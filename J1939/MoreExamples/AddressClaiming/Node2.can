@@ -1,0 +1,52 @@
+/*@!Encoding:1252*/
+includes
+{
+  
+}
+
+variables
+{
+  qword deviceNAME;
+}
+
+on preStart
+{
+  J1939ILControlInit();
+}
+
+on start
+{
+  J1939ILControlStart(J1939ILGetAddress());
+}
+
+void J1939ILOnTxMessage(pg * txPG)
+{
+  if(txPG.pgn == 0xEE00)
+  {
+    //This is my Address Claim message! Restore the used NAME.
+    deviceNAME = txPG.qword(0);
+  }
+}
+
+void J1939ILOnChangedState( LONG state )
+{
+  pg * myAC = {DLC = 8};
+  if((state == 3) && (J1939ILGetAddress() == 254)) //new state is "Stopped", and the node lost its address
+  {
+    //We just send the "Cannot Claim Address" message
+    myAC.id = 0x80000000;
+    myAC.pgn = 0xEE00;
+    myAC.SA = 0xFE;
+    myAC.DA = 0xFF;
+    myAC.qword(0) = deviceNAME;
+    output(myAC);
+  }
+}
+
+on sysvar svChangeAddress_Node2
+{
+  if(@this == 1)
+  {
+    @sysvar::J1939::Node2::ILAddress = @svNewAddress_Node2;
+  }
+}

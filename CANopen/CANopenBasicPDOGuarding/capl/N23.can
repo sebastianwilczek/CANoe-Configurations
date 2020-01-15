@@ -1,0 +1,86 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "CANopenHelper.cin"
+}
+
+variables
+{
+  // ------------------------------------------------
+  // File information
+  // Copyright         : 2019, Vector Informatik GmbH
+  // ------------------------------------------------
+  
+  // Globals for "Sensor_1" device
+  BYTE gNodeId          = 23;
+  char gNodeLabel[32]   = "Sensor_1";
+
+  sysvarInt * gRunLEDVar;
+  sysvarInt * gErrLEDVar;
+  msTimer enableTimer;
+}
+
+on preStart
+{
+  gRunLEDVar = sysvar::GUIControls::Node23_State;
+  gErrLEDVar = sysvar::GUIControls::Node23ErrLed;
+}
+
+on start
+{
+  @sysvar::GUIControls::Node23_ID = gNodeId;
+}
+
+on sysvar CANopen::CAN::Sensor_1::Control::CommunicationState
+{
+  CANopenUpdateState(@this);
+}
+
+void EnableSensor(byte enable)
+{
+  if(enable == 1)
+  {
+    @sysvar::CANopen::CAN::Sensor_1::Control::Enabled = 1;
+    setTimer(enableTimer, 1);
+    @sysvar::GUIControls::Node23_ID = gNodeId;
+  }
+  else
+  {
+    @sysvar::CANopen::CAN::Sensor_1::Control::Enabled = 0;
+    ShutDownLights();
+  }
+}
+
+on timer enableTimer
+{
+  CANopenInternalNMTCommand(gNodeId, 1);
+}
+  
+on sysVar GUIControls::Sensor1_Connected
+{
+  // write the actual state
+  if(@sysvar::GUIControls::Sensor1_Connected == 1)
+  {
+    sysSetVariableString(sysvar::GUIControls::Sensor1_CnxnState,"");
+  } // if
+  else{
+    sysSetVariableString(sysvar::GUIControls::Sensor1_CnxnState,"!! unplugged !!");
+  } // else
+  
+  if(@sysvar::GUIControls::MainSwitch == 0){
+    return;
+  } // if
+  
+  EnableSensor(@sysvar::GUIControls::Sensor1_Connected);
+}
+
+ShutDownLights()
+{
+  @sysvar::GUIControls::Node23_State = 0;
+  @sysvar::GUIControls::Node23_ID = 0;
+}
+
+on sysVar GUIControls::MainSwitch
+{
+  EnableSensor(@sysvar::GUIControls::Sensor1_Connected == 1 && @this);
+}

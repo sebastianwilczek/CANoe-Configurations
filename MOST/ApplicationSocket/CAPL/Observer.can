@@ -1,0 +1,188 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+}
+/*@@end*/
+
+/*@@caplFunc:DisplayRegistry(long):*/
+DisplayRegistry (long rgtype)
+{
+  long size, i;
+  long fblockid, instid, rxtxlog;
+  char buf1[20];
+  char buf2[2000];
+  buf2[0] = 0;
+
+  if(rgtype != kLocalFBlockList)
+    return;
+
+  // get the size of the registry
+  size = mostAsRgGetSize(rgtype);
+
+  // put the registry into one string
+  for(i = 0; i < size; i++)
+  {
+    // read FBlockID
+    fblockid = mostAsRgGetFBlockID(rgtype,i);
+    if(fblockid >= 0)
+      snprintf(buf1, elcount(buf1), "%02X ", fblockid);
+    else
+      snprintf(buf1, elcount(buf1), "-- ");
+    strncat(buf2, buf1, elcount(buf2));
+
+    // read InstID
+    instid = mostAsRgGetInstID(rgtype,i);
+    if(instid >= 0)
+      snprintf(buf1, elcount(buf1), "%02X ", instid);
+    else
+      snprintf(buf1, elcount(buf1), "-- ");
+    strncat(buf2, buf1, elcount(buf2));
+  }
+
+  // fill the environment variable
+  sysSetVariableString(sysvar::Observer::LocalRegistry, buf2);
+}
+/*@@end*/
+
+/*@@sysvarChange:Observer::ExApiRegister:*/
+on sysvar Observer::ExApiRegister
+{
+  long res;
+
+  if(@this != 1)
+    return;
+ 
+  res = mostApRegisterEx(@sysvar::Observer::ExApiFBlockID, @sysvar::Observer::ExApiInstID);
+  @sysvar::Observer::ExApiResult = res;
+}
+/*@@end*/
+
+/*@@sysvarChange:Observer::ExApiUnregister:*/
+on sysvar Observer::ExApiUnregister
+{
+  long res;
+
+  if(@this != 1)
+    return;
+ 
+  res = mostApUnregisterEx(@sysvar::Observer::ExApiFBlockID, @sysvar::Observer::ExApiInstID);
+  @sysvar::Observer::ExApiResult = res;
+}
+/*@@end*/
+
+/*@@sysvarChange:Observer::ExApiIsRegistered:*/
+on sysvar Observer::ExApiIsRegistered
+{
+  long res;
+
+  if(@this != 1)
+    return;
+
+  res = mostApIsRegisteredEx(@sysvar::Observer::ExApiFBlockID, @sysvar::Observer::ExApiInstID);
+  @sysvar::Observer::ExApiResult = res;
+}
+/*@@end*/
+
+/*@@sysvarChange:Observer::TempShutDown:*/
+on sysvar Observer::TempShutDown
+{
+  mostAMSMessage NetBlock.ShutDown.Result msgRes;
+  mostAMSMessage NetBlock.ShutDown.ResultAck msgResAck;
+
+  if(@this != 1)
+    return;
+
+  // request temperature shut down
+  msgRes.Suspend = 0x03;
+  msgRes.DA = 0x3C8;
+  msgRes.InstanceId = mostGetNodePosAdr(mostGetChannel()) & 0xFF; // InstID of NetBlock
+
+  msgResAck.Suspend = 0x03;
+  msgResAck.SenderHandle = 0;
+  msgResAck.DA = 0x3C8;
+  msgResAck.InstanceId = mostGetNodePosAdr(mostGetChannel()) & 0xFF;
+
+  if (mostGetSpeedGrade(mostGetChannel()) == 3)
+  {
+    output(msgResAck);
+  }
+  else
+  {
+    output(msgRes);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:Observer::WakeUp:*/
+on sysvar Observer::WakeUp
+{
+  if(@this != 1)
+    return;
+
+  mostWakeUp(mostGetChannel(), 1000);
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // Receive only messages of connected channels
+  // Don't receive spy messages
+  // transmit on connected channel
+  mostApplicationNode();
+}
+/*@@end*/
+
+/*@@mostAmsMsg:NetBlock.ShutDown.Start (0x010060):*/
+on mostAMSMessage NetBlock.ShutDown.Start
+{
+  mostAMSMessage NetBlock.ShutDown.Result msgRes;
+
+  if(this.Suspend == 0) // NetBlock.ShutDown.Start.Suspend::Query
+  {
+    if(@Observer::SuspendShutDown == 1)
+    {
+      // send suspend message
+      msgRes.Suspend = 1; // NetBlock.ShutDown.Start.Suspend::Suspend;
+      msgRes.DA = this.SA;
+      msgRes.InstanceID = mostGetNodePosAdr(mostGetChannel()) & 0xFF; // InstID of NetBlock
+      output(msgRes);
+    }
+  }
+}
+/*@@end*/
+
+/*@@mostAsRegistry:OnMostAsRegistry(long):*/
+OnMostAsRegistry(long rgtype)
+{
+  DisplayRegistry(rgtype);
+}
+/*@@end*/
+
+/*@@mostAmsMsg:NetBlock.ShutDown.StartAck (0x010068):*/
+on mostAMSMessage NetBlock.ShutDown.StartAck
+{
+  mostAMSMessage NetBlock.ShutDown.ResultAck msgRes;
+
+  if(this.Suspend == 0) // NetBlock.ShutDown.StartAck.Suspend::Query
+  {
+    if(@Observer::SuspendShutDown == 1)
+    {
+      // send suspend message
+      msgRes.Suspend = 1; // NetBlock.ShutDown.StartAck.Suspend::Suspend;
+      msgRes.SenderHandle = this.SenderHandle;
+      msgRes.DA = this.SA;
+      msgRes.InstanceID = mostGetNodePosAdr(mostGetChannel()) & 0xFF; // InstID of NetBlock
+      output(msgRes);
+    }
+  }
+}
+/*@@end*/
+

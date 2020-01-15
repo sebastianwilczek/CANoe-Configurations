@@ -1,0 +1,259 @@
+/*@!Encoding:1252*/
+/*@!Encoding:1252*/
+includes
+{
+  #include "RT_checks.cin"
+}
+
+variables
+{
+  char versionName[20] = "12.0.1.0";
+}
+
+
+// ==============================================================================================================
+// CT MEA START STOP MANAGEMENT...
+on preStart
+{
+  write("\nPreparing...");
+  write(gLineShort);
+  CTF_HandleCTAutoStart();
+  @CT::SYSTEM::MeaStartCount++;
+}
+
+// on any change of following sysvars, save the default config... (config persistency)
+// AND stop a runnin test sequence.
+on sysvar (
+    CT::TEST::CTRL::AutostopMea
+  | CT::CFG::DUT::Addr
+  | CT::CFG::DUT::DevName
+  | CT::CFG::DUT::PGN::FixedPgn
+  | CT::CFG::DUT::PGN::FixedPgnData
+  | CT::CFG::DUT::PGN::Req_Msgs_DLC8
+  | CT::CFG::DUT::PGN::Req_Msgs_DLCx
+  | CT::CFG::DUT::PGN::NoReq_Msgs
+  | CT::CFG::DUT::PGN::Cycl_Req_Msgs_DLC8
+  | CT::CFG::DUT::PGN::Cycl_Req_Msgs_DLCx
+  | CT::CFG::DUT::PGN::Cycl_NoReq_Msgs
+  | CT::CFG::DUT::PGN::ACK_Producing_Msgs
+  | CT::CFG::DUT::PGN::Busy_Producing_Msgs
+  | CT::CFG::DUT::PGN::RTSCTS_Msgs
+  | CT::CFG::DUT::PGN::RTSAbort_Msgs
+  | CT::CFG::DUT::PGN::AccessDenied_Producing_Msgs
+  | CT::CFG::DUT::MsgToleranceAbs
+  | CT::CFG::DUT::MsgToleranceRel
+  | CT::CFG::TOOL::Addr
+  | CT::GUI::CFG::ConfigFile
+  )
+{
+  CTF_OnConfigSysVarChanged(0, this.name);
+}
+// on any change of following sysvars, save the default config... (config persistency)
+// do NOT STOP testsequence on change.
+on sysvar (
+    CT::CFG::DUT::CyclicDisabled
+  | CT::TEST::CTRL::Fullmode
+  | CT::CFG::DUT::DenyResponseDisabled
+  | CT::DEBUG::TEST
+  | CT::DEBUG::HELPER
+  | CT::DEBUG::CHECKS
+  | CT::DEBUG::CONFIG
+  | CT::CFG::REPORT::PrintPreconditions
+  | CT::CFG::REPORT::PrintStrategy
+  | CT::CFG::REPORT::InconclusiveAs
+  | CT::CFG::DUT::NoCA
+  )
+{
+  CTF_OnConfigSysVarChanged(0, this.name);
+}
+
+// ==============================================================================================================
+// change autostart during module run...
+on sysvar CT::TEST::CTRL::Autostart
+{
+  CTF_OnConfigSysVarChanged(0, this.name);
+  CTF_HandleCTAutoStart();
+}
+
+// ==============================================================================================================
+// initialize the test environment.
+// precond: -
+export testfunction CTF_INIT_ENV()
+{
+  @CT::TEST::CTRL::Running = 1;
+  CT_BEGIN(0, "Initialize test environment");
+    CT_STEP_BEGIN("", "Initialize test environment");
+      CT_InitVars();
+      CT_InitCfg();
+      
+      CT_DISABLE_TESTNODE_IL(); // disabled by default (!). Will be enabled within functions needing it.
+      CT_INIT_AWAIT_ACL();
+    CT_STEP_END_PASS(1);
+
+  
+    // print testconfiguration and dut information into the report's header information...
+    if (CT_RT()) 
+    {
+      testReportAddSetupInfo( "CT Template version", "%s", versionName );
+      
+      CT_Report_PrintTestconfiguration();
+      CT_Report_PrintDUTDeviceName();
+    }
+    if ( (@CT::SYSTEM::MeaStartCount == 1) || (@CT::TEST::CTRL::Autostart) )
+    {
+      //write("First time or auto start... wait a bit for environment...");
+      CT_WAIT(1000); // else first time some test may fail unexpectedly...
+    }
+  CT_END();
+}
+
+// ==============================================================================================================
+// after test completes...
+export testfunction CTF_EXIT()
+{
+  @CT::TEST::CTRL::Running = 0;
+}
+
+// ==============================================================================================================
+byte CTF_CheckConfig(char[255] errLines[long])
+{
+  byte result;
+  dword v1[long];
+  dword v2[long];
+  byte byteBuf[1800];
+  long count;
+  char text[255];
+  int l;
+  l=0;
+  result = 1;
+  
+  if (!CT_RT()) return 1;
+  
+  if (@CT::CFG::DUT::DevName == 0) 
+  {
+    snprintf(errLines[l++], 255, "DevName is 0.");
+    result = 0;
+  }
+  
+  if (@CT::CFG::DUT::Addr == 0) 
+  {
+    snprintf(errLines[l++], 255, "DUT Addr is 0.");
+    result = 0;
+  }
+  if (@CT::CFG::TOOL::Addr == 0) 
+  {
+    snprintf(errLines[l++], 255, "TOOL (Tester) Addr is 0.");
+    result = 0;
+  }
+  if (@CT::CFG::DUT::MsgToleranceRel == 0.0) 
+  {
+    snprintf(errLines[l++], 255, "MsgToleranceRel is 0.");
+    result = 0;
+  }
+  if (@CT::CFG::DUT::MsgToleranceAbs == 0) 
+  {
+    snprintf(errLines[l++], 255, "MsgtoleranceAbs is 0.");
+    result = 0;
+  }
+  
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::Req_Msgs_DLC8 , text, elcount(text) );
+  CSV_SplitHexValues(v1, text);
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::Req_Msgs_DLCx , text, elcount(text) );
+  CSV_SplitHexValues(v2, text);
+  if ((v1.size()+v2.size())==0)
+  {
+    snprintf(errLines[l++], 255, "There are no requestable messages.");
+    //result = 0;
+  }
+  
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::NoReq_Msgs , text, elcount(text) );
+  CSV_SplitHexValues(v1, text);
+  if (v1.size()==0) 
+  {
+    snprintf(errLines[l++], 255, "There has to be at least 1 non requestable messages.");
+    //result = 0;
+  }
+  
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::Cycl_Req_Msgs_DLC8 , text, elcount(text) );  
+  CSV_SplitHexValues(v1, text);
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::Cycl_Req_Msgs_DLCx , text, elcount(text) );  
+  CSV_SplitHexValues(v2, text);
+  if ((v1.size()+v2.size())==0)
+  {
+    snprintf(errLines[l++], 255, "There are no cyclic requestable messages.");
+    //result = 0;
+  }
+  
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::AccessDenied_Producing_Msgs , text, elcount(text) );
+  CSV_SplitHexValues(v1, text);
+  if (v1.size()==0) 
+  {
+    snprintf(errLines[l++], 255, "There has to be at least 1 access deny producing PGN.");
+    //result = 0;
+  }
+  
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::ACK_Producing_Msgs , text, elcount(text) );
+  CSV_SplitHexValues(v1, text);
+  if (v1.size()==0) 
+  {
+    snprintf(errLines[l++], 255, "There has to be at least 1 ACK producing PGN.");
+    //result = 0;
+  }
+  
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::Busy_Producing_Msgs , text, elcount(text) );
+  CSV_SplitHexValues(v1, text);
+  if (v1.size()==0) 
+  {
+    snprintf(errLines[l++], 255, "There has to be at least 1 BUSY producing PGN.");
+    //result = 0;
+  }
+  
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::RTSCTS_Msgs , text, elcount(text) );
+  CSV_SplitHexValues(v1, text);
+  if (v1.size()==0) 
+  {
+    snprintf(errLines[l++], 255, "There has to be at least 1 RTS->CTS producing PGN.");
+    //result = 0;
+  }
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::RTSAbort_Msgs , text, elcount(text) );
+  CSV_SplitHexValues(v1, text);
+  if (v1.size()==0) 
+  {
+    snprintf(errLines[l++], 255, "There has to be at least 1 RTS->Abort producing PGN.");
+    //result = 0;
+  }
+    
+  return result;
+}
+
+// ==============================================================================================================
+void CTF_HandleCTAutoStart()
+{
+  char[255] cfgErrLines[long];
+  CTF_CheckConfig(cfgErrLines);
+  // always output errorlines if there are some.
+  for(long k: cfgErrLines)
+  {
+    writeEx(1,2, "\n- %s", cfgErrLines[k]);
+  }
+  if ( @CT::TEST::CTRL::Autostart )
+  {
+    write("CFG: Autostarting Compliance Test...");
+    @CT::TEST::CTRL::Start = 1;
+    
+    write(gLineShort);
+  }
+}
+
+// ==============================================================================================================
+void CTF_OnConfigSysVarChanged(byte allowStopTestModule, char sysvarName[])
+{
+  if ( @CT::SYSTEM::MeaStartCount > 1 )
+  {
+    if (allowStopTestModule && CT_RT()) 
+    {
+      write("Testmodule detected configuration variable '%s' changed, stopping test.", sysvarName);
+      @CT::TEST::CTRL::Stop = 1;
+    }
+  }
+}

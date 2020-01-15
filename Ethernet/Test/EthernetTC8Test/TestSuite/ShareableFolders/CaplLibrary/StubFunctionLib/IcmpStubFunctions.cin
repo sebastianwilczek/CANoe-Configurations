@@ -1,0 +1,293 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "../StubFunctionLib/StubFunctions.cin"
+}
+
+variables
+{
+  byte gIpv4Payload[50];
+  long gIpv4PayloadLength;
+}
+
+/**
+ * Makes DUT send an ICMP echo request.
+ * @paramm destAddr The destination IP address of to send the echo request to.
+ * @param data The data payload of the echo request.
+ */
+export testfunction Stub_IcmpEchoRequest(char destAddr[], byte data[])
+{
+  long stubResult;
+  stubResult = Internal_Stub_IcmpEchoRequest(destAddr, data, elcount(data));
+  //write("stubResult=%d",stubResult);
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_IcmpEchoRequest", "Send ICMP echo request from DUT succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_IcmpEchoRequest", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_IcmpEchoRequest", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_IcmpEchoRequest", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_IcmpEchoRequest", "Unknown error.");
+    break;
+  }
+}
+
+/**
+ * Makes DUT send an ICMP echo request.
+ * @param ifName The name of the interface to send the echo request from.
+ * @paramm destAddr The destination IP address of to send the echo request to.
+ * @param data The data payload of the echo request.
+ */
+export testfunction Stub_IcmpEchoRequest(char ifName[], char destAddr[], byte data[])
+{
+  long stubResult;
+
+  stubResult = Internal_Stub_IcmpEchoRequest(ifName, destAddr, data, elcount(data));
+
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_IcmpEchoRequest", "Send ICMP echo request from DUT succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_IcmpEchoRequest", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_IcmpEchoRequest", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_IcmpEchoRequest", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_IcmpEchoRequest", "Unknown error.");
+    break;
+  }
+}
+  
+/**
+ * Data that will be received after the call of this SP will be forwarded to the test system.
+ */
+export testfunction Stub_IcmpReceiveAndForward()
+{
+  long stubResult;
+
+  stubResult = Internal_Stub_IcmpReceiveAndForward(0xFFFF, 0xFFFF);
+
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_IcmpReceiveAndForward", "Receive and check UDP data on DUT succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_IcmpReceiveAndForward", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_IcmpReceiveAndForward", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_IcmpReceiveAndForward", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_IcmpReceiveAndForward", "Unknown error.");
+    break;
+  }
+}
+
+/**
+ * This is not just a wrapper.
+ * Checks the data that returns after Stub_UdpReceiveAndForward according to various parameters.
+ * @param timeoutMilliseconds Listen timeout in milliseconds.
+ * @param srcIpAddress Compares with the IP source address of the received datagram.
+ * @param destIpAddress Compares with the IP destination address of the received datagram.
+ * @param ttl Compares with the time to live of the received datagram.
+ * @param options Compares with the options of the received datagram.
+ */
+export testfunction Stub_ReceiveIcmpDestUnreachable(
+  long timeoutMilliseconds, 
+  char srcIpAddress[],
+  char destIpAddress[],
+  enum IcmpDestUnreachableCodes code,
+  char checksum[]
+  )
+{
+  char codeString[5];
+  char typeString[5];
+  char payload[51];
+  
+  if(IpVersionOfString(syspar::Host1Ip) == 4)
+  {
+    snprintf(codeString, 5, "%02X", code);
+    snprintf(typeString, 5, "0x03"); // Destination Unreachable icmpv4
+  }
+  else
+  {
+    snprintf(codeString, 5, syspar::Wildcard);
+    snprintf(typeString, 5, "0x01"); // Destination Unreachable icmpv6
+  }
+    
+  Internal_IcmpReceiveAndForwardEvent(
+    timeoutMilliseconds, 
+    srcIpAddress,
+    destIpAddress,
+    typeString, 
+    codeString,
+    checksum,
+    syspar::Wildcard,
+    gIpv4PayloadLength,
+    kTrue);
+}
+
+
+void Internal_IcmpReceiveAndForwardEvent(
+  long timeoutMilliseconds, 
+  char srcIpAddress[],
+  char destIpAddress[],
+  char type[],
+  char code[],
+  char checksum[],
+  char payload[],
+  word payloadLength,
+  enum Bool expectedMessage
+  )
+{
+  long stubResult;
+  char outSrcAddr[50], outDestPort[50];
+  byte outType, outCode, outPayload[0xFFFF];
+  word outChecksum, outPayloadLength;
+
+  stubResult = Internal_Stub_IcmpReceiveAndForwardEvent(timeoutMilliseconds, outSrcAddr, outDestPort, outType, outCode, outChecksum, outPayload, outPayloadLength);
+
+  switch (stubResult) {
+  case 0:
+      CheckIcmpReceiveAndForwardEventParameters(
+        srcIpAddress,
+        outSrcAddr,
+        destIpAddress,
+        outDestPort,
+        type,
+        outType,
+        code,
+        outCode,
+        checksum,
+        outChecksum,
+        payload,
+        payloadLength,
+        outPayload,
+        outPayloadLength,
+        expectedMessage);
+    break;
+  case -1:
+    //timeout
+    if(expectedMessage == kTrue)
+    {
+      testStepFail("Stub_IcmpReceiveAndForwardEvent", "Internal stub function handling error.");
+    }
+    else
+    {
+      testStepPass("Stub_IcmpReceiveAndForwardEvent", "Did not receive unexpected IPv4 data.");
+    }
+    break;
+  case -2:
+    testStepFail("Stub_IcmpReceiveAndForwardEvent", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_IcmpReceiveAndForwardEvent", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_IcmpReceiveAndForwardEvent", "Unknown error.");
+    break;
+  }
+}
+
+void CheckIcmpReceiveAndForwardEventParameters( 
+  char srcIpAddress[],
+  char outSrcAddr[],
+  char destIpAddress[],
+  char outDestAddress[],
+  char type[],
+  byte outType,
+  char code[],
+  byte outCode,
+  char checksum[],
+  word outChecksum,
+  char payload[],
+  word payloadLength,
+  byte outPayload[],
+  word outPayloadLength,
+  enum Bool expectedMessage)
+{
+  char parameterTemp[5], outDataString[0x1FFFF];
+  byte i;
+  
+  if(expectedMessage == kTrue)
+  {
+    //Check if received data matches expected values.
+    if(!isWildcard(srcIpAddress) && strncmp(srcIpAddress, outSrcAddr, strlen(srcIpAddress)) != 0)
+    {
+      testStepFail("Stub_IcmpReceiveAndForwardEvent", "Receive and check IPv4 data on DUT failed. Source IP mismatch.");
+      return;
+    }
+    if(!isWildcard(destIpAddress) && strncmp(destIpAddress, outDestAddress, strlen(destIpAddress)) != 0)
+    {
+      testStepFail("Stub_IcmpReceiveAndForwardEvent", "Receive and check IPv4 data on DUT failed. Destination IP mismatch.");
+      return;
+    }
+    if(!isWildcard(type) && atol(type) != outType)
+    {
+      testStepFail("Stub_IcmpReceiveAndForwardEvent", "Receive and check IPv4 data on DUT failed. ICMP Type mismatch. Expected: %d Received: %d", atol(type), outType);
+      return;
+    }
+    if(!isWildcard(code) && atol(code) != outCode)
+    {
+      testStepFail("Stub_IcmpReceiveAndForwardEvent", "Receive and check IPv4 data on DUT failed. ICMP Code mismatch.");
+      return;
+    }
+    if(!isWildcard(checksum) && atol(checksum) != outChecksum)
+    {
+      testStepFail("Stub_IcmpReceiveAndForwardEvent", "Receive and check IPv4 data on DUT failed. Checksum mismatch.");
+      return;
+    }
+    if(!isWildcard(payload))
+    {
+      if(ComparePayload(payload, payloadLength, outPayload, outPayloadLength) != kTrue)
+      {
+        testStepFail("Stub_IcmpReceiveAndForwardEvent", "Receive and check UDP data on DUT failed. Payload mismatch.");
+        return;
+      }
+    }
+    
+    testStepPass("Stub_IcmpReceiveAndForwardEvent", "ICMP message have been received by DUT.");
+  }
+  else
+  {
+    testStepFail("Stub_IcmpReceiveAndForwardEvent", "Received unexpected ICMP message.");
+  }
+}  

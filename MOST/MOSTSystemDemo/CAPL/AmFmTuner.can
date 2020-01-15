@@ -1,0 +1,1286 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+  #include "FCatDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+//
+// Simulation of a MOST AmFmTuner FBlock
+//
+// Note: Only basic audio source functionality is simulated here.
+//
+variables
+{
+  // current application phase
+  const byte kAppOff      = 0; // no power; no communication
+  const byte kAppOn       = 1; // power on
+  const byte kAppShutdown = 2; // power on; shutdown started
+  byte  gAppPhase = kAppOff;
+
+
+  // Method: Allocate / DeAllocate
+  long    gAllocState = 0; // 0: no allocation; 1: allocating; 2: allocated; 3: deallocating
+  mostAMSMessage AmFmTuner.Allocate.Result gMsgAllocateRes; // store allocation parameters here
+  mostAMSMessage AmFmTuner.DeAllocate.Result gMsgDeAllocateRes;
+
+  mostAMSMessage AmFmTuner.AllocateLabel.ResultAck gMsgAllocateLabelRes; // store allocation parameters here
+  const long kLabelWidth = 4;
+  const byte kSourceNr = 1;
+
+
+  // Property: ATPresetList1
+  const long kATPresetList1_Size = 6;
+  // SenderNames are fix for simulation
+  char       gATPresetList1_SenderName[kATPresetList1_Size][50] = {"SWR 1","SWR 3","101.7","HR 1","HR 3","BR 1"};
+  long       gATPresetList1_SenderFreq[kATPresetList1_Size] = {87300,92500,101700,103456,90300,92715};
+
+
+  // Property: RadioText
+  const long kRadioTextBufferSize = 50; // number of different messages
+  const long kRadioTextLength = 100; // string length
+  char       gRadioText[2][kRadioTextBufferSize][kRadioTextLength]; // TextA and TextB
+  long       gRadioTextIdx; // index of current text pair
+  long       gRadioTextIdxMax; // max index of text pair
+  timer      tRadioText;
+  const long kRadioTextCycle = 4; // in s
+
+
+  // Property: PeakLevel
+  msTimer    tPeakLevel;
+  const long kPeakLevelCycle = 300; // in ms
+  byte       gPeakLevelLeft;
+  byte       gPeakLevelRight;
+
+  long gSpeedGrade;
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{ 
+  // configure CAPL node as application node (don't receive spy messages...)
+  mostApplicationNode();
+
+  // configure FBlock AmFmTuner
+  ConfigureFBlock();
+
+  // init property RadioText
+  InitRadioText();
+}
+/*@@end*/
+
+/*@@mostCriticalUnlock:OnMostCriticalUnlock():*/
+OnMostCriticalUnlock()
+{
+  //Channels have to be allocated again
+  gAllocState = 0;
+}
+/*@@end*/
+
+/*@@mostNetState:OnMostNetState(long,long):*/
+OnMostNetState(long oldstate, long newstate)
+{
+  if(newstate == kNetStatePowerOff)
+  {
+    AppExit();
+  }
+  else if(newstate == kNetStateConfigOk)
+  {
+  }
+
+  // Property: Deckstatus
+  if((oldstate == kNetStateConfigOk) && (newstate <= kNetStateConfigNotOk))
+  {
+    RadioStop();
+  }
+}
+/*@@end*/
+
+/*@@mostSBC:OnMostSBC(long):*/
+OnMostSBC(long sbc)
+{
+  // channels have to be allocated again
+  gAllocState = 0;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AmFmTuner.Allocate.StartResult (0x401012):*/
+on mostAMSMessage AmFmTuner.Allocate.StartResult
+{
+  long chn[4];
+  long i;
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // this player has one source only
+  if(this.SourceNr != 0x01)
+  {
+    mostSendError_CodeByteByte(this, kErrParamNotAvailable, 1, this.SourceNr);
+    return;
+  }
+
+  if(gAllocState != 0)
+  {
+    // allocation already in progress
+    mostSendError_Code(this, kErrNotAvailable);
+    return;
+  }
+
+  // store address of initiator
+  gMsgAllocateRes.DA = this.SA;
+
+  // call synchronous channel allocation service
+  // OnMostSyncAllocResult() will be invoked on completion or timeout
+  if((kMost25 == gSpeedGrade) && (0 != mostSyncAlloc(4)))
+  {
+    mostSendError_Code(this, kErrNotAvailable);
+    return;
+  }
+
+  // state: allocating
+  gAllocState = 1;
+
+  if (kMost25 != gSpeedGrade)
+  {
+    // simulate allocation of 4 channels
+    for (i = 0; i < elcount(chn); ++i)
+    {
+      chn[i] = i;
+    }
+
+    OnMostSyncAllocResult(1, 4, chn);
+  }
+
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AmFmTuner.DeAllocate.StartResult (0x401022):*/
+on mostAMSMessage AmFmTuner.DeAllocate.StartResult
+{
+  long label;
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // this player has one source only
+  if(this.SourceNr != 0x01)
+  {
+    mostSendError_CodeByteByte(this, kErrParamNotAvailable, 1, this.SourceNr);
+    return;
+  }
+
+  if(gAllocState != 2)
+  {
+    // nothing allocated
+    mostSendError_Code(this, kErrNotAvailable);
+    return;
+  }
+
+  // stop music
+  RadioStop();
+
+  // state: deallocating
+  gAllocState = 3;
+
+  // store address of initiator
+  gMsgDeAllocateRes.DA = this.SA;
+
+  label = gMsgAllocateLabelRes.byte(2);
+
+  if((kMost150 == gSpeedGrade) && !isSimulated())
+  {
+    MostSetSyncAudio(MostGetChannel(), label, 4, 0, 0);
+    OnMostSyncDeallocResult(1, label);
+  }
+  else
+  {
+    OnMostSyncDeallocResult(1, label);
+  }
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AmFmTuner.SourceActivity.StartResult (0x401032):*/
+on mostAMSMessage AmFmTuner.SourceActivity.StartResult
+{
+  mostAMSMessage AmFmTuner.SourceActivity.Result msgRes;
+  byte disc, bFail;
+  word track;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 2))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // this tuner has one source only
+  if(this.SourceNr != kSourceNr)
+  {
+    mostSendError_CodeByteByte(this, kErrParamNotAvailable, 1, this.SourceNr);
+    return;
+  }
+
+  if(this.Activity > 2)
+  {
+    mostSendError_CodeByteByte(this, kErrParamWrong, 2, this.Activity);
+    return;
+  }
+  
+  // source not allocated
+  if(gAllocState != 2)
+  {
+    // since no channels allocated, no source can be activated
+    mostSendError_CodeByteByte(this, kErrParamNotAvailable, 1, this.SourceNr);
+    return;
+  }
+
+  // simulate source activity
+  if(this.Activity == 2) // On
+    RadioStart();
+  else
+    RadioStop();
+
+  // this is just a simulation; send result immediately
+  msgRes.DA = this.SA;
+  msgRes.InstanceId = this.InstanceId;
+  msgRes.SourceNr = this.SourceNr;
+  msgRes.Activity = this.Activity;
+  output(msgRes);
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AmFmTuner.ATStationInfo.Get (0x402011):*/
+on mostAMSMessage AmFmTuner.ATStationInfo.Get
+{
+  //{{{ --- begin default code ------------------
+
+  mostAMSmessage AmFmTuner.ATStationInfo.Status msg;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 2))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  if(this.PosX > 7)
+  {
+    mostSendError_CodeByteWord(this, kErrParamWrong, 1, this.Pos);
+    return;
+  }
+
+  // fill message
+  // get list from table
+  msg.Pos = this.Pos;
+  FillATStationInfoStatusMsg(msg);
+  
+  // reply status
+  mostAsNtfOutput(this.SA, msg);
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:ConfigureFBlock():*///function
+void ConfigureFBlock()
+{
+  // Configures the FBlock.
+  // Therefore functions are registered at CANoe's Function and 
+  // Notification Service.
+
+  long oldInstId = -1; // static variable
+  long newInstId;
+
+  newInstId = mostApGetInstId();
+
+  if(newInstId < 0)
+  {
+    newInstId = -1;
+  }
+
+  if(oldInstId != -1)
+  {
+    // disable Notification Service
+    mostAsNtfDisableEx(kFB_AFT, oldInstId);
+    // disable Function Service
+    mostAsFsDisableEx(kFB_AFT, oldInstId);
+  }
+
+  if(newInstId != -1)
+  {
+    // enable Notification Service
+    mostAsNtfEnable();
+    // enable Function Service
+    mostAsFsEnable();
+
+    // Enable all functions and all operations defined in the XML function catalog
+    // for the FBlock. Additionally, functions of type 'property' will be registered
+    // at the Notification Service if a corresponding CAPL function for sending 
+    // the status message is defined.
+    mostAsFsFunctionEnable(kFctAllInFCat, kOpTFAllInFCat, "SendStatus_");
+  }
+  oldInstId = newInstId;
+
+  gSpeedGrade = mostGetSpeedGrade(mostGetChannel());
+}
+/*@@end*/
+
+/*@@caplFunc:CheckNormalOperation():*///function
+long CheckNormalOperation()
+{
+  // Description:
+  //   Checks if FBlock is able to process commands
+  //   (Maybe used for power simulation later.)
+  // Return:
+  //   0: failed; 1: Ok
+
+  //{{{ --- begin application section -----------
+
+  return 1;
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_PeakLevel(long):*///function
+long SendStatus_PeakLevel(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage AmFmTuner.PeakLevel.Status msg;
+  
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstId();
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin application section -----------
+
+  msg.LevelLeft  = gPeakLevelLeft;
+  msg.LevelRight = gPeakLevelRight;
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //{{{ --- end application section -------------
+}
+/*@@end*/
+
+/*@@mostReg:OnMostReg():*/
+OnMostReg()
+{
+  //{{{ --- begin application section -----------
+
+  // Method: Allocate
+  long res;
+  res = mostRegGetByteAbs(1, 0x8F);
+  if(res >= 0)
+  {
+    // store node delay for SrcDelay parameter
+    gMsgAllocateRes.SrcDelay = res;
+  }
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:RoutingEngineSet(long[]):*///function
+void RoutingEngineSet(long channels[])
+{
+  // Description:
+  //   Routes line-in of the interface hardware onto 4 synchronous channels.
+  //   Prerequisit: Channel numbers are stored in gMsgAllocateRes
+
+  if ((kMost25 != gSpeedGrade) || (isSimulated()))
+  {
+    // don't call HW commands for MOST 150 or in simulated mode
+    return;
+  }
+
+  // route line in
+  // params: channel, syncchannels, device (0: line in; 1: line out), mode (0: mute; 1: on)
+  mostSetSyncAudio(mostGetChannel(), channels, 0, 1); 
+
+  // volume
+  // params: channel, device (0: line in; 1: line out), volume (0...255 = 100%)
+  mostSetSyncVolume(mostGetChannel(), 0, 255);
+}
+/*@@end*/
+
+/*@@caplFunc:RoutingEngineReset():*///function
+void RoutingEngineReset()
+{
+  // Description:
+  //   Resets the line-in routing of the interface hardware.
+
+  long chn[4];
+  chn[0] = gMsgAllocateRes.byte(2);
+  chn[1] = gMsgAllocateRes.byte(3);
+  chn[2] = gMsgAllocateRes.byte(4);
+  chn[3] = gMsgAllocateRes.byte(5);
+
+  if ((kMost25 != gSpeedGrade) || (isSimulated()))
+  {
+    // don't call HW commands for MOST 150 or in simulated mode
+    return;
+  }
+
+  // mute line in
+  // params: channel, syncchannels, device (0: line in; 1: line out), mode (0: mute; 1: on)
+  mostSetSyncAudio(mostGetChannel(), chn, 0, 0); 
+}
+/*@@end*/
+
+/*@@caplFunc:RadioStop():*///function
+void RadioStop()
+{
+  cancelTimer(tPeakLevel);
+  cancelTimer(tRadioText);
+}
+/*@@end*/
+
+/*@@caplFunc:RadioStart():*///function
+void RadioStart()
+{
+  if(!CheckNormalOperation())
+    return;
+
+  if(0 == @sysvar::HU::AFT_ATPI)
+    @sysvar::HU::AFT_ATPI = 1;
+  cancelTimer(tPeakLevel);
+  setTimer(tPeakLevel, 100);
+  cancelTimer(tRadioText);
+  setTimer(tRadioText, 0);
+}
+/*@@end*/
+
+/*@@timer:tPeakLevel:*/
+on timer tPeakLevel
+{
+  int x,y;
+
+  //{{{ --- begin application section -----------
+
+  if(!CheckNormalOperation()) 
+    return;
+
+  x = random(127);
+  y = random(127);
+
+  gPeakLevelLeft  = x/2;
+  gPeakLevelRight = y/2;
+
+  // send notification
+  SendStatus_PeakLevel(kAsNtfDestAdr);
+
+  canceltimer(tPeakLevel);
+  setTimer(tPeakLevel, kPeakLevelCycle);
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AmFmTuner.PeakLevel.Get (0x40F001):*/
+on mostAMSMessage AmFmTuner.PeakLevel.Get
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 0))
+    return;
+
+  // reply status
+  SendStatus_PeakLevel(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_ATStationInfo(long):*///function
+long SendStatus_ATStationInfo(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage AmFmTuner.ATStationInfo.Status msg;
+  
+  if(!CheckNormalOperation())
+    return -1;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.Pos = 0x0000; // whole record
+  FillATStationInfoStatusMsg(msg);
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //{{{ --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncAllocResult(long,long,long[]):*///callback
+OnMostSyncAllocResult(long allocResult, long numChannels, long channels[])
+{
+  // result of allocation process
+  
+  long i;
+
+  if(allocResult == 0x01) // alloc grant
+  {
+    // fill result msg
+    gMsgAllocateRes.SourceNr = 0x01;
+    for(i = 0; i < 4; ++i)
+      gMsgAllocateRes.byte(2+i) = channels[i];
+    gMsgAllocateRes.DLC = 6;
+    gMsgAllocateRes.InstanceId = mostApGetInstID();
+    output(gMsgAllocateRes);
+
+    // state is now 'allocated'
+    gAllocState = 2;
+
+    // programm routing engine
+    RoutingEngineSet(channels);
+  }
+  else
+  {
+    // fill and send error message
+    if(gAppPhase != kAppOff)
+      mostSendError_Code(gMsgAllocateRes, kErrProcessing);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncDeallocResult(long,long):*///callback
+OnMostSyncDeallocResult(long deallocResult, long label)
+{
+  // result of deallocation process
+
+  if(deallocResult == 0x01) // alloc grant
+  {
+    // fill result msg
+    gMsgDeAllocateRes.SourceNr = 0x01;
+    gMsgDeAllocateRes.DLC = 1;
+    gMsgDeAllocateRes.InstanceId = mostApGetInstID();
+    output(gMsgDeAllocateRes);
+
+    // state is now 'not allocated'
+    gAllocState = 0;
+
+    // programm routing engine
+    RoutingEngineReset();
+  }
+  else
+  {
+    // fill and send error message
+    if(gAppPhase != kAppOff)
+      mostSendError_Code(gMsgAllocateRes, kErrProcessing);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:AppInit():*///function
+void AppInit()
+{
+  // Called on first start of the application.
+
+  if(gAppPhase == kAppOn)
+    return;
+
+  // application has started now
+  gAppPhase = kAppOn;
+}
+/*@@end*/
+
+/*@@caplFunc:AppExit():*///function
+void AppExit()
+{
+  // Called on final exit of the application.
+
+  if(gAppPhase == kAppOff)
+    return;
+
+  // power off
+  gAppPhase = kAppOff;
+
+  // reset state machine
+  if(gAllocState == 2)
+    RoutingEngineReset();
+  gAllocState = 0;
+
+  cancelTimer(tRadioText);
+}
+/*@@end*/
+
+/*@@caplFunc:AppShutdown():*///function
+void AppShutdown()
+{
+  // Called for a regular shut down of the application.
+  
+  if(gAppPhase == kAppShutdown)
+    return;
+  
+  // application is in shutdown mode now
+  gAppPhase = kAppShutdown;
+
+  cancelTimer(tRadioText);
+}
+/*@@end*/
+
+/*@@mostNetOn:OnMostNetOn():*/
+OnMostNetOn()
+{
+  AppInit();
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_ATPI(long):*///function
+long SendStatus_ATPI(long destAdr)
+{
+ // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage AmFmTuner.ATPI.Status msg;
+  
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstId();
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin application section -----------
+
+  msg.ProgramIndex = @sysvar::HU::AFT_ATPI;
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //{{{ --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_ATPresetList1(long):*///function
+long SendStatus_ATPresetList1(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage AmFmTuner.ATPresetList1.Status msg;
+  
+  if(!CheckNormalOperation())
+    return -1;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.Pos = 0x0000; // whole array
+  FillATPresetList1StatusMsg(msg);
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+  
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AmFmTuner.ATPI.Get (0x402051):*/
+on mostAMSMessage AmFmTuner.ATPI.Get
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 0))
+    return;
+
+  // reply status
+  SendStatus_ATPI(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AmFmTuner.ATPI.SetGet (0x402052):*/
+on mostAMSMessage AmFmTuner.ATPI.SetGet
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 2))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // verify position
+  if((this.ProgramIndex == 0) || (this.ProgramIndex > kATPresetList1_Size))
+  {
+    mostSendError_CodeByteWord(this, kErrParamWrong, 1, this.ProgramIndex);
+    return;
+  }
+
+  // set property
+  @sysvar::HU::AFT_ATPI = this.ProgramIndex;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_ATPI(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@sysvarChange:HU::AFT_ATPI:*/
+on sysvar HU::AFT_ATPI
+{
+  // force a new RadioText on channel switching
+  cancelTimer(tRadioText);
+  setTimer(tRadioText, 0);
+
+  //{{{ --- begin default code ------------------
+
+  // send status message to all notification clients
+  SendStatus_ATPI(kAsNtfDestAdr);
+
+  //}}} --- end default code --------------------
+
+  SendStatus_ATStationInfo(kAsNtfDestAdr);
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AmFmTuner.ATPI.Set (0x402050):*/
+on mostAMSMessage AmFmTuner.ATPI.Set
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 2))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // verify position
+  if((this.ProgramIndex == 0) || (this.ProgramIndex > kATPresetList1_Size))
+  {
+    mostSendError_CodeByteWord(this, kErrParamWrong, 1, this.ProgramIndex);
+    return;
+  }
+
+  // set property
+  @sysvar::HU::AFT_ATPI = this.ProgramIndex;
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AmFmTuner.ATPI.Increment (0x402053):*/
+on mostAMSMessage AmFmTuner.ATPI.Increment
+{
+  long atpi;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  atpi = @sysvar::HU::AFT_ATPI + this.NSteps;
+  if(atpi < 1)
+    atpi = 1;
+  if(atpi > kATPresetList1_Size)
+    atpi = kATPresetList1_Size;
+
+  // set property
+  @sysvar::HU::AFT_ATPI = atpi;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_ATPI(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AmFmTuner.ATPI.Decrement (0x402054):*/
+on mostAMSMessage AmFmTuner.ATPI.Decrement
+{
+  long atpi;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  atpi = @sysvar::HU::AFT_ATPI - this.NSteps;
+  if(atpi < 1)
+    atpi = 1;
+  if(atpi > kATPresetList1_Size)
+    atpi = kATPresetList1_Size;
+
+  // set property
+  @sysvar::HU::AFT_ATPI = atpi;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_ATPI(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:FillATPresetList1StatusMsg(mostAmsMessage4210716):*///function
+FillATPresetList1StatusMsg(mostAmsMessage AmFmTuner.ATPresetList1.Status msg)
+{
+  // Fill ATPresetList1.Status() message dependent on posx and posy from msg
+  // posx   =   posy =  0  --> Fill all available records
+  // posx != 0, posy =  0  --> Fill dedicated record
+  // posy != 0, posy != 0  --> Fill dedicated record field
+
+  byte i;
+  char buffer[50];
+  
+  msg.InstanceId = mostApGetInstId();
+
+  // remove data behind Pos parameter; deletes all array elements
+  msg.DLC = 2;
+
+  // check posx, posy
+  if((msg.PosX > kATPresetList1_Size) || (msg.PosY > 6))
+    return;
+
+  if(msg.PosX == 0)
+  {
+    // set size of array
+    mostParamSet(msg, "Data", kATPresetList1_Size);
+  }
+
+  // copy data
+  for(i = 1; i <= kATPresetList1_Size; ++i)
+  {
+    if((i == msg.PosX) || (msg.PosX == 0))
+    {
+      if((msg.PosY == 1) || (msg.PosY == 0))
+      {
+        snprintf(buffer, elcount(buffer), "Data.Record[%d].PresetSelection", i);
+        mostParamSet(msg, buffer, 1);
+      }
+
+      if((msg.PosY == 2) || (msg.PosY == 0))
+      {
+        snprintf(buffer, elcount(buffer), "Data.Record[%d].SenderName", i);
+        mostParamSetString(msg, buffer, gATPresetList1_SenderName[i-1]);
+      }
+
+      if((msg.PosY == 3) || (msg.PosY == 0))
+      {
+        snprintf(buffer, elcount(buffer), "Data.Record[%d].SendernameInfo", i);
+        mostParamSet(msg, buffer, 1);
+      }
+
+      if((msg.PosY == 4) || (msg.PosY == 0))
+      {
+        snprintf(buffer, elcount(buffer), "Data.Record[%d].PTY", i);
+        mostParamSet(msg, buffer, 0);
+      }
+
+      if((msg.PosY == 5) || (msg.PosY == 0))
+      {
+        snprintf(buffer, elcount(buffer), "Data.Record[%d].PI", i);
+        mostParamSet(msg, buffer, i+1);
+      }
+
+      if((msg.PosY == 6) || (msg.PosY == 0))
+      {
+        snprintf(buffer, elcount(buffer), "Data.Record[%d].TpTa", i);
+        mostParamSet(msg, buffer, 0);
+      }
+    }
+  }
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AmFmTuner.ATPresetList1.Get (0x404011):*/
+on mostAMSMessage AmFmTuner.ATPresetList1.Get
+{
+  mostAMSmessage AmFmTuner.ATPresetList1.Status msg = { DLC = 500} ;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 2))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // semantic checks
+  if((msg.PosX > kATPresetList1_Size) || (msg.PosY > 6))
+  {
+    mostSendError_CodeByteWord(this, kErrParamWrong, 1, this.Pos);
+    return;
+  }
+
+  // fill message
+  // get list from table
+  msg.Pos = this.Pos;
+  FillATPresetList1StatusMsg(msg);
+  
+  // reply status
+  mostAsNtfOutput(this.SA, msg);
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AmFmTuner.Radiotext.Get (0x4045A1):*/
+on mostAMSMessage AmFmTuner.Radiotext.Get
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 0))
+    return;
+
+  // reply status
+  SendStatus_RadioText(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_Radiotext(long):*///function
+long SendStatus_Radiotext(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage AmFmTuner.Radiotext.Status msg;
+  
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstId();
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin application section -----------
+
+  mostParamSetString(msg, "TextA", gRadioText[0][gRadioTextIdx]);
+  mostParamSetString(msg, "TextB", gRadioText[1][gRadioTextIdx]);
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //{{{ --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:InitRadioText():*///function
+InitRadioText()
+{
+  // Reads RadioText from file.
+  // Property is a pair of two strings.
+
+  long i;
+  dword glbHandle = 0;
+
+  // Opens the file in ASCII mode for read access. 
+  // To determine the absolute path, the search procedure will be used. 
+  // The file must be located in the directory of the databases or the 
+  // configuration directory. 
+  glbHandle = openFileRead ("RadioText.txt", 0);
+
+  if(glbHandle != 0)
+  {
+    i = 0;
+    while((i < kRadioTextBufferSize) && (fileGetStringSZ(gRadioText[i%2][i/2], kRadioTextLength, glbHandle) == 1))
+    {
+      
+      //write("r %d %s", i, gRadioTextA[i%2][i/2]);
+      ++i;
+    }
+
+    fileClose(glbHandle); 
+    gRadioTextIdxMax = (i-2) / 2;
+  }
+  else  
+  {
+    write("AmFmTuner.can: Error reading file 'RadioText.txt'."); 
+  }
+}
+/*@@end*/
+
+/*@@timer:tRadioText:*/
+on timer tRadioText
+{
+  // send notifications
+  SendStatus_RadioText(kAsNtfDestAdr);
+
+  // next radio text
+  gRadioTextIdx++;
+  if(gRadioTextIdx > gRadioTextIdxMax)
+    gRadioTextIdx = 0;
+  setTimer(tRadioText, kRadioTextCycle);
+}
+/*@@end*/
+
+/*@@caplFunc:FillATStationInfoStatusMsg(mostAmsMessage4202524):*///function
+FillATStationInfoStatusMsg(mostAmsMessage AmFmTuner.ATStationInfo.Status msg)
+{
+  // Fill ATStationInfo.Status() message dependent on posx from msg
+  // posx == 0 --> Fill dedicated record
+  // posy != 0 --> Fill dedicated record field
+
+  byte idx;
+  char buffer[50];
+  
+  msg.InstanceId = mostApGetInstId();
+
+  // get current sender
+  idx = @sysvar::HU::AFT_ATPI;
+
+  if((msg.PosX == 1) || (msg.PosX == 0))
+  {
+    if((idx > 0) && (idx <= elcount(gATPresetList1_SenderName)))
+      mostParamSetString(msg, "Data.SenderName", gATPresetList1_SenderName[idx-1]);
+    else
+      mostParamSetString(msg, "Data.SenderName", "");
+  }
+
+  if((msg.PosX == 2) || (msg.PosX == 0))
+    mostParamSet(msg, "Data.SendernameInfo", 1);
+
+  if((msg.PosX == 3) || (msg.PosX == 0))
+  {
+    if((idx > 0) && (idx <= elcount(gATPresetList1_SenderFreq)))
+      mostParamSet(msg, "Data.Frequency", gATPresetList1_SenderFreq[idx-1]);
+    else
+      mostParamSet(msg, "Data.Frequency", 0);
+  }
+
+  if((msg.PosX == 4) || (msg.PosX == 0))
+    mostParamSet(msg, "Data.PTY", 1);
+
+  if((msg.PosX == 5) || (msg.PosX == 0))
+    mostParamSet(msg, "Data.PI", idx);
+
+  if((msg.PosX == 6) || (msg.PosX == 0))
+    mostParamSet(msg, "Data.ATStationInfoSwitches", 0);
+
+  if((msg.PosX == 7) || (msg.PosX == 0))
+    mostParamSet(msg, "Data.ReceptionQuality", 0xFF);
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AmFmTuner.AllocateLabel.StartResultAck (0x40F016):*/
+on mostAMSMessage AmFmTuner.AllocateLabel.StartResultAck
+{
+  long i;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 3))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // this player has one source only
+  if(this.SourceNr != 0x01)
+  {
+    mostSendError_CodeByteByte(this, kErrParamNotAvailable, 1, this.SourceNr);
+    return;
+  }
+
+  if(gAllocState != 0)
+  {
+    // allocation already in progress
+    mostSendError_Code(this, kErrNotAvailable);
+    return;
+  }
+
+  // store address of initiator
+  gMsgAllocateLabelRes.DA = this.SA;
+  gMsgAllocateLabelRes.senderHandle = this.senderHandle;
+
+  // state: allocating
+  gAllocState = 1;
+
+  // call synchronous channel allocation service
+  // OnMostSyncAudio() will be invoked on completion or timeout
+  if((kMost150 == gSpeedGrade) && !isSimulated())
+  {
+    MostSetSyncAudio(MostGetChannel(), 1, kLabelWidth, 0, 1);     // 2nd param "label" is NOT used.
+  }
+  else
+  {
+    OnMostSyncAudio(339, 0, 1);       // Simulate allocation on label 339 
+  }
+
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncAudio(long,long,long):*///callback
+OnMostSyncAudio (long label, long device, long mode)
+{
+    if(kMost25 == gSpeedGrade || mode == 0)
+      return;
+
+    // fill result msg
+    gMsgAllocateLabelRes.SourceNr = 0x01;
+    gMsgAllocateLabelRes.InstanceId = mostApGetInstID();
+
+    gMsgAllocateLabelRes.ConnectionLabel = label;
+    gMsgAllocateLabelRes.BlockWidth = kLabelWidth;
+    output(gMsgAllocateLabelRes);
+
+    // state is now 'allocated'
+    gAllocState = 2;
+}
+/*@@end*/
+

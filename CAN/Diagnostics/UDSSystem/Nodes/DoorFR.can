@@ -1,0 +1,226 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "..\CAPL_Includes\DiagDefinitions.cin"
+  #include "..\CAPL_Includes\FaultMemory_Sim.cin"
+}
+
+variables
+{
+  long gCANFDavailable = 0;        // set to 1 if the bus supports CAN FD
+
+  // Default serial number as long as not overwritten via variant coding
+  const cDefaultSerialNumber=1397051954;
+
+  word gS3ServerTimeout;
+  msTimer tS3ServerTimer;
+  
+  long gP2ClientTimeout;
+  long gP2extClientTimeout;
+  
+  enum eSessionType {DefaultSession=1, ExtendedSession=2, ProgrammingSession=3};
+  
+  enum eSecurityStatus {Locked=0, Unlocked=1};
+  enum eSecurityLevel {Locked_Level_1=0, Unlocked_Level_1=1, Locked_Level_17=2, Unlocked_Level_17=3};
+  word gLastSecuritySeedLevel1;
+  dword gLastSecuritySeedLevel17;
+  
+  enum eVoltageRange {VoltageTooLow, VoltageNormal, VoltageTooHigh} gVoltageRange;
+  
+  enum eDIDSendMode gSineSendMode;
+  enum eDIDSendMode gSawtoothSendMode;
+  enum eDIDSendMode gDDDIDSendMode;
+  
+  word gNumberOfDDDIDs;
+  const cMaxNumberOfDDDIDs = 6;
+  word gDDDID[cMaxNumberOfDDDIDs];
+  
+  double gTargetWindowLiftPosition;
+
+  word gSelectorValue;
+  const cMaxMuxDataSize = 14;
+  byte gMuxData[cMaxMuxDataSize];
+}
+
+on start
+{
+  long value;
+
+  setWriteDbgLevel(0);
+  
+  value = DiagGetCommParameter( "CANoe.BusContext");
+  writeDbgLevel(1, "(CanTP) %NODE_NAME%: Setting bus context %x", value);
+  SetBusContext( value);
+  {
+    // check if CAN FD is available at all
+    CANSettings arbitration;
+    CANSettings data;
+    canFdGetConfiguration( (WORD) value, arbitration, data);
+    gCANFDavailable = (arbitration.flags & 0x100 ? 1 : 0);
+    if( gCANFDavailable)
+      writeDbgLevel(1, "(CanTP) %NODE_NAME%: CAN FD is available");
+  }
+  
+  InitECU();
+}
+
+on timer tS3ServerTimer
+{
+  write("%NODE_NAME%: Session timed out (S3 server timeout=%d ms), falling back to default.", gS3ServerTimeout);
+}
+
+on sysvar sysvarMember::%NODE_NAME%::FaultMemoryGui.BtnStoreDTC
+{
+  byte status;
+  
+  if (@this) { // only when button was pressed (not when released)
+    status =   (@sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[7] << 7)
+             | (@sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[6] << 6)
+             | (@sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[5] << 5)
+             | (@sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[4] << 4)
+             | (@sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[3] << 3)
+             | (@sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[2] << 2)
+             | (@sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[1] << 1)
+             |  @sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[0];
+    
+    AddFault(@sysvarMember::%NODE_NAME%::FaultMemoryGui.DTC_ToStore, status);
+  }
+}
+
+on sysvar sysvarMember::%NODE_NAME%::FaultMemoryInternal.FaultMemoryActivated
+{
+  enableControl("%NODE_NAME%", "FaultMemoryGroup", @this);
+}
+
+// If not handled explicitly, send negative response with negative response code (NRC) "Service not supported"
+on diagRequest DoorFR.*
+{
+  diagSendNegativeResponse(this, cNRC_ServiceNotSupported); 
+}
+
+// If Tester present is received, reply with positive response
+on diagRequest DoorFR.TesterPresent_Send
+{
+  diagResponse this resp;
+  
+  refreshS3Timer();
+
+  diagSendPositiveResponse(resp);
+}
+
+// PDX contains specific service in for the case that SPRMIB set for Tester Present request
+on diagRequest DoorFR.TesterPresent_Send_NoResponse
+{
+  writeDbgLevel(1, "%NODE_NAME%: Suppressed TesterPresent response!");
+}
+
+// Use diagnostic class handler to save some identical lines of code
+on diagRequest DoorFR.Sessions::*
+{
+  diagResponse DoorFR.DefaultSession_Start resp; // "this resp" does not work here since in the PDX there are services without response
+  
+  word SessionType;
+
+  refreshS3Timer();
+
+  SessionType=((word)diagGetParameter(this, "DiagSessionType")) & 0x7F; // Filter out SPRMIB
+  switch(SessionType) {
+    case 0x01: 
+    case 0x02: 
+    case 0x03: 
+      break;
+    default:
+      diagSendNegativeResponse(resp, cNRC_SecurityAccessDenied); 
+      return;
+  }
+  if (((word)diagGetParameter(this, "DiagSessionType")) & 0x80) {
+    writeDbgLevel(1, "%NODE_NAME%: Suppressed DoorFR.Sessions::* response!");
+  }
+  else {
+    diagSetPrimitiveByte(resp, 1, SessionType);
+    diagSetPrimitiveByte(resp, 2, 0);
+    diagSetPrimitiveByte(resp, 3, gP2ClientTimeout);
+    diagSetPrimitiveByte(resp, 4, (gP2extClientTimeout/2560));
+    diagSetPrimitiveByte(resp, 5, (gP2extClientTimeout/10)%256);
+    
+    diagSendPositiveResponse(resp);
+  }
+}
+
+on diagRequest DoorFR.DevelopmentData_Read
+{
+  diagResponse this resp;
+
+  refreshS3Timer();
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "OperatingSystemVersion", 1);
+  DiagSetParameter( resp, "CanDriverVersion", 5);
+  DiagSetParameter( resp, "NmVersion", 2);
+  DiagSetParameter( resp, "DiagnosticModuleVersion", 1);
+  DiagSetParameter( resp, "TransportLayerVersion", 4);
+  DiagSendResponse( resp);
+}
+
+// Example how to set a raw parameter value
+on diagRequest DoorFR.SerialNumber_Read
+{
+  diagResponse this resp;
+  byte rawSerialNumber[4];
+  
+  refreshS3Timer();
+  // Since the serial number here is only 4 bytes long, this could simply be done via 
+  // diagSetParameter(resp, "SerialNumber", @%NODE_NAME%::RewritableData.SerialNumber);
+  // But we want to demonstrate the setting of raw values:
+  rawSerialNumber[0]=@%NODE_NAME%::RewritableData.SerialNumber>>24;
+  rawSerialNumber[1]=(@%NODE_NAME%::RewritableData.SerialNumber>>16) & 0xFF;
+  rawSerialNumber[2]=(@%NODE_NAME%::RewritableData.SerialNumber>>8) & 0xFF;
+  rawSerialNumber[3]=@%NODE_NAME%::RewritableData.SerialNumber & 0xFF;
+  diagSetParameterRaw(resp, "SerialNumber", rawSerialNumber, elcount(rawSerialNumber));
+  diagSendPositiveResponse(resp);
+}
+
+on diagRequest DoorFR.EcuIdentification_Read
+{
+  diagResponse this resp;
+  char buffer[30];  
+
+  refreshS3Timer();
+  sysGetVariableString(sysvar::%NODE_NAME%::ECUIdentification, buffer, elcount(buffer));
+  DiagSetParameter( resp, "Part_Number", buffer);
+  DiagSendPositiveResponse( resp);
+}
+
+// Handle both Hard and soft reset within one function (i.e. handle all services within one class)
+on diagRequest DoorFR.Ecu_Reset::*
+{
+  diagResponse this resp;
+  byte subFunction;
+
+  subFunction=diagGetPrimitiveByte(this, 1);
+  
+  refreshS3Timer();
+  InitECU();
+  
+  DiagSetPrimitiveByte(resp, 1, subFunction);
+  diagSendPositiveResponse(resp);
+}
+
+// Refresh timer to avoid falling back into default session
+void refreshS3Timer()
+{
+  setTimer(tS3ServerTimer, gS3ServerTimeout);
+}
+
+
+void InitECU()
+{
+  InitFaultmem(UDS);  
+
+  @sysvarMember::%NODE_NAME%::RewritableData.SerialNumber=cDefaultSerialNumber;
+  @sysvarMember::%NODE_NAME%::RewritableData.VariantCoding.WindowLiftSupport=1;
+  @sysvarMember::%NODE_NAME%::RewritableData.VariantCoding.VehicleSpeedToLockDoor=20;
+
+  gS3ServerTimeout=diagGetCommParameter("CANoe.S3ServerTime");
+  gP2ClientTimeout=150;
+  gP2extClientTimeout=2000;
+}

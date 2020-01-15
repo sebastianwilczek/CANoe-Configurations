@@ -1,0 +1,401 @@
+/*@@includes:*/
+includes
+{
+  #include "MOST_Diag_Def.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  /* -----------------------------------------------------------------------
+  Multi-connection ISO-TP on CAN / AMS/MHP on MOST gateway
+
+  This node is a gateway between a CAN bus and a MOST ring that forwards
+  data between the busses arriving on ISO TP and AMS/MHP.
+  The connections have to be configured during the start of the measurement
+  ----------------------------------------------------------------------- */
+  char gECU[15] = "CANMOSTTPGW";
+  char gPrefix[30];
+
+  DWORD gContextCAN;
+  DWORD gContextMOST;
+
+  // This map is used to find the corresponding connection
+  // This will initialized with 0 on start, i.e. invalid
+  long gConnectionMap[10][2];  // [0] for CAN, [1] for MOST
+
+  // MOST High related variables
+  long gMHPTxPort;
+  long gMHPRxPort;
+  BYTE gMHPRxBuffer[4095 + DAP_HEADER_SIZE];
+  BYTE gMHPTxBuffer[4095 + DAP_HEADER_SIZE];
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  setWriteDbgLevel(1);
+  gContextCAN  = GetBusNameContext( "CAN");
+  gContextMOST = GetBusNameContext( "Gateway"); // name of the MOST device
+  
+  mostApplicationNode();
+
+  MH_SetVerbose(0);
+
+  // Early initialization, if necessary
+  gMHPTxPort = MH_CreateTxPort("");  
+  MH_SetTxTranspMode(gMHPTxPort, 2); //use asynchronous channel
+  MH_SetTxFrameSize(gMHPTxPort, MD_MHP_FRAME_SIZE);
+  MH_SetTxPriority(gMHPTxPort, MD_MHP_PRIO);
+  MH_SetTxBlockAck(gMHPTxPort, 1); //use block acknowledge
+  
+  gMHPRxPort = MH_CreateRxPort("");
+  MH_SetRxCapacity(gMHPRxPort, MD_MHP_FRAMES_PER_BLOCK, MD_MHP_FRAME_SIZE, MD_MHP_AIR, MD_MHP_PRIO);
+}
+/*@@end*/
+
+/*@@caplFunc:SetPrefix():*///function
+SetPrefix()
+{
+  snprintf( gPrefix, elcount(gPrefix), "[%.3f] %s: ", timeNow()/100000.0, gECU);
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  long conn;
+
+  // Initialize the connections here!
+
+  // First pair
+  SetBusContext( gContextCAN);
+  conn = CanTpCreateConnection(0);  // Normalmode
+  CanTpSetRxIdentifier( conn, 0x700);
+  CanTpSetTxIdentifier( conn, 0x600);
+  gConnectionMap[0][0] = conn;
+
+  SetBusContext( gContextMOST);
+  write( "Created MOST connection %d", gMDP1.connID);
+  gConnectionMap[0][1] = gMDP1.connID;
+
+  // Second pair
+  SetBusContext( gContextCAN);
+  conn = CanTpCreateConnection(0);  // Normalmode
+  CanTpSetRxIdentifier( conn, 0x701);
+  CanTpSetTxIdentifier( conn, 0x601);
+  gConnectionMap[1][0] = conn;
+
+  SetBusContext( gContextMOST);
+  write( "Created MOST connection %d", gMDP2.connID);
+  gConnectionMap[1][1] = gMDP2.connID;
+}
+/*@@end*/
+
+/*@@caplFunc:GetMostConn(long):*///function
+long GetMostConn( long canConn)
+{
+  dword i;
+  for( i = 0; i < elcount(gConnectionMap); ++i)
+  {
+    if( gConnectionMap[i][0] == canConn)
+      return gConnectionMap[i][1];
+  }
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:GetCanConn(long):*///function
+long GetCanConn( long mostConn)
+{
+  dword i;
+  for( i = 0; i < elcount(gConnectionMap); ++i)
+  {
+    if( gConnectionMap[i][1] == mostConn)
+      return gConnectionMap[i][0];
+  }
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:CanTp_SendCon(long,dword):*///callback
+CanTp_SendCon( long handle, DWORD txCount)
+{
+  SetPrefix();
+  writeDbgLevel(1,"%sCanTp_SendCon( handle=%d, txCount=%d)", gPrefix, handle, txCount);
+}
+/*@@end*/
+
+/*@@caplFunc:CanTp_ErrorInd(long,long):*///callback
+CanTp_ErrorInd( long handle, long error) 
+{
+  char cErrorText[13][30] = {
+    "(no error)"
+  , "Timeout while waiting for CF" // 1
+  , "Timeout while waiting for FC" // 2
+  , "Wrong Sequence Number"        // 3
+  , "TP_DLL busy"                  // 4
+  , "Unexpected PDU"               // 5
+  , "Timeout waiting for Tx-Ack"   // 6
+  , "WFT Overrun"                  // 7
+  , "Buffer overflow"              // 8
+  , "Wrong parameter"              // 9
+  , "Invalid FlowStatus received"  // 10
+  , "Transfer abort requested"     // 11
+  // Sentinel
+  , "unknown error!"
+  };
+  long i;
+
+  SetPrefix();
+  if( error < 0 || error >= elcount(cErrorText))
+    i = elcount(cErrorText) - 1;
+  else
+    i = error;
+
+  writeDbgLevel( 1, "%sCanTp_ErrorInd(%d): %s", gPrefix, error, cErrorText[i]);
+}
+/*@@end*/
+
+/*@@caplFunc:CanTp_ReceptionInd(long,byte[]):*///callback
+CanTp_ReceptionInd( long handle, BYTE data[])
+{
+  long mostConn, status;
+  SetPrefix();
+
+  // Find the corresponding connection
+  mostConn = GetMostConn( handle);
+  if( !mostConn)
+  {
+    writeDbgLevel(0,"%sCanTp_ReceptionInd - no MOST connection for %d!", gPrefix, handle);
+    return;
+  }
+
+  writeDbgLevel(1,"%sCanTp_ReceptionInd( handle=%d, %d bytes), forward on mostConn %d", gPrefix, handle, elcount( data), mostConn);
+
+  // Forward data to other bus
+  SetBusContext( gContextMOST);
+  status = MOSTDataRequest( mostConn, data);
+  SetBusContext( gContextCAN);
+
+  if( status != 0)
+    MOST_ErrorInd( mostConn, status);
+}
+/*@@end*/
+
+/*@@caplFunc:MOSTDataRequest(long,byte[]):*///function
+long MOSTDataRequest( long handle, BYTE data[])
+{
+  long i;
+  long portState;
+  mostAmsMessage * msg = { dlc = 4095 + DAP_HEADER_SIZE };
+  byte header[DAP_HEADER_SIZE];
+  long diagDataSize;
+  long dataSize;
+  
+  diagDataSize = elcount( data);
+  dataSize = DAP_HEADER_SIZE + diagDataSize;
+
+  if( handle == gMDP1.connID)
+  {
+    msg.DA = gMDP1.devID;
+    msg.FBlockId = MD_FBLOCKID;
+    msg.InstanceId = gMDP1.instID;
+    msg.FunctionId = MD_FUNCTIONID;
+    msg.OpType = MD_OPTYPE_REQ;
+    msg.msgChannel = 1;
+    msg.dlc = dataSize;
+    //Add DAP header
+    FillDAPHeader(header, diagDataSize, DAP_DEFAULT_TESTER_ADR);
+    for( i = DAP_HEADER_SIZE; i-- > 0; )
+      msg.byte(i) = header[i];
+    //Append diagnosis data
+    for( i = diagDataSize; i-- > 0; )
+      msg.byte(i + DAP_HEADER_SIZE) = data[i];
+
+    output( msg);
+    return 0; // OK
+  }
+  else if (handle == gMDP2.connID)
+  {
+    portState = MH_GetTxPortState(gMHPTxPort);
+
+    if (portState == 1) //Port is busy
+      return 1;
+
+    FillDAPHeader(gMHPTxBuffer, diagDataSize, DAP_DEFAULT_TESTER_ADR);
+    
+    for( i = diagDataSize; i-- > 0; )
+      gMHPTxBuffer[i + DAP_HEADER_SIZE] = data[i];
+
+    if (portState == 2)
+    {
+      //Resuse connection
+      MH_SetTxBuffer(gMHPTxPort, gMHPTxBuffer, dataSize, 0);
+    }
+    else
+    {
+
+      MH_ReqTrans(gMHPTxPort, 
+                  gMDP2.devID,
+                  MD_FBLOCKID,
+                  gMDP2.instID,
+                  MD_FUNCTIONID,
+                  MD_OPTYPE_REQ,
+                  gMHPTxBuffer,
+                  dataSize);
+    }
+    return 0;
+  }
+
+  return 1; // connection not found
+}
+/*@@end*/
+
+/*@@mostAmsMsg:*:*/
+on mostAMSMessage *
+{
+  BYTE data[4095 + DAP_HEADER_SIZE];
+  mostAmsMessage * _this = { dlc = 4095 + DAP_HEADER_SIZE };
+  int i;
+  long handle;
+
+  if( (this.dir != rx) ||
+      (this.FBlockID != MD_FBLOCKID) ||
+      (this.FunctionID != MD_FUNCTIONID) ||
+      (this.OpType != MD_OPTYPE_RES))
+    return;
+
+  if( this.InstanceId == gMDP1.instID)
+    handle = gMDP1.connID;
+  else if( this.InstanceId == gMDP2.instID)
+    handle = gMDP2.connID;
+  else
+    return;
+
+  _this = this;
+
+  for( i = _this.dlc; i -- > 0; )
+  {
+    data[i] = _this.byte(i);
+  }
+
+  // The connection is hard-coded with the TP settings
+  MOST_ReceptionInd( handle, data, _this.dlc);
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRequestConnection(dword,dword,dword,dword,dword,dword,dword):*///callback
+void MH_IndRequestConnection(dword dsoDevice, dword fblockID, dword instanceID, dword fktID,
+  dword opType, dword prio, dword frameSize)
+{
+  if((MD_FBLOCKID == fblockID) && // check addressing ...
+    (gMDP2.instID == instanceID) &&
+    (MD_FUNCTIONID == fktID) &&
+    (MD_OPTYPE_RES == opType) &&
+    (MH_GetRxPortState(gMHPRxPort) == 0)) // ... and port state
+  {
+    writeDbgLevel(1, "%s: Accepted MHP connection", gECU);
+    MH_AcceptConnection(gMHPRxPort);
+  }
+  else if (MD_OPTYPE_RES == opType)
+  {
+    writeDbgLevel(1, "%s: Denied MHP connection", gECU);
+    MH_DenyConnection(MD_MHP_PRIO + 1);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRxBufferRequested(dword,long):*///callback
+MH_IndRxBufferRequested(dword handle, long isPacketBegin)
+{
+  if (handle == gMHPRxPort)
+    MH_SetRxBuffer(handle, gMHPRxBuffer, elcount(gMHPRxBuffer));
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRxBufferFinished(dword,long,long):*///callback
+MH_IndRxBufferFinished(dword handle, long sizeFilled, long reason)
+{
+  MOST_ReceptionInd( gMDP2.connID, gMHPRxBuffer, sizeFilled);
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRxConnectionClosed(dword,long):*///callback
+MH_IndRxConnectionClosed(dword handle, long result)
+{
+  // mandatory callback function for MHP
+}
+/*@@end*/
+
+/*@@caplFunc:MOST_ErrorInd(long,dword):*///function
+MOST_ErrorInd(long connectionHdl, DWORD error)
+{
+  char cErrorText[4][60] = {
+    "(no error)"
+  , "Unknown connection"
+  , "Data too short"
+  // Sentinel
+  , "unknown error!"
+  };
+  long i;
+
+  SetPrefix();
+  if( error < 0 || error >= elcount(cErrorText))
+    i = elcount(cErrorText) - 1;
+  else
+    i = error;
+
+  writeDbgLevel( 1, "%sMOST_ErrorInd(%d): %s", gPrefix, error, cErrorText[i]);
+}
+/*@@end*/
+
+/*@@caplFunc:MOST_ReceptionInd(long,byte[],word):*///function
+MOST_ReceptionInd(long handle, BYTE data[], WORD count)
+{
+  long canConn, status;
+  byte canData[4095];
+  long i;
+
+  SetPrefix();
+  // Find the corresponding connection
+  canConn = GetCanConn( handle);
+  if( !canConn)
+  {
+    writeDbgLevel(0,"%sMOST_ReceptionInd - no CAN connection for %d!", gPrefix, handle);
+    return;
+  }
+
+  if (count < DAP_HEADER_SIZE)
+  {
+    MOST_ErrorInd(handle, 2);
+    return;
+  }
+
+  for( i = 0; i < count - DAP_HEADER_SIZE; ++i)
+  {
+    canData[i] = data[i + DAP_HEADER_SIZE];
+  }
+
+  writeDbgLevel(1,"%sMOST_ReceptionInd( handle=%d, %d bytes), forward on CAN conn %d", gPrefix, handle, count, canConn);
+
+  // Forward data to other bus
+  SetBusContext( gContextCAN);
+  status = CanTpSendData( canConn, canData, count - DAP_HEADER_SIZE);
+  SetBusContext( gContextMOST);
+
+  if( status != 0)
+    CanTp_ErrorInd( canConn, status);
+}
+/*@@end*/
+
+/*@@caplFunc:MOST_TxConfirmationInd(long):*///function
+MOST_TxConfirmationInd( long handle)
+{
+  SetPrefix();
+  writeDbgLevel(1,"%sMOST_TxConfirmationInd( handle=%d)", gPrefix, handle);
+}
+/*@@end*/
+

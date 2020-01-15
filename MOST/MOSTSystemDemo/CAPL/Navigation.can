@@ -1,0 +1,481 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+  #include "FCatDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+//
+// Simulation of a Mini-Navigation FBlock
+//
+// Note: Only basic functionality for demonstration is simulated here.
+//
+// The progam shows the transmission of a binary file using the
+// MOST High protocol.
+//
+variables
+{
+  // Application phase
+  const byte kAppOff      = 0; // no power; no communication
+  const byte kAppOn       = 1; // power on
+  const byte kAppShutdown = 2; // power on; shutdown started
+  byte  gAppPhase = kAppOff;
+
+
+  // Property: Image
+
+  // MOST High Protocol settings
+  // transport mode: 1 - Control channel; 2 - Asynchronous 
+  const byte  gMH_TxTranspMode = 2;
+  // frame size:   11 bytes max for transmissions on Control channel
+  //             1006 bytes max for transmissions on Async channel (MOST 25/50)
+  //             1516 bytes max for transmissions on Async channel (MOST 150)
+  const long  gMH_FrameSize = 1006;
+  // storage of handle for High Protocol data source port  
+  // is set at port creation in preStart handler
+  dword gTxPort; 
+
+  // Property: CurrentPosition
+  mstimer     tPosition;
+  const dword kPositionCycle = 1300; // update cycle for changing position
+  dword       gCurrentPosition_Longitude = 1234;
+  dword       gCurrentPosition_Latitude  = 5678;
+  word        gCurrentPosition_Height = 250;
+
+  // Method: CalculateRoute
+  mstimer     tCalculateRoute;
+  mostAMSMessage Navigation.CalculateRoute.StartResultAck gMsgCalculateRoute;
+
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // configure CAPL node as application node (don't receive spy messages...)
+  MostApplicationNode();
+
+  // configure FBlock AmFmTuner
+  ConfigureFBlock();
+
+  // set verbose level of High Protocol Service to report only critical errors
+  MH_SetVerbose(0); 
+
+  // adapt most high configuration for MOST 150
+  if (kMost150 == mostGetSpeedGrade(mostGetChannel()))
+  {
+    MH_UseProtocolRev(0, 3);
+  }
+
+  // create data source port for High Protocol transmission
+  gTxPort = MH_CreateTxPort(""); 
+}
+/*@@end*/
+
+/*@@mostAmsMsg:Navigation.CalculateRoute.StartResultAck (0x52E006):*/
+on mostAMSMessage Navigation.CalculateRoute.StartResultAck
+{
+  char from[100], to[100];
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReception(this))
+    return;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin application section -----------
+
+  // try to read start location from message
+  if(mostParamIsAvailable(this, "From"))
+  {
+    mostParamGetString(this, "From", from, elcount(from));
+  }
+  else
+  {
+    mostSendError_CodeByte(this, kErrParamWrong, 1);
+    return;
+  }
+
+  // try to read destination from message
+  if(mostParamIsAvailable(this, "To"))
+  {
+    mostParamGetString(this, "To", to, elcount(to));
+  }
+  else
+  {
+    mostSendError_CodeByte(this, kErrParamWrong, 2);
+    return;
+  }
+
+  // store command message for later use
+  gMsgCalculateRoute = this;
+
+  // send result with delay
+  cancelTimer(tCalculateRoute);
+  setTimer(tCalculateRoute, 150);
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:CheckNormalOperation():*///function
+long CheckNormalOperation()
+{
+  // Description:
+  //   Checks if FBlock is able to process commands
+  //   (Maybe used for power simulation later.)
+  // Return:
+  //   0: failed; 1: Ok
+
+  //{{{ --- begin application section -----------
+
+  return (kAppOff != gAppPhase);
+
+  //}}} --- end application section -------------
+
+}
+/*@@end*/
+
+/*@@mostAmsMsg:Navigation.Image.Get (0x52E031):*/
+on mostAMSMessage Navigation.Image.Get
+{
+  // Sends image data using MOST High Protocol.
+
+  mostAMSMessage Navigation.Image.Status msg;
+  char strMH_FileAbs[200];
+
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReception(this))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  if(!mostParamIsAvailable(this, "Filename"))
+  {
+    mostSendError_CodeByte(this, kErrParamWrong, 1);
+    return;
+  }
+
+  mostParamGetString(this, "Filename", strMH_FileAbs, elcount(strMH_FileAbs));
+
+  // initiate MOST High Protocol transmission
+  write("MOST HP: %NODE_NAME%: Starting transmission of file '%s'", strMH_FileAbs);
+  MH_StartFileTransmission(this.SA,
+           this.FBlockId,
+           mostApGetInstId(),
+           this.FunctionId,
+           0xC,
+           strMH_FileAbs);
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@mostApInstID:OnMostApInstID():*/
+OnMostApInstID()
+{
+  // reconfigure FBlock
+  ConfigureFBlock();
+}
+/*@@end*/
+
+/*@@caplFunc:ConfigureFBlock():*///function
+void ConfigureFBlock()
+{
+  // Configures the FBlock.
+  // Therefore functions are registered at CANoe's Function and 
+  // Notification Service.
+
+  long oldInstId = -1; // static variable
+  long newInstId;
+
+  newInstId = MostApGetInstId();
+
+  if(newInstId < 0)
+  {
+    newInstId = -1;
+  }
+
+  if(oldInstId != -1)
+  {
+    // disable Notification Service
+    mostAsNtfDisableEx(kFB_Nav, oldInstId);
+    // disable Function Service
+    mostAsFsDisableEx(kFB_Nav, oldInstId);
+  }
+
+  if(newInstId != -1)
+  {
+    // enable Notification Service
+    mostAsNtfEnable();
+    // enable Function Service
+    mostAsFsEnable();
+
+    // Enable all functions and all operations defined in the XML function catalog
+    // for the FBlock. Additionally, functions of type 'property' will be registered
+    // at the Notification Service if a corresponding CAPL function for sending 
+    // the status message is defined.
+    mostAsFsFunctionEnable(kFctAllInFCat, kOpTFAllInFCat, "SendStatus_");
+  }
+  oldInstId = newInstId;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:Navigation.CurrentPosition.Get (0x52E021):*/
+on mostAMSMessage Navigation.CurrentPosition.Get
+{
+  mostAMSmessage Navigation.CurrentPosition.Status msg;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 2))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  msg.PosX = this.PosX;
+  FillCurrentPositionStatusMsg(msg);
+
+  mostAsNtfOutput(this.SA, msg);
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_CurrentPosition(long):*///function
+long SendStatus_CurrentPosition(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service
+  //     (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage Navigation.CurrentPosition.Status msg;
+  
+  if(!CheckNormalOperation())
+    return -1;
+
+  //}}} --- end default code --------------------
+ 
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.Pos = 0;
+  FillCurrentPositionStatusMsg(msg);
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // send message
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:FillCurrentPositionStatusMsg(mostAmsMessage5431340):*///function
+FillCurrentPositionStatusMsg(mostAmsMessage Navigation.CurrentPosition.Status msg)
+{
+  // remove data behind Pos parameter; deletes all record fields
+  msg.DLC = 2;
+  msg.InstanceId = mostApGetInstID();
+
+  if(msg.PosX > 3)
+    return;
+  
+  
+  if((msg.PosX  == 0) || (msg.PosX  == 1))
+  {
+    mostParamSet(msg, "Data.Longitude", gCurrentPosition_Longitude);
+  }
+  if((msg.PosX  == 0) || (msg.PosX  == 2))
+  {
+    mostParamSet(msg, "Data.Latitude", gCurrentPosition_Latitude);
+  }
+  if((msg.PosX  == 0) || (msg.PosX  == 3))
+  {
+    mostParamSet(msg, "Data.Height", gCurrentPosition_Height);
+  }
+}
+/*@@end*/
+
+/*@@timer:tPosition:*/
+on timer tPosition
+{
+  gCurrentPosition_Longitude += 10;
+  gCurrentPosition_Latitude += 100;
+  gCurrentPosition_Height = gCurrentPosition_Height - 1 + random(3);
+
+  // property has changed
+  // send notifications
+  SendStatus_CurrentPosition(kAsNtfDestAdr);
+
+  setTimer(tPosition, kPositionCycle);
+}
+/*@@end*/
+
+/*@@caplFunc:AppExit():*///function
+void AppExit()
+{
+  // Called on final exit of the application.
+
+  if(gAppPhase == kAppOff)
+    return;
+
+  // power off
+  gAppPhase = kAppOff;
+
+  cancelTimer(tPosition);
+}
+/*@@end*/
+
+/*@@caplFunc:AppInit():*///function
+void AppInit()
+{
+  // Called on first start of the application.
+  if(gAppPhase == kAppOn)
+    return;
+
+  // application has started now
+  gAppPhase = kAppOn;
+
+  // set the timer for reporting current position (we drive all the time)
+  cancelTimer(tPosition);
+  setTimer(tPosition, kPositionCycle);
+}
+/*@@end*/
+
+/*@@mostNetOn:OnMostNetOn():*/
+OnMostNetOn()
+{
+  AppInit();
+}
+/*@@end*/
+
+/*@@mostNetState:OnMostNetState(long,long):*/
+OnMostNetState(long oldstate, long newstate)
+{
+  //{{{ --- begin application section -----------
+
+  
+  if(newstate == kNetStatePowerOff)
+  {
+    AppExit();
+  }
+  else if(newstate == kNetStateConfigNotOk)
+  {
+    MH_TxStopTrans(gTxPort);
+  }
+  
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@timer:tCalculateRoute:*/
+on timer tCalculateRoute
+{
+  // Route has been calculated now.
+  // Send result.
+
+  mostAMSMessage Navigation.CalculateRoute.ResultAck msgResult;
+  dword routeHandle = 0x0001;
+  if(gAppPhase != kAppOn)
+    return;
+
+  // assemble report message
+  msgResult.InstanceId = mostApGetInstID();
+  mostPrepareReport(gMsgCalculateRoute, msgResult);
+  mostParamSet(msgResult, "RouteHandle", routeHandle);
+
+  // send the result now
+  output(msgResult);
+
+  // an other route handle next time
+  routeHandle++;
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndTxPktFinished(dword,long):*///callback
+MH_IndTxPktFinished(dword handle, long packetSize)
+{
+  write("MOST HP: %NODE_NAME%: Transmission of file completed (%d bytes)", packetSize);
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndTxConnectionClosed(dword,long):*///callback
+MH_IndTxConnectionClosed(dword handle, long res)
+{
+  MH_ReportErrorsToWrite(res);
+}
+/*@@end*/
+
+/*@@caplFunc:MH_ReportErrorsToWrite(long):*///function
+MH_ReportErrorsToWrite(long res)
+{
+  switch (res)
+  {
+    case 0:  /* writeDbgLevel(0, "MOST HP: %NODE_NAME%: Result (%d): OK", res); */ break;
+    case 1:  writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Number of Send retries exceeded", res);          break;
+    case 2:  writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Number of Trans retries exceeded", res);         break;
+    case 3:  writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Number of End retries exceeded", res);           break;
+    case 4:  writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Number of Ready retries exceeded", res);         break;
+    case 5:  writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Number of Frame Retries exceeded", res);         break;
+    case 6:  writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Number of Receive retries execeeded", res);      break;
+    case 10: writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Receive buffer could not be provided", res);     break;
+    case 11: writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Connection rejected via higher priority", res);  break;
+    case 13: writeDbgLevel(0, "MOST HP: %NODE_NAME%: Result (%d): Transmission terminated by receiver", res);     break;
+    case 14: /* writeDbgLevel(0, "MOST HP: %NODE_NAME%: Result (%d): Transmission terminated by sender", res); */   break;
+    case 15: writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Transmission killed by sender", res);            break;
+    case 16: writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Parameter out of range", res);                   break;
+    default: writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Unknown error", res);                            break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:MH_StartFileTransmission(long,long,long,long,long,char[]):*///function
+MH_StartFileTransmission(long destAdr, long funcBlockId, long instId, long funcId, long opTypeId, char filenameAbsolute[])
+{
+  // Initiates a file transmission using the MOST High Protocol.
+  // The filename has to be an absolute file path.
+
+  // set transport mode
+  MH_SetTxTranspMode(gTxPort, gMH_TxTranspMode);
+  MH_SetTxFrameSize(gTxPort, gMH_FrameSize);
+
+  // transfer file
+  MH_ReqTrans(gTxPort, destAdr, funcBlockId, instId, funcId, opTypeId, filenameAbsolute);
+}
+/*@@end*/
+

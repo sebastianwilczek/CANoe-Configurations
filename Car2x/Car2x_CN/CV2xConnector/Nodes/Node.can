@@ -1,0 +1,98 @@
+/*@!Encoding:1252*/
+
+includes
+{
+  // Library for UDP Communication, contains API Functions for convenient use
+  #include "UdpCommunicationLib.cin"
+  
+  #include "..\DataSources_Templates\ASNV_Template_BaseDatatypes.cin"
+  #include "..\DataSources_Templates\ASNV_Template_BasicSafetyMessage.cin"
+  #include "..\DataSources_Templates\ASNV_Template_MapData.cin"
+  #include "..\DataSources_Templates\ASNV_Template_RoadSideInformation.cin"
+  #include "..\DataSources_Templates\ASNV_Template_RoadsideSafetyMessage.cin"
+  #include "..\DataSources_Templates\ASNV_Template_RoadTrafficSigns.cin"
+  #include "..\DataSources_Templates\ASNV_Template_SPAT.cin"
+}
+
+variables
+{
+  // Section for global variables
+}
+
+on preStart
+{
+  // Enable C-V2X on ATH1
+  C2xEnableCV2xMode(1);
+}
+
+on start
+{
+  // Register PreTx Callback
+  C2xRegisterCallback(kPreTxIndication, "OnPreTxBSM", "BasicSafetyMessage");
+  
+  // The values from the Panel "UDP Connection Settings" are used to open an UDP Communication
+  API_OpenUDPCommunication();
+}
+
+on preStop
+{
+  // Close the UDP Communication
+  API_CloseUDPCommunication();
+}
+
+// Callback function before sending BSM message
+long OnPreTxBSM(long packet)
+{
+  // If you want to set Application Message Data, this can be done best in this function
+  SetApplicationMessageData(packet);
+  
+  // If you want to set Meta Data, this can be done best in this function
+  SetMetaData(tx_metaData);
+  
+  API_TxFrameViaUdp(packet, tx_metaData);
+
+  // 0 = Do not send | 1 = Send
+  return 0; 
+}
+
+// Function called on Rx of C-V2x Frame via UDP
+void OnRxViaUdp(long packet, byte metaData[])
+{
+  /*** Example Code for getting values from the packet ***/
+  
+  struct BasicSafetyMessage cbsm;
+    
+  API_GetBasicSafetyMessageParams(packet, cbsm);
+  
+  write("Rx | Id: [%s]", cbsm.bsmFrame.id.string);
+  write("Rx | Latitude: %2.6f", cbsm.bsmFrame.pos.lat / 10000000.0);
+  write("Rx | Longitude: %2.6f", cbsm.bsmFrame.pos.lon / 10000000.0);
+  write("Rx | Heading: %2.6f", cbsm.bsmFrame.heading * 0.0125);
+}
+
+// Function for setting V2x data
+void SetApplicationMessageData(long packet)
+{
+  /*** Example Code for setting values to the packet ***/
+  
+  struct BasicSafetyMessage cbsm;
+  
+  // Set the id to 1111111
+  cbsm.bsmFrame.id.stringLength = 8;
+  memcpy(cbsm.bsmFrame.id.string, "11111111", cbsm.bsmFrame.id.stringLength);
+
+  // Set the Position to the Vector Campus 
+  cbsm.bsmFrame.pos.lat = 488253070;
+  cbsm.bsmFrame.pos.lon = 90968560;
+  cbsm.bsmFrame.heading = 90 / 0.0125;
+
+  API_SetBasicSafetyMessageParams(packet, cbsm);
+}
+
+// Function for setting Meta Data
+void SetMetaData(byte metaData[])
+{
+  /*** Example Code for setting the first Meta Data Byte to the value '5' ***/
+  
+  // metaData[0] = 5;
+}

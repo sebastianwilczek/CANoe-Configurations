@@ -1,0 +1,428 @@
+/*@!Encoding:1252*/
+
+variables
+{
+  const dword  kVCC_GridWidth       = 304;     // [columns]
+  const dword  kVCC_GridHeight      = 233;     // [rows]
+  const double kVCC_GridWidthMeter  = 2260.0; // [m]
+  const double kVCC_GridHeightMeter = 3600.0; // [m]
+
+  const dword  kVCC_MaxPointCount   = 100;
+  const dword  kVCC_MaxSymbolCount  = 10;
+  
+  struct VCC_Point {
+    dword gridRow;
+    dword gridCol;
+    byte  symbol;
+  };
+
+  struct VCC_Object {
+    double x;
+    double y;
+    double distance;
+    byte   symbol;
+    dword id;
+  };
+}
+
+/// <Objects>
+dword VCC_ScanGrid( char grid[][], char symbol[], struct VCC_Point points[] )
+{
+  dword row;
+  dword col;
+  dword i;
+  dword pointCount;
+  dword symbolCount;
+
+  symbolCount = strlen(symbol);
+  pointCount  = 0;
+  
+  for( row = 0; row < kVCC_GridHeight; row++ )
+  {
+    for( col = 0; col < kVCC_GridWidth; col++ )
+    {
+      char currentSymbol;
+      currentSymbol = grid[row][col];
+      
+      for( i = 0; i < symbolCount; i++ )
+      {
+        if (currentSymbol == symbol[i])
+        {
+          points[pointCount].gridRow = row;
+          points[pointCount].gridCol = col;
+          points[pointCount].symbol  = i;
+          pointCount += 1;
+        }
+      }
+    }
+  }
+  
+  return pointCount;
+}
+
+/// <Objects>
+dword VCC_ScanGridAndSortByDistance( char grid[][], char symbol[], struct VCC_Point points[] )
+{
+  dword count;
+  dword i;
+  
+  count = VCC_ScanGrid( grid, symbol, points );
+  
+  // find starting point
+  for( i = 0; i < count; i++ )
+  {
+    if (points[i].symbol == 0)
+    {
+      VCC_SwapPoints( points, 0, i );
+      break;
+    }
+  }
+  
+  for( i = 0; i < count; i++ )
+  {
+    dword nearestPointIndex;
+    double shortestDistance;
+    dword j;
+    
+    nearestPointIndex = i + 1;
+    shortestDistance  = kVCC_GridWidthMeter;
+    
+    for( j = nearestPointIndex; j < count; j++ )
+    {
+      double dist;
+      
+      dist = VCC_Distance( points[i].gridCol, points[i].gridRow, points[j].gridCol, points[j].gridRow );
+
+      //write( "  %d  %d/%d  %f  to %d/%d", j, points[j].gridCol, points[j].gridRow, dist, points[i].gridCol, points[i].gridRow );
+      
+      if (dist < shortestDistance)
+      {
+        shortestDistance  = dist;
+        nearestPointIndex = j;
+      }
+    }
+    
+    //write( "Swap %d<->%d  %d/%d  %f", i+1, nearestPointIndex, points[nearestPointIndex].gridCol, points[nearestPointIndex].gridRow, shortestDistance );
+    VCC_SwapPoints( points, i+1, nearestPointIndex );
+  }
+  
+  return count;
+}
+
+/// <Objects>
+void VCC_Dump( struct VCC_Point points[], dword count )
+{
+  dword i;
+
+  for( i = 0; i < count; i++ )
+  {
+    write( "<%BASE_FILE_NAME%> [%d] %d/%d %d", i, points[i].gridCol, points[i].gridRow, points[i].symbol );
+  }
+
+  write( "<%BASE_FILE_NAME%> %d points found", i );
+}
+
+/// <Objects>
+void VCC_Points2Waypoints( struct VCC_Point points[], dword count )
+{
+  dword i;
+  double x, y, xnext, ynext, heading;
+  
+  for( i = 0; i < count; i++ )
+  {
+    char name[30];
+    snprintf( name, elcount(name), "Waypoints.Points[%d].x", i );
+    sysSetVariableMemberPhys( "ConceptCar::Environment", name, VCC_Grid2RelX(points[i].gridCol) );
+    snprintf( name, elcount(name), "Waypoints.Points[%d].y", i );
+    sysSetVariableMemberPhys( "ConceptCar::Environment", name, VCC_Grid2RelY(points[i].gridRow) );
+  }
+  @sysvarMember::ConceptCar::Environment::Waypoints.PointsCount = count;
+
+  x       = VCC_Grid2RelX( points[0].gridCol );
+  y       = VCC_Grid2RelY( points[0].gridRow );
+  xnext   = VCC_Grid2RelX( points[1].gridCol );
+  ynext   = VCC_Grid2RelY( points[1].gridRow );
+  heading = VCC_Heading( x, y, xnext, ynext );
+  
+  sysBeginVariableStructUpdate( sysvar::ConceptCar::Vehicle::WaypointState);
+  @sysvarMember::ConceptCar::Vehicle::WaypointState.CurrentIndex           = 1;
+  @sysvarMember::ConceptCar::Vehicle::WaypointState.CurrentX               = xnext;
+  @sysvarMember::ConceptCar::Vehicle::WaypointState.CurrentY               = ynext;
+  @sysvarMember::ConceptCar::Vehicle::WaypointState.CurrentDistance        = 0;
+  @sysvarMember::ConceptCar::Vehicle::WaypointState.DistanceToCurrentPoint = VCC_Distance( x, y, xnext, ynext );
+  @sysvarMember::ConceptCar::Vehicle::WaypointState.HeadingToCurrentPoint  = heading;
+  sysEndVariableStructUpdate( sysvar::ConceptCar::Vehicle::WaypointState);
+  
+  sysBeginVariableStructUpdate( sysvar::ConceptCar::Vehicle::Position);
+  @sysvarMember::ConceptCar::Vehicle::Position.RelativeX = x;
+  @sysvarMember::ConceptCar::Vehicle::Position.RelativeY = y;
+  @sysvarMember::ConceptCar::Vehicle::Position.Heading   = heading;
+  sysEndVariableStructUpdate( sysvar::ConceptCar::Vehicle::Position);
+}
+
+/// <Objects>
+void VCC_Points2Environment( struct VCC_Point points[], dword count )
+{
+  dword i;
+  double x, y, xnext, ynext, heading;
+  
+  for( i = 0; i < count; i++ )
+  {
+    char name[30];
+    snprintf( name, elcount(name), "TrafficSigns.Objects[%d].x", i );
+    sysSetVariableMemberPhys( "ConceptCar::Environment", name, VCC_Grid2RelX(points[i].gridCol) );
+    snprintf( name, elcount(name), "TrafficSigns.Objects[%d].y", i );
+    sysSetVariableMemberPhys( "ConceptCar::Environment", name, VCC_Grid2RelY(points[i].gridRow) );
+    snprintf( name, elcount(name), "TrafficSigns.Objects[%d].type", i );
+    sysSetVariableMemberPhys( "ConceptCar::Environment", name, points[i].symbol );
+  }
+  @sysvarMember::ConceptCar::Environment::TrafficSigns.ObjectsCount = count;
+}
+
+/// <Objects>
+void VCC_NextWaypoint( double x, double y )
+{
+  double xnext, ynext;
+  dword nextIndex;
+  char name[30];
+
+  nextIndex = @sysvarMember::ConceptCar::Vehicle::WaypointState.CurrentIndex + 1;
+  
+  if (nextIndex >= @sysvarMember::ConceptCar::Environment::Waypoints.PointsCount)
+  {
+    // last waypoint reached. Use first waypoint as next waypoint.
+    nextIndex = 0;
+  }
+
+  snprintf( name, elcount(name), "Waypoints.Points[%d].x", nextIndex );
+  sysGetVariableMemberPhys( "ConceptCar::Environment", name, xnext );
+  snprintf( name, elcount(name), "Waypoints.Points[%d].y", nextIndex );
+  sysGetVariableMemberPhys( "ConceptCar::Environment", name, ynext );
+  
+  sysBeginVariableStructUpdate( sysvar::ConceptCar::Vehicle::WaypointState);
+  @sysvarMember::ConceptCar::Vehicle::WaypointState.CurrentIndex           = nextIndex;
+  @sysvarMember::ConceptCar::Vehicle::WaypointState.CurrentX               = xnext;
+  @sysvarMember::ConceptCar::Vehicle::WaypointState.CurrentY               = ynext;
+  @sysvarMember::ConceptCar::Vehicle::WaypointState.DistanceToCurrentPoint = VCC_Distance( x, y, xnext, ynext );
+  @sysvarMember::ConceptCar::Vehicle::WaypointState.HeadingToCurrentPoint  = VCC_Heading( x, y, xnext, ynext );
+  
+  if (nextIndex == 0)
+  {
+    // reset current distanc, if track begins
+    @sysvarMember::ConceptCar::Vehicle::WaypointState.CurrentDistance = 0.0;
+  }
+  sysEndVariableStructUpdate( sysvar::ConceptCar::Vehicle::WaypointState);
+}
+
+/// <Objects>
+dword VCC_FindNearestObjects( double x, double y, double heading, double viewAngleLeft, double viewAngleRight, double withinDistance, struct VCC_Object foundObjects[], dword foundObjectSize )
+{
+  dword  objCount;
+  dword  i;
+  double nearestDistance;
+  dword  foundObjectsCount;
+
+  foundObjectsCount = 0;
+  objCount          = @sysvarMember::ConceptCar::Environment::TrafficSigns.ObjectsCount;
+  nearestDistance   = 1e300;
+
+  for( i = 0; i < objCount; i++ )
+  {
+    char   name[30];
+    double objectDistance;
+    double objX;
+    double objY;
+    double objSymbol;
+    double objHeading;
+    double objHeadingDelta;
+    double objFlag;
+    
+    snprintf( name, elcount(name), "TrafficSigns.Objects[%d].x", i );
+    sysGetVariableMemberPhys( "ConceptCar::Environment", name, objX );
+    snprintf( name, elcount(name), "TrafficSigns.Objects[%d].y", i );
+    sysGetVariableMemberPhys( "ConceptCar::Environment", name, objY );
+    snprintf( name, elcount(name), "TrafficSigns.Objects[%d].type", i );
+    sysGetVariableMemberPhys( "ConceptCar::Environment", name, objSymbol );
+    snprintf( name, elcount(name), "TrafficSigns.Objects[%d].flag", i );
+    sysGetVariableMemberPhys( "ConceptCar::Environment", name, objFlag );
+    
+    objectDistance  = VCC_Distance( x, y, objX, objY );
+    objHeading      = VCC_Heading( x, y, objX, objY );
+    objHeadingDelta = VCC_HeadingDelta( heading, objHeading );
+   
+    if ((objectDistance < withinDistance) && (objHeadingDelta > viewAngleLeft) && (objHeadingDelta < viewAngleRight))
+    {
+      if (foundObjectsCount < foundObjectSize)
+      {
+        // there is a free entry if foundObjects array, so use it
+        foundObjects[foundObjectsCount].id       = i;
+        foundObjects[foundObjectsCount].x        = objX;
+        foundObjects[foundObjectsCount].y        = objY;
+        foundObjects[foundObjectsCount].symbol   = objSymbol;
+        foundObjects[foundObjectsCount].distance = objectDistance;
+        foundObjectsCount   += 1;
+      }
+      else
+      {
+        dword l;
+        double farthestDistance;
+        dword  farthestIndex;
+        
+        // there is no free entry in foundObjects, so we search for an entry
+        // which with larger distance and relace it
+        
+        farthestIndex    = foundObjectSize + 1;
+        farthestDistance = 0;
+        for( l = 0; l < foundObjectsCount; l++ )
+        {
+          if ((foundObjects[l].distance > farthestDistance) && (foundObjects[l].distance > objectDistance))
+          {
+            farthestIndex    = l;
+            farthestDistance = objectDistance;
+          }
+        }
+        
+        if (farthestIndex < foundObjectsCount)
+        {
+          // we found an object, with larger distance thann current object
+          foundObjects[farthestIndex].id       = i;
+          foundObjects[farthestIndex].x        = objX;
+          foundObjects[farthestIndex].y        = objY;
+          foundObjects[farthestIndex].symbol   = objSymbol;
+          foundObjects[farthestIndex].distance = objectDistance;
+        }
+      }
+    }
+  }
+  
+  return foundObjectsCount;
+}
+
+/// <Geometric>
+double VCC_Distance( double x1, double y1, double x2, double y2 )
+{
+  double dx;
+  double dy;
+  
+  dx = abs(x1 - x2);
+  dy = abs(y1 - y2);
+  
+  return sqrt( dx*dx + dy*dy );
+}
+
+/// <Geometric>
+double VCC_Heading( double x1, double y1, double x2, double y2 )
+{
+  double dx;
+  double dy;
+  
+  dx = x2 - x1;
+  dy = y2 - y1;
+  
+  if (dx == 0.0)
+  {
+    if (dy >= 0)
+    {
+      return 180.0;
+    }
+    else
+    {
+      return 0.0;
+    }
+  }
+  else if (dy == 0.0)
+  {
+    if (dx >= 0)
+    {
+      return 90.0;
+    }
+    else
+    {
+      return 270.0;
+    }
+  }
+  else if (dx > 0)
+  {
+    return VCC_HeadingRange( (arctan( dy / dx ) / (2 * pi)) * 360.0 + 90.0 );
+  }
+  else
+  {
+    return VCC_HeadingRange( (arctan( dy / dx ) / (2 * pi)) * 360.0 + 270.0 );
+  }
+}
+
+/// <Geometric>
+double VCC_HeadingRange( double heading )
+{
+  if (heading > 360.0)
+  {
+    heading -= 360.0;
+  }
+  else if (heading < 0.0)
+  {
+    heading += 360.0;
+  }
+  
+  return heading;
+}
+
+/// <Geometric>
+double VCC_HeadingDelta( double heading1, double heading2 )
+{
+  double delta;
+  
+  delta = heading2 - heading1;
+  
+  if (delta > 180)
+  {
+    delta = delta - 360;
+  }
+  else if (delta < -180)
+  {
+    delta = 360 + delta;
+  }
+  
+  return delta;
+}
+
+/// <Utility>
+void VCC_SwapPoints( struct VCC_Point points[], dword index1, dword index2 )
+{
+  struct VCC_Point p;
+  
+  if (index1 != index2)
+  {
+    memcpy( p, points[index1] );
+    memcpy( points[index1], points[index2] );
+    memcpy( points[index2], p );
+  }
+}
+
+/// <Utility>
+double VCC_UtilRange( double value, double min, double max )
+{
+  if (value < min)
+  {
+    return min;
+  }
+  else if (value > max)
+  {
+    return max;
+  }
+  else
+  {
+    return value;
+  }
+}
+
+/// <Utility>
+double VCC_Grid2RelX( dword x )
+{
+  return ((x * kVCC_GridWidthMeter) / kVCC_GridWidth) + (kVCC_GridWidthMeter / (kVCC_GridWidth * 2));
+}
+
+/// <Utility>
+double VCC_Grid2RelY( dword y )
+{
+  return ((y * kVCC_GridHeightMeter) / kVCC_GridHeight) + (kVCC_GridHeightMeter / (kVCC_GridHeight * 2));
+}

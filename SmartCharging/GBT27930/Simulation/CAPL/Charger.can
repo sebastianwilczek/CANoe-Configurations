@@ -1,0 +1,152 @@
+/*@!Encoding:1252*/
+includes
+{
+  
+}
+
+variables
+{
+  enum DelayTransition
+  {
+    chm_to_crmNotRecognized = 0,
+    crmNotRecognized_to_crmRecognized,
+    crmRecognized_to_cml,
+    cml_to_croNotReady,
+    croNotReady_to_croReady,
+    croReady_to_ccs,
+    ccs_to_cst,
+    cst_to_csd,
+    csd_to_end
+  };
+  
+  dword msStartOfChargingMS = 0;
+  msTimer tmrUpdateStatus;
+  double outputEnergy;
+}
+
+
+on start 
+{
+  GBT27930IL_InitAsCharger();
+
+  setControlForeColor("Charger", "btnStoreSettings", MakeRGB(0, 128, 0));
+  $CSD::ChargerNo = $CRM::ChargerNumber;
+}
+
+on sysvar GBT27930::Charger::svStart
+{
+  if(@this == 1)
+  {  
+    SetDelayTransition();
+    GBT27930IL_StartChargingSimulation();
+    msStartOfChargingMS = 0;
+    outputEnergy = $CSD::OutputEnergy.phys;
+  }
+  else
+  {
+    GBT27930IL_StopChargingSimualtion();
+  }
+}
+
+on sysvar GBT27930::Charger::svSuspendCharging
+{
+  if(@this == 1)
+    GBT27930IL_SuspendCharging();
+}
+
+on sysvar GBT27930::Charger::svStopChargingWithError
+{
+  if(@this == 1)
+    GBT27930IL_SetCommunicationState(50); //Send Charger Error Message
+  else
+    GBT27930IL_SetCommunicationState(17); //End of Charging
+}
+
+on sysvar GBT27930::Charger::svStoreSettings
+{
+  if(@this == 1)    
+    startValuesUpdateList("Charger Settings");
+}
+
+on preStop
+{
+  setControlForeColor("Charger", "btnStoreSettings", MakeRGB(128, 128, 128));
+}
+
+
+on sysvar_update GBT27930::Charger::svChargerLocation
+{
+  char buf[4];
+  dword textAsDWord;
+
+  sysGetVariableString(this, buf, elcount(buf));
+  textAsDWord = (buf[0] << 0) + (buf[1] << 8) + (buf[2] << 16);
+  $CRM::ChargerLocation = textAsDWord;
+}
+
+void SetDelayTransition()
+{
+  GBT27930IL_SetDelayForStateTransition(chm_to_crmNotRecognized,           @GBT27930::Charger::DelayTransition::svCRM_NotRecognized);
+  GBT27930IL_SetDelayForStateTransition(crmNotRecognized_to_crmRecognized, @GBT27930::Charger::DelayTransition::svCRM_Recognized);
+  GBT27930IL_SetDelayForStateTransition(crmRecognized_to_cml,              @GBT27930::Charger::DelayTransition::svCML);
+  GBT27930IL_SetDelayForStateTransition(cml_to_croNotReady,                @GBT27930::Charger::DelayTransition::svCRO_NotReady);
+  GBT27930IL_SetDelayForStateTransition(croNotReady_to_croReady,           @GBT27930::Charger::DelayTransition::svCRO_Ready);
+  GBT27930IL_SetDelayForStateTransition(croReady_to_ccs,                   @GBT27930::Charger::DelayTransition::svCCS);
+  GBT27930IL_SetDelayForStateTransition(ccs_to_cst,                        @GBT27930::Charger::DelayTransition::svCST);
+  GBT27930IL_SetDelayForStateTransition(cst_to_csd,                        @GBT27930::Charger::DelayTransition::svCSD);
+  GBT27930IL_SetDelayForStateTransition(csd_to_end,                        @GBT27930::Charger::DelayTransition::svEnd);
+}
+
+///////////////////////////
+on timer tmrUpdateStatus
+{
+  double additionalEnergy;
+  SetCCS();
+  
+  $CSD::CumulativeChargingTime = $CCS::CumulativeChargingTime;
+  
+  additionalEnergy = abs($CCS::CurrentOutputValue.phys * $CCS::VoltageOutputValue.phys)/3600000.0;
+  outputEnergy = outputEnergy + additionalEnergy;
+  @GBT27930::Charger::svCalculatedOutputEnergy = @GBT27930::Charger::svCalculatedOutputEnergy + additionalEnergy;
+  $CSD::OutputEnergy.phys = outputEnergy;
+  
+  if(GBT27930IL_GetCommunicationState() == 12) //sending of CCS
+    setTimer(tmrUpdateStatus, 1000);
+}
+
+void GBT27930IL_OnTxMessage(pg * txPG)
+{
+  if(txPG.PGN == CRM.PGN)
+  {
+    $CCS::CumulativeChargingTime = 0;
+  }
+  else if(txPG.pgn == CCS.PGN && msStartOfChargingMS == 0)
+  {
+    msStartOfChargingMS = timeNow() / 100;
+    SetCCS();
+    setTimer(tmrUpdateStatus, 1000);
+  }
+}
+
+void SetCCS()
+{
+  double delta ;
+  
+  $CCS::CumulativeChargingTime = (timeNow() / 100 - msStartOfChargingMS) / 60000;
+
+  delta = getSignal(BCL::VoltageDemand) * (random(100)/ 10000.0 - 0.01);
+  $CCS::VoltageOutputValue.phys = (($CCS::VoltageOutputValue.phys + getSignal(BCL::VoltageDemand)) / 2)* (0.995 + random(100)/ 10000.0);
+  
+  delta = getSignal(BCL::CurrentDemand) * (random(100)/ 10000.0 - 0.01);
+  $CCS::CurrentOutputValue.phys = (($CCS::CurrentOutputValue.phys + getSignal(BCL::CurrentDemand)) / 2)* (0.995 + random(100)/ 10000.0);
+}
+
+long GBT27930IL_OnRxMessage(pg * rxPG)
+{
+  if(rxPG.PGN == 0x1E00)//BMS Error message, CEM
+  {
+    GBT27930IL_SetCommunicationState(17); //End of charging
+  }
+  return 1;
+}
+

@@ -1,0 +1,259 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  // Simulation of FBlock VectorTelephone
+
+  // Line states
+  const byte kLineState_LineFree      = 0;
+  const byte kLineState_NoLine        = 1;
+  const byte kLineState_Connected     = 2;
+  const byte kLineState_Connecting    = 3;
+  const byte kLineState_Disconnecting = 4;
+  
+  const int kTextSize = 20;
+
+  // actual processed number
+  char gNumberStr[kTextSize];
+
+  word kFunctionID_Telephone_LineState = 0xC12;
+
+  // internal timers
+  msTimer tConnect;
+
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // React on node messages from connected channel only; ignore spy messages
+  mostApplicationNode();
+
+  // enable FBlock for Notification Service
+  mostAsNtfEnable();
+
+  // Enable function service
+  // The function service implements FktIds.Get/Status and
+  // provides automatic error reply on commands to non-registred
+  // functions of this FBlock.
+  mostAsFsEnable();
+
+  // Enable all functions and all operations defined in the function catalog
+  // for this FBlock. Additionally, functions of type 'property' will be registered
+  // at the Notification Service if a corresponding CAPL function for sending 
+  // the status message is defined.
+  mostAsFsFunctionEnable(kFctAllInFCat, kOpTFAllInFCat, "SendStatus_");
+}
+/*@@end*/
+
+/*@@sysvarChange:Telephone::Register:*/
+on sysvar Telephone::Register
+{
+  if(@this != 1)
+    return;
+ 
+  MostApRegister();
+}
+/*@@end*/
+
+/*@@sysvarChange:Telephone::Unregister:*/
+on sysvar Telephone::Unregister
+{
+  if(@this != 1)
+    return;
+ 
+  MostApUnregister();
+
+  Reset();
+}
+/*@@end*/
+
+/*@@mostAmsMsg:VectorTelephone.DialNumber.Start (0xC5C100):*/
+on mostAMSMessage VectorTelephone.DialNumber.Start
+{
+  if(!CheckValidReception(this))
+    return;
+
+  if(@sysvar::Telephone::LineState != kLineState_LineFree)
+  {
+    // send "busy" error
+    mostSendError_Code(this, kErrBusy);
+    return;
+  }
+
+  // extract number to dial
+  mostParamGetString(this, "NumberStr", gNumberStr, kTextSize);
+
+  // simulate dial-up
+  SetLineState(kLineState_Connecting);
+}
+/*@@end*/
+
+/*@@caplFunc:SetLineState(byte):*/
+SetLineState(byte newstate)
+{
+  mostAMSMessage VectorTelephone.LineState.Status msg;
+
+  switch(newstate)
+  {
+    case kLineState_Connecting:
+    {
+      if(@sysvar::Telephone::LineState == kLineState_LineFree)
+      {
+        // simulate the dial-up
+        setTimer(tConnect, 2000);
+      }
+      break;
+    }
+    case kLineState_Disconnecting:
+    {
+      if(@sysvar::Telephone::LineState == kLineState_Connected)
+      {
+        // simulate the hang-up
+        setTimer(tConnect, 500);
+      }
+      break;
+    }
+  }
+
+  @sysvar::Telephone::LineState = newstate;
+}
+/*@@end*/
+
+/*@@timer:tConnect:*/
+on timer tConnect
+{
+  switch(@sysvar::Telephone::LineState)
+  {
+    case kLineState_Connecting:
+      SetLineState(kLineState_Connected);
+      break;
+    case kLineState_Disconnecting:
+      SetLineState(kLineState_LineFree);
+      break;
+   }
+}
+/*@@end*/
+
+/*@@mostAmsMsg:VectorTelephone.HangupCall.Start (0xC5C110):*/
+on mostAMSMessage VectorTelephone.HangupCall.Start
+{
+  if(!CheckValidReception(this))
+    return;
+
+  if(@sysvar::Telephone::LineState != kLineState_Connected)
+  {
+    // send "busy" error
+    mostSendError_Code(this, kErrBusy);
+    return;
+  }
+
+  // simulate hang-up
+  SetLineState(kLineState_Disconnecting);
+}
+/*@@end*/
+
+/*@@caplFunc:Reset():*/
+Reset ()
+{
+  @sysvar::Telephone::LineState = kLineState_LineFree;
+  strncpy(gNumberStr,"", kTextSize);
+  cancelTimer(tConnect);
+}
+/*@@end*/
+
+/*@@mostApInstID:OnMostApInstID():*/
+OnMostApInstID()
+{
+  @sysvar::Telephone::InstID = MostApGetInstID();
+}
+/*@@end*/
+
+/*@@mostAsRegistry:OnMostAsRegistry(long):*/
+OnMostAsRegistry(long rgtype)
+{
+  long size,i;
+  long rxtxlog, fblockid, instid;
+
+  // local registry changed
+  if(rgtype == kLocalFBlockList)
+  {
+    @sysvar::Telephone::IsRegistered = MostApIsRegistered();
+  }
+}
+/*@@end*/
+
+/*@@mostNetState:OnMostNetState(long,long):*/
+OnMostNetState(long oldstate, long newstate)
+{
+  if(newstate == kNetStateConfigNotOk)
+  {
+    // clear shadowed properties
+    Reset();
+  }
+}
+/*@@end*/
+
+/*@@mostNodeAdr:OnMostNodeAdr(long):*/
+OnMostNodeAdr(long nodeadr)
+{
+  @sysvar::Telephone::NodeAdr = nodeadr;
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_LineState(long):*///function
+long SendStatus_LineState(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service
+  //     (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  
+  mostAMSMessage VectorTelephone.LineState.Status msg;
+  msg.InstanceID = MostApGetInstID();
+
+  // assemble status message
+  msg.State = @sysvar::Telephone::LineState;
+
+  // send message via Notification Service
+  MostAsNtfOutput(destAdr, msg);
+  return 0;
+}
+/*@@end*/
+
+/*@@sysvarChange:Telephone::LineState:*/
+on sysvar Telephone::LineState
+{
+  if( (@this >= kLineState_LineFree) &&
+      (@this <= kLineState_Disconnecting) )
+  {
+    SendStatus_LineState(kAsNtfDestAdr);
+  }
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  @sysvar::Telephone::FBlockID = mostApGetFBlockID();
+  @sysvar::Telephone::InstID = mostApGetInstID();
+  @sysvar::Telephone::IsRegistered = (1 == mostApIsRegistered());
+}
+/*@@end*/
+

@@ -1,0 +1,417 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "J1939.can" 
+  #include "J1939DTC.can"
+}
+
+/*
+ * EBS - Electronic Brake System                   Version 1.3
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Jr) Created 
+ * 1.1 (Jr) Use J1939 Interaction Layer now
+ * 1.2 (Jr) Send DM1 always
+ * 1.3 (Wfk) TSC1_EBS_EMS is sent cyclically at least with 1000ms
+ *           and uses ControlPurpose = Temporary Powertrain Control (P32) always 
+ *           TSC1::EngRqedTorque_TorqueLimit derived from EnvEBS_BrakePedalPos
+ *           TSC1::EngRqedSpeedCtrlConditions is not used for torque control
+ *           TSC1 signal names shortened
+ *           J1939ILControlStop(1) suppresses 'Cannot Claim Address'
+ */
+variables
+{
+  // ECU information
+  char gNodeName[32]     = "TECU";   // Name of the node, is used for output to write window
+  char gECUID[40]        = "V-EBS06-04*PON0610051*POWERTRAIN*EBS*";
+  char gSOFT[32]         = "\003V1.0*REV-A-CAPL*2006-10-05*";
+  char gVI[32]           = "VECTOR2006-10-05X*";
+
+  // simulation variables
+  int         gBrakeActive   = 0;    // brake is active flag
+
+  // system timer
+  const int   kSystemTime    = 100;                  // System time in [ms]
+  const float kSystemTimeSec = kSystemTime / 1000.0; // System time in [sec]
+  msTimer     SystemTimer;                           // System timer
+}
+
+on start
+{
+  if ((@sysvar::Powertrain::EBS::ILEnable == 1) && (getValue(EnvIgnitionSwitch) >= 1)) {
+    EBSStartUp();
+  }
+}
+
+/*
+ * This system timer calulates the simulated values.
+ */
+on timer SystemTimer
+{
+  int oldActive = 0;
+
+  oldActive    = gBrakeActive;
+  gBrakeActive = (getValue( EnvEBS_BrakePedalPos ) > 1.0) ? 1 : 0;
+
+  if (oldActive != gBrakeActive) {
+    sendTSC1( gBrakeActive );
+  }
+
+  // update TX signals
+  
+  if (gBrakeActive) {
+    setSignal( TSC1_EBS_EMS::EngRqed_TorqueLimit , (-8.0 * getValue(EnvEBS_BrakePedalPos)) );
+  }
+
+  setSignal( EBC1_EBS::BrakePedalPos      , getValue( EnvEBS_BrakePedalPos ) * 10 );
+  setSignal( EBC1_EBS::ABSFullyOperational, 1 );
+  setSignal( EBC2_EBS::FrontAxleSpeed     , getValue( EnvVehicleSpeed ) );
+
+  setTimer( SystemTimer, kSystemTime );
+}
+
+/*
+ * Shut down EBS
+ *
+ * Send cannot claim address and stop sending messages
+ */
+void EBSShutDown()
+{
+  J1939ILControlStop(1);
+
+  cancelTimer( SystemTimer );
+
+  @sysvar::Powertrain::EBS::ILEnable = 0;
+
+}
+
+/*
+ * Start up EBS
+ *
+ * Begin address claiming. After successfully claiming
+ * an address, start sending cyclic messages.
+ */
+void EBSStartUp()
+{
+  @sysvar::Powertrain::EBS::ILEnable = 1;
+
+  if(J1939ILGetState() != 2)//don'tstart if already 'Active'
+    J1939ILControlStart();
+	
+  J1939ILSetMsgRawData( ECUID , strlen(gECUID), gECUID );
+  J1939ILSetMsgRawData( SOFT  , strlen(gSOFT) , gSOFT );
+
+  // Send DM1
+  dtcActivate( 1 );
+  J1939ILSetMsgCycleTime( DM1, 1200 ); // too slow -> dtc monitor shows gray text
+
+  // Send TSC1_EBS_EMS
+  sendTSC1( gBrakeActive );
+
+  UpdateControls();
+
+  cancelTimer( SystemTimer );
+  setTimer( SystemTimer, kSystemTime );
+}
+
+on preStart
+{
+  J1939ILControlInit();  
+}
+
+/*
+ * Handle error frame
+ */
+on errorFrame
+{
+  
+}
+
+/*
+ * Handle End key
+ */
+on key End
+{
+  float value;
+  
+  value = getValue( EnvEBS_BrakePedalPos );
+  if (value >= 1) {
+    putValue( EnvEBS_BrakePedalPos, value - 1 );
+  }
+  else {
+    putValue( EnvEBS_BrakePedalPos, 0 );
+  }
+}
+
+/*
+ * Handle Home key
+ */
+on key Home
+{
+  float value;
+  
+  value = getValue( EnvEBS_BrakePedalPos );
+  if (value <= 9) {
+    putValue( EnvEBS_BrakePedalPos, value + 1 );
+  }
+  else {
+    putValue( EnvEBS_BrakePedalPos, 10 );
+  }
+}
+
+/*
+ * Send TSC1
+ */
+void sendTSC1( int active )
+{
+  float ratio;
+
+  switch(active) {
+    case 1:
+      setSignal( TSC1_EBS_EMS::EngOverrideCtrlMode , 2 /* Torque control */ );
+      setSignal( TSC1_EBS_EMS::OverrideCtrlModePrio, 0 /* Highest priority */ );
+      setSignal( TSC1_EBS_EMS::EngRqedSpeedCtrlCond, 0x03 );
+      setSignal( TSC1_EBS_EMS::EngRqed_TorqueLimit , (-8.0 * getValue(EnvEBS_BrakePedalPos)) );
+      J1939ILSetSignalRaw( TSC1_EBS_EMS::EngRqed_SpeedLimit, 0xffff );
+      setSignal( TSC1_EBS_EMS::TransmissionRate    , 5 ); // 50ms
+      setSignal( TSC1_EBS_EMS::ControlPurpose      , 0x1f ); // Temp PT Ctrl (P32)
+      J1939ILSetMsgCycleTime(TSC1_EBS_EMS, 50 );
+      break;
+    case 0:
+      J1939ILSetSignalRaw( TSC1_EBS_EMS::EngOverrideCtrlMode , 0 /* Override disabled */ );
+      J1939ILSetSignalRaw( TSC1_EBS_EMS::OverrideCtrlModePrio, 3 /* Low priority */ );
+      J1939ILSetSignalRaw( TSC1_EBS_EMS::EngRqedSpeedCtrlCond, 0x03 );
+      J1939ILSetSignalRaw( TSC1_EBS_EMS::EngRqed_TorqueLimit , 0xff );
+      J1939ILSetSignalRaw( TSC1_EBS_EMS::EngRqed_SpeedLimit  , 0xffff );
+      J1939ILSetSignalRaw( TSC1_EBS_EMS::TransmissionRate    , 0x0 ); // 1000ms
+      J1939ILSetSignalRaw( TSC1_EBS_EMS::ControlPurpose      , 0x1f ); // Temp PT Ctrl (P32)
+      //J1939ILSetMsgEvent(TSC1_EBS_EMS );
+      J1939ILSetMsgCycleTime(TSC1_EBS_EMS, 1000 );
+      break;
+  }
+}
+
+/*
+ * Active DTC for BrakePedalPos signal.
+ */
+on envVar EnvEBS_FaultBrakePedalPos
+{
+  if (getValue(this) == 1) {
+    dtcActivate( 521, kFMI_CauseUnknown );
+  }
+  else {
+    dtcDeactivate( 521, kFMI_CauseUnknown );
+  }
+}
+
+/*
+ * Active DTC for AppPressure signal.
+ */
+on envVar EnvEBS_FaultAppPressureError
+{
+  if (getValue(this) == 1) {
+    dtcActivate( 1091, kFMI_BelowNormalCritical );
+  }
+  else {
+    dtcDeactivate( 1091, kFMI_BelowNormalCritical );
+  }
+}
+
+on envVar EnvIgnitionSwitch
+{
+  if (getValue(this) == 1) {
+    EBSStartUp(); 
+  }
+  else if (getValue(this) == 0) {
+    EBSShutDown();
+  }
+}
+
+on sysvar sysvar::Powertrain::EBS::ILEnable
+{
+  if (@this == 1) {
+    EBSStartUp();
+  }
+  else {
+    EBSShutDown();
+  }
+}
+
+on envVar EnvEBS_SimulationMode
+{
+  UpdateControls();
+}
+
+/*
+ * IL has changed its state
+ *
+ * state - 0 = Initialized
+ *         1 = Claiming
+ *         2 = Active
+ *         3 = Stopped
+ *         4 = Suspended
+ */
+void J1939ILOnChangedState( LONG state )
+{
+  switch( state ) {
+    case 1: // Claiming
+//      write( "<%s> Claiming", gNodeName );
+      break;
+    case 2: // Active
+//      write( "<%s> Active", gNodeName );
+      break;
+    case 3: // Stopped
+//      write( "<%s> Stopped", gNodeName );
+      break;
+    case 4: // Suspended
+//      write( "<%s> Suspended", gNodeName );
+      break;
+  }
+}
+
+/*
+ * IL has sent a message
+ */
+void J1939ILOnError( LONG errorCode, LONG additionalParam )
+{
+  write( "<%s> Error %d, additional %d", gNodeName, errorCode, additionalParam );
+}
+
+/*
+ * IL has sent received a request
+ *
+ * return 0 - do not respond
+ *        1 - answer the request
+ *        2 - answer with a NACK
+ *        3 - answer with positive ACK
+ *
+ *     _pgn - requested PGN
+ *     _sa  - sender address of the request
+ */
+LONG J1939ILOnRequest( LONG _pgn, LONG _sa )
+{
+  switch(_pgn) {
+    //
+    // DM3 - Diagnostic data clear/reset of previously active DTCs.
+    //
+    case 0xfecc:
+      dtcClear( gDTCPreviousTable );
+      return 3; // send positive ACK
+    //
+    // DM11 - Diagnostic data clear/Reset for active DTCs
+    //
+    case 0xfed3:
+      dtcClear( gDTCActiveTable );
+      return 3; // send positive ACK
+  }
+
+  return 1; // send response
+}
+
+/*
+ * IL has sent a message
+ */
+void J1939ILOnTxMessage( pg * txPG )
+{
+  switch( txPG.PGN ) {
+  }
+}
+
+/*
+ * IL will send a message
+ *
+ * Use this callback to update the data of the message
+ */
+LONG J1939ILOnTxPrepare( pg CAPL_MSG txPG )
+{
+  switch( txPG.PF ) {
+    default:
+     dtcCopyToPgBuffer( txPG );
+     break;
+  }
+
+  return 1; // 1=send message, 0=suppress message
+}
+
+void UpdateControls()
+{
+  int enable;
+  long bkColor;
+
+  enable  = (getValue(EnvEBS_SimulationMode) != EnvEBS_SimulationMode::SimulateValues) ? 1 : 0;
+  bkColor = (enable == 1) ? MakeRGB(255,255,255) : MakeRGB(229,229,229);
+
+  enableControl( "EBS", "BrakePedalPosSlider" , enable );
+  enableControl( "EBS", "BrakePedalPosEdit"   , enable );
+  setControlBackColor( "EBS", "BrakePedalPosEdit"   , bkColor);
+}
+
+on pg DM7
+{
+int a, b, c, d, e, f;
+    if( this.dir == RX )
+    {
+        if( this.DA == EBS.NmStationAddress || this.DA == 0xFF )
+        {
+        
+            switch( this.TestIdentifier )
+            {
+                case 12:
+                {
+                    J1939ILSetSignal(DM8_0001::TestIdentifier, this.TestIdentifier);
+                    J1939ILSetSignal(DM8_0001::TestType, 0);
+                    J1939ILSetSignal(DM8_0001::TestValue, 0xFE00);
+                    J1939ILSetSignal(DM8_0001::TestLimitMaximum, 0xFFFF);
+                    J1939ILSetSignal(DM8_0001::TestLimitMinimum, 0xFFFF);
+
+                    J1939ILSetMsgEvent(DM8_0001);
+                    break;
+                }
+
+                case 60:
+                {
+                    J1939ILSetSignal(DM8_0001::TestIdentifier, this.TestIdentifier);
+                    J1939ILSetSignal(DM8_0001::TestType, 0);
+                    J1939ILSetSignal(DM8_0001::TestValue, 0xFB01);
+                    J1939ILSetSignal(DM8_0001::TestLimitMaximum, 0xFFFF);
+                    J1939ILSetSignal(DM8_0001::TestLimitMinimum, 0xFFFF);
+
+                    J1939ILSetMsgEvent(DM8_0001);
+                    break;
+                }
+
+                case 249:
+                {
+                    dword spn = 0;
+                                  
+                    spn = this.SPN1 | ( this.SPN1High << 16 );
+
+                    if( spn == 521 && this.FailureModeIdentifier1 == 15 )
+                    {                        
+                        J1939ILSetMsgDA( DM30_0001, this.SA);
+
+                        J1939ILSetSignal(DM30_0001::TestIdentifier, this.TestIdentifier);
+                        J1939ILSetSignal(DM30_0001::SPN1, this.SPN1);
+                        J1939ILSetSignal(DM30_0001::SPN1High, this.SPN1High);
+                        J1939ILSetSignal(DM30_0001::FailureModeIdentifier1, this.FailureModeIdentifier1);
+                        J1939ILSetSignal(DM30_0001::SlotId, 44);
+                        J1939ILSetSignal(DM30_0001::TestValue, 0x1E);
+                        J1939ILSetSignal(DM30_0001::TestLimitMaximum, 0x3C);
+                        J1939ILSetSignal(DM30_0001::TestLimitMinimum, 0x28);
+
+                        J1939ILSetMsgEvent(DM30_0001);
+                        break;
+                    }
+                }
+
+                default:
+                {
+                    break;
+                }
+            }
+        }
+    }
+}
+

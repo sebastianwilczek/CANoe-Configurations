@@ -1,0 +1,383 @@
+/*@!Encoding:1252*/
+includes
+{
+}
+
+variables
+{
+  long deviceID;
+}
+
+on preStart
+{
+   deviceID = @sysvar::CANDisturbanceInterface1::DeviceNo;
+}
+
+
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//Frame trigger with sequence
+//////////////////////////////////////////////////////////////////////////////////
+/// <FrameTriggerWithSequence>
+on sysvar sysvar::CanDisturbanceConfigurationSysVars::EnableFrameTriggerSeq1
+{
+  if(@sysvar::CanDisturbanceConfigurationSysVars::EnableFrameTriggerSeq1 == 1)
+  {
+    CanDisturbanceFrameTrigger frameTrigger;
+    CanDisturbanceSequence     sequence;
+    long                       result;
+    long                       valditiyMask;
+    message 0x100              triggerMessage;
+    long                       validityMask;
+    
+    //clear the sequence
+    sequence.Clear();
+    
+    //configure the message should be triggered
+    
+    //ID must standard ID and a CAN message must on the bus
+    validityMask = @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDBase 
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDE 
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::FDF ; 
+    
+    frameTrigger.SetMessage(triggerMessage, deviceID, validityMask);
+    //trigger position is the CRC delimiter
+    frameTrigger.TriggerFieldType =   
+            @sysvar::CanDisturbance::Enums::FieldType::CRCDel;
+    frameTrigger.TriggerFieldOffset = 0;
+    
+    //configure a sequence 320 FPGA ticks long and send a recessive bit at the Ack slot
+    //bit on the bus. 
+    result = sequence.AppendToSequence(320, 'R');
+    
+    //Configure the frame trigger and the sequence to the CANstress device
+    if(result == 1)
+    {
+      result = canDisturbanceTriggerEnable(deviceID, frameTrigger, sequence);
+      if(result == 1)
+      {
+        write("Trigger is enabled");
+      }
+      else
+      {
+        write("Enable trigger error Result =%d", result);
+      }
+    }
+  }
+}
+
+/// <FrameTriggerWithSequence>
+on sysvar sysvar::CanDisturbanceConfigurationSysVars::EnableFrameTriggerSeq2
+{
+  if(@sysvar::CanDisturbanceConfigurationSysVars::EnableFrameTriggerSeq2 == 1)
+  {
+    CanDisturbanceFrameTrigger       frameTrigger;
+    CanDisturbanceSequence           sequence;
+    CanDisturbanceTriggerRepetitions repetitions;
+    long                             result;
+    long                             validityMask;
+    message 0x100x                   triggerMessage;
+    
+    //clear the sequence
+    sequence.Clear();
+    
+    //configure the message should be triggered
+    
+    //ID must extended ID and a CAN message must on the bus
+    validityMask = @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDBase 
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDExtended
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDE 
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::FDF;
+    
+    frameTrigger.SetMessage(triggerMessage, deviceID, validityMask);
+     //trigger position is the CRC delimiter
+    frameTrigger.TriggerFieldType =   
+            @sysvar::CanDisturbance::Enums::FieldType::AckSlot;
+    frameTrigger.TriggerFieldOffset = 0;   
+    
+    //configure a sequence 320 FPGA ticks long and send a dominant bit 
+    //at the Ack Delimiter bit on the bus. 
+    result = sequence.AppendToSequence(320, 'd');
+    
+    //Define two repetitions and one cycle with a 1 ms hold off time 
+    repetitions.Cycles = 1;
+    repetitions.HoldOffCycles = 1;
+    repetitions.HoldOffRepetitions = 0;
+    repetitions.Repetitions = 33;
+    
+    //Configure the frame trigger and the sequence to the CANstress device
+    if(result == 1)
+    {
+      result = canDisturbanceTriggerEnable(deviceID, frameTrigger, sequence, 
+                                           repetitions);
+    
+      if(result == 1)
+      {
+        write("Trigger is enabled");
+      }
+      else
+      {
+        write("Enable trigger error Result =%d", result);
+      }
+    }
+  }
+}
+
+/// <FrameTriggerWithSequence>
+
+void ConfigureFrameTriggerForm3(long flags, long fieldType, long offset)
+{
+    CanDisturbanceFrameTrigger       frameTrigger;
+    CanDisturbanceSequence           sequence;
+    CanDisturbanceTriggerRepetitions repetitions;
+    long                             result;
+    long                             validityMask;
+    message 0x100x                   triggerMessage;
+    
+    //clear the sequence
+    sequence.Clear();
+    //configure the message should be triggered
+    
+    //ID must extended ID and a CAN message must on the bus
+    validityMask = @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDBase 
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDExtended
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDE 
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::FDF;
+    
+    frameTrigger.SetMessage(triggerMessage, deviceID, validityMask);
+     //trigger position is the CRC delimiter
+    frameTrigger.TriggerFieldType = fieldType;
+    frameTrigger.TriggerFieldOffset = offset;   
+    
+    //configure a sequence one bit long and send a dominant bit at the RTR
+    //bit on the bus. 
+    result = sequence.AppendToSequence(320, 'd');
+    
+    //Define two repetitions and one cycle with a 1 ms hold off time 
+    repetitions.Cycles = 1;
+    repetitions.HoldOffCycles = 1;
+    repetitions.HoldOffRepetitions = 0;
+    repetitions.Repetitions = 32;
+    
+    //Configure the frame trigger and the sequence to the CANstress device
+    if(result == 1)
+    {
+      result = canDisturbanceTriggerEnable(deviceID, frameTrigger, 
+                                 sequence, repetitions, flags);
+      if(result == 1)
+      {
+        write("Trigger is enabled");
+      }
+      else
+      {
+        write("Enable trigger error Result =%d", result);
+      }
+    }
+}
+
+
+on sysvar sysvar::CanDisturbanceConfigurationSysVars::EnableFrameTriggerSeq3
+{
+  if(@sysvar::CanDisturbanceConfigurationSysVars::EnableFrameTriggerSeq3 == 1)
+  {
+    ConfigureFrameTriggerForm3(@sysvar::CanDisturbanceConfigurationSysVars::TriggerEnable, @sysvar::CanDisturbance::Enums::FieldType::AckSlot, 0);
+  }
+}
+
+on sysvar sysvar::CanDisturbanceConfigurationSysVars::EnableDirDependedFrameTriggerSeq
+{
+ if(@sysvar::CanDisturbanceConfigurationSysVars::EnableDirDependedFrameTriggerSeq == 1)
+ {
+ 
+   long flags;
+   flags = 0;
+   if(@sysvar::CanDisturbanceConfigurationSysVars::TriggerDirection == 1)
+   flags |= sysvar::CanDisturbance::Enums::TriggerEnable::TriggerDirectionTx;
+      
+   if(@sysvar::CanDisturbanceConfigurationSysVars::TriggerDirection == 2)
+   flags |= sysvar::CanDisturbance::Enums::TriggerEnable::TriggerDirectionRx;
+      
+   ConfigureFrameTriggerForm3(flags, @sysvar::CanDisturbance::Enums::FieldType::AckSlot, 0);
+ }  
+}
+
+on sysvar sysvar::CanDisturbanceConfigurationSysVars::EnableInvertedFrameTriggerSeq
+{
+ if(@sysvar::CanDisturbanceConfigurationSysVars::EnableInvertedFrameTriggerSeq == 1)
+ {
+    long flags;
+    flags = 0;
+    if(@sysvar::CanDisturbanceConfigurationSysVars::InvertedTrigger == 1)
+    flags |= sysvar::CanDisturbance::Enums::TriggerEnable::InvertedTrigger;
+      
+    ConfigureFrameTriggerForm3(flags, @sysvar::CanDisturbance::Enums::FieldType::AckSlot, 0);
+  }  
+}
+
+on sysvar sysvar::CanDisturbanceConfigurationSysVars::EnableMissingBitFrameTriggerSeq
+{
+ if(@sysvar::CanDisturbanceConfigurationSysVars::EnableMissingBitFrameTriggerSeq == 1)
+ {
+    long flags;
+    flags = 0;
+    if(@sysvar::CanDisturbanceConfigurationSysVars::MissingBitTriggerConfiguration == 1)
+    flags |= sysvar::CanDisturbance::Enums::TriggerEnable::TriggerIfBitMissing;
+      
+    ConfigureFrameTriggerForm3(flags, @sysvar::CanDisturbance::Enums::FieldType::CRC, 21);
+  }  
+  
+}
+
+
+
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//Frame trigger with Frame sequence
+//////////////////////////////////////////////////////////////////////////////////
+/// <FrameTriggerWithFrameSequence>
+on sysvar sysvar::CanDisturbanceConfigurationSysVars::EnableFrameTriggerFrameSeq1
+{
+  if(@sysvar::CanDisturbanceConfigurationSysVars::EnableFrameTriggerFrameSeq1 == 1)
+  {
+    CanDisturbanceFrameTrigger  frameTrigger;
+    CanDisturbanceFrameSequence frameSequence;
+    long                        result;
+    long                        validityMask;
+    message 0x100               triggerMessage;
+    message 0x200               messageForSequence;
+    
+    //configure the message should be triggered
+    //ID must standard ID and a CAN message must on the bus
+    validityMask = @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDBase 
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDE 
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::FDF; 
+    
+    frameTrigger.SetMessage(triggerMessage, deviceID, validityMask);
+    
+    //trigger position is the 2nd IFS bit
+    frameTrigger.TriggerFieldType =   
+          @sysvar::CanDisturbance::Enums::FieldType::EndOfFrame;
+    frameTrigger.TriggerFieldOffset = 9;   
+    
+    //configure the frame sequence with the a message
+    frameSequence.SetMessage(deviceID, messageForSequence);
+    
+    //Configure the frame trigger and the frame sequence to the CANstress device
+    result = canDisturbanceTriggerEnable(deviceID, frameTrigger, frameSequence);
+    
+    if(result == 1)
+    {
+      write("Trigger is enabled");
+    }
+    else
+    {
+      write("Trigger enabling error result =%d", result);
+    }
+  }
+}
+
+/// <FrameTriggerWithFrameSequence>
+on sysvar sysvar::CanDisturbanceConfigurationSysVars::EnableFrameTriggerFrameSeq2
+{
+  if(@sysvar::CanDisturbanceConfigurationSysVars::EnableFrameTriggerFrameSeq2 == 1)
+  {
+    CanDisturbanceFrameTrigger       frameTrigger;
+    CanDisturbanceFrameSequence      frameSequence;
+    CanDisturbanceTriggerRepetitions repetitions;
+    long                             result;
+    long                             validityMask;
+    message 0x100x                   triggerMessage;
+    message 0x200x                   messageForSequence;
+    
+    //configure the message should be triggered
+    //ID must extended ID and a CAN message must on the bus
+    validityMask = @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDBase 
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDExtended
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDE 
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::FDF;
+    
+    frameTrigger.SetMessage(triggerMessage, deviceID, validityMask);
+    
+    //trigger position is the 2nd IFS bit
+    frameTrigger.TriggerFieldType =   
+            @sysvar::CanDisturbance::Enums::FieldType::EndOfFrame;
+    frameTrigger.TriggerFieldOffset = 9;   
+    
+    //configure the frame sequence with the a message
+    frameSequence.SetMessage(deviceID, messageForSequence);
+   
+    //Define two repetitions and one cycle with a 1 ms hold off time 
+    repetitions.Cycles = 1;
+    repetitions.HoldOffCycles = 1;
+    repetitions.HoldOffRepetitions = 1;
+    repetitions.Repetitions = 2;
+    
+    //Configure the frame trigger and the sequence to the CANstress device
+    result = canDisturbanceTriggerEnable(deviceID, frameTrigger, 
+                                         frameSequence, repetitions);
+    if(result == 1)
+    {
+      write("Trigger is enabled");
+    }
+    else
+    {
+      write("Trigger enabling error result =%d", result);
+    }
+  }
+}
+
+/// <FrameTriggerWithFrameSequence>
+on sysvar sysvar::CanDisturbanceConfigurationSysVars::EnableFrameTriggerFrameSeq3
+{
+  if(@sysvar::CanDisturbanceConfigurationSysVars::EnableFrameTriggerFrameSeq3 == 1)
+  {
+    CanDisturbanceFrameTrigger       frameTrigger;
+    CanDisturbanceFrameSequence      frameSequence;
+    CanDisturbanceTriggerRepetitions repetitions;
+    long                             result;
+    long                             validityMask;
+    message 0x100x                   triggerMessage;
+    message 0x200x                   messageForSequence;
+    
+    //configure the message should be triggered
+    //ID must extended ID and a CAN message must on the bus
+    validityMask = @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDBase 
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDExtended
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::IDE 
+                   | @sysvar::CanDisturbance::Enums::ValidityMaskFlags::FDF;
+    
+    frameTrigger.SetMessage(triggerMessage, deviceID, validityMask);
+    
+    //trigger position is the 2nd IFS bit
+    frameTrigger.TriggerFieldType =   
+            @sysvar::CanDisturbance::Enums::FieldType::EndOfFrame;
+    frameTrigger.TriggerFieldOffset = 9;   
+    
+    //configure the frame sequence with the a message
+    frameSequence.SetMessage(deviceID, messageForSequence);
+    
+    //Define two repetitions and one cycle with a 1 ms hold off time 
+    repetitions.Cycles = 1;
+    repetitions.HoldOffCycles = 1;
+    repetitions.HoldOffRepetitions = 1;
+    repetitions.Repetitions = 2;
+    
+   
+    //Configure the frame trigger and the sequence to the CANstress device
+    result = canDisturbanceTriggerEnable(deviceID, frameTrigger, frameSequence, 
+                             repetitions, @sysvar::CanDisturbanceConfigurationSysVars::TriggerEnable);
+    if(result == 1)
+    {
+      write("Trigger is enabled");
+    }
+    else
+    {
+      write("Trigger enabling error result =%d", result);
+    }
+  }
+}
+
+
+//////////////////////////////////////////////////////////////////////////////////

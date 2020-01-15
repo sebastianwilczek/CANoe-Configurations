@@ -1,0 +1,4176 @@
+/*@!Encoding:1252*/
+/*
+ * CAPL Library for OBDII Compliance Test          Version 1.3
+ *
+ * Copyright 2009, Vector Informatik GmbH, Vector CANtech LLC - All rights reserved
+ *
+ * History:
+ * 1.0 (Jr) Created
+ * 1.1 (AaronG) Amended to conform with August 2005 OBDII Compliance Specification 
+ * 1.2 (AaronG) Amended to conform with November 2007 OBDII Compliance Draft Specification
+ * 1.3 (AaronG) Amended to conform with December 2008 OBDII Compilance Draft Specification
+ */
+variables
+{
+    msTimer LCDTimer;
+    
+    /* CONSTANTS */
+    const int   kSpecificRequest    = 0x00;
+    const int   kGlobalRequest      = 0x01;
+    const int   kEnableTP           = 0x02;
+
+    const BYTE  kGlobalAddress      = 0xff;
+    const BYTE  kNullAddress        = 0xfe;
+
+    /* BOOLEAN CONSTANTS */
+    const   FALSE   = 0;
+    const   TRUE    = 1;
+    const   OTHER   = 2;
+    
+    /* CONSTANTS USED FOR PRINTING TO THE TEST REPORT */
+    const   FAIL    = 0;
+    const   PASS    = 1;
+    const   WARNING = 2;
+    const   COMMENT = 3;
+    const   NO  = 0;
+    const   YES = 1;
+    
+    /* GLOBAL VARIABLES */
+
+    /* ARRAYS */
+    byte    gEmissionRelatedECUAddress[255];
+    byte    dm25RespondingECUs[255];
+    char    TEXT[256];
+    char    TEXT2[256];
+    char    REPORT_TEXT[256];
+    char    gVehicleModel[256];
+    char    gVehicleMake[256];    
+    char DM4ETMValTable[16][32] = { "Low Idle Governor/No Request",
+                                    "Accel Pedal/Operator Selection",
+                                    "Cruise Control",
+                                    "PTO Governor",
+                                    "Road Speed Governor",
+                                    "ASR Control",
+                                    "Transmission Control",
+                                    "ABS Control",
+                                    "Torque Limiting",
+                                    "High Speed Governor",
+                                    "Braking System",
+                                    "Remote Accelerator",
+                                    "Service Procedure",
+                                    "Not Defined",
+                                    "Other",
+                                    "Not Available"
+                                  };
+
+    char MILStateTable[4][14] = { "Lamp Off",
+                                  "Lamp On",
+                                  "Reserved",
+                                  "Not Available"
+                                };    
+
+    /* VARIABLES */
+    byte    LCDMode;
+    byte    firstTime                   = 0;
+    byte    firstTime_6_2_1             = 0;
+    byte    startLCDTimer               = FALSE;    
+    dword   timeout                     = 0;
+    int     gNumOfEmmissionECUs         = 0;
+    long    engineOn                    = FALSE;
+    long    gEmissionRelatedECUCount    = 0;
+    long    LCDCounter                  = 60;
+}
+
+/*
+ * Find a SPN in a DM24 message
+ *
+ * return Index of the DTC
+ * _pg    DM message
+ * spn    SPN to search for
+ */
+LONG verifySPNinDM24( pg CAPL_MSG _pg, DWORD spn )
+{
+    LONG i, count;
+    
+    count = _pg.DLC / 4;
+    for( i = 0; i < count; i++ )
+    {//check all SPNs
+
+        if (spn == (_pg.DWORD(i*4) & 0xFFFF))
+        {
+            return i*4;
+        }
+    }
+
+    // SPN not found
+    return -1;
+}
+
+char getYearCharacter()
+{
+  switch(getValue(EnvOBDII_ModelYearVIN)) {
+    case 1981: return 'B';
+    case 1982: return 'C';
+    case 1983: return 'D';
+    case 1984: return 'E';
+    case 1985: return 'F';
+    case 1986: return 'G';
+    case 1987: return 'H';
+    case 1988: return 'J';
+    case 1989: return 'K';
+    case 1990: return 'L';
+    case 1991: return 'M';
+    case 1992: return 'N';
+    case 1993: return 'P';
+    case 1994: return 'R';
+    case 1995: return 'S';
+    case 1996: return 'T';
+    case 1997: return 'V';
+    case 1998: return 'W';
+    case 1999: return 'X';
+    case 2000: return 'Y';
+    case 2001: return '1';
+    case 2002: return '2';
+    case 2003: return '3';
+    case 2004: return '4';
+    case 2005: return '5';
+    case 2006: return '6';
+    case 2007: return '7';
+    case 2008: return '8';
+    case 2009: return '9';
+    case 2010: return 'A';
+    case 2011: return 'B';
+    case 2012: return 'C';
+    case 2013: return 'D';
+    case 2014: return 'E';
+    case 2015: return 'F';
+    case 2016: return 'G';
+    case 2017: return 'H';
+    case 2018: return 'J';
+    case 2019: return 'K';
+    case 2020: return 'L';
+    case 2021: return 'M';
+    case 2022: return 'N';
+    case 2023: return 'P';
+    case 2024: return 'R';
+    case 2025: return 'S';
+  }
+  return '?';
+}
+
+/*
+ *  This function formats the data which is to be output to the test report.
+ *
+ *  PARAMETERS:
+ *  passOrFail  - tells if the step passed, failed, or should be printed
+ *                  + PASS      -> test passed
+ *                  + FAIL      -> test failed
+ *                  + COMMENT   -> test step should only be printed (no verdict)
+ *  bothFields  - determines if both fields should be printed to
+ *  array1      - string to be printed in "Test Step" column of test report
+ *  array2      - string to be printed in "Description" column of test report
+ *
+ *  RETURN:
+ *  void        - no return
+ *
+ *  NOTES:
+ *              If the function is being called and the intention is to only print in the "Description"
+ *              field of the report, use 'NO' for bothFields.  This will ensure the "Test Step" 
+ *              field is NOT printed in (regardless of verdict/no verdict).
+ *
+ *              If the function is being called and the intention is to print to both the "Test Step"
+ *              and "Description" fields of the report, use 'YES' for bothFields.
+ */
+
+void formatTestReportData(byte passOrFail, byte bothFields, char array1[], char array2[])
+{
+    if(bothFields == YES)
+    {//print array1 and array2 to "Test Step" and "Description" fields
+        switch(passOrFail)
+        {
+            case FAIL:
+            {//print with fail verdict to "Test Step" and "Description" fields
+                TestStepFail( array1, array2 );            
+            }
+            break;
+
+            case PASS:
+            {//print with pass verdict "Test Step" and "Description" fields
+                TestStepPass( array1, array2 );
+            }
+            break;
+
+
+            case WARNING:
+            {//print with warning verdict "Test Step" and "Description" fields
+                TestStepWarning( array1, array2 );
+            }
+            break;
+
+            default:
+            {//print only (no verdict) to "Test Step" and "Description" fields
+                TestStep( array1, array2 );
+            }
+            break;
+        }
+    }
+    else if(bothFields == NO)
+    {//only print array2
+        switch(passOrFail)
+        {
+            case FAIL:
+            {//print with fail verdict in "Description" field only
+                TestStepFail( "", array2 );            
+            }
+            break;
+
+            case PASS:
+            {//print with pass verdict in "Description" field only
+                TestStepPass( "", array2 );            
+            }
+            break;
+
+            case WARNING:
+            {//print with warning verdict "Test Step" and "Description" fields
+                TestStepWarning( "", array2 );
+            }
+            break;
+
+            default:
+            {//print only (no verdict) in "Description" field only
+                TestStep( "",  array2 );
+            }
+            break;
+        }
+    }
+}
+
+on timer LCDTimer
+{
+    switch(LCDMode)
+    {
+        case 15:
+        {
+            if(LCDCounter == 0)
+            {
+                LCDMode = 3;
+                return;
+            }
+
+            if(firstTime == TRUE)
+            {
+                putValue(EnvCountdownClock, LCDCounter);
+                firstTime = FALSE;
+            }
+            else
+            {
+                LCDCounter--;
+                putValue(EnvCountdownClock, LCDCounter);
+            }
+        }
+        break;
+
+        case 60:
+        {
+            if(LCDCounter == 0)
+            {
+                LCDMode = 0;
+                return;
+            }
+
+            if(firstTime == TRUE)
+            {
+                putValue(EnvCountdownClock, LCDCounter);
+                firstTime = FALSE;
+            }
+            else
+            {
+                LCDCounter--;
+                putValue(EnvCountdownClock, LCDCounter);
+            }
+        }
+        break;
+
+        default:
+        break;
+    }
+    
+    setTimer(LCDTimer, 1000);
+}
+
+on pg *
+{
+    if(startLCDTimer == TRUE)
+    {
+        if(LCDMode == 15)
+        {
+            LCDCounter = 15;
+            firstTime = TRUE;
+            startLCDTimer = FALSE;
+            setTimer(LCDTimer, 0);
+        }
+        else if (LCDMode == 60)
+        {
+            LCDCounter = 60;
+            firstTime = TRUE;
+            startLCDTimer = FALSE;
+            setTimer(LCDTimer, 0);
+        }            
+    }
+}
+
+/*
+ *  SAE-J1939-84 6.1.1:  This testcase ensures the user has the vehicle prepared and Test Unit connected
+ *                       correctly.
+ *
+ *  PARAMETERS:
+ *              none
+ *
+ *  PASS CONDITION:  The user indicates the ignition has been off for at least 1 minute AND CANoe is connected
+ *                   via J1939-13 connector.
+ *
+ *  FAIL CONDITION:  The user answers 'no' to either of the status questions (see NOTES below) indicating 
+ *                   improper test setup.
+ *
+ *  NOTES:
+ *              A pop-up window displays instructions to the tester:
+ *                  Ensure ignition has been off for at least 60 seconds.
+ *                  Ensure CANoe is connected to the bus via SAE J1939-13 connector.
+ *
+ *              Additional pop-up windows will prompt the user to answer two questions:
+ *                  1)  Has ignition been off for a minimum of 60 seconds?
+ *                  2)  Is Test Unit (CANoe) connected via SAE J1939-13 connector?
+ */
+
+testcase tc_6_1_1 ()
+{
+    long popup_reply;
+
+    startLCDTimer = TRUE;
+    LCDMode = 15;
+    
+    setEnvVarEndTest();
+
+    putValueToControl("OBDII Compliance Test Setup Panel","UserInstructions", "\t\t\t\t TEST IS RUNNING...");
+
+    TestStep("1", "Get user confirmation that initial test setup has been completed.");    
+    popup_reply = TestWaitForTesterConfirmation (" >>>  6.1.1  <<<\n\n* Ensure ignition has been off for at least 60 seconds.\n\n* Ensure CANoe is connected to the bus via SAE J1939-13 connector.\n\n* Press 'YES' button when ready to continue with test.\n\n * Press 'NO' to abort the test.");
+
+    switch(popup_reply)
+    {//was user ready to run the test? (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated initial setup was completed: running test...");
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester has not completed initial setup: test aborted!" );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+            stop();
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+    TestStep("2", "Has ignition been off for a minimum of 60 seconds?");
+    popup_reply = TestWaitForTesterConfirmation("1) Has ignition been off for a minimum of 60 seconds?");
+
+    switch(popup_reply)
+    {//get Ignition status from user (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated ignition was off for at least 60 seconds." );
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated ignition was not off for at least 60 seconds." );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+    TestStep("3", "Is Test Unit (CANoe) connected via SAE J1939-13 connector?");
+    popup_reply = TestWaitForTesterConfirmation("2) Is Test Unit (CANoe) connected via SAE J1939-13 connector?");
+
+    switch(popup_reply)
+    {//get Test Unit connection status from user (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated CANoe is connected via SAE J1939-13 connector." );
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated CANoe is not connected via SAE J1939-13 connector." );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 6.1.2:  This testcase ensures the user has turned the ignition on without cranking the engine.
+ *
+ *  PARAMETERS:
+ *              none
+ *
+ *  PASS CONDITION:  The user indicates the ignition has been turned on and the engine is still off.
+ *
+ *  FAIL CONDITION:  The user answers 'no' to either of the status questions (see NOTES below) indicating 
+ *                   improper test setup.
+ *
+ *  NOTES:
+ *              A pop-up window displays instructions to the tester:
+ *                  Turn on the ignition leaving the engine off.
+ *                  Watch MIL for at least 15 seconds.
+ *
+ *              Additional pop-up windows will prompt the user to answer two questions:
+ *                  1)  Was the ignition on?
+ *                  2)  Was the engine off?
+ */
+testcase tc_6_1_2 ()
+{
+    long popup_reply;
+    long popup_reply_engine;
+    long popup_reply_ignition;
+
+    setEnvVarEndTest();
+
+    TestStep("1", "Get user confirmation that MIL test setup has been completed.");
+
+    popup_reply = TestWaitForTesterConfirmation (" >>> 6.1.2 & 6.1.3 <<<\n\n* Turn on the ignition leaving the engine off.\n\n* Watch MIL for at least 15 seconds.\n\n* Press 'YES' after watching MIL to continue test.\n\n * Press 'NO' to abort test.");
+
+    switch(popup_reply)
+    {//was user ready to run the test? (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester finished watching MIL and is ready to continue the test...");
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester has chosen to abort the test: test aborted!" );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+            stop();
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+    TestStep("2", "Was the ignition on?");
+
+    popup_reply_ignition = TestWaitForTesterConfirmation("1) Was the ignition on?");
+
+    switch(popup_reply_ignition)
+    {//get Ignition status from user (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated ignition is ON." );
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated ignition is OFF." );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+    TestStep("3", "Was the engine off?");
+    
+    popup_reply_engine = TestWaitForTesterConfirmation("2) Was the engine off?");
+    
+    switch(popup_reply_engine)
+    {//get engine status from user (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated engine is OFF." );
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated engine is ON." );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+
+    if((popup_reply_ignition == 1) && (popup_reply_engine == 1))
+    {//user answered YES to both ignition AND engine questions (pop-up window)
+        snprintf( TEXT2, elCount(TEXT2), "Tester indicated [IGNITION ON] and [ENGINE OFF]." );
+        formatTestReportData(PASS, NO, TEXT, TEXT2);
+    }
+    else if((popup_reply_ignition != 1) && (popup_reply_engine == 1))
+    {//user answered NO to ignition AND YES to engine questions (pop-up window)
+        snprintf( TEXT2, elCount(TEXT2), "Tester indicated [IGNITION OFF] and [ENGINE OFF]." );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+    else if((popup_reply_ignition == 1) && (popup_reply_engine != 1))
+    {//user answered YES to ignition AND NO to engine questions (pop-up window)
+        snprintf( TEXT2, elCount(TEXT2), "Tester indicated [IGNITION ON] and [ENGINE ON]." );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+    else
+    {//user answered NO to both ignition AND engine questions (pop-up window)
+        snprintf( TEXT2, elCount(TEXT2), "Tester indicated [IGNITION ON] and [ENGINE ON]." );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 6.2.1:  This testcase transmits a global request for DM5 (diagnostic readiness 1).
+ *
+ *  PARAMETERS:
+ *              none
+ *
+ *  PASS CONDITION:  The test passes if ALL of the emission-related ECUs correctly repond.
+ *
+ *  FAIL CONDITION:  The test fails if ANY of the emission-related ECUs do not correctly repond.
+ *
+ *  NOTES:
+ *              A pop-up window will prompt the user to enter the number of emissions-related ECUs present
+ *              on the vehicle per the specification (see J1939-84 6.2.1, pg. 7). 
+ *
+ *              This testcase transmits a global request for the DM5 message and logs the source addresses
+ *              of all of the responding ECUs.
+ */
+
+testcase tc_6_2_1 ()
+{
+    byte engineECUResponded;
+    long i, result, waitResponse;
+    pg DM5 dm5;
+
+    long popup_reply;
+
+    setEnvVarEndTest();
+    
+    if(!firstTime_6_2_1)
+    {
+        TestStep("1", "Determine number of emissions related ECUs");
+        popup_reply = TestWaitForValueInput (">>> 6.2.1 <<<\n\n1) Enter the number of emissions-related ECUs present on this vehicle in the 'Value' box below.  Then press 'OK'.");
+        
+        //get input from tester and store in environment variable
+        gNumOfEmmissionECUs = TestGetValueInput();        
+        putValue(EnvOBDII_NumOfEmmissionECUs, gNumOfEmmissionECUs);
+
+        snprintf( TEXT2, elCount(TEXT2), "Tester indicated %d emissions-related ECUs present on vehicle", getValue(EnvOBDII_NumOfEmmissionECUs));
+        formatTestReportData(COMMENT, NO, TEXT, TEXT2);
+
+        //do not enter this code again
+        firstTime_6_2_1 = 1;
+    }
+    else
+    {
+        TestStep("1", "Determine number of emissions related ECUs");
+
+        putValue(EnvOBDII_NumOfEmmissionECUs, gNumOfEmmissionECUs);
+
+        snprintf( TEXT2, elCount(TEXT2), "Used previously indicated number of emissions-related ECUs: %d (see \"J1939-84 6.2.1\")", getValue(EnvOBDII_NumOfEmmissionECUs));
+        formatTestReportData(WARNING, NO, TEXT, TEXT2);
+    }
+
+    timeout = 0;  //ms; for J1939TestRequest this means DM5 will not be waited for
+
+    // send global request for DM5 and do not wait
+    result = J1939TestRequest( dm5, 1785, getValue(EnvOBDII_TesterAddress), kNullAddress, timeout, kGlobalRequest );
+
+    snprintf( TEXT, elCount(TEXT), "SA 0x%x", dm5.SA );
+    
+    if ( result < 0 )
+    {//error -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Error [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if( result == 0)
+    {//timeout -> expected
+    }
+    else if ( result == 1 )
+    {//response received -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Response received [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if ( result == 2 )
+    {//negative acknowledge -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Negative Acknowledge [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if ( result == 3 )
+    {//positive acknowledge -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Positive Acknowledge [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+        
+    TestStep("2", "Indicate ECUs that responded to Global Request for DM5 (identified by Source Address):");
+
+    gEmissionRelatedECUCount = 0;
+    engineECUResponded = FALSE;
+    timeout = 250;  //ms
+
+    do
+    {
+        //wait for DM5
+        waitResponse = TestWaitForJ1939PG( DM5.pgn, timeout );
+
+        if ( waitResponse == -2 )
+        {//resume due to constraint violation
+            snprintf( TEXT2, elCount(TEXT2), "Constraint Violation (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }
+        else if ( waitResponse == -1 )
+        {//general error
+            snprintf( TEXT2, elCount(TEXT2), "General Error (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }            
+        else if ( waitResponse == 0 )
+        {//timeout -> do nothing
+        }
+        else if (waitResponse > 0)
+        {//received DM5
+            TestGetWaitJ1939PGData( dm5 );
+           
+            snprintf( TEXT, elCount(TEXT), "0x%x", dm5.SA );
+          
+            write( "SA = 0x%x, DA = 0x%x, byte0 = 0x%x", dm5.SA, dm5.DA, dm5.byte(0) );
+
+            if(dm5.SA == 0x00)
+            {
+                engineECUResponded = TRUE;
+            }
+            
+            //populate list of responding ECUs (by Source Address)
+            gEmissionRelatedECUAddress[gEmissionRelatedECUCount] = dm5.SA;
+            gEmissionRelatedECUCount++;
+
+            //print to report
+            snprintf( TEXT2, elCount(TEXT2), "Responded to DM5 Request");
+            formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+        }
+    } while(waitResponse > 0);  //as long as there are more buffered messages
+
+    if (gEmissionRelatedECUCount == 0)
+    {//if there are no emission-related ECUs the test fails
+        snprintf(TEXT2, elCount(TEXT2), "No emission-related ECUs found; no DM5 received." );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        return;
+    }
+
+    if(engineECUResponded == FALSE)
+    {//did not receive DM5 from engine, test fails
+        snprintf( TEXT2, elCount(TEXT2), "Did not receive DM5 response from Engine (SA: 0x00)!" );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        return;        
+    }
+
+    if (gEmissionRelatedECUCount != getValue(EnvOBDII_NumOfEmmissionECUs))
+    {//if the number of ECU is not equal to the number entered in prompt 1, the test fails
+        snprintf( TEXT2, elCount(TEXT2), "%d emission-related ECU(s) found, but %d expected (as indicated by user via pop-up).", gEmissionRelatedECUCount, getValue(EnvOBDII_NumOfEmmissionECUs) );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        return;
+    }
+    
+    snprintf( TEXT2, elCount(TEXT2), "Received %d DM5 response message(s)", gEmissionRelatedECUCount );
+    formatTestReportData(PASS, NO, TEXT, TEXT2);
+
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 6.1.3:  This testcase ensures the tester monitored the MIL for a minimum of 15 seconds, and has 
+ *                       turned the ignition on without cranking the engine.
+ *
+ *  PARAMETERS:
+ *              none
+ *
+ *  PASS CONDITION:  The tester indicates the ignition has been turned on and the engine is still off.
+ *
+ *  FAIL CONDITION:  The tester answers 'no' to either of the status questions (see NOTES below) indicating 
+ *                   improper test setup.
+ *
+ *  NOTES:
+ *              The pop-up window from 6.1.2 is used to displays instructions to the tester for 6.1.3 as well:
+ *
+ *              A pop-up window will prompt the user to answer a question (continued from 6.1.2):
+ *                  3)  Was MIL lit for at least 15 seconds?
+ */
+testcase tc_6_1_3 ()
+{
+    long popup_reply;
+    
+    setEnvVarEndTest();
+
+    TestStep("1", "Did MIL light for at least 15 seconds?");
+    popup_reply = TestWaitForTesterConfirmation("3) Was MIL lit for at least 15 seconds?");
+
+    switch(popup_reply)
+    {//get MIL status from user (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated MIL was lit for at least 15 seconds" );
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated MIL was not lit for at least 15 seconds" );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 6.3.1:  This testcase transmits a request for DM11 (diagnostic readiness 1) to each of the 
+ *                       ECUs which responded to DM5.
+ *
+ *  PARAMETERS:
+ *              none
+ *
+ *  PASS CONDITION:  The test passes if at least one emission-related ECU reponds with a positive acknowledge.
+ *
+ *  FAIL CONDITION:  The test fails if more than the specified number of emission-related ECUs responds, or
+ *                   if no ECUs respond.
+ *
+ *  NOTES:
+ *              none
+ */
+testcase tc_6_3_1 ()
+{
+    byte rqstSA, rcvdSA;
+    long i, waitResponse, packRcvd, packCount;
+    pg DM11 dm11;
+    pg ACKM ackm;
+    pg RQST rqst;
+
+    setEnvVarEndTest();
+
+    TestStep("1", "Clear DTCs (DM11) and indicate ECU responses (identified by Source Address):");
+    
+    if (gEmissionRelatedECUCount == 0)
+    {
+        snprintf(TEXT2, elCount(TEXT2), "No emission-related ECUs available!" );
+        formatTestReportData(FAIL, NO, "", TEXT2);
+        return;
+    }
+    
+    packRcvd = 0;   //flag for determining test report output
+    packCount = 0;  //no positive acknowledges received yet
+    timeout = 250;  //ms
+
+    for( i = 0; i < gEmissionRelatedECUCount; i++ )
+    {//as long as there are emission related ECUs
+
+        //store next address (used later)
+        rqstSA = gEmissionRelatedECUAddress[i];
+
+        // send request for DM11
+        rqst.ParameterGroupNumber = DM11.pgn;
+        rqst.sa = getValue(EnvOBDII_TesterAddress);
+        rqst.da = gEmissionRelatedECUAddress[i];
+        output( rqst );
+      
+        waitResponse = testWaitForJ1939PG( ACKM.pgn, rqst.da, kGlobalAddress, timeout ); 
+        
+        snprintf( TEXT, elCount(TEXT), "0x%x", gEmissionRelatedECUAddress[i] );            
+
+        if ( waitResponse == -2 )
+        {//resume due to constraint violation
+            snprintf( TEXT2, elCount(TEXT2), "Constraint Violation (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }
+        else if ( waitResponse == -1 )
+        {//general error
+            snprintf( TEXT2, elCount(TEXT2), "General Error (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }            
+        else if ( waitResponse == 0 )
+        {//timeout
+            snprintf( TEXT2, elCount(TEXT2), "Timeout (Positive Acknowledge expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);          
+        }
+        else if (waitResponse > 0)
+        {//received ACKM
+            switch (ackm.ControlByte)
+            {
+              case 0: // positive acknowledgement -> expected
+              {
+                TestGetWaitJ1939PGData( ackm );
+                //get address of responding node
+                //J1939TestGetWaitEventPGData(pack, 8);
+                rcvdSA = ackm.SA;
+
+                if(rqstSA == rcvdSA)
+                {//if requested address and responding address are the same...
+                    //print to report
+                    snprintf( TEXT2, elCount(TEXT2), "Responded to request for DM11 with Positive Acknowledge");
+                    formatTestReportData(PASS, YES, TEXT, TEXT2);
+                    //at least one positive acknowledge received
+                    packRcvd = 1;
+                    packCount++;
+                }
+                else
+                {//error
+                    //print to report
+                    snprintf( TEXT2, elCount(TEXT2), "Expected response from address 0x%x, received response from 0x%x", rqstSA, rcvdSA);
+                    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                }            
+                break;
+              }
+              case 1: // negative acknowledgment
+                snprintf( TEXT2, elCount(TEXT2), "Negative Acknowledgement (Positive Acknowledge expected)" );
+                formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                break;
+              case 2: // access denied
+                snprintf( TEXT2, elCount(TEXT2), "Access Denied (Positive Acknowledge expected)" );
+                formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                break;
+              case 3: // cannot respond
+                snprintf( TEXT2, elCount(TEXT2), "Cannot Respond (Positive Acknowledge expected)" );
+                formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                break;
+              default:
+                snprintf( TEXT2, elCount(TEXT2), "Acknowledgement control byte %d (Positive Acknowledge expected)", ackm.ControlByte );
+                formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                break;           
+            }
+        }
+          
+     }
+       
+
+    if (gEmissionRelatedECUCount > getValue(EnvOBDII_NumOfEmmissionECUs))
+    {//if the number of emission related ECUs is greater than the number entered in prompt 1, the test fails
+        snprintf( TEXT2, elCount(TEXT2), "%d emission-related ECU(s) responded, but only %d expected (as configured in prompt).", gEmissionRelatedECUCount, getValue(EnvOBDII_NumOfEmmissionECUs) );
+        formatTestReportData(FAIL, NO, "", TEXT2);
+        return;
+    }
+    
+    if(packRcvd == 1)
+    {//at least one ECU MUST respond with DM11
+
+        //positive ACK received from each ECU:  test outcome is determined
+        //by requesting DM12 (see next step - J1939-84 5.4)
+        snprintf( TEXT2, elCount(TEXT2), "Positive ACK received from %d ECUs", packCount );
+        formatTestReportData(PASS, NO, TEXT, TEXT2);
+    }
+    else
+    {
+        //positive ACK NOT received from at least one ECU: fail
+        snprintf( TEXT2, elCount(TEXT2), "No ECU responded with a Positive ACK (require minimum 1)" );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        return;
+    }
+
+    snprintf( TEXT, elCount(TEXT), "NOTE" );
+
+    switch(engineOn)
+    {//change message dependant upon engine being on/off
+        
+        case(FALSE):
+        {//DM11 request with engine off
+
+            snprintf( TEXT2, elCount(TEXT2), "See verdict for \"J1939-84 6.4.1\" for result of this test case." );
+            formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+        }
+        break;
+                    
+        case(TRUE):
+        {//DM11 request with engine on
+            snprintf( TEXT2, elCount(TEXT2), "See verdict for \"J1939-84 6.4.1 (6.7.1)\" for result of this test case." );
+            formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+        }
+
+        default:
+        break;
+    }
+    
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 6.4.1:  This testcase transmits a request for DM12 (Emissions-Related Active Diagnostic
+ *                       Trouble Codes) to each of the ECUs which responded to DM5.
+ *
+ *  PARAMETERS:
+ *              milState                expected state of the malfunction indicator lamp
+ *              expectedNumberOfDTCs    number of expected DTCs from at least one ECU
+ *
+ *  PASS CONDITION:  The engine ECU (SA: 0x00) and all other emissions-related ECUs must respond with a DM12
+ *                   response to pass).  The response from the engine ECU and all other emissions-related ECUs
+ *                   should show the MIL status was cleared and there are no faults (no DTCs) present.
+ *
+ *  FAIL CONDITION:  The engine ECU (SA: 0x00) or any other emissions-related ECU doesn't respond, the MIL 
+ *                   status has not been cleared, or there are DTCs present.
+ *
+ *  NOTES:
+ *              Separate DM12 requests will be sent to all of the ECUs which previously responded to DM5.
+ *
+ *              During bulb testing the MIL status bit will indicate whether or not the MIL will be illuminated
+ *              after the engine has been started.  It should not reflect the status of the MIL bulb driver
+ *              circuit, which will be turning the bulb on for the bulb prove out.
+ */
+
+testcase tc_6_4_1 ( int milState, int expectedNumberOfDTCs )
+{
+    byte failure, formatIssue;
+	long i;
+	long spn, fmi, oc;
+	long result, numOfDTCs, expectedNumOfDTCsFound, engineResponseReceived;
+    pg DM12 dm12 = { DLC = 1785 };
+    
+    setEnvVarEndTest();
+
+    TestStep("1", "Verify MIL Status Bit & DTCs cleared for Emissions related ECUs (identified by Source Address):");
+    
+    if (gEmissionRelatedECUCount == 0)
+    {//no emission related ECUs
+        snprintf(TEXT2, elCount(TEXT2), "No emission-related ECUs available!" );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        return;
+    }
+
+    expectedNumOfDTCsFound = 0;
+    timeout = 250; //ms
+    failure = TRUE;
+  	engineResponseReceived = FALSE;
+    
+    for( i = 0; i < gEmissionRelatedECUCount; i++ )
+    {//send request for DM12 to each emission-related ECU
+
+        // send request for DM12
+        result = J1939TestRequest( dm12, 1785, getValue(EnvOBDII_TesterAddress), gEmissionRelatedECUAddress[i], timeout, kSpecificRequest|kEnableTP );
+
+        snprintf( TEXT, elCount(TEXT), "0x%x", gEmissionRelatedECUAddress[i] );            
+
+        if ( result < 0 )
+        {//error
+            snprintf( TEXT2, elCount(TEXT2), "Error %d (DM12 response expected)", result );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+        else if( result == 0)
+        {//timeout
+            snprintf( TEXT2, elCount(TEXT2), "Timeout (DM12 response expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+        else if ( result == 1 )
+        {//response received -> expected
+
+            formatIssue = FALSE;
+            
+            snprintf( TEXT, elCount(TEXT), "0x%x", gEmissionRelatedECUAddress[i] );
+
+            //retrieve number of DTCs in message
+            if (dm12.DLC > 8)
+            {//more than 1 DTC
+                numOfDTCs = (dm12.DLC - 2) / 4;
+            }
+            else if (dm12.DWORD(2) == 0)
+            {//0 DTCs
+                numOfDTCs = 0;
+            }
+            else
+            {//1 DTC
+                numOfDTCs = 1;
+            }
+
+            if (numOfDTCs <= 1)
+            {//0 or 1 DTC(s)
+                
+                if (dm12.DLC != 8)
+                {//0 or 1 DTC AND data is not equal to 8-bytes in length 
+                    
+                	snprintf( TEXT2, elCount(TEXT2), "Transmitted DM12 with invalid number of bytes (%d)", dm12.DLC );
+                    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+
+                    //problem with DM12 format
+                    formatIssue = TRUE;
+                    failure = TRUE;
+                }
+
+                if (dm12.WORD(6) != 0xffff)
+                {//ensure bytes 7 & 8 are 0xFF (respectively)
+                    
+                    snprintf( TEXT2, elCount(TEXT2), "Bytes 7 & 8 are 0x%x (0xFFFF expected)", dm12.WORD(6) );
+                    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                    
+                    //problem with DM12 format
+                    formatIssue = TRUE;
+                    failure = TRUE;
+                }
+                
+				if ((numOfDTCs == 0) && (formatIssue == FALSE))
+   	        	{//no DTCs AND message formatted correctly
+	            
+       	    		if(dm12.MalfunctionIndicatorLampStatus == milState)
+        	    	{//MIL status bit indicates desired MIL state
+	            	
+        			    snprintf( TEXT2, elCount(TEXT2), "MIL Status Bit & DTCs cleared" );
+   	   			    	formatTestReportData(PASS, YES, TEXT, TEXT2);
+      			    	
+    			    	//ECU passes testcase 
+    			    	failure = FALSE;
+           	    	}
+					else
+					{//MIL status bit indicates undesired MIL State
+						
+    					snprintf( TEXT2, elCount(TEXT2), "MIL state is %d (%d expected)", dm12.MalfunctionIndicatorLampStatus, milState );
+						formatTestReportData(FAIL, YES, TEXT, TEXT2);	
+						failure = TRUE;
+       		        }
+               	}
+               	else if(numOfDTCs == 1)
+               	{//1 DTC present
+                        
+               		spn = (dm12.DWORD(i+1) & 0xFFFF);
+					fmi = (dm12.byte(i+3) & 0x1F);
+					oc = (dm12.byte(i+4) & 0x7F);
+               	
+       				snprintf( TEXT2, elCount(TEXT2), "1 DTC present... SPN: %d, FMI: %d, OC: %d", spn, fmi, oc );
+                	formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                    failure = TRUE;
+
+       	    		if(dm12.MalfunctionIndicatorLampStatus != milState)
+        	    	{//MIL status bit indicates undesired MIL state
+	
+        			    snprintf( TEXT2, elCount(TEXT2), "MIL state is %d (%d expected)", dm12.MalfunctionIndicatorLampStatus, milState );
+	    	    	    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                        failure = TRUE;
+           	    	}
+           	    	
+           	    	//ECU causes testcase to fail since there is a DTC present
+           	    	failure = TRUE;
+                }
+            }
+            else if (numOfDTCs > 1)
+            {//more than one DTC
+
+   				snprintf( TEXT2, elCount(TEXT2), "More than one DTC present" );
+               	formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                failure = TRUE;
+								
+                if(dm12.MalfunctionIndicatorLampStatus != milState)
+       	    	{//MIL status bit indicates undesired MIL state
+	
+           			snprintf( TEXT2, elCount(TEXT2), "MIL state is %d (%d expected)", dm12.MalfunctionIndicatorLampStatus, milState );
+					formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                    failure = TRUE;
+       	    	}
+            
+                if (dm12.DLC != (2 + numOfDTCs * 4))
+               	{//data length does not match expected length for number of DTCs
+
+					snprintf( TEXT2, elCount(TEXT2), "Transmitted DM12 with invalid number of bytes (%d) -> (%d expected)", dm12.DLC, (2 + numOfDTCs * 4) );
+					formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                    failure = TRUE;
+                }
+                	
+                for( i = 0; i < numOfDTCs; i++ )
+                {//ensure DTCs are reported correctly (not '0')
+                        
+              		if (dm12.DWORD(2+i*4) == 0)
+               		{//DTC is '0'
+               			snprintf( TEXT2, elCount(TEXT2), "DTC %d is 0 (non-zero expected)", i );
+						formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                        failure = TRUE;
+	                }
+    	        }
+
+      			//ECU causes testcase to fail since there is more than zero DTCs  	
+   			   	failure = TRUE;
+        	}
+
+			if (numOfDTCs == expectedNumberOfDTCs)
+        	{//does number of DTCs for current ECU match expected number of DTCs?
+            	expectedNumOfDTCsFound = 1;
+	        }
+    	}
+        else if ( result == 2 )
+        {//negative acknowledge
+            snprintf( TEXT2, elCount(TEXT2), "Negative Acknowledge (DM12 response expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+        else if ( result == 3 )
+        {//positive acknowledge
+            //print to report
+            snprintf( TEXT2, elCount(TEXT2), "Positive Acknowledge (DM12 response expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+    }
+    
+    if (expectedNumOfDTCsFound == 0)
+    {//The engine ECU and all emissions-related ECUs must respond with a DM12
+        snprintf( TEXT2, elCount(TEXT2), "Expected no (zero) DTCs but received at least one DM12 response with one or more active DTCs");
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        failure = TRUE;
+    }
+
+    if(failure == TRUE)
+    {//one or more ECUs responded incorrectly
+        snprintf( TEXT2, elCount(TEXT2), "One or more ECUs responded incorrectly to DM12 request" );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+	}
+	else
+	{//all ECUs responded correctly
+
+	   	switch(engineOn)
+    	{//change message dependant upon engine being on/off
+        
+        	case(FALSE):
+        	{//DM12 request with engine off
+
+            	snprintf( TEXT2, elCount(TEXT2), "All emission-related ECUs responded (DM12) with MIL and DTCs cleared." );
+        		formatTestReportData(PASS, NO, TEXT, TEXT2);
+
+                snprintf( TEXT, elCount(TEXT), "NOTE");
+                snprintf( TEXT2, elCount(TEXT2), "This also confirms \"J1939-84 6.3.1\" was successful." );
+        		formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+        	}
+        	break;
+                    
+        	case(TRUE):
+        	{//DM12 request with engine on
+            	snprintf( TEXT2, elCount(TEXT2), "All emission-related ECUs responded (DM12) with MIL and DTCs cleared." );
+       	        formatTestReportData(PASS, NO, TEXT, TEXT2);
+
+                snprintf( TEXT, elCount(TEXT), "NOTE");
+                snprintf( TEXT2, elCount(TEXT2), "This also confirms \"J1939-84 6.3.1 (6.7.1)\" was successful." );
+        		formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+        	}
+
+        	default:
+        	break;
+    	}
+	}
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 6.5.1:  This testcase transmits a request for DM6 (Pending DTCs) to each of the 
+ *                       ECUs which responded to DM5.
+ *
+ *  PARAMETERS:
+ *              milState                expected state of the malfunction indicator lamp
+ *              expectedNumberOfDTCs    number of expected DTCs from all ECUs
+ *
+ *  PASS CONDITION:  All emission-related ECUs report their emission-related faults have been cleared.
+ *
+ *  FAIL CONDITION:  Any fault code reported in a DM6 indicates a current problem and is flagged as a failure.
+ *
+ *  NOTES:
+ *              None
+ */
+testcase tc_6_5_1 ( int milState, int expectedNumberOfDTCs )
+{
+    byte ECUfailTest, failure;
+    long i;
+    long result, numOfDTCs, expectedNumOfDTCsFound;
+    pg DM6 dm6 = { DLC = 1785 };
+    
+    setEnvVarEndTest();
+
+    TestStep("1", "Request On-Board Monitoring Test Results (identified by Source Address):");
+    
+    if (gEmissionRelatedECUCount == 0)
+    {//no emission-related ECUs
+        snprintf( TEXT2, elCount(TEXT2), "No emission-related ECUs available!" );
+        formatTestReportData(FAIL, NO, "", TEXT2);        
+        return;
+    }
+
+    expectedNumOfDTCsFound = 0;
+    timeout = 250;  //ms
+    failure = FALSE;
+
+    for( i = 0; i < gEmissionRelatedECUCount; i++ )
+    {//send request for DM6 to each emission-related ECU
+    
+        //send request for DM6
+        result = J1939TestRequest( dm6, 1785, getValue(EnvOBDII_TesterAddress), gEmissionRelatedECUAddress[i], timeout, kSpecificRequest|kEnableTP );
+
+        snprintf( TEXT, elCount(TEXT), "0x%x", gEmissionRelatedECUAddress[i] );        
+        
+        if ( result < 0 )
+        {//error
+            snprintf( TEXT2, elCount(TEXT2), "Error %d (DM6 response expected)", result );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+        else if( result == 0)
+        {//timeout
+            snprintf( TEXT2, elCount(TEXT2), "Timeout (DM6 response expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+        else if ( result == 1 )
+        {//response received -> expected
+            
+            ECUfailTest = FALSE;
+            
+            //retrieve number of DTCs in message
+            if (dm6.DLC > 8)
+            {
+                numOfDTCs = (dm6.DLC - 2) / 4;
+            }
+            else if (dm6.DWORD(2) == 0)
+            {
+                numOfDTCs = 0;
+            }
+            else
+            {
+                numOfDTCs = 1;
+            }
+            
+            if(numOfDTCs == 0)
+            {//0 DTCs
+
+                if (dm6.DLC != 8)
+                {//data is not equal to 8-bytes in length 
+                    
+                	snprintf( TEXT2, elCount(TEXT2), "Transmitted DM6 with invalid number of bytes (%d) -> (8 expected)", dm6.DLC );
+                    formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+
+                    //ECU fails DM6 test due to format issue
+                    failure = TRUE;
+                    ECUfailTest = TRUE;
+                }
+
+                if ( (dm6.dword(2) != 0x00000000) || (dm6.WORD(6) != 0xffff) )
+                {//DM6 response formatted incorrectly
+                    
+                    snprintf( TEXT2, elCount(TEXT2), "DM6 formatted incorrectly..." );
+                    formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+
+                    if(dm6.dword(2) != 0x00000000)
+                    {//non-zero DTC
+                        snprintf( TEXT2, elCount(TEXT2), "DTC is 0x%x (expected 0)", dm6.dword(2) );
+                        formatTestReportData(COMMENT, NO, TEXT, TEXT2);
+                    }
+
+                    if(dm6.WORD(6) != 0xffff)
+                    {//fill bytes incorrectly filled
+                        snprintf( TEXT2, elCount(TEXT2), "Bytes 7 & 8 are 0x%x (0xFFFF expected)", dm6.WORD(6) );
+                        formatTestReportData(COMMENT, NO, TEXT, TEXT2);
+                    }
+                    
+                    //ECU fails DM6 test due to format issue
+                    failure = TRUE;
+                    ECUfailTest = TRUE;
+                }
+            }
+            else if (numOfDTCs == 1)
+            {//1 DTC
+
+                if (dm6.DLC != 8)
+                {//0 or 1 DTC AND data is not equal to 8-bytes in length 
+                    
+                	snprintf( TEXT2, elCount(TEXT2), "Transmitted DM6 with invalid number of bytes (%d) -> (8 expected)", dm6.DLC );
+                    formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+                }
+
+                if (dm6.WORD(6) != 0xffff)
+                {//ensure bytes 7 & 8 are 0xFF (respectively)
+                    
+                    snprintf( TEXT2, elCount(TEXT2), "Bytes 7 & 8 are 0x%x (0xFFFF expected)", dm6.WORD(6) );
+                    formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+                }
+
+                if (dm6.dword(2) != 0x00000000)
+                {//DTC/fault present
+                    
+                    snprintf( TEXT2, elCount(TEXT2), "DM6 bytes 3..6 are 0x%x (0x00000000 expected)", dm6.dword(2) );
+                    formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+                }
+
+                //ECU fails DM6 test due to fault being present or a formatting issue
+                failure = TRUE;
+                ECUfailTest = TRUE;
+            }
+            else if (numOfDTCs > 1)
+            {//more than one DTC
+
+   				snprintf( TEXT2, elCount(TEXT2), "More than one DTC present" );
+               	formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+								
+                for( i = 0; i < numOfDTCs; i++ )
+                {//ensure DTCs are reported correctly (not '0')
+                        
+              		if (dm6.DWORD(2+i*4) == 0)
+               		{//DTC is '0'
+               			snprintf( TEXT2, elCount(TEXT2), "DTC/freeze frame %d is 0 (non-zero expected)", i );
+						formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+	                }
+    	        }
+
+                if (dm6.DLC != (2 + numOfDTCs * 4))
+               	{//data length does not match expected length for number of DTCs
+
+    	    		snprintf( TEXT2, elCount(TEXT2), "Transmitted DM6 with invalid number of bytes (%d) -> (%d expected)", dm6.DLC, (2 + numOfDTCs * 4) );
+			    	formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+                }
+
+      			//ECU causes testcase to fail since there is more than zero DTCs  	
+   			   	failure = TRUE;
+                ECUfailTest = TRUE;
+        	}
+
+			if (numOfDTCs == expectedNumberOfDTCs)
+        	{//does number of DTCs for current ECU match expected number of DTCs?
+            	expectedNumOfDTCsFound = 1;
+	        }
+
+            if(dm6.MalfunctionIndicatorLampStatus != milState)
+   	    	{//MIL status bit indicates undesired MIL state
+	
+    			snprintf( TEXT2, elCount(TEXT2), "MIL state is %d (%d expected)", dm6.MalfunctionIndicatorLampStatus, milState );
+				formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+			}
+
+            if(ECUfailTest == FALSE)
+            {//ECU passes
+                snprintf( TEXT2, elCount(TEXT2), "Correctly responded to DM6 Request");
+                formatTestReportData(PASS, YES, TEXT, TEXT2);                 
+            }
+            else if(ECUfailTest == TRUE)
+            {//ECU fails
+                snprintf( TEXT2, elCount(TEXT2), "Incorrectly responded to DM6 Request");
+                formatTestReportData(FAIL, NO, TEXT, TEXT2);
+                failure = TRUE;
+            }
+        }
+        else if ( result == 2 )
+        {//negative acknowledge
+            snprintf( TEXT2, elCount(TEXT2), "Negative Acknowledge (DM6 response expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+        else if ( result == 3 )
+        {//positive acknowledge
+            //print to report
+            snprintf( TEXT2, elCount(TEXT2), "Positive Acknowledge (DM6 response expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+    }
+
+    if (expectedNumOfDTCsFound == 0)
+    {//The engine ECU must respond with a DM12, responses from others are expected but not required to pass the test
+        snprintf( TEXT2, elCount(TEXT2), "Expected no (zero) DTCs but received at least one DM6 response with one or more pending DTCs" );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        failure = TRUE;
+    }
+
+    if(failure == TRUE)
+    {//one or more DM6 messages failed
+        snprintf( TEXT2, elCount(TEXT2), "One or more DM6 responses failed (see above)." );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+    else if (failure == FALSE)
+    {//all DM6 messages pass
+        snprintf( TEXT2, elCount(TEXT2), "All pending emission-related faults (DM6) have been cleared." );
+        formatTestReportData(PASS, NO, TEXT, TEXT2);
+    }
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 6.6.1:  This testcase transmits a request for DM24 (SPN Support) to each of the 
+ *                       ECUs which responded to DM5.
+ *
+ *  PARAMETERS:
+ *              none
+ *
+ *  PASS CONDITION:  All emission-related ECUs must respond with support for SPN's 84, 92, 110, and 190.
+ *                   The testcase must also check each of these SPNs to ensure the returned data is valid.
+ *
+ *  FAIL CONDITION:  If any emission-related ECU does not support SPN 84, 92, 110, or 190.  If SPNs 84 and 
+ *                   190 are not 0 (zero).
+ *
+ *  NOTES:
+ *              Lack of support for DM24 is not necessarily a failure.  DM24 and DM25 are required for ECUs
+ *              supporting the California CCR 1971.1 regulation and later (but not previous regulations).
+ */
+testcase tc_6_6_1 ()
+{
+    byte failure, bothColumns, ECUfailTest;
+    long i, j, spn, result;
+    long SPN84Location, SPN92Location, SPN110Location, SPN190Location;   
+    pg DM24 dm24 = { DLC = 1785 };
+
+    setEnvVarEndTest();
+    
+    TestStep("1", "Verify ECUs transmit appropriate data for diagnostic use");
+
+    if (gEmissionRelatedECUCount == 0)
+    {//no emission related ECUs
+        snprintf( TEXT2, elCount(TEXT2), "No emission-related ECUs available!" );
+        formatTestReportData(FAIL, NO, "", TEXT2);        
+        return;
+    }
+
+    timeout = 500;  //ms
+    failure = FALSE;
+
+    for( i = 0; i < gEmissionRelatedECUCount; i++ )
+    {//send request for DM24 to each emission-related ECU
+
+        result = J1939TestRequest( dm24, 1785, getValue(EnvOBDII_TesterAddress), gEmissionRelatedECUAddress[i], timeout, kSpecificRequest|kEnableTP );
+
+        snprintf( TEXT, elCount(TEXT), "0x%x", gEmissionRelatedECUAddress[i] );        
+        
+        if ( result < 0 )
+        {//error
+            snprintf( TEXT2, elCount(TEXT2), "Error %d (DM24 response expected)", result );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+        else if( result == 0)
+        {//timeout
+            snprintf( TEXT2, elCount(TEXT2), "Timeout (DM24 response expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+        else if ( result == 1 )
+        {//response received -> expected
+
+            bothColumns = YES;
+            ECUfailTest = FALSE; 
+            
+            if (dm24.DLC % 4 != 0)
+            {//DLC invalid
+                snprintf( TEXT2, elCount(TEXT2), "DM24 has invalid data length; must be divisable by 4" );
+                formatTestReportData(COMMENT, bothColumns, TEXT, TEXT2); 
+                bothColumns = NO;
+                ECUfailTest = TRUE;
+            }
+            
+            //ensure SPNs 84, 92, 110, and 190 are present            
+            SPN84Location  = verifySPNinDM24( (pg CAPL_MSG)dm24, 84 );
+            SPN92Location  = verifySPNinDM24( (pg CAPL_MSG)dm24, 92 );
+            SPN110Location = verifySPNinDM24( (pg CAPL_MSG)dm24, 110 );
+            SPN190Location = verifySPNinDM24( (pg CAPL_MSG)dm24, 190 );
+            
+            if( SPN84Location == -1 )
+            {
+                spn = 84;
+                snprintf( TEXT2, elCount(TEXT2), "DM24 does not contain SPN %d", spn );
+                formatTestReportData(FAIL, bothColumns, TEXT, TEXT2);
+                bothColumns = NO;
+                ECUfailTest = TRUE;
+            }
+            
+            if( SPN92Location == -1 )
+            {
+                spn = 92;
+                snprintf( TEXT2, elCount(TEXT2), "DM24 does not contain SPN %d", spn );
+                formatTestReportData(FAIL, bothColumns, TEXT, TEXT2);
+                bothColumns = NO;
+                ECUfailTest = TRUE;
+            }
+            
+            if( SPN110Location == -1 )
+            {
+                spn = 110;
+                snprintf( TEXT2, elCount(TEXT2), "DM24 does not contain SPN %d", spn );
+                formatTestReportData(FAIL, bothColumns, TEXT, TEXT2);
+                bothColumns = NO;
+                ECUfailTest = TRUE;
+            }
+            
+            if( SPN190Location == -1 )
+            {
+                spn = 190;
+                snprintf( TEXT2, elCount(TEXT2), "DM24 does not contain SPN %d", spn );
+                formatTestReportData(FAIL, bothColumns, TEXT, TEXT2);
+                bothColumns = NO;
+                ECUfailTest = TRUE;
+            }
+            
+            switch(engineOn)
+            {
+                case(FALSE):
+                {//DM24 request with engine off
+
+                    if(getSignal( CCVS_EMS::WheelBasedVehicleSpeed ) != 0)
+                    {//SPN84 is not zero
+                        
+                        snprintf( TEXT2, elCount(TEXT2), "Wheel Based Vehicle Speed (SPN84) is %4.2f RPM (expected zero RPM)", getSignal( CCVS_EMS::WheelBasedVehicleSpeed ) );
+                        formatTestReportData(FAIL, bothColumns, TEXT, TEXT2);
+                        bothColumns = NO;
+                        ECUfailTest = TRUE;
+                        failure = TRUE;
+                    }
+    
+                    if(getSignal( EEC1_EMS::EngSpeed ) != 0)
+                    {//SPN190 is not zero
+                        
+                        snprintf( TEXT2, elCount(TEXT2), "Engine Speed (SPN190) is %4.2f RPM (expected zero RPM)", getSignal( EEC1_EMS::EngSpeed ) );
+                        formatTestReportData(FAIL, bothColumns, TEXT, TEXT2);
+                        bothColumns = NO;
+                        ECUfailTest = TRUE;
+                        failure = TRUE;
+                    }
+
+                    engineOn = TRUE;
+                }
+                break;
+                    
+                case(TRUE):
+                {//DM24 request with engine on
+
+                    if(getSignal( EEC1_EMS::EngSpeed ) == 0)
+                    {//SPN190 is zero
+                        snprintf( TEXT2, elCount(TEXT2), "Engine Speed (SPN190) is 0 RPM (expected non-zero RPM)." );
+                        formatTestReportData(FAIL, bothColumns, TEXT, TEXT2);
+                        bothColumns = NO;
+                        ECUfailTest = TRUE;
+                        failure = TRUE;
+                    }
+                    
+                    engineOn = OTHER;
+                }
+                break;
+
+                default:
+                break;
+            }
+
+            if(ECUfailTest == FALSE)
+            {//print to report
+                snprintf( TEXT2, elCount(TEXT2), "Required SPNs are supported and their values are appropriate");
+                formatTestReportData(PASS, YES, TEXT, TEXT2);
+            }
+        }
+        else if ( result == 2 )
+        {//negative acknowledge
+            snprintf( TEXT2, elCount(TEXT2), "Negative Acknowledge (DM24 response expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+        else if ( result == 3 )
+        {//positive acknowledge
+            //print to report
+            snprintf( TEXT2, elCount(TEXT2), "Positive Acknowledge (DM24 response expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+    }
+
+    if(failure == TRUE)
+    {//one or more DM24 messages failed
+        snprintf( TEXT2, elCount(TEXT2), "One or more DM24 responses failed (see above)." );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+    else if (failure == FALSE)
+    {//all DM24 messages pass
+        snprintf( TEXT2, elCount(TEXT2), "All emission-related ECUs positively responded." );
+        formatTestReportData(PASS, NO, TEXT, TEXT2);
+    }
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 6.7.1:  This testcase ensures the user turns the engine on before attempting J1939-84 6.7.2.
+ *
+ *  PARAMETERS:
+ *              none
+ *
+ *  PASS CONDITION:  The test passes if the user answers 'yes' to the engine status question.
+ *
+ *  FAIL CONDITION:  The test fails if the user answers 'no' to the engine status question.
+ *
+ *  NOTES:
+ *              The OBDII Compliance Test Prompt Panel will prompt the user to:
+ *                  1)  Turn the engine on
+ *                  2)  Turn on the A/C or Defroster (verification engine is actually on)
+ *                  3)  Let the engine idle for 1 minute
+ */
+testcase tc_6_7_1 ()
+{
+    long popup_reply;
+    long popup_reply_engine;
+    long popup_reply_idle;    
+    
+    setEnvVarEndTest();    
+    
+    TestStep("1", "Move ignition to crank position and start engine.");    
+    popup_reply_engine = TestWaitForTesterConfirmation (" >>>  6.7.1  <<<\n\n* Move ignition to crank position and start engine.\n\n* Press 'YES' button if engine is started.\n\n * Press 'NO' button if engine is not started.");
+
+    startLCDTimer = TRUE;
+    LCDMode = 60;
+
+    switch(popup_reply_engine)
+    {//get Engine status from user (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated engine had been started." );
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated engine had not been started." );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+    TestStep("2", "Was the engine allowed to idle for 60 seconds?");
+    popup_reply_idle = TestWaitForTesterConfirmation("1) Let the engine idle for 60 seconds.\n\n* Press 'YES' button if engine idled for at least 60 seconds.\n\n * Press 'NO' button if engine did not idle for at least 60 seconds.");
+
+    switch(popup_reply_idle)
+    {//get Test Unit connection status from user (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated engine was allowed to idle for 60 seconds." );
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated engine was not allowed to idle for 60 seconds." );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+    if((popup_reply_engine == 1) && (popup_reply_idle == 1))
+    {//engine was started AND allowed to idle for 60 seconds
+        
+        snprintf( TEXT, elCount(TEXT), "NOTE");
+        snprintf( TEXT2, elCount(TEXT2), "Repeating \"J1939-84 6.2 - 6.6\", but with Engine running...");
+        formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+    }
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 6.8.1:  This testcase transmits a global request for DM4 (freeze frame data).
+ *
+ *  PARAMETERS:
+ *              expectedNumberOfDTCs    number of expected DTCs from at least one ECU 
+ *
+ *  PASS CONDITION:  At least one ECU must support freeze frames.  Any ECUs that retuen a DM4 must have 
+ *                   bytes 1-5 of the data set to zero.  SPNs 84, 92, 110, and 192 must be supported for
+ *                   any ECU responding to the request.
+ *
+ *  FAIL CONDITION:  No ECUs support freeze frames.  Any emission-related ECU supports DM4 but does
+ *                   not support SPNs 84, 92, 110, or 192.  Bytes 1-5 are not zero.
+ *
+ *  NOTES:
+ *              If none of the ECUs support DM4 freeze frames, send a global request for DM25 to assure support.
+ *              Currently this testcase DOES NOT support this functionality.
+ */
+testcase tc_6_8_1 ( int expectedNumberOfDTCs )
+{
+    byte prevSA, curSA, failure, bothColumns, gotOneDM4, index;
+    long i, j, k;
+    long result, waitResponse, numOfDTCs, countDM4, numOfFFs, expectedNumOfDTCsFound;
+    long SPN84Location, SPN92Location, SPN110Location, SPN190Location; 
+    long spn, fmi, oc;
+    pg DM4 dm4 = { DLC = 1785 };
+
+    setEnvVarEndTest();
+
+    TestStep("1", "Request powertrain freeze frames from ALL ECUs" );
+    
+    if (gEmissionRelatedECUCount == 0)
+    {//no emission-related ECUs
+        snprintf(TEXT2, elCount(TEXT2), "No emission-related ECUs available!" );
+        formatTestReportData(FAIL, NO, "", TEXT2);
+        return;
+    }
+
+    timeout = 0;    //ms
+    gotOneDM4 = FALSE;
+
+    //send request for DM4
+    result = J1939TestRequest( dm4, 1785, getValue(EnvOBDII_TesterAddress), kNullAddress, timeout, kGlobalRequest );
+
+    snprintf( TEXT, elCount(TEXT), "0x%x", dm4.SA );
+    
+    if ( result < 0 )
+    {//error -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Error [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if( result == 0)
+    {//timeout -> expected
+    }
+    else if ( result == 1 )
+    {//response received -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Response received [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if ( result == 2 )
+    {//negative acknowledge -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Negative Acknowledge [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if ( result == 3 )
+    {//positive acknowledge -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Positive Acknowledge [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+
+    //wait for all DM4 messages
+    countDM4 = 0;
+    timeout = 500;    //ms
+    prevSA = kNullAddress;
+    curSA = kNullAddress;
+    
+    do
+    {
+        //DM4 received?
+        waitResponse = TestWaitForJ1939PG( DM4, timeout );
+
+        if ( waitResponse == -2 )
+        {//resume due to constraint violation
+            snprintf( TEXT2, elCount(TEXT2), "Constraint Violation (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }
+        else if ( waitResponse == -1 )
+        {//general error
+            snprintf( TEXT2, elCount(TEXT2), "General Error (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }            
+        else if ( waitResponse == 0 )
+        {//timeout -> do nothing
+        }
+        else if (waitResponse > 0)
+        {//received DM4
+            TestGetWaitJ1939PGData( dm4 );
+            
+            snprintf( TEXT, elCount(TEXT), "0x%x", dm4.SA );            
+    
+            //count freeze frames
+            i = 0;
+            numOfDTCs = 0;
+            numOfFFs = 0;
+            failure = FALSE;
+            gotOneDM4 = TRUE;
+
+            index = 0;
+
+            //set current source address
+            curSA = dm4.SA;
+            
+            if (dm4.dlc == 0)
+            {//nothing to evaluate
+                snprintf( TEXT2, elCount(TEXT2),"DM4 contains invalid number of bytes (%d)", dm4.SA, dm4.DLC );
+                formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+                failure = TRUE;
+            }
+
+            if (dm4.FreezeFrameLength != 0)
+            {//undesired response
+                
+                while((i < dm4.dlc) && (dm4.BYTE(i) != 0))
+                {//more freeze frames AND current freeze frame length is not 0
+
+                    //found at least one freeze frame
+                    numOfFFs++;
+
+                    //print freeze frame number and/or ECU address to report
+                    snprintf( TEXT2, elCount(TEXT2), "Freeze frame %d", numOfFFs );
+                    formatTestReportData(FAIL, !(prevSA == curSA), TEXT, TEXT2);
+                    failure = TRUE;
+
+                    if (dm4.DWORD(i+1) == 0)
+                    {//DTC value is zero
+                        snprintf( TEXT2, elCount(TEXT2), "Freeze frame %d contains zero-value DTC and non-zero Freeze Frame Length (%d)", numOfFFs, dm4.byte(i) );
+                        formatTestReportData(COMMENT, NO, TEXT, TEXT2);
+                    }
+                    else
+                    {//DTC value is non-zero
+                        spn = (dm4.dword(i+1) & 0xFFFF);
+                        fmi = (dm4.byte(i+3) & 0x1F);
+                        oc = (dm4.byte(i+4) & 0x7F);
+
+                        snprintf( TEXT2, elCount(TEXT2), "DTC = { SPN: %d, FMI: %d, OC: %d }", spn, fmi, oc );
+                        formatTestReportData(COMMENT, NO, TEXT, TEXT2);
+                    }
+
+                    for(j = 0; j < 6; j++)
+                    {
+                        switch(j)
+                        {//print data/contents of current freeze frame DM4 to the report
+
+                            case 0:
+                            {//Print Engine Torque Mode to test report
+                                index = (dm4.byte(i+5) & 0x0F);
+                                
+								if(index == 0xF)
+								{//Engine Torque Mode Not Available
+									snprintf( TEXT2, elCount(TEXT2), "Engine Torque Mode (SPN 899) is \"Not Available\"");
+								}
+								else
+								{
+									snprintf( TEXT2, elCount(TEXT2), "Engine Torque Mode (SPN 899): %s", DM4ETMValTable[index] );
+								}
+                            }
+                            break;
+
+                            case 1:
+                            {//Print Engine Turbo Boost Pressure to test report
+                				if( dm4.byte(i+6) == 0xFF )
+				                {//Engine Turbo Boost Pressure not available
+                				    snprintf( TEXT2, elCount(TEXT2), "Engine Turbo Boost Pressure (SPN 102) is \"Not Available\"");
+                				}
+            				    else if( (dm4.byte(i+6) < 0) || (dm4.byte(i+6) > 250) )
+            				    {//Engine Turbo Boost Pressure out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Engine Turbo Boost Pressure (SPN 102) value %d kPa (signal value out of range)", dm4.byte(i+6) );
+                   				}                				
+                				else
+            				    {
+	            				    snprintf( TEXT2, elCount(TEXT2), "Engine Turbo Boost Pressure (SPN 102): %d kPa", dm4.byte(i+6) );
+            				    }
+                            }
+                            break;
+
+                            case 2:
+                            {//Print Engine Speed to test report
+                            	if( dm4.word(i+7) == 0xFFFF )
+                            	{//engine speed is not available
+                            		snprintf( TEXT2, elCount(TEXT2), "Engine Speed (SPN 190) is \"Not Available\"");
+                        		}
+                				else if( (dm4.word(i+7) < 0) || (dm4.word(i+7) > 64255) )
+                				{//Engine Speed out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Engine Speed (SPN 190) value %d RPM (signal value out of range)", dm4.word(i+7) );
+                				}
+                        		else
+                        		{
+	                        		snprintf( TEXT2, elCount(TEXT2), "Engine Speed (SPN 190):  %d RPM", dm4.word(i+7) );
+                        		}
+                            }
+                            break;
+
+                            case 3:
+                            {//Print Engine Percent Load at Current Speed to test report
+                				if( dm4.byte(i+9) == 0xFF )
+                				{//Engine Percent Load at Current Speed out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Engine %% Load @ Current Speed (SPN 92) is \"Not Available\"");
+                				}
+                				else if( (dm4.byte(i+9) < 0) || (dm4.byte(i+9) > 250) )
+                				{//Engine Percent Load at Current Speed out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Engine load @ Current Speed (SPN 92) is %d %%%% (signal value out of range)", dm4.byte(i+9) );
+                				}
+                				else
+                				{
+	                				snprintf( TEXT2, elCount(TEXT2), "Engine Load @ Current Speed (SPN 92): %d %%%%", dm4.byte(i+9) );
+                				}
+                            }
+                            break;
+
+                            case 4:
+                            {//Print Engine Coolant Temperature to test report
+                				if( dm4.byte(i+10) == 0xFF )
+                				{//Engine Coolant Temperature out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Engine Coolant Temperature (SPN 110) is \"Not Available\"");
+                				}
+                				else if( (dm4.byte(i+10) < 0) || (dm4.byte(i+10) > 250) )
+                				{//Engine Coolant Temperature out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Engine Coolant Temperature (SPN 110) value %d °C (signal value out of range)", dm4.byte(i+10) );
+                				}      			
+                				else
+                				{
+	                				snprintf( TEXT2, elCount(TEXT2), "Engine Coolant Temperature (SPN 110):  %d °C", dm4.byte(i+10) );
+                				}
+                            }
+                            break;
+
+                            case 5:
+                            {//Print Wheel Based Vehicle Speed to test report
+                				if( dm4.word(i+11) == 0xFFFF )
+                				{//Wheel Based Vehicle Speed out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Wheel Based Vehicle Speed (SPN 86) is \"Not Available\"");
+                				}
+                				else if( (dm4.word(i+11) < 0) || (dm4.word(i+11) > 64255) )
+                				{//Wheel Based Vehicle Speed out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Wheel Based Vehicle Speed (SPN 86) value %d km/hr (signal value out of range)", dm4.Word(i+11) );
+                				}                				
+                				else
+                				{
+	                				snprintf( TEXT2, elCount(TEXT2), "Wheel Based Vehicle Speed (SPN 86): %d km/hr", dm4.word(i+11) );
+                				}
+                            }
+                            break;
+
+                            default:
+                            {}
+                            break;                
+                        }//end switch(j)
+
+                        formatTestReportData(COMMENT, NO, TEXT, TEXT2);
+                    
+                    }//end for loop
+                
+                    //get next freeze frame
+                    i += dm4.BYTE(i) + 1;
+                    numOfDTCs++;
+                    prevSA = curSA;
+
+                }//end while loop
+
+                failure = TRUE;
+            }
+            else
+            {//freeze frame length = 0; desired response
+                
+                failure = FALSE;
+                
+                if( dm4.DTC1 != 0)
+                {//invalid DTC
+                    snprintf( TEXT2, elCount(TEXT2),"DM4 contains freeze frame length of zero but has a non-zero DTC" );
+                    formatTestReportData(FAIL, !failure, TEXT, TEXT2);
+                    failure = TRUE;
+                }
+                
+                if( ( dm4.byte(5) != 0xFF ) || ( dm4.byte(6) != 0xFF ) || ( dm4.byte(7) != 0xFF ) )
+                {//invalid freeze frame data
+                    snprintf( TEXT2, elCount(TEXT2),"DM4 contains invalid freeze frame data (expected bytes 6-8 to be 0xFFFFFF)" );
+                    formatTestReportData(FAIL, !failure, TEXT, TEXT2);
+                    failure = TRUE;
+                }
+                
+                if( dm4.DLC > 8)
+                {//incorrect DLC
+                    snprintf( TEXT2, elCount(TEXT2),"DM4 contains invalid data length: %d bytes (expected 8 bytes)", dm4.DLC );
+                    formatTestReportData(FAIL, !failure, TEXT, TEXT2);
+                    failure = TRUE;
+                }
+            }//end if-else
+
+            // check if DM4 countains number of expected DTCs
+            if (expectedNumberOfDTCs == numOfDTCs)
+            {//it does
+                expectedNumOfDTCsFound = 1;
+            }
+            else
+            {//it doesn't
+                expectedNumOfDTCsFound = 0;
+                failure = TRUE;
+            }
+
+            //received at least one DM4 response
+            countDM4++;
+    	}//end if-else if
+
+    } while(waitResponse > 0);
+    
+    if (countDM4 != gEmissionRelatedECUCount)
+    {//ensure all ECUs have sent a DM4
+        
+        snprintf( TEXT, elCount(TEXT), "Only %d of %d ECUs sent a DM4", countDM4, gEmissionRelatedECUCount );
+        TestStepFail( TEXT );
+    }
+
+    if (countDM4 != getValue(EnvOBDII_NumOfEmmissionECUs))
+    {//if the number of ECU is not equal to the number entered in prompt 1, the test fails
+
+        snprintf( TEXT, elCount(TEXT), "%d emission-related ECUs with DM4 found, but %d expected (as configured in prompt).", countDM4, getValue(EnvOBDII_NumOfEmmissionECUs) );
+        TestStepFail( TEXT );
+    }
+
+    if (expectedNumOfDTCsFound == 0)
+    {//test fails if the number of expceted DTCs was not send from at least one ECU
+        snprintf( TEXT, elCount(TEXT), "Received %d DTCs in %d DM4 messages (expected %d DTCs)", numOfDTCs, countDM4, expectedNumberOfDTCs );
+        TestStepFail( TEXT );
+    }
+    
+    if(gotOneDM4 == FALSE)
+    {//didn't receive any DM4 responses
+        snprintf( TEXT2, elCount(TEXT2), "No ECUs support DM4 freeze frames." );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        return;
+    }
+
+    if(failure == TRUE)
+    {//one or more DM4 problems
+        snprintf( TEXT2, elCount(TEXT2), "One or more DM4 responses failed (see above)." );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+    else if (failure == FALSE)
+    {//all DM4 messages pass
+        snprintf( TEXT2, elCount(TEXT2), "All emission-related ECUs responded with DM4 containing 0 DTCs." );
+        formatTestReportData(PASS, NO, TEXT, TEXT2);
+    }
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 6.9.1 (1):  This testcase transmits a global request for the Vehicle Identification (VI).
+ *
+ *  PARAMETERS:
+ *  none
+ *
+ *  PASS CONDITION:  The test passes if ALL of the emission-related ECUs respond with the correct VIN.
+ *
+ *  FAIL CONDITION:  The test fails if ANY of the emission-related ECUs respond with a VIN different from
+ *                   the other VINs reported.
+ *
+ *  NOTES:
+ *              This test is the first part of two parts for SAE J1939-84 6.9.  See tc_6_9_1_2 for the
+ *              second part.
+ */
+testcase tc_6_9_1_1()
+{
+    byte firstVI, VINFailure, VINTestFails;
+    char identification[201];
+    long i, result, waitResponse, countVI;
+    pg VI_EMS vi = { DLC = 1785 };
+    
+    setEnvVarEndTest();
+    
+    TestStep("1", "Verify Vehicle Information (VIN)" );
+
+    if (gEmissionRelatedECUCount == 0)
+    {//no emission-related ECUs
+        snprintf(TEXT2, elCount(TEXT2), "No emission-related ECUs available!" );
+        formatTestReportData(FAIL, NO, "", TEXT2);
+        return;
+    }
+
+    firstVI = TRUE;    //set to true
+    VINTestFails = FALSE;
+    timeout = 0;    //ms; for J1939TestRequest this means VI will not be waited for
+
+    // send request for VI
+    result = J1939TestRequest( vi, 1785, getValue(EnvOBDII_TesterAddress), kNullAddress, timeout, kGlobalRequest );
+
+    if ( result < 0 )
+    {//error -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Error [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if( result == 0)
+    {//timeout -> expected
+    }
+    else if ( result == 1 )
+    {//response received -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Response received [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if ( result == 2 )
+    {//negative acknowledge -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Negative Acknowledge [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if ( result == 3 )
+    {//positive acknowledge -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Positive Acknowledge [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+
+    //wait for all responded VI messages
+    timeout = 500;  //ms
+    countVI = 0;
+       
+    do
+    {
+        //wait for VI            
+        waitResponse = TestWaitForJ1939PG( VI, timeout );
+
+        if ( waitResponse == -2 )
+        {//resume due to constraint violation
+            snprintf( TEXT2, elCount(TEXT2), "Constraint Violation (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            return;
+        }
+        else if ( waitResponse == -1 )
+        {//general error
+            snprintf( TEXT2, elCount(TEXT2), "General Error (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            return;
+        }            
+        else if ( waitResponse == 0 )
+        {//timeout -> do nothing
+        }
+        else if (waitResponse > 0)
+        {//received VI
+          
+            TestGetWaitJ1939PGData( vi );
+
+            snprintf( TEXT, elCount(TEXT), "0x%x", vi.SA );
+          
+            VINFailure = FALSE;
+            countVI++;
+
+            if(firstVI == TRUE)
+            {//first VI message received
+            
+                for( i = 0; i < vi.DLC; i++ )
+                {//get identification
+
+                    identification[i] = vi.BYTE(i);
+                }
+
+                //null terminate    
+                identification[i] = 0;
+        
+                if (strlen(identification) != 18)
+                {//check VIN length
+
+                    snprintf( TEXT2, elCount(TEXT2), "Wrong vehicle identification size: %d (17 characters expected)", strlen(identification) );
+                    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                    VINFailure = TRUE;
+                    VINTestFails = TRUE;
+                }
+        
+                if (identification[9] != getYearCharacter())
+                {//check year character
+ 
+                    snprintf( TEXT2, elCount(TEXT2), "Wrong year character in vehicle identification: '%c' (expected '%c' based on user input)", identification[9], getYearCharacter() );
+                    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                    VINFailure = TRUE;
+                    VINTestFails = TRUE;
+                }
+                
+                firstVI = FALSE;
+            }
+            else
+            {//not first VI message received
+         
+                //for additional ECUs
+                if (vi.DLC == strlen(identification))
+                {//data length = identification length
+                
+                    for( i = 0; i < vi.DLC; i++ )
+                    {//check all characters
+                    
+                        if (identification[i] != vi.BYTE(i))
+                        {//characters differ between VI
+                            snprintf( TEXT2, elCount(TEXT2), "Vehicle identification does not match" );
+                            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                            VINFailure = TRUE;
+                            VINTestFails = TRUE;
+                        }
+                    }
+                }
+                else
+                {//data length != identification length
+                    snprintf( TEXT2, elCount(TEXT2), "Wrong vehicle identification size: %d (17 characters expected)", strlen(identification) );
+                    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                    VINFailure = TRUE;
+                    VINTestFails = TRUE;               
+                }
+            }
+
+            if(VINFailure == FALSE)
+            {
+                //print the identification string
+                snprintf( TEXT2, elCount(TEXT2), "Reported VIN: %s", identification);
+                formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+            }
+            else if (VINFailure == TRUE)
+            {
+                //print the identification string
+                snprintf( TEXT2, elCount(TEXT2), "Reported VIN: %s", identification);
+                formatTestReportData(COMMENT, NO, TEXT, TEXT2);
+            }                
+        }
+    } while(waitResponse > 0);
+
+    if(VINTestFails == TRUE)
+    {
+        snprintf( TEXT2, elCount(TEXT2), "One or more ECUs responded with incorrect VIN" );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        return;
+    }
+
+    // test step passed
+    snprintf( TEXT2, elCount(TEXT2), "All ECUs agree on VIN - received %d VI message(s)", countVI );
+    formatTestReportData(PASS, NO, TEXT, TEXT2);
+    
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 6.9.1 (2):  This testcase transmits a request for DM19 (Calibration Information) to each
+ *                           of the emission-related ECUs.
+ *
+ *  PARAMETERS:
+ *              none
+ *
+ *  PASS CONDITION:  The test passes if CVNs and CALIDs are supported for ALL of the emission-related ECUs.
+ *
+ *  FAIL CONDITION:  The test fails if ANY of the emission-related ECUs do not support CVN/CALIDs, the 
+ *                   unused CALID bytes are not represented correctly, or the number of ECUs that respond are
+ *                   not the same as the number of reprogrammable emission-related ECUs per the users input.
+ *
+ *  NOTES:
+ *              This test is the second part of two parts for SAE J1939-84 6.9.  See tc_6_9_1_1 for the
+ *              first part.
+ *
+ *              Calibration Numbers (checksums) will be ECU independant, and can vary based on algorithm used.
+ */
+testcase tc_6_9_1_2()
+{
+    byte failure;
+    char RXCALID[1785];              //received CALID
+    char RXDM19MSG[1785];            //received DM19
+    byte multiCALIDs [89] [20];      //multiple received CALIDs
+    long a, b, c, i, j, k, x, y;     //looping variables
+    long result;                     //IL return value
+    long currentByte, numOfCALIDs;   //for validation of DM19 structure
+    pg DM19 dm19 = { DLC = 1785 };
+    
+    setEnvVarEndTest();    
+    
+    TestStep("1", "Request Calibration Information" );
+    
+    if (gEmissionRelatedECUCount == 0)
+    {//no emission-related ECUs
+        snprintf( TEXT2, elCount(TEXT2), "No emission-related ECUs available!" );
+        formatTestReportData(FAIL, NO, "", TEXT2);        
+        return;
+    }
+
+    failure = FALSE;
+    timeout = 250; //ms
+
+    for( i = 0; i < gEmissionRelatedECUCount; i++ )
+    {//send request for DM19 to each emission-related ECU
+    
+        //send request for DM19
+        result = J1939TestRequest( dm19, 1785, getValue(EnvOBDII_TesterAddress), gEmissionRelatedECUAddress[i], timeout, kSpecificRequest|kEnableTP );
+
+        snprintf( TEXT, elCount(TEXT), "0x%x", gEmissionRelatedECUAddress[i] );        
+        
+        if ( result < 0 )
+        {//error
+            snprintf( TEXT2, elCount(TEXT2), "Error %d (DM6 response expected)", result );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+        else if( result == 0)
+        {//timeout
+            snprintf( TEXT2, elCount(TEXT2), "Timeout (DM6 response expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+        else if (result == 1)
+        {//received DM19 response
+
+            if(dm19.DLC > 20)
+            {//DM19 has multiple CALIDs
+
+                if( ( dm19.DLC % 20 ) != 0)
+                {//invalid DLC
+                    
+                    snprintf( TEXT2, elCount(TEXT2), "ECU with address 0x%x transmitted DM19 with invalid number of bytes (%d)", gEmissionRelatedECUAddress[i], dm19.DLC );
+                    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                    failure = TRUE;
+                }
+                else
+                {//valid DLC
+                    
+                    currentByte = 0;
+
+                    numOfCALIDs = dm19.DLC / 20;
+                    
+                    for(x = 0; x < numOfCALIDs; x++)
+                    {//fill "multiCALIDs" array
+                        
+                        for(y = 0; y < 20; y++)     // j = 0..15
+                        {//get each CVN CALID pair
+            
+                            multiCALIDs[x][y] = dm19.byte(currentByte);
+                            
+                            currentByte++;
+                        }
+                    }
+
+                    snprintf( TEXT2, elCount(TEXT2), "Reported %d CALIDs", numOfCALIDs );
+                    formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+
+                    for(a = 0; a < numOfCALIDs; a++)
+                    {//populate RXCALID array
+
+                        for(b = 0; b < 16; b++)
+                        {
+                            currentByte = 19 - b;
+                            
+                            RXCALID[b] = multiCALIDs[a][currentByte];
+                        }
+
+                        for(c = 0; c < 16; c++)
+                        {//ensure message is correctly transmitted
+                
+                            if(c != 15)
+                            {
+                                if(RXCALID[c] == 0x00)
+                                {//signals the end of CALID data
+                    
+                                    if(RXCALID[c+1] != 0x00)
+                                    {//if next byte is not 0x00 - incorrect DM19 format
+                                        
+                                        snprintf( TEXT2, elCount(TEXT2), "CALID%d has incorrect format at byte %d", a, c );
+                                        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+                                        failure = TRUE;
+                                    }
+                                }
+                            }
+                            else
+                            {//do nothing, last byte of CALID
+                            }
+                        }
+                
+                        //output to report
+                        snprintf( TEXT2, elCount(TEXT2), "CALID %d:  %s", a+1, RXCALID);
+                        formatTestReportData(COMMENT, NO, TEXT, TEXT2);
+                    }
+                }
+            }
+            else
+            {//DM19 has single CALID
+
+                for(j = 0; j < 16; j++)     // j = 0..15
+                {//populate RXCALID array
+            
+                    currentByte = 19 - j;
+                
+                    RXCALID[j] = dm19.byte(currentByte);
+                }
+              
+                for(k = 0; k < 16; k++)
+                {//ensure message is correctly transmitted
+                
+                    if(RXCALID[k] == 0x00)
+                    {//signals the end of CALID data
+                    
+                        if(RXCALID[k+1] != 0x00)
+                        {//if next byte is not 0x00 - incorrect DM19 format
+                            snprintf( TEXT2, elCount(TEXT2), "CALID has incorrect format at byte %d", j );
+                            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                            failure = TRUE;
+                        }
+                    }
+                }
+
+                //output to report
+                snprintf( TEXT2, elCount(TEXT2), "Reported 1 CALID", RXCALID);
+                formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+
+                snprintf( TEXT, elCount(TEXT), "CALID" );
+                snprintf( TEXT2, elCount(TEXT2), "%s", RXCALID);
+                formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+            }
+        }
+        else if ( result == 2 )
+        {//received Negative Acknowledge
+            snprintf( TEXT2, elCount(TEXT2), "Expected DM19, received Negative Acknowledge [%d] from address %d", result, gEmissionRelatedECUAddress[i] );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+            return;
+        }
+        else if ( result == 3 )
+        {//received Positive Acknowledge
+            snprintf( TEXT2, elCount(TEXT2), "Expected DM19, received Positive Acknowledge [%d] from address %d", result, gEmissionRelatedECUAddress[i] );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+            return;
+        }
+    }
+
+    if(failure == TRUE)
+    {
+        snprintf( TEXT2, elCount(TEXT2), "One or more DM19 responses failed (see above)." );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        return;
+    }
+    else if (failure == FALSE)
+    {//all DM19 messages pass        
+        snprintf( TEXT2, elCount(TEXT2), "Calibration Information transmitted successfully." );
+        formatTestReportData(PASS, NO, TEXT, TEXT2);
+    }
+
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 7.1.1:  This testcase induces a circuit fault for the remaining tests.
+ *
+ *  PARAMETERS:
+ *              none
+ *
+ *  PASS CONDITION:  The test passes if the user answers 'yes' to ALL of the Setup Fault/Failure questions.
+ *
+ *  FAIL CONDITION:  The test fails if the user answers 'no' to ANY of the Setup Fault/Failure questions.
+ *
+ *  NOTES:
+ *              A pop-up window displays instructions to the tester:
+ *                  Turn the engine and ignition off.
+ *                  Disconnect a sensor that is continuously tested (e.g., Eng. coolant temp., Fuel pressure, etc.)
+ *                  Ensure CANoe is connected to the bus via SAE J1939-13 connector.
+ *
+ *              Additional pop-up windows will prompt the user to answer two questions:
+ *                  1)  Were the engine and ignition turned off?
+ *                  2)  Was a continuously monitored sensor disconnected?
+ */
+
+testcase tc_7_1_1 ()
+{
+    long popup_reply;
+
+    setEnvVarEndTest();    
+    
+    TestStep("1", "Stop Engine, Induce Fault");
+    popup_reply = TestWaitForTesterConfirmation (" >>>  7.1.1  <<<\n\n* Turn the engine and ignition off\n\n* Disconnect a sensor that is continuously tested (e.g., Eng. coolant temp., Fuel Pressure, etc.)\n\n* Press 'YES' button when ready to continue test\n\n * Press 'NO' to abort test");
+
+    switch(popup_reply)
+    {//was user ready to continue with the test? (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated ready to continue with test: continuing test...");
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated not ready to continue with test: test aborted!" );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+            stop();
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+    TestStep("2", "Were the engine and igntion turned off?");
+    popup_reply = TestWaitForTesterConfirmation("1) Were the engine and ignition turned off?");
+
+    switch(popup_reply)
+    {//was user ready to continue with the test? (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated engine and ingnition were turned off.");
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated engine and ignition were not turned off." );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+
+    TestStep("3", "Was a continuously monitored sensor disconnected?");
+    popup_reply = TestWaitForTesterConfirmation("2) Was a continuously monitored sensor disconnected?");
+
+    switch(popup_reply)
+    {//was user ready to continue with the test? (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated a continuously monitored sensor was disconnected.");
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated a continuously monitored sensor was not disconnected.");
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 7.1.2:  This testcase prompts tester to start engine once again.
+ *
+ *  PARAMETERS:
+ *              none
+ *
+ *  PASS CONDITION:  The test passes if the user answers 'yes' to ALL of the Setup Fault/Failure questions.
+ *
+ *  FAIL CONDITION:  The test fails if the user answers 'no' to ANY of the Setup Fault/Failure questions.
+ *
+ *  NOTES:
+ *              A pop-up window displays instructions to the tester:
+ *                  Move ignition to crank position and start engine.
+ *
+ *              Another pop-up window displays an instruction to the tester and asks for a response:
+ *                  1) Let the engine idle for 60 seconds.
+ *                  If engine idled for at least 60 seconds press 'yes' otherwise press 'no'.
+ */
+testcase tc_7_1_2 ()
+{
+    long popup_reply;
+    
+    setEnvVarEndTest();    
+    
+    TestStep("1", "Move ignition to crank position and start engine.");    
+    popup_reply = TestWaitForTesterConfirmation (" >>>  7.1.2  <<<\n\n* Move ignition to crank position and start engine.\n\n* Press 'YES' button if engine is started.\n\n * Press 'NO' button if engine is not started.");
+
+    startLCDTimer = TRUE;
+    LCDMode = 60;
+
+    switch(popup_reply)
+    {//get Engine status from user (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated engine had been started." );
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated engine had not been started." );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+    TestStep("2", "Was the engine allowed to idle for 60 seconds?");
+    popup_reply = TestWaitForTesterConfirmation("1) Let the engine idle for 60 seconds.\n\n* Press 'YES' button if engine idled for at least 60 seconds.\n\n * Press 'NO' button if engine did not idle for at least 60 seconds.");
+
+    switch(popup_reply)
+    {//get Test Unit connection status from user (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated engine was allowed to idle for 60 seconds." );
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester indicated engine was not allowed to idle for 60 seconds." );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 7.2.1:  This testcase transmits a global request for DM5 (diagnostic readiness 1).
+ *
+ *  PARAMETERS:
+ *  none
+ *
+ *  PASS CONDITION:  The test passes if ALL of the emission-related ECUs correctly repond.
+ *
+ *  FAIL CONDITION:  The test fails if ANY of the emission-related ECUs do not correctly repond.
+ *
+ *  NOTES:
+ *              This testcase uses the number of emissions-related ECUs provided by the tester from 
+ *              tc_6_2_1 (J1939-84 6.2.1).
+ *
+ *              This testcase transmits a global request for the DM5 message and logs the source addresses
+ *              of all of the responding ECUs.
+ */
+testcase tc_7_2_1 ()
+{
+    byte engineECUResponded;
+    long i, result, waitResponse;
+    pg DM5 dm5;
+
+    long popup_reply;
+    
+    setEnvVarEndTest();
+
+    TestStep("1", "Determine number of emissions related ECUs");
+
+    putValue(EnvOBDII_NumOfEmmissionECUs, gNumOfEmmissionECUs);
+
+    snprintf( TEXT2, elCount(TEXT2), "Used previously indicated number of emissions-related ECUs: %d (see \"J1939-84 6.2.1\")", getValue(EnvOBDII_NumOfEmmissionECUs));
+    formatTestReportData(WARNING, NO, TEXT, TEXT2);
+        
+    timeout = 0;  //ms; for J1939TestRequest this means DM5 will not be waited for
+
+    // send global request for DM5 and do not wait
+    result = J1939TestRequest( dm5, 1785, getValue(EnvOBDII_TesterAddress), kNullAddress, timeout, kGlobalRequest );
+
+    snprintf( TEXT, elCount(TEXT), "SA 0x%x", dm5.SA );
+    
+    if ( result < 0 )
+    {//error -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Error [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if( result == 0)
+    {//timeout -> expected
+    }
+    else if ( result == 1 )
+    {//response received -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Response received [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if ( result == 2 )
+    {//negative acknowledge -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Negative Acknowledge [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if ( result == 3 )
+    {//positive acknowledge -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Positive Acknowledge [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+        
+    TestStep("2", "Indicate ECUs that responded to Global Request for DM5 (identified by Source Address):");
+
+    gEmissionRelatedECUCount = 0;
+    engineECUResponded = FALSE;
+    timeout = 250;  //ms
+
+    do
+    {     
+        //wait for DM5
+        waitResponse = TestWaitForJ1939PG( DM5, timeout );
+
+        if ( waitResponse == -2 )
+        {//resume due to constraint violation
+            snprintf( TEXT2, elCount(TEXT2), "Constraint Violation (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }
+        else if ( waitResponse == -1 )
+        {//general error
+            snprintf( TEXT2, elCount(TEXT2), "General Error (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }            
+        else if ( waitResponse == 0 )
+        {//timeout -> do nothing
+        }
+        else if (waitResponse > 0)
+        {//received DM5
+     
+            TestGetWaitJ1939PGData( dm5 );
+
+            snprintf( TEXT, elCount(TEXT), "0x%x", dm5.SA );
+          
+            if(dm5.SA == 0x00)
+            {
+                engineECUResponded = TRUE;
+            }
+            
+            //populate list of responding ECUs (by Source Address)
+            gEmissionRelatedECUAddress[gEmissionRelatedECUCount] = dm5.SA;
+            gEmissionRelatedECUCount++;
+
+            //print to report
+            snprintf( TEXT2, elCount(TEXT2), "Responded to DM5 Request");
+            formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+        }
+    } while(waitResponse > 0);  //as long as there are more buffered messages
+
+    if (gEmissionRelatedECUCount == 0)
+    {//if there are no emission-related ECUs the test fails
+        snprintf(TEXT2, elCount(TEXT2), "No emission-related ECUs found; no DM5 received." );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        return;
+    }
+
+    if(engineECUResponded == FALSE)
+    {//did not receive DM5 from engine, test fails
+        snprintf( TEXT2, elCount(TEXT2), "Did not receive DM5 response from Engine (SA: 0x00)!" );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        return;        
+    }
+
+    if (gEmissionRelatedECUCount != getValue(EnvOBDII_NumOfEmmissionECUs))
+    {//if the number of ECU is not equal to the number entered in prompt 1, the test fails
+        snprintf( TEXT2, elCount(TEXT2), "%d emission-related ECU(s) found, but %d expected (as indicated by user via pop-up).", gEmissionRelatedECUCount, getValue(EnvOBDII_NumOfEmmissionECUs) );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        return;
+    }
+    
+    snprintf( TEXT2, elCount(TEXT2), "Received %d DM5 response message(s)", gEmissionRelatedECUCount );
+    formatTestReportData(PASS, NO, TEXT, TEXT2);
+
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 7.3.1:  This testcase transmits a global request for DM6 (Pending DTCs).
+ *
+ *  PARAMETERS:
+ *              milState                expected state of the malfunction indicator lamp
+ *
+ *  PASS CONDITION:  At least one ECU MUST respond to a DM6 request with one or more DTCs set.
+ *
+ *  FAIL CONDITION:  No ECU responds with at least one DTC set (at least one non-zero value DTC).
+ *
+ *  NOTES:
+ *              Every 500ms the tool will send a DM6 request to the global address (0xFF) to get pending DTCs.
+ *              If a DTC is set, tool will prompt user that DTC has been set and the test will continue.
+ *              If no pending DTCs are set after 30 seconds the test will be flagged as a failure and the 
+ *              tool will prompt the user to continue.
+ *
+ *              A pop-up window appears ONLY IF the DM6 response with a set DTC is not received in 30s.
+ *                  If tester wishes to contine test he chooses 'yes'; abort test 'no'.
+ *                   
+ */
+testcase tc_7_3_1 ( int milState )
+{
+    long popup_reply;
+    long   i, result, counter, pass, numOfDTCs, waitResponse;
+    pg DM6 dm6 = { DLC = 1785 };
+    
+    setEnvVarEndTest();    
+
+    TestStep("1", "Verify DTC State(s)");
+    
+    if (gEmissionRelatedECUCount == 0)
+    {//no emission-related ECUs
+        snprintf( TEXT2, elCount(TEXT2), "No emission-related ECUs available!" );
+        formatTestReportData(FAIL, NO, "", TEXT2);        
+        return;
+    }
+
+    counter = 0;
+    pass = FALSE;
+
+    for(counter; counter<59; counter++)
+    {
+//-------------
+        timeout = 0;  //ms; for J1939TestRequest this means DM6 will not be waited for
+    
+        // send global request for DM6 and do not wait
+        result = J1939TestRequest( dm6, 1785, getValue(EnvOBDII_TesterAddress), kNullAddress, timeout, kGlobalRequest );
+
+        snprintf( TEXT, elCount(TEXT), "0x%x", dm6.SA );
+    
+        if ( result < 0 )
+        {//error -> should never occur
+            snprintf( TEXT2, elCount(TEXT2), "Error [%d] (expected 0)", result );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            return;
+        }
+        else if( result == 0)
+        {//timeout -> expected
+        }
+        else if ( result == 1 )
+        {//response received -> should never occur
+            snprintf( TEXT2, elCount(TEXT2), "Response received [%d] (expected 0)", result );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            return;
+        }
+        else if ( result == 2 )
+        {//negative acknowledge -> should never occur
+            snprintf( TEXT2, elCount(TEXT2), "Negative Acknowledge [%d] (expected 0)", result );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            return;
+        }
+        else if ( result == 3 )
+        {//positive acknowledge -> should never occur
+            snprintf( TEXT2, elCount(TEXT2), "Positive Acknowledge [%d] (expected 0)", result );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            return;
+        }
+        
+        timeout = 250;  //ms
+        
+        do
+        {
+            //wait for DM6
+            waitResponse = TestWaitForJ1939PG( DM6, timeout );
+
+            if ( waitResponse == -2 )
+            {//resume due to constraint violation
+                snprintf( TEXT2, elCount(TEXT2), "Constraint Violation (%d)", waitResponse );
+                formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            }
+            else if ( waitResponse == -1 )
+            {//general error
+                snprintf( TEXT2, elCount(TEXT2), "General Error (%d)", waitResponse );
+                formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            }            
+            else if ( waitResponse == 0 )
+            {//timeout -> do nothing
+            }
+            else if (waitResponse > 0)
+            {//received DM6
+
+              TestGetWaitJ1939PGData( dm6 );
+
+              snprintf( TEXT, elCount(TEXT), "0x%x", dm6.SA );
+            
+                //retrieve number of DTCs in message
+                if (dm6.DLC > 8)
+                {
+                    numOfDTCs = (dm6.DLC - 2) / 4;
+                }
+                else if (dm6.DWORD(2) == 0)
+                {
+                    numOfDTCs = 0;
+                }
+                else
+                {
+                    numOfDTCs = 1;
+                }
+            
+                for( i = 0; i < numOfDTCs; i++ )
+                {//ensure DTCs are reported correctly (not '0')
+
+                    if (dm6.DWORD(2+i*4) == 0)
+                    {//DTC value is '0'
+                        snprintf( TEXT2, elCount(TEXT2), "DTC %d in DM6 is 0 (expected non-zero)", i );
+                        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+                        return;
+                    }
+                }
+
+                if ( numOfDTCs == 0 )
+                {//continue checking until 30s has elapsed
+                }
+                else if ( numOfDTCs == 1 )
+                {//one DTC
+                
+                    if (dm6.DLC != 8)
+                    {//incorrect DLC
+
+                        snprintf( TEXT2, elCount(TEXT2), "Transmitted DM6 with invalid number of bytes (%d)", dm6.DLC );
+                        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                        return;
+                    }
+
+                    if (dm6.WORD(6) != 0xffff)
+                    {//ensure bytes 7 & 8 are 0xFF (respectively)
+                    
+                        snprintf( TEXT2, elCount(TEXT2), "DM6 (bytes 7 & 8) are 0x%x (0xFFFF expected)", dm6.WORD(6) );
+                        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                        return;
+                    }
+
+                    pass = TRUE;
+                }
+                else if ( numOfDTCs > 1 )
+                {//more than one DTC
+
+                    if (dm6.DLC != (2 + numOfDTCs * 4))
+                    {//data length does not match expected length for number of DTCs
+
+                        snprintf( TEXT2, elCount(TEXT2), "Transmitted DM6 with invalid number of bytes (%d)", dm6.DLC );
+                        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                        return;
+                    }
+
+                    pass = TRUE;
+                }
+
+                
+                if (dm6.MalfunctionIndicatorLampStatus != milState)
+                {//does lamp status match required lamp status?
+
+                    snprintf( TEXT2, elCount(TEXT2), "MIL state in DM6 is %d (%d expected)", dm6.MalfunctionIndicatorLampStatus, milState );
+                    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                    return;
+                }
+                
+                //test passes
+                if(pass == TRUE)
+                {
+                    snprintf( TEXT2, elCount(TEXT2), "Reported %d DTC(s)", numOfDTCs );
+                    formatTestReportData(PASS, YES, TEXT, TEXT2);
+                    return;
+                }
+            }
+        } while(waitResponse > 0);  //as long as there are more buffered messages
+
+        //wait 500ms until trying again
+        TestWaitForTimeout(500);
+        
+    }//end for(counter; counter<59; counter++)
+
+    snprintf( TEXT2, elCount(TEXT2), "Pending DTC not set within 30 seconds of first DM6 request" );
+    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+
+    //30 seconds has passed with no valid DM6
+    popup_reply = TestWaitForTesterConfirmation (" >>>  7.3.1  <<<\n\n WARNING\n\nNo pending DTCs set\n\n30 seconds have elapsed\n\nPress 'YES' button to continue test.\n\n * Press 'NO' to abort the test.");
+
+    switch(popup_reply)
+    {//was user ready to run the test? (pop-up window)
+        case 1:
+        {//YES
+            snprintf( TEXT2, elCount(TEXT2), "Tester chose to continue test...");
+            formatTestReportData(PASS, NO, TEXT, TEXT2);
+        }
+        break;
+
+        case 2:
+        {//NO
+            snprintf( TEXT2, elCount(TEXT2), "Tester has chosen to abort the test: test aborted!" );
+            formatTestReportData(FAIL, NO, TEXT, TEXT2);
+            stop();
+        }
+        break;
+
+        default:
+        {}
+        break;
+    }
+
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 7.4.1:  This testcase transmits a global request for DM25 (expanded freeze frame data).
+ *
+ *  PARAMETERS:
+ *              None
+ *
+ *  PASS CONDITION:  At least one ECU must support expanded freeze frames.  The freeze frame length must 
+ *                   correctly correspond with the length of the data field for each freeze frame present.
+ *
+ *  FAIL CONDITION:  No ECUs support freeze frames.  Freeze frame length and data field length do not 
+ *                   correspond correctly.
+ *
+ *  NOTES:
+ *              The global array dm25RespondingECUs is populated and the data is used in tc_7_6_1
+ */
+testcase tc_7_4_1 ()
+{
+    byte    lastSA, failure, gotOneDM25, printSA;
+    long    i, result, waitResponse;
+    long    numOfDTCs, countDM25;
+    long    numOfFreezeFrames, correctNumOfFFDataBytes;
+    pg DM25 dm25 = { DLC = 1785 };
+
+    setEnvVarEndTest();
+
+    TestStep("1", "Request Expanded Freeze Frame Data");
+
+    if (gEmissionRelatedECUCount == 0)
+    {//no emission-related ECUs
+        snprintf(TEXT2, elCount(TEXT2), "No emission-related ECUs available!" );
+        formatTestReportData(FAIL, NO, "", TEXT2);
+        return;
+    }
+
+    timeout = 0;  //ms; for J1939TestRequest this means DM25 will not be waited for
+
+    //send request for DM25
+    result = J1939TestRequest( dm25, 1785, getValue(EnvOBDII_TesterAddress), kNullAddress, timeout, kGlobalRequest );
+
+    snprintf( TEXT, elCount(TEXT), "0x%x", dm25.SA );
+    
+    if ( result < 0 )
+    {//error -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Error [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if( result == 0)
+    {//timeout -> expected
+    }
+    else if ( result == 1 )
+    {//response received -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Response received [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if ( result == 2 )
+    {//negative acknowledge -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Negative Acknowledge [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if ( result == 3 )
+    {//positive acknowledge -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Positive Acknowledge [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+        
+    timeout = 500;  //ms
+    countDM25 = 0;
+    correctNumOfFFDataBytes = 1;
+    lastSA = 0xFF;
+    gotOneDM25 = FALSE;
+
+    do
+    {
+        //wait for DM25 responses
+        waitResponse = TestWaitForJ1939PG( DM25, timeout );
+
+        if ( waitResponse == -2 )
+        {//resume due to constraint violation
+            snprintf( TEXT2, elCount(TEXT2), "Constraint Violation (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }
+        else if ( waitResponse == -1 )
+        {//general error
+            snprintf( TEXT2, elCount(TEXT2), "General Error (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }            
+        else if ( waitResponse == 0 )
+        {//timeout -> do nothing
+        }
+        else if (waitResponse > 0)
+        {//received DM25
+            
+            TestGetWaitJ1939PGData( dm25 );
+          
+            snprintf( TEXT, elCount(TEXT), "0x%x", dm25.SA );
+          
+            numOfFreezeFrames = 1;
+            numOfDTCs = 0;
+            i = 0;
+            printSA = YES;
+            
+            //populate array for use in obd2GlobalRequestDM24
+            dm25RespondingECUs[countDM25] = dm25.SA;
+            
+            if (dm25.dlc == 0)
+            {//nothing to evaluate
+                snprintf( TEXT2, elCount(TEXT2),"Transmitted DM25 with invalid number of bytes (%d)", dm25.DLC );
+                formatTestReportData(FAIL, printSA, TEXT, TEXT2);
+                printSA = NO;
+            }
+
+            while((i < dm25.dlc) && (dm25.BYTE(i) != 0))
+            {//more freeze frames AND current freeze frame length is not 0
+
+                if(dm25.DWORD(i+1) == 0)
+                {//DTC is zero
+                    snprintf( TEXT2, elCount(TEXT2), "Freeze frame %d length (%d) indicates a freeze frame is present yet DTC is zero (expected non-zero DTC)", numOfFreezeFrames, dm25.byte(0) );
+                    formatTestReportData(COMMENT, printSA, TEXT, TEXT2);
+                    printSA = NO;
+                    correctNumOfFFDataBytes = 0;
+                }                
+                else if( dm25.byte(i) > (dm25.DLC - i) )
+                {//freeze frame length > # of remaining bytes of message
+                    snprintf( TEXT2, elCount(TEXT2), "Freeze frame %d length (%d) > remaining length of DM25 message (%d)", numOfFreezeFrames, dm25.byte(i), (dm25.DLC - i) );
+                    formatTestReportData(COMMENT, printSA, TEXT, TEXT2);
+                    printSA = NO;
+                    correctNumOfFFDataBytes = 0;
+                }
+                else
+                {
+                    //print to report
+                    snprintf( TEXT2, elCount(TEXT2), "Freeze frame %d has correct number of bytes (%d)", numOfFreezeFrames, dm25.byte(i) );
+
+                    //format left column
+                    if(lastSA != dm25.SA)
+                    {
+                        formatTestReportData(COMMENT, printSA, TEXT, TEXT2);
+                        printSA = NO;
+                    }
+                    else
+                    {
+                        formatTestReportData(COMMENT, NO, TEXT, TEXT2);
+                    }
+                }
+
+                //get next freeze frame
+                i += dm25.BYTE(i) + 1;
+                numOfDTCs++;
+                numOfFreezeFrames++;
+                lastSA = dm25.SA;
+            }
+
+            if( (dm25.ExpandedFreezeFrameLength == 0) && (dm25.DTC1 != 0) )
+            {//freeze frame value is zero AND DTC is non-zero
+                snprintf( TEXT2, elCount(TEXT2), "Zero freeze frames in DM25, but DTC is non-zero (expected zero)" );
+                formatTestReportData(COMMENT, printSA, TEXT, TEXT2);
+                printSA = NO;
+                numOfDTCs++;
+            }
+            else if( (dm25.ExpandedFreezeFrameLength == 0) && (dm25.byte(5) != 0xFF) && (dm25.byte(6) != 0xFF) && (dm25.byte(7) != 0xFF))
+            {//freeze frame value is zero AND data is not 0xFFFFFF
+                snprintf( TEXT2, elCount(TEXT2), "Zero freeze frames in DM25, but bytes 6-8 are incorrect (expected 0xFFFFFF)" );
+                formatTestReportData(COMMENT, printSA, TEXT, TEXT2);
+                printSA = NO;
+                numOfDTCs++;
+            }
+
+            countDM25++;
+            gotOneDM25 = TRUE;
+        }
+    } while(waitResponse > 0);
+
+    //check if all ECUs has sent DM25
+    if (countDM25 != gEmissionRelatedECUCount)
+    {
+        snprintf( TEXT2, elCount(TEXT2), "%d of %d ECUs have sent DM25", countDM25, gEmissionRelatedECUCount );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+
+    //if the number of ECU is not equal to the number entered in prompt 1, the test fails
+    if (countDM25 != getValue(EnvOBDII_NumOfEmmissionECUs))
+    {
+        snprintf( TEXT2, elCount(TEXT2), "%d emission-related ECUs withd DM25 found, but %d expected as configured in prompt.", countDM25, getValue(EnvOBDII_NumOfEmmissionECUs) );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+
+    if(gotOneDM25 == FALSE)
+    {//must receive at least one DM25 to be considered success
+        snprintf( TEXT2, elCount(TEXT2), "Did not receive any DM25 responses!" );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+        
+    
+    if(correctNumOfFFDataBytes == 0)
+    {//test step failed
+        snprintf( TEXT2, elCount(TEXT2), "One or more DM25 messages was incorrect" );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+    else if (correctNumOfFFDataBytes == 1)
+    {//test step passed
+        snprintf( TEXT2, elCount(TEXT2), "Correctly received %d DM25 response message(s)", countDM25 );
+        formatTestReportData(PASS, NO, TEXT, TEXT2);
+    }
+
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 7.5.1:  This testcase transmits a request for DM4 (Freeze Frame Data) to each of the 
+ *                       ECUs which responded to DM5.
+ *
+ *  PARAMETERS:
+ *              none
+ *
+ *  PASS CONDITION:  A NACK or a response are both acceptable returns.  If the ECU returns a response, 
+ *                   but it has no freeze frames, byte1 must be 0x00, bytes 2-5 must be 0x00000000, and
+ *                   bytes 6-8 must be 0xFFFFFF.
+ *
+ *  FAIL CONDITION:  No ECUs support freeze frames.  If only one ECU supports freeze frames it HAS TO BE the 
+ *                   Engine (SA:0x00) ECU.  Any emission-related ECU that responds with a DM4 that has 
+ *                   freeze frame data as "Not Available".
+ *
+ *  NOTES:
+ *              None
+ */
+testcase tc_7_5_1 ()
+{
+    byte gotOneDM4WithDTC;
+    byte gotOneDM4, index;
+    long i, result, waitResponse, countDM4;
+    long spn, fmi, oc;
+    pg DM4 dm4 = { DLC = 1785 };
+    
+    setEnvVarEndTest();
+
+    TestStep("1", "Request DM4 Freeze Frame Data (responses identified by Source Address)");
+    
+    if (gEmissionRelatedECUCount == 0)
+    {//no emission-related ECUs
+        snprintf( TEXT2, elCount(TEXT2), "No emission-related ECUs available!" );
+        formatTestReportData(FAIL, NO, "", TEXT2);        
+        return;
+    }
+
+    timeout = 500;  //ms
+    gotOneDM4WithDTC = FALSE;
+
+    for( i = 0; i < gEmissionRelatedECUCount; i++ )
+    {//send request for DM4 to each emission-related ECU
+    
+        //send request for DM4
+        result = J1939TestRequest( dm4, 1785, getValue(EnvOBDII_TesterAddress), gEmissionRelatedECUAddress[i], timeout, kSpecificRequest|kEnableTP );
+
+        snprintf( TEXT, elCount(TEXT), "0x%x", gEmissionRelatedECUAddress[i] );        
+        
+        if ( result < 0 )
+        {//error
+            snprintf( TEXT2, elCount(TEXT2), "Error %d (DM4 response or NACK expected)", result );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }
+        else if( result == 0)
+        {//timeout
+            snprintf( TEXT2, elCount(TEXT2), "Timeout (DM4 response or NACK expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }
+        else if (result == 1)
+        {//received DM4 response
+
+            if (dm4.FreezeFrameLength != 0)
+            {//desired response
+                
+                //print freeze frame number and ECU address to report
+                snprintf( TEXT2, elCount(TEXT2), "Received non-zero freeze frame" );
+                formatTestReportData(PASS, YES, TEXT, TEXT2);
+
+               	gotOneDM4WithDTC = TRUE;                        
+            }
+            else
+            {//freeze frame length = 0; undesired response
+                
+                if( dm4.DTC1 != 0)
+                {//invalid DTC
+
+                    snprintf( TEXT2, elCount(TEXT2),"Transmitted DM4 with freeze frame length of zero and a non-zero DTC", dm4.SA );
+                    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                }
+
+                if( ( dm4.byte(5) != 0xFF ) || ( dm4.byte(6) != 0xFF ) || ( dm4.byte(7) != 0xFF ) )
+                {//invalid freeze frame data
+
+                    snprintf( TEXT2, elCount(TEXT2),"Transmitted DM4 with invalid freeze frame data (expected bytes 6-8 to be 0xFFFFFF)", dm4.SA );
+                    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                }
+            }//end if-else
+
+            //count number of DM4 responses
+            countDM4++;
+    	}
+        else if ( result == 2 )
+        {//received Negative Acknowledge
+            snprintf( TEXT2, elCount(TEXT2), "DM4 not supported, NACK received" );
+            formatTestReportData(PASS, YES, TEXT, TEXT2);
+        }
+        else if ( result == 3 )
+        {//received Positive Acknowledge
+            snprintf( TEXT2, elCount(TEXT2), "Positive Acknowledge received (DM4 response or NACK expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }
+    }
+
+    if(gotOneDM4WithDTC == FALSE)
+    {//did not receive a DM4 containing at least 1 DTC
+	    snprintf( TEXT2, elCount(TEXT2), "Did not receive any DM4 responses containing at least one DTC" );
+    	formatTestReportData(FAIL, NO, TEXT, TEXT2);
+	}
+    
+    if( countDM4 == 0 )
+    {//did not receive any DM4 responses
+        snprintf( TEXT2, elCount(TEXT2), "Did not receive a DM4 response from any of the emission-related ECUs" );
+    	formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+    
+    if (countDM4 != gEmissionRelatedECUCount)
+    {//ensure all ECUs have sent a DM4
+        snprintf( TEXT2, elCount(TEXT2), "Only %d of %d ECUs sent a DM4", countDM4, gEmissionRelatedECUCount );
+    	formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+
+    if (countDM4 != getValue(EnvOBDII_NumOfEmmissionECUs))
+    {//if the number of ECU is not equal to the number entered in prompt 1, the test fails
+        snprintf( TEXT2, elCount(TEXT2), "%d emission-related ECUs supporting DM4 found, but %d expected (as configured in prompt).", countDM4, getValue(EnvOBDII_NumOfEmmissionECUs) );
+    	formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+    
+    clearEnvVarEndTest();          
+}
+
+/*
+ *  SAE-J1939-84 7.5.2:  This testcase evaluates the data acquired in the DM4 (Freeze Frame Data) response
+ *                       to tc_7_5_1.
+ *
+ *  PARAMETERS:
+ *              none
+ *
+ *  PASS CONDITION:  A NACK or a response are both acceptable returns.  If the ECU returns a response, 
+ *                   but it has no freeze frames, byte1 must be 0x00, bytes 2-5 must be 0x00000000, and
+ *                   bytes 6-8 must be 0xFFFFFF.
+ *
+ *  FAIL CONDITION:  No ECUs support freeze frames.  If only one ECU supports freeze frames it HAS TO BE the 
+ *                   Engine (SA:0x00) ECU.  Any emission-related ECU that responds with a DM4 that has 
+ *                   freeze frame data as "Not Available".
+ *
+ *  NOTES:
+ *              None
+ */
+testcase tc_7_5_2 ()
+{
+    byte failure, gotOneDM4WithDTC, FFError;
+    byte prevSA, curSA, ECUFailTest, bothColumns, gotOneDM4, index;
+    long i, j, result, waitResponse, numOfFFs, countDM4;
+    long spn, fmi, oc;
+    pg DM4 dm4 = { DLC = 1785 };
+    
+    setEnvVarEndTest();
+
+    TestStep("1", "Evaluate Requested DM4 Freeze Frame Data (identified by Source Address & Freeze Frame number)");
+    
+    if (gEmissionRelatedECUCount == 0)
+    {//no emission-related ECUs
+        snprintf( TEXT2, elCount(TEXT2), "No emission-related ECUs available!" );
+        formatTestReportData(FAIL, NO, "", TEXT2);        
+        return;
+    }
+
+    timeout = 500;  //ms
+    gotOneDM4WithDTC = FALSE;
+    prevSA = kNullAddress;
+    curSA = kNullAddress;
+    failure = FALSE;
+
+    for( i = 0; i < gEmissionRelatedECUCount; i++ )
+    {//send request for DM4 to each emission-related ECU
+    
+        //send request for DM4
+        result = J1939TestRequest( dm4, 1785, getValue(EnvOBDII_TesterAddress), gEmissionRelatedECUAddress[i], timeout, kSpecificRequest|kEnableTP );
+
+        snprintf( TEXT, elCount(TEXT), "0x%x", gEmissionRelatedECUAddress[i] );        
+        
+        if ( result < 0 )
+        {//error
+            snprintf( TEXT2, elCount(TEXT2), "Error %d (DM4 response or NACK expected)", result );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+        else if( result == 0)
+        {//timeout
+            snprintf( TEXT2, elCount(TEXT2), "Timeout (DM4 response or NACK expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+        else if (result == 1)
+        {//received DM4 response
+
+            j = 0;
+            numOfFFs = 0;
+            FFError = FALSE;
+            ECUFailTest = FALSE;
+
+            //set current source address
+            curSA = dm4.SA;
+            
+            if (dm4.FreezeFrameLength != 0)
+            {//desired response
+                
+                while((i < dm4.dlc) && (dm4.BYTE(i) != 0))
+                {//more freeze frames AND current freeze frame length is not 0
+
+                    //found at least one freeze frame
+                    numOfFFs++;
+
+                    //print freeze frame number and/or ECU address to report
+                    snprintf( TEXT2, elCount(TEXT2), "Freeze frame %d", numOfFFs );
+                    formatTestReportData(WARNING, !(prevSA == curSA), TEXT, TEXT2);
+
+                    if (dm4.DWORD(i+1) == 0)
+                    {//DTC value is zero
+                        snprintf( TEXT2, elCount(TEXT2), "Freeze frame %d contains zero-value DTC and non-zero Freeze Frame Length (%d)", numOfFFs, dm4.byte(i) );
+                        formatTestReportData(COMMENT, NO, TEXT, TEXT2);
+                    }
+                    else
+                    {//DTC value is non-zero
+                        spn = (dm4.dword(i+1) & 0xFFFF);
+                        fmi = (dm4.byte(i+3) & 0x1F);
+                        oc = (dm4.byte(i+4) & 0x7F);
+
+                        snprintf( TEXT2, elCount(TEXT2), "DTC = { SPN: %d, FMI: %d, OC: %d }", spn, fmi, oc );
+                        formatTestReportData(COMMENT, NO, TEXT, TEXT2);
+                        
+                    	gotOneDM4WithDTC = TRUE;                        
+                    }
+
+                    for(j = 0; j < 6; j++)
+                    {
+                        switch(j)
+                        {//print data/contents of current freeze frame DM4 to the report
+
+                            case 0:
+                            {//Print Engine Torque Mode to test report
+                                index = (dm4.byte(i+5) & 0x0F);
+                                
+								if(index == 0xF)
+								{//Engine Torque Mode Not Available
+									snprintf( TEXT2, elCount(TEXT2), "Engine Torque Mode (SPN 899) is \"Not Available\"");
+									FFError = TRUE;
+								}
+								else
+								{
+									snprintf( TEXT2, elCount(TEXT2), "Engine Torque Mode (SPN 899): %s", DM4ETMValTable[index] );
+								}
+                            }
+                            break;
+
+                            case 1:
+                            {//Print Engine Turbo Boost Pressure to test report
+                				if( dm4.byte(i+6) == 0xFF )
+				                {//Engine Turbo Boost Pressure not available
+                				    snprintf( TEXT2, elCount(TEXT2), "Engine Turbo Boost Pressure (SPN 102) is \"Not Available\"");
+				                    FFError = TRUE;
+                				}
+            				    else if( (dm4.byte(i+6) < 0) || (dm4.byte(i+6) > 250) )
+            				    {//Engine Turbo Boost Pressure out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Engine Turbo Boost Pressure (SPN 102) value %d kPa (signal value out of range)", dm4.byte(i+6) );
+                    				FFError = TRUE;
+                				}                				
+                				else
+            				    {
+	            				    snprintf( TEXT2, elCount(TEXT2), "Engine Turbo Boost Pressure (SPN 102): %d kPa", dm4.byte(i+6) );
+            				    }
+                            }
+                            break;
+
+                            case 2:
+                            {//Print Engine Speed to test report
+                            	if( dm4.word(i+7) == 0xFFFF )
+                            	{//engine speed is not available
+                            		snprintf( TEXT2, elCount(TEXT2), "Engine Speed (SPN 190) is \"Not Available\"");
+                            		FFError = TRUE;
+                        		}
+                				else if( (dm4.word(i+7) < 0) || (dm4.word(i+7) > 64255) )
+                				{//Engine Speed out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Engine Speed (SPN 190) value %d RPM (signal value out of range)", dm4.word(i+7) );
+                    				FFError = TRUE;
+                				}
+                        		else
+                        		{
+	                        		snprintf( TEXT2, elCount(TEXT2), "Engine Speed (SPN 190):  %d RPM", dm4.word(i+7) );
+                        		}
+                            }
+                            break;
+
+                            case 3:
+                            {//Print Engine Percent Load at Current Speed to test report
+                				if( dm4.byte(i+9) == 0xFF )
+                				{//Engine Percent Load at Current Speed out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Engine Load at Current Speed (SPN 92) is \"Not Available\"");
+                    				FFError = TRUE;
+                				}
+                				else if( (dm4.byte(i+9) < 0) || (dm4.byte(i+9) > 250) )
+                				{//Engine Percent Load at Current Speed out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Engine Load at Current Speed (SPN 92) is %d %%%%. (signal value out of range)", dm4.byte(i+9) );
+				                    FFError = TRUE;
+                				}
+                				else
+                				{
+	                				snprintf( TEXT2, elCount(TEXT2), "Engine Load at Current Speed (SPN 92): %d %%%%", dm4.byte(i+9) );
+                				}
+                            }
+                            break;
+
+                            case 4:
+                            {//Print Engine Coolant Temperature to test report
+                				if( dm4.byte(i+10) == 0xFF )
+                				{//Engine Coolant Temperature out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Engine Coolant Temperature (SPN 110) is \"Not Available\"");
+                    				FFError = TRUE;
+                				}
+                				else if( (dm4.byte(i+10) < 0) || (dm4.byte(i+10) > 250) )
+                				{//Engine Coolant Temperature out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Engine Coolant Temperature (SPN 110) value %d °C (signal value out of range)", dm4.byte(i+10) );
+                    				FFError = TRUE;
+                				}      			
+                				else
+                				{
+	                				snprintf( TEXT2, elCount(TEXT2), "Engine Coolant Temperature (SPN 110):  %d °C", dm4.byte(i+10) );
+                				}
+                            }
+                            break;
+
+                            case 5:
+                            {//Print Wheel Based Vehicle Speed to test report
+                				if( dm4.word(i+11) == 0xFFFF )
+                				{//Wheel Based Vehicle Speed out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Wheel Based Vehicle Speed (SPN 86) is \"Not Available\"");
+                    				FFError = TRUE;
+                				}
+                				else if( (dm4.word(i+11) < 0) || (dm4.word(i+11) > 64255) )
+                				{//Wheel Based Vehicle Speed out of range
+                    				snprintf( TEXT2, elCount(TEXT2), "Wheel Based Vehicle Speed (SPN 86) value %d km/hr (signal value out of range)", dm4.Word(i+11) );
+									FFError = TRUE;
+                				}                				
+                				else
+                				{
+	                				snprintf( TEXT2, elCount(TEXT2), "Wheel Based Vehicle Speed (SPN 86): %d km/hr", dm4.word(i+11) );
+                				}
+                            }
+                            break;
+
+                            default:
+                            {}
+                            break;                
+                        }//end switch(j)
+
+                        if ( FFError == TRUE )
+                        {//freeze frame error
+                        	formatTestReportData(FAIL, NO, TEXT, TEXT2);
+                            failure = TRUE;
+                    	}
+                    	else if ( FFError == FALSE )
+                    	{
+	                    	formatTestReportData(PASS, NO, TEXT, TEXT2);
+                    	}
+
+                        FFError = FALSE;                 
+                    }//end for loop
+                
+                    //get next freeze frame
+                    i += dm4.BYTE(i) + 1;
+                    prevSA = curSA;
+
+                }//end while loop
+            }
+            else
+            {//freeze frame length = 0; undesired response
+                
+                curSA = dm4.SA;
+                
+                if( dm4.DTC1 != 0)
+                {//invalid DTC
+
+                    snprintf( TEXT2, elCount(TEXT2),"Transmitted DM4 with freeze frame length of zero and a non-zero DTC", dm4.SA );
+                    formatTestReportData(FAIL, !(prevSA == curSA), TEXT, TEXT2);
+                    failure = TRUE;
+                    prevSA = curSA;
+                }
+
+                if( ( dm4.byte(5) != 0xFF ) || ( dm4.byte(6) != 0xFF ) || ( dm4.byte(7) != 0xFF ) )
+                {//invalid freeze frame data
+
+                    snprintf( TEXT2, elCount(TEXT2),"Transmitted DM4 with invalid freeze frame data (expected bytes 6-8 to be 0xFFFFFF)", dm4.SA );
+                    formatTestReportData(FAIL, !(prevSA == curSA), TEXT, TEXT2);
+                    failure = TRUE;
+                }
+            }//end if-else
+
+            //received at least one DM4 response
+            countDM4++;
+    	}
+        else if ( result == 2 )
+        {//received Negative Acknowledge
+            snprintf( TEXT2, elCount(TEXT2), "DM4 not supported, NACK received" );
+            formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+        }
+        else if ( result == 3 )
+        {//received Positive Acknowledge
+            snprintf( TEXT2, elCount(TEXT2), "Positive Acknowledge received (DM4 response or NACK expected)" );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+    }
+
+    if(gotOneDM4WithDTC == FALSE)
+    {//did not receive a DM4 containing at least 1 DTC
+	    snprintf( TEXT2, elCount(TEXT2), "Did not receive any DM4 responses containing at least one DTC" );
+    	formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        failure = TRUE;
+	}
+    
+    if( countDM4 == 0 )
+    {//did not receive any DM4 responses
+        snprintf( TEXT2, elCount(TEXT2), "Did not receive a DM4 response from any of the emission-related ECUs" );
+    	formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        failure = TRUE;
+    }
+    
+    if (countDM4 != gEmissionRelatedECUCount)
+    {//ensure all ECUs have sent a DM4
+        snprintf( TEXT2, elCount(TEXT2), "Only %d of %d ECUs sent a DM4", countDM4, gEmissionRelatedECUCount );
+    	formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        failure = TRUE;
+    }
+
+    if (countDM4 != getValue(EnvOBDII_NumOfEmmissionECUs))
+    {//if the number of ECU is not equal to the number entered in prompt 1, the test fails
+        snprintf( TEXT2, elCount(TEXT2), "%d emission-related ECUs supporting DM4 found, but %d expected (as configured in prompt).", countDM4, getValue(EnvOBDII_NumOfEmmissionECUs) );
+    	formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        failure = TRUE;
+    }      
+
+    if(failure == TRUE)
+    {//one or more DM4 messages failed
+        snprintf( TEXT2, elCount(TEXT2), "One or more DM4 responses failed (see above)." );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+    else if (failure == FALSE)
+    {//all DM4 messages pass
+        snprintf( TEXT2, elCount(TEXT2), "DM4 responses correctly received from all emission-related ECUs" );
+        formatTestReportData(PASS, NO, TEXT, TEXT2);
+    }
+
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 7.6.1:  This testcase transmits a global request for DM24 (SPN Support).
+ *
+ *  PARAMETERS:
+ *              None
+ *
+ *  PASS CONDITION:  At least one ECU must have SPN support.  For each ECU that supports DM24, the SPN
+ *                   for each of the minimum required freeze frame parameters must be reported with expanded
+ *                   freeze frame support indicated in the SPN Support Type.
+ *
+ *  FAIL CONDITION:  No ECUs have SPN support.  Any ECU that responded to the DM25 request indicates that no 
+ *                   SPNs are supported for freeze frame.
+ *
+ *  NOTES:
+ *              The global array dm25RespondingECUs is used for determining the second failure condition.
+ */
+
+testcase tc_7_6_1 ()
+{
+    byte printSA, ECUfailTest, SPNError;
+    long i, j, result, waitResponse, countDM24, spn;
+    long SPN84Location, SPN92Location, SPN110Location, SPN190Location;
+      
+    pg DM24 dm24 = { DLC = 1785 };
+    
+    setEnvVarEndTest();    
+
+    TestStepBegin("1", "Request SPN Support");
+    
+    if (gEmissionRelatedECUCount == 0)
+    {//no emission-related ECUs
+        snprintf(TEXT2, elCount(TEXT2), "No emission-related ECUs available!" );
+        formatTestReportData(FAIL, NO, "", TEXT2);
+        return;
+    }
+
+    timeout = 0;    //ms
+   
+    //send request for DM24
+    result = J1939TestRequest( dm24, 1785, getValue(EnvOBDII_TesterAddress), kNullAddress, timeout, kGlobalRequest );
+
+    snprintf( TEXT, elCount(TEXT), "0x%x", dm24.SA );
+    
+    if ( result < 0 )
+    {//error -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Error [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if( result == 0)
+    {//timeout -> expected
+    }
+    else if ( result == 1 )
+    {//response received -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Response received [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if ( result == 2 )
+    {//negative acknowledge -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Negative Acknowledge [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if ( result == 3 )
+    {//positive acknowledge -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Positive Acknowledge [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+
+    timeout = 500;
+    countDM24 = 0;
+    ECUfailTest = FALSE;
+
+    do
+    {
+        //wait for DM24 response
+        waitResponse = TestWaitForJ1939PG( DM24, timeout );
+
+        if ( waitResponse == -2 )
+        {//resume due to constraint violation
+            snprintf( TEXT2, elCount(TEXT2), "Constraint Violation (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }
+        else if ( waitResponse == -1 )
+        {//general error
+            snprintf( TEXT2, elCount(TEXT2), "General Error (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        }            
+        else if ( waitResponse == 0 )
+        {//timeout -> do nothing
+        }
+        else if (waitResponse > 0)
+        {//received DM24
+
+            TestGetWaitJ1939PGData( dm24 );
+
+            snprintf( TEXT, elCount(TEXT), "0x%x", dm24.SA );
+
+            printSA = YES;
+            SPNError = NO;
+            
+            if (dm24.DLC % 4 != 0)
+            {//DLC invalid
+                snprintf( TEXT2, elCount(TEXT2), "DM24 has invalid length:  must be divisable by 4" );
+                formatTestReportData(FAIL, printSA, TEXT, TEXT2);
+                ECUfailTest = TRUE;
+                printSA = NO;
+            }
+            
+            //ensure SPNs 84, 92, 110, and 190 are present            
+            SPN84Location  = verifySPNinDM24( (pg CAPL_MSG)dm24, 84 );
+            SPN92Location  = verifySPNinDM24( (pg CAPL_MSG)dm24, 92 );
+            SPN110Location = verifySPNinDM24( (pg CAPL_MSG)dm24, 110 );
+            SPN190Location = verifySPNinDM24( (pg CAPL_MSG)dm24, 190 );
+            
+            if( SPN84Location == -1 )
+            {
+                spn = 84;
+                snprintf( TEXT2, elCount(TEXT2), "DM24 does not contain SPN %d", spn );
+                formatTestReportData(FAIL, NO, TEXT, TEXT2);
+                ECUfailTest = TRUE;
+                SPNError = YES;
+            }
+            
+            if( SPN92Location == -1 )
+            {
+                spn = 92;
+                snprintf( TEXT2, elCount(TEXT2), "DM24 does not contain SPN %d", spn );
+                formatTestReportData(FAIL, NO, TEXT, TEXT2);
+                ECUfailTest = TRUE;
+                SPNError = YES;
+            }
+            
+            if( SPN110Location == -1 )
+            {
+                spn = 110;
+                snprintf( TEXT2, elCount(TEXT2), "DM24 does not contain SPN %d", spn );
+                formatTestReportData(FAIL, NO, TEXT, TEXT2);
+                ECUfailTest = TRUE;
+                SPNError = YES;
+            }
+            
+            if( SPN190Location == -1 )
+            {
+                spn = 190;
+                snprintf( TEXT2, elCount(TEXT2), "DM24 does not contain SPN %d", spn );
+                formatTestReportData(FAIL, NO, TEXT, TEXT2);
+                ECUfailTest = TRUE;
+                SPNError = YES;
+            }
+            
+            if(getSignal( EEC1_EMS::EngSpeed ) == 0)
+            {//SPN190 is zero
+                snprintf( TEXT2, elCount(TEXT2), "Engine Speed (SPN190) is 0 RPM (expected non-zero)");
+                formatTestReportData(FAIL, printSA, TEXT, TEXT2);
+                printSA = NO;
+                ECUfailTest = TRUE;
+            }
+                    
+            if(SPNError == TRUE)
+            {
+                snprintf( TEXT2, elCount(TEXT2), "One or more required SPNs is not supported");
+                formatTestReportData(PASS, printSA, TEXT, TEXT2);
+            }
+            else if(SPNError == FALSE)
+            {
+                snprintf( TEXT2, elCount(TEXT2), "Required SPNs are supported");
+                formatTestReportData(PASS, printSA, TEXT, TEXT2);
+            }
+
+            countDM24++;
+        }
+    } while(waitResponse > 0);
+
+    //check if all ECUs has sent DM25
+    if (countDM24 == 0)
+    {//At least one ECU must support DM24
+        snprintf( TEXT2, elCount(TEXT2), "DM24 not supported by any emission-related ECUs" );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+        ECUfailTest = FAIL;
+    }
+    
+    if(ECUfailTest == TRUE)
+    {//test step failed
+        snprintf( TEXT2, elCount(TEXT2), "One or more DM24 messages was incorrect" );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+    else if (ECUfailTest == FALSE)
+    {//test step passed
+        snprintf( TEXT2, elCount(TEXT2), "Correctly received %d DM24 response message(s)", countDM24 );
+        formatTestReportData(PASS, NO, TEXT, TEXT2);
+    }
+    
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 7.7.1:  This testcase transmits a global request for DM12 (Emissions-Related Active 
+ *                       Diagnostic Trouble Codes).
+ *
+ *  PARAMETERS:
+ *              milState                expected state of the malfunction indicator lamp
+ *
+ *  PASS CONDITION:  A stored DTC is received, and the MIL lamp is ON.
+ *
+ *  FAIL CONDITION:  No stored DTC or MIL Lamp is OFF.
+ *
+ *  NOTES:
+ *              None
+ */
+testcase tc_7_7_1 ( long milState )
+{
+    byte failure, gotOneCorrectMIL, printSA, gotMILandDTC;
+    long i, j, result, waitResponse;
+    long numOfDTCs;
+    long expectedNumOfDTCsFound;
+    long countDM12, countMIL, countDTC;
+    long spn, fmi, oc, MILState;
+    pg DM12 dm12 = { DLC = 1785 };
+    
+    setEnvVarEndTest();
+
+    TestStepBegin("1", "Verify MIL on & at least one DTC set");
+
+    timeout = 0;    //ms
+    
+    if (gEmissionRelatedECUCount == 0)
+    {//no emission-related ECUs
+        snprintf(TEXT2, elCount(TEXT2), "No emission-related ECUs available!" );
+        formatTestReportData(FAIL, NO, "", TEXT2);
+        return;
+    }
+
+    // send request for DM12
+    result = J1939TestRequest( dm12, 8, getValue(EnvOBDII_TesterAddress), kNullAddress, timeout, kGlobalRequest );
+
+    snprintf( TEXT, elCount(TEXT), "0x%x", dm12.SA );
+    
+    if ( result < 0 )
+    {//error -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Error [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if( result == 0)
+    {//timeout -> expected
+    }
+    else if ( result == 1 )
+    {//response received -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Response received [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if ( result == 2 )
+    {//negative acknowledge -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Negative Acknowledge [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+    else if ( result == 3 )
+    {//positive acknowledge -> should never occur
+        snprintf( TEXT2, elCount(TEXT2), "Positive Acknowledge [%d] (expected 0)", result );
+        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+        return;
+    }
+
+    // wait for DM12 from each emission-related ECU
+    countDM12 = 0;
+    countDTC = 0;
+    countMIL = 0;
+    timeout = 500;  //ms
+    failure = FALSE;
+    gotMILandDTC = FALSE;
+    
+    do
+    {
+        //DM12 received? 
+        waitResponse = TestWaitForJ1939PG( DM12, timeout );
+
+        if ( waitResponse == -2 )
+        {//resume due to constraint violation
+            snprintf( TEXT2, elCount(TEXT2), "Constraint Violation (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }
+        else if ( waitResponse == -1 )
+        {//general error
+            snprintf( TEXT2, elCount(TEXT2), "General Error (%d)", waitResponse );
+            formatTestReportData(FAIL, YES, TEXT, TEXT2);
+            failure = TRUE;
+        }            
+        else if ( waitResponse == 0 )
+        {//timeout -> do nothing
+        }
+        else if (waitResponse > 0)
+        {//received DM12
+
+            TestGetWaitJ1939PGData( dm12 );
+
+            snprintf( TEXT, elCount(TEXT), "0x%x", dm12.SA );
+
+            //retrieve number of DTCs in message
+            if (dm12.DLC > 8)
+            {
+                numOfDTCs = (dm12.DLC - 2) / 4;
+            }
+            else if (dm12.DWORD(2) == 0)
+            {
+                numOfDTCs = 0;
+            }
+            else
+            {
+                numOfDTCs = 1;
+            }
+
+            if (numOfDTCs <= 1)
+            {//0 or 1 DTC(s)
+                
+                if (dm12.DLC != 8)
+                {
+                    snprintf( TEXT2, elCount(TEXT2), "Transmitted DM12 with invalid number of bytes (%d)", dm12.DLC );
+                    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                    failure = TRUE;
+                }
+
+                if (dm12.WORD(6) != 0xffff)
+                {//ensure bytes 7 & 8 are 0xFF (respectively)
+                    
+                    snprintf( TEXT2, elCount(TEXT2), "DM12 (byte 7 & 8) is 0x%x (0xFFFF expected)", dm12.WORD(6) );
+                    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                    failure = TRUE;
+                }
+
+                if(numOfDTCs == 0)
+                {
+                    MILState = (dm12.byte(0) & 0xC0) >> 6;
+                    spn = (dm12.dword(2) & 0xFFFF);
+                    fmi = (dm12.byte(4) & 0x1F);
+                    oc = (dm12.byte(5) & 0x7F);
+                    
+                    snprintf( TEXT2, elCount(TEXT2), "DTC = { SPN: %d, FMI: %d, OC: %d }, MIL State: %s", spn, fmi, oc, MILStateTable[MILState] );
+                    formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+
+                    snprintf( TEXT2, elCount(TEXT2), "Zero Value DTC and MIL not set" );
+                    formatTestReportData(WARNING, NO, TEXT, TEXT2);
+                }
+
+                if(numOfDTCs == 1)
+                {
+                    MILState = (dm12.byte(0) & 0xC0) >> 6;
+                    spn = (dm12.dword(2) & 0xFFFF);
+                    fmi = (dm12.byte(4) & 0x1F);
+                    oc = (dm12.byte(5) & 0x7F);
+                    
+                    snprintf( TEXT2, elCount(TEXT2), "DTC = { SPN: %d, FMI: %d, OC: %d }, MIL State: %s", spn, fmi, oc, MILStateTable[MILState] );
+                    formatTestReportData(COMMENT, YES, TEXT, TEXT2);
+
+                    if( ( MILState == 0 ) || ( MILState == 3 ) )
+                    {
+                        snprintf( TEXT2, elCount(TEXT2), "MILState is %d (expected 1 or 2)", MILState );
+                        formatTestReportData(WARNING, NO, TEXT, TEXT2);
+                    }
+                    else
+                    {
+                        gotMILandDTC = TRUE;
+                    }
+                }
+            }
+            else if (numOfDTCs > 1)
+            {//more than one DTC
+
+                j = 0;
+                printSA = YES;
+                
+                if (dm12.DLC != (2 + numOfDTCs * 4))
+                {//data length does not match expected length for number of DTCs
+
+                    snprintf( TEXT2, elCount(TEXT2), "Transmitted DM12 with invalid number of bytes (%d) -> (%d expected)", dm12.DLC, (2 + numOfDTCs * 4) );
+                    formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                    failure = TRUE;
+                }
+
+                for( i = 0; i < numOfDTCs; i++ )
+                {//ensure DTCs are reported correctly (not '0')
+
+                    if (dm12.DWORD(2+j) == 0)
+                    {//DTC is '0'
+                        snprintf( TEXT2, elCount(TEXT2), "DTC %d in DM12 is 0 (non-zero DTC expected)", i );
+                        formatTestReportData(FAIL, YES, TEXT, TEXT2);
+                        failure = TRUE;
+                    }
+
+                    MILState = (dm12.byte(j+0) & 0xC0) >> 6;
+                    spn = (dm12.dword(j+2) & 0xFFFF);
+                    fmi = (dm12.byte(j+4) & 0x1F);
+                    oc = (dm12.byte(j+5) & 0x7F);
+                    
+                    snprintf( TEXT2, elCount(TEXT2), "DTC = { SPN: %d, FMI: %d, OC: %d }, MIL State: %s", spn, fmi, oc, MILStateTable[MILState] );
+                    formatTestReportData(COMMENT, printSA, TEXT, TEXT2);
+
+                    if( ( MILState == 0 ) || ( MILState == 3 ) )
+                    {
+                        snprintf( TEXT2, elCount(TEXT2), "MILState is %d (expected 1 or 2)", MILState );
+                        formatTestReportData(WARNING, NO, TEXT, TEXT2);
+                    }
+                    else
+                    {
+                        gotMILandDTC = TRUE;
+                    }
+
+                    j += 6;
+                    printSA = NO;
+                }
+            }
+
+            if(numOfDTCs >= 1)
+            {
+                countDTC++;
+            }
+            
+            if (dm12.MalfunctionIndicatorLampStatus == milState)
+            {//does lamp status for current ECU match required lamp status?
+                countMIL++;
+            }        
+ 
+            countDM12++;
+        }
+    } while(waitResponse > 0);
+
+    if( ( countDTC == 0) || (countMIL == 0) )
+    {//no DTCs set or MIL lamp never set
+        failure = TRUE;
+    }
+
+    if( gotMILandDTC == FALSE )
+    {//did not received at least one DM12 response with MIL on and DTC set
+        failure = TRUE;
+    }
+
+    if(failure == TRUE)
+    {
+        snprintf( TEXT2, elCount(TEXT2), "One or more DM12 messages was incorrect" );
+        formatTestReportData(FAIL, NO, TEXT, TEXT2);
+    }
+    else if(failure == FALSE)
+    {
+        snprintf( TEXT2, elCount(TEXT2), "Received %d DM12 response(s): At least one response had MIL on and >= 1 DTC set", countDM12, countMIL);
+        formatTestReportData(PASS, NO, TEXT, TEXT2);
+    }
+
+    putValueToControl("OBDII Compliance Test Prompt","TesterInstructions", "\n\n\t\t\t TEST COMPLETE");
+
+    clearEnvVarEndTest();
+}
+
+/*
+ *  SAE-J1939-84 6.7.2:  THIS TEST CASE IS NEVER CALLED! (PLACEHOLDER).
+ *
+ *  PARAMETERS:
+ *              none
+ *
+ *  PASS CONDITION:  N/A
+ *
+ *  FAIL CONDITION:  N/A
+ *
+ *  NOTES:
+ *              The tester will be repeating J1939-84 6.2.1 - 6.6.1.  This is already accounted for in the 
+ *              XML.  This test case is only listed here to inform the user that J1939-84 6.7.2 is implicitly
+ *              performed.
+ */
+testcase tc_6_7_2 ()
+{
+    //NOTHING HAPPENS HERE!!!
+
+    //DO NOT PUT CODE HERE!!!
+}
+
+on envVar EnvOBDII_StartTest
+{
+    getValue(EnvOBDII_VehicleMake, gVehicleMake);
+
+    getValue(EnvOBDII_VehicleModel, gVehicleModel);
+
+    TestReportAddSUTInfo  ("Vehicle Make", gVehicleMake);
+
+    TestReportAddSUTInfo  ("Vehicle Model", gVehicleModel);
+}
+
+setEnvVarEndTest ()
+{
+    putValue(EnvEMS_EndTest, 1);
+}
+
+clearEnvVarEndTest ()
+{
+    putValue(EnvEMS_EndTest, 0);
+}
+

@@ -1,0 +1,213 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "include\PDU-NM-ASR_Eth.cin"
+  #include "include\VectorConceptCar_Grid.cin"
+}
+
+variables
+{
+}
+
+on serviceSignal LaneDetection::DetectedLaneBorder[0].ReliabilityLeft
+{
+  $Vehicle_Ethernet::sif_2000::LaneInfo::LaneReliabilityLeft = this;
+}
+
+on serviceSignal LaneDetection::DetectedLaneBorder[0].ReliabilityRight
+{
+  $Vehicle_Ethernet::sif_2000::LaneInfo::LaneReliabilityRight = this;
+}
+
+on serviceSignal LaneDetection::DetectedLaneBorder[0].BorderLeft
+{
+  if ($LaneDetection::DetectedLaneBorder[0].ReliabilityLeft > 80)
+  {
+    if (this > -1.0)
+    {
+      $LaneInfo::LaneDeparture = 1;
+    }
+    else if ($LaneDetection::DetectedLaneBorder[0].BorderRight > 1.0)
+    {
+      $LaneInfo::LaneDeparture = 0;
+    }
+  }
+}
+
+on serviceSignal LaneDetection::DetectedLaneBorder[0].BorderRight
+{
+  if ($LaneDetection::DetectedLaneBorder[0].ReliabilityLeft > 80)
+  {
+    if (this < 1.0)
+    {
+      $LaneInfo::LaneDeparture = 2;
+    }
+    else if ($LaneDetection::DetectedLaneBorder[0].BorderLeft < -1.0)
+    {
+      $LaneInfo::LaneDeparture = 0;
+    }
+  }
+}
+
+on serviceSignal ObstacleDetection::Segment[2].Distance
+{
+  if (this < 20)
+  {
+    $LaneInfo::CollisionWarning = 1;
+  }
+  else
+  {
+    $LaneInfo::CollisionWarning = 0;
+  }
+}
+
+
+on serviceSignal TrafficSignDetection::DetectedTrafficSign[0].DistanceToSign
+{
+  ProcessSpeedLimitSigns();
+  ProcessNoPassingSigns();
+  ProcessWarningSigns();
+}
+
+void ProcessSpeedLimitSigns()
+{
+  byte   speedLimitSign;
+  double distanceToSign;
+  
+  speedLimitSign = 0;
+  distanceToSign = 150;
+  
+  if (($TrafficSignDetection::DetectedTrafficSign[0].SignType > 0) && ($TrafficSignDetection::DetectedTrafficSign[0].SignType <= 7))
+  {
+    if ($TrafficSignDetection::DetectedTrafficSign[0].DistanceToSign < distanceToSign)
+    {
+      speedLimitSign = $TrafficSignDetection::DetectedTrafficSign[0].SignType;
+      distanceToSign = $TrafficSignDetection::DetectedTrafficSign[0].DistanceToSign;
+    }
+  }
+
+  if (($TrafficSignDetection::DetectedTrafficSign[1].SignType > 0) && ($TrafficSignDetection::DetectedTrafficSign[1].SignType <= 7))
+  {
+    if ($TrafficSignDetection::DetectedTrafficSign[1].DistanceToSign < distanceToSign)
+    {
+      speedLimitSign = $TrafficSignDetection::DetectedTrafficSign[1].SignType;
+      distanceToSign = $TrafficSignDetection::DetectedTrafficSign[1].DistanceToSign;
+    }
+  }
+  
+  if (($TrafficSignDetection::DetectedTrafficSign[2].SignType > 0) && ($TrafficSignDetection::DetectedTrafficSign[2].SignType <= 7))
+  {
+    if ($TrafficSignDetection::DetectedTrafficSign[2].DistanceToSign < distanceToSign)
+    {
+      speedLimitSign = $TrafficSignDetection::DetectedTrafficSign[2].SignType;
+      distanceToSign = $TrafficSignDetection::DetectedTrafficSign[2].DistanceToSign;
+    }
+  }
+
+  switch(speedLimitSign)
+  {
+    case 1: $TrafficSignInfo::SpeedLimit =  30; break;
+    case 2: $TrafficSignInfo::SpeedLimit =  50; break;
+    case 3: $TrafficSignInfo::SpeedLimit =  60; break;
+    case 4: $TrafficSignInfo::SpeedLimit =  70; break;
+    case 5: $TrafficSignInfo::SpeedLimit =  80; break;
+    case 6: $TrafficSignInfo::SpeedLimit = 100; break;
+    case 7: $TrafficSignInfo::SpeedLimit =   0; break;
+  }
+}
+
+void ProcessNoPassingSigns()
+{
+  byte   noPassingSign;
+  double distanceToSign;
+  
+  noPassingSign = 0;
+  distanceToSign = 150;
+  
+  // check first detectec traffic sign
+  if (  (($TrafficSignDetection::DetectedTrafficSign[0].SignType >= 8) && ($TrafficSignDetection::DetectedTrafficSign[0].SignType <= 9))
+      || ($TrafficSignDetection::DetectedTrafficSign[0].SignType == 7) )
+  {
+    if ($TrafficSignDetection::DetectedTrafficSign[0].DistanceToSign < distanceToSign)
+    {
+      noPassingSign = $TrafficSignDetection::DetectedTrafficSign[0].SignType;
+      distanceToSign = $TrafficSignDetection::DetectedTrafficSign[0].DistanceToSign;
+    }
+  }
+
+  // check second detectec traffic sign
+  if (  (($TrafficSignDetection::DetectedTrafficSign[1].SignType >= 8) && ($TrafficSignDetection::DetectedTrafficSign[1].SignType <= 9))
+      || ($TrafficSignDetection::DetectedTrafficSign[1].SignType == 7) )
+  {
+    if ($TrafficSignDetection::DetectedTrafficSign[1].DistanceToSign < distanceToSign)
+    {
+      noPassingSign = $TrafficSignDetection::DetectedTrafficSign[1].SignType;
+      distanceToSign = $TrafficSignDetection::DetectedTrafficSign[1].DistanceToSign;
+    }
+  }
+
+  // check third detectec traffic sign
+  if (  (($TrafficSignDetection::DetectedTrafficSign[2].SignType >= 8) && ($TrafficSignDetection::DetectedTrafficSign[2].SignType <= 9))
+      || ($TrafficSignDetection::DetectedTrafficSign[2].SignType == 7) )
+  {
+    if ($TrafficSignDetection::DetectedTrafficSign[2].DistanceToSign < distanceToSign)
+    {
+      noPassingSign = $TrafficSignDetection::DetectedTrafficSign[2].SignType;
+      distanceToSign = $TrafficSignDetection::DetectedTrafficSign[2].DistanceToSign;
+    }
+  }
+
+  switch(noPassingSign)
+  {
+    case 8: $TrafficSignInfo::NoPassingZone = 1; break;
+    case 9: $TrafficSignInfo::NoPassingZone = 0; break;
+  }
+}
+
+void ProcessWarningSigns()
+{
+  byte   warningSign;
+  double distanceToSign;
+  
+  warningSign = 0;
+  distanceToSign = 150;
+  
+  // check first detectec traffic sign
+  if (($TrafficSignDetection::DetectedTrafficSign[0].SignType >= 10) && ($TrafficSignDetection::DetectedTrafficSign[0].SignType <= 13))
+  {
+    if ($TrafficSignDetection::DetectedTrafficSign[0].DistanceToSign < distanceToSign)
+    {
+      warningSign    = $TrafficSignDetection::DetectedTrafficSign[0].SignType;
+      distanceToSign = $TrafficSignDetection::DetectedTrafficSign[0].DistanceToSign;
+    }
+  }
+
+  // check second detectec traffic sign
+  if (($TrafficSignDetection::DetectedTrafficSign[1].SignType >= 10) && ($TrafficSignDetection::DetectedTrafficSign[1].SignType <= 13))
+  {
+    if ($TrafficSignDetection::DetectedTrafficSign[1].DistanceToSign < distanceToSign)
+    {
+      warningSign    = $TrafficSignDetection::DetectedTrafficSign[1].SignType;
+      distanceToSign = $TrafficSignDetection::DetectedTrafficSign[1].DistanceToSign;
+    }
+  }
+
+  // check third detectec traffic sign
+  if (($TrafficSignDetection::DetectedTrafficSign[2].SignType >= 10) && ($TrafficSignDetection::DetectedTrafficSign[2].SignType <= 13))
+  {
+    if ($TrafficSignDetection::DetectedTrafficSign[2].DistanceToSign < distanceToSign)
+    {
+      warningSign    = $TrafficSignDetection::DetectedTrafficSign[2].SignType;
+      distanceToSign = $TrafficSignDetection::DetectedTrafficSign[2].DistanceToSign;
+    }
+  }
+
+  switch(warningSign)
+  {
+    case 10:  $TrafficSignInfo::Hazard   = 1; break;
+    case 11:  $TrafficSignInfo::Hazard   = 0; break;
+    case 12:  $TrafficSignInfo::RoadWork = 1; break;
+    case 13:  $TrafficSignInfo::RoadWork = 0; break;
+  }
+}
+

@@ -1,0 +1,2042 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "RT_helper.cin"
+}
+
+variables
+{
+  byte gVerboseRequest = 1;
+}
+
+// ==============================================================================================================
+// Do request(1/2) and await response after doing a request.
+//
+// Params:
+// pg* pgResponse: referential result parameter of the response.
+// errText       : referential parameter for the error text on any errors.
+// pgnReq        : pgn to request
+// srcReq        : src node address of the request
+// dstReq        : dst node address of the request
+// pgnResp       : pgn of the response.
+// srcResp       : src node address of the response. 
+// dstResp       : dst node address of the response. 
+// timeout       : timeout in ms waiting for the response.
+// prio          : prio of the request
+// rqt           : request type. use gReqType1 or gReqType2
+//
+// returns
+// =0: ok
+// -1: timeout
+// -2: failed to wait for response pg
+// -3: failed to retrieve response pg.
+// -4: expected ACK not detected.
+// -5: expected XFER not detected.
+// -6: expected NACK not detected.
+// -7: expected DENY not detected.
+// -8: expected BUSY not detected.
+int CT_Request_And_Await_Response(enum gReqType rqt, pg* pgResponse, struct gPGAttrs pgi, char errText[], 
+  byte srcReq, byte dstReq, byte srcResp, byte dstResp, word timeout, byte prio, enum gXferType xfer)
+{
+  long result;
+  char text[1024];
+  char fn[255] = "CT_Request_And_Await_Response";
+  int64 tsReq, tsRts;
+  dword sa,da;
+  byte verbose;
+  byte ilEnabled;
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  
+  ilEnabled = CT_ENABLE_TESTNODE_IL();
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+
+  verbose = gVerboseRequest;
+  gVerboseRequest = 1; // next time automatically verbosity 1.
+  
+  if ( (rqt == gReqType1) || ( (rqt==gReqType2) && (xfer!=gXferYes) ) )
+  {
+    CT_Warning( (CT_IsPdu2(pgi.PGN) && CT_IsDlc8(pgi) && (dstResp != gc_BC_ADDR) ), fn, "PGN is of type PDU2 with DLC8, but response destination is not configured as 0xFF.");
+  }
+
+  // print infos...
+  snprintf(text, elcount(text), "Params: pgnReq:0x%.05X, srcReq:0x%.02X, dstReq:0x%.02X, srcResp:0x%.02X, dstResp:0x%.02X timeout:%dms", pgi.PGN, srcReq, dstReq, srcResp, dstResp, timeout);
+  CT_Info(@CT::DEBUG::CHECKS, fn, text);
+  
+  // prepare report output for request and awaiting response...
+  CT_Info(@CT::DEBUG::CHECKS, fn, "Awaiting response...");
+  
+  // Report that a request is indicated...
+  snprintf(text, elcount(text), "PGN %d (0x%.05X) requesting       ... (%X -> %X)", pgi.PGN, pgi.PGN, srcReq, dstReq);
+  if (verbose) 
+  {
+    if (rqt == gReqType1) CT_STEP("Req.", text);
+    if (rqt == gReqType2) 
+    {
+      if (xfer == gXferYes) 
+      {
+        strncat(text, " (transfer=yes)", elcount(text));
+      }
+      else
+      {
+        strncat(text, " (transfer=no)", elcount(text));
+      }
+      CT_STEP("Req2.", text);
+    }
+  }
+  
+  // do the request...
+  snprintf(text, elcount(text), "Request...(type %d, prio %d)", rqt, prio);
+  CT_Info(@CT::DEBUG::CHECKS, fn, text);
+  
+  tsReq = CT_SendRequest(rqt, pgi.PGN, srcReq, dstReq, prio, xfer);
+  
+  // ----------------------------------
+  // await and check response...
+  // ----------------------------------
+  snprintf(text, elcount(text), "PGN %d (0x%.05X) awaiting response... (%X -> %X)", pgi.PGN, pgi.PGN, srcResp, dstResp);
+  if (verbose) 
+  {
+    if (rqt == gReqType1) CT_STEP("Rsp.", text);
+  } 
+
+  // ----------------------------------
+  // REQ2: check for request type 2 using transfer pgn
+  // ----------------------------------
+  if ( (rqt == gReqType2) && (xfer == gXferYes) && CT_ExpRespContains(pgi, gExpResp_PG) )
+  {
+    if (verbose) CT_STEP("XFER", text);
+    if (!CT_STEP_AWAIT_XFER_FROM(pgR, srcResp, srcReq, pgi.PGN, errText))
+    {
+      if (strlen(errText)==0) snprintf(errText, elcount(errText), "Missing expected XFER PG. %s", errText);
+      CT_Info(@CT::DEBUG::CHECKS, fn, errText);
+      CT_ENABLE_TESTNODE_IL(ilEnabled);
+      return -5;
+    }
+    
+    pgResponse = pgR;
+    
+    // check can be left now, if ACK was detected. (doesn't matter if PGN afterwards is sent - request is done here).
+    CT_Info(@CT::DEBUG::CHECKS, fn, "... leaving due XFER PG detected.");
+    CT_ENABLE_TESTNODE_IL(ilEnabled);
+    return 0;
+  }
+  
+  // ----------------------------------
+  // ACK producing pgn?... is only checked if global pgi-info is filled properly.
+  // ----------------------------------
+  if (CT_ExpRespContains(pgi.ExpResp, gExpResp_ACK) && CT_IsAckPos(pgi))
+  {
+    if (!CT_AWAIT_ACK_FROM(pgR, srcResp, srcReq, pgi.PGN, timeout+1, errText, 0))
+    {
+      if (strlen(errText)==0) snprintf(errText, elcount(errText), "Missing expected ACK.");
+      CT_Info(@CT::DEBUG::CHECKS, fn, errText);
+      CT_ENABLE_TESTNODE_IL(ilEnabled);
+      return -4;
+    }
+    
+    pgResponse = pgR;
+    
+    // check can be left now, if ACK was detected. (doesn't matter if PGN afterwards is sent - request is done here).
+    CT_Info(@CT::DEBUG::CHECKS, fn, "... leaving due ACK detected.");
+    CT_ENABLE_TESTNODE_IL(ilEnabled);
+    return 0;
+  }
+  
+  // ----------------------------------
+  // NACK producing pgn?... is only checked if global pgi-info is filled properly.
+  // ----------------------------------
+  if (CT_ExpRespContains(pgi.ExpResp, gExpResp_NACK) && CT_IsAckNeg(pgi))
+  {
+    if (!CT_AWAIT_NACK_FROM(pgR, srcResp, srcReq, pgi.PGN, timeout+1, errText, 0))
+    {
+      if (strlen(errText)==0) snprintf(errText, elcount(errText), "Missing expected NACK.");
+      CT_Info(@CT::DEBUG::CHECKS, fn, errText);
+      CT_ENABLE_TESTNODE_IL(ilEnabled);
+      return -6;
+    }
+    
+    pgResponse = pgR;
+    
+    // check can be left now, if NACK was detected. (doesn't matter if PGN afterwards is sent - request is done here).
+    CT_Info(@CT::DEBUG::CHECKS, fn, "... leaving due NACK detected.");
+    CT_ENABLE_TESTNODE_IL(ilEnabled);
+    return 0;
+  }
+
+  // ----------------------------------
+  // Access Denied producing pgn?... is only checked if global pgi-info is filled properly.
+  // ----------------------------------
+  if (CT_ExpRespContains(pgi.ExpResp, gExpResp_DENY) && CT_IsDeny(pgi))
+  {
+    if (!CT_AWAIT_ACK_DENY_FROM(pgR, srcResp, srcReq, pgi.PGN, timeout+1, errText, 0))
+    {
+      if (strlen(errText)==0) snprintf(errText, elcount(errText), "Missing expected ACK DENY.");
+      CT_Info(@CT::DEBUG::CHECKS, fn, errText);
+      CT_ENABLE_TESTNODE_IL(ilEnabled);
+      return -7;
+    }
+    
+    pgResponse = pgR;
+    
+    // check can be left now, if ACK was detected. (doesn't matter if PGN afterwards is sent - request is done here).
+    CT_Info(@CT::DEBUG::CHECKS, fn, "... leaving due ACK DENY detected.");
+    CT_ENABLE_TESTNODE_IL(ilEnabled);
+    return 0;
+  }
+  
+  // ----------------------------------
+  // ACK BUSY producing pgn?... is only checked if global pgi-info is filled properly.
+  // ----------------------------------
+  if (CT_ExpRespContains(pgi.ExpResp, gExpResp_BUSY) && CT_IsBusy(pgi))
+  {
+    if (!CT_AWAIT_ACK_BUSY_FROM(pgR, srcResp, srcReq, pgi.PGN, timeout+1, errText, 0))
+    {
+      if (strlen(errText)==0) snprintf(errText, elcount(errText), "Missing expected ACK BUSY.");
+      CT_Info(@CT::DEBUG::CHECKS, fn, errText);
+      CT_ENABLE_TESTNODE_IL(ilEnabled);
+      return -8;
+    }
+    
+    pgResponse = pgR;
+    
+    // check can be left now, if ACK was detected. (doesn't matter if PGN afterwards is sent - request is done here).
+    CT_Info(@CT::DEBUG::CHECKS, fn, "... leaving due ACK BUSY detected.");
+    CT_ENABLE_TESTNODE_IL(ilEnabled);
+    return 0;
+  }
+  
+  
+  // ----------------------------------
+  // wait for the answer event...
+  // ----------------------------------
+  sa = srcResp;
+  da = dstResp;
+  
+  if (CT_IsPdu2(pgi.PGN) && CT_IsDlc8(pgi)) da = -1; // ignore destination address..
+  if (da == 0) da = -1; // ignore destination if 0 is given.
+  if (sa == 0) sa = -1; // ignore source address if 0 is given.
+  result = TestWaitForJ1939PG(pgi.PGN, sa, da, timeout+1); // waits for wide event
+  
+  // ----------------------------------
+  // TP running without wide-event... can be tested with A04_16 and huge dlc message (at least 1400)
+  // ----------------------------------
+  if (result == 0)
+  {
+    long msgBufIdx;
+    // no wide event so far -> timeout if no tp was used, else check time diff from request to TP.RTS | TP.BAM
+    if ( (tsRts = CT_CHECK_BUF_TP_USED(msgBufIdx, tsReq, pgi.PGN, srcResp, dstResp)) > 0 )
+    {
+      if (verbose) CT_STEP_BEGIN_CHECK("TP...");
+      
+      //write("%.6f - %.6f = %dms (to=%d)", CT_Ns2Sec(tsRts), CT_Ns2Sec(tsReq), CT_Ns2Ms(tsRts-tsReq), timeout);
+      if ( CT_Ns2Ms(tsRts-tsReq) < (timeout+1) ) // TP.RTS is within timeout...
+      {
+        byte nrPkgs;
+        dword maxTpTimeout;
+        
+        nrPkgs = CT_GetTPCMRTSPkgCount(gMsgBuf[msgBufIdx]);
+        maxTpTimeout = nrPkgs * gc_RESP_TIMEOUT;
+        
+        snprintf(text, elcount(text), "Detected TP started at t=%.6f. (Time diff = %dms, timeout=%dms).", CT_Ns2Sec(tsRts), CT_Ns2Ms(tsRts - tsReq), timeout);
+        //write(text);
+        CT_STEP("TP", text);
+        
+        snprintf(text, elcount(text), "Waiting max %dms for TP ended...", maxTpTimeout);
+        CT_STEP("TP", text);
+        CT_Info(@CT::DEBUG::CHECKS, fn, text );
+        
+        result = testWaitForJ1939PG(pgi.PGN, srcResp, dstResp, maxTpTimeout); // wait for max TP duration
+        
+        if (result == 0)
+        {
+          // TP timeout 
+          snprintf(errText, elcount(errText), "TP incomplete. Timeout within TP started at t=%.6f, relating to the request at t=%.6f. (pgn=0x%.05X, sa=0x%.02X, da=0x%.02X, timeout=%dms).", CT_Ns2Sec(tsRts), CT_Ns2Sec(tsReq), pgi.PGN, srcResp, dstResp, timeout);
+          CT_Error(@CT::DEBUG::CHECKS, fn, errText);
+          CT_ENABLE_TESTNODE_IL(ilEnabled);
+          return -1;
+        }
+      }
+    }
+    else
+    {
+      // else TP.RTS is not within timeout, result keeps 0 that stands for timeout.
+    }
+  }
+  
+  if (result == 0)
+  {
+    // timeout 
+    snprintf(errText, elcount(errText), "Response timed out for the request at t=%.6f. (pgn=0x%.05X, sa=0x%.02X, da=0x%.02X, timeout=%dms)", CT_Ns2Sec(tsReq), pgi.PGN, srcResp, dstResp, timeout);
+    CT_Error(@CT::DEBUG::CHECKS, fn, errText);
+    CT_ENABLE_TESTNODE_IL(ilEnabled);
+    return -1;
+  }
+  else if (result <=0)
+  {
+    // failed to wait for pg
+    snprintf(errText, elcount(errText), "INTERNAL ERROR: Retrieving pg with TestWaitForJ1939PG failed for pgn:0x%.05X from %d to %d with error code %d. ", pgi.PGN, srcResp, dstResp, result);
+    CT_Error(@CT::DEBUG::CHECKS, fn, errText);
+    CT_ENABLE_TESTNODE_IL(ilEnabled);
+    return -2;
+  }
+  else
+  {
+    // ----------------------------------
+    // ok. get the pg...
+    // ----------------------------------
+    if ( (result = testGetWaitJ1939PGData(pgResponse)) != 0) 
+    {
+      //should never happen...
+      snprintf(errText, elcount(errText), "INTERNAL ERROR: testGetWaitJ1939PGData failed for pg with pgn:0x%.05X. (%d). Response DLC=%d", pgi.PGN, result, pgResponse.dlc);
+      CT_Error(1, fn, errText);
+      CT_ENABLE_TESTNODE_IL(ilEnabled);
+      return -3;
+    }
+    CT_SYNC_WITH_PG(pgResponse);
+    CT_WAIT(1); // sync output to be at least beyond the response pg.
+    CT_STEP_BEGIN_CHECK("Response PG..."); // callees will end with step end...
+  }
+  CT_ENABLE_TESTNODE_IL(ilEnabled);
+  return 0;
+}
+
+// ==============================================================================================================
+// request1 full wrapper
+int CT_Request_And_Await_Response(pg* pgResponse, struct gPGAttrs pgi, char errText[], 
+  byte srcReq, byte dstReq, byte srcResp, byte dstResp, word timeout, byte prio )
+{
+  return CT_Request_And_Await_Response(gReqType1, pgResponse, pgi, errText, srcReq, dstReq, srcResp, dstResp, timeout, prio, gXferNo);
+}
+
+// ==============================================================================================================
+// request2 full wrapper
+int CT_Request2_And_Await_Response(pg* pgResponse, struct gPGAttrs pgi, char errText[], 
+  byte srcReq, byte dstReq, byte srcResp, byte dstResp, word timeout, byte prio, enum gXferType xfer )
+{
+  return CT_Request_And_Await_Response(gReqType2, pgResponse, pgi, errText, srcReq, dstReq, srcResp, dstResp, timeout, prio, xfer);
+}
+
+// ==============================================================================================================
+// simplified request response2
+int CT_Request2_And_Await_Response(PG* pgR, char errText[], struct gPGAttrs pgi, byte src, byte dst, word timeout, byte prio, enum gXferType xfer)
+{
+  return CT_Request2_And_Await_Response(pgR, pgi, errText, src, dst, dst, src, timeout, prio, xfer);
+}
+
+// ==============================================================================================================
+// simplified request response
+int CT_Request_And_Await_Response(pg* pgResponse, struct gPGAttrs pgi, char errText[], byte src, byte dst, word timeout, byte prio)
+{
+  byte dstResp;
+  dstResp = src;
+  if (CT_IsPdu2(pgi.PGN) && CT_IsDlc8(pgi)) dstResp = gc_BC_ADDR;
+  return CT_Request_And_Await_Response(pgResponse, pgi, errText, src, dst, dst, dstResp, timeout, prio);
+}
+
+// ==============================================================================================================
+// simplified request response
+int CT_Request_And_Await_Response_MiscNodes(pg* pgResponse, struct gPGAttrs pgi, char errText[], byte srcReq, byte dstReq, byte srcResp, byte dstResp, word timeout, byte prio)
+{
+  return CT_Request_And_Await_Response(pgResponse, pgi, errText, srcReq, dstReq, srcResp, dstResp, timeout, prio);
+}
+// ==============================================================================================================
+// simplified request response
+int CT_Request_And_Await_Response_Glob(pg* pgResponse, struct gPGAttrs pgi, char errText[], byte src, byte dst, word timeout, byte prio, byte restartRecording)
+{
+  CT_Info(1,"", "Check for BAM gap of foreign nodes, before requesting globally a DLCx PGN...");
+  CT_WAIT_FOR_BAM_GAP(); // dont do this within CT_SendRequest, due the SendRequest may be used without waiting for gaps (request bulk) - and this would not work anymore when waiting there.
+  CT_Info(1,"", "Starting global request now.");
+  if (restartRecording)
+  {
+    MsgBuf_StartRecording();
+  }
+  return CT_Request_And_Await_Response(pgResponse, pgi, errText, src, gc_BC_ADDR, dst, gc_BC_ADDR, timeout, prio);
+}
+
+
+// ==============================================================================================================
+// Request Address Claim from destination and await ACL as reponse within T3
+// returns 1: ok
+// returns 0: timeout.
+int CT_Request_And_Await_AC(pg J1939::J1939_CT_RT::AC pgAC, byte srcReq, byte dstReq, byte srcResp, char errText[])
+{
+  int64 reqTime;
+  
+  reqTime = CT_SendRequest(gc_PGN_AC, srcReq, dstReq, (byte)gc_PRIO_DEFAULT);
+  if (!CT_Await_AC(pgAC, srcResp, gc_TIMEOUT_TR, errText))
+  {
+    snprintf(errText, elcount(errText), "AC timeout for AC request at t=%.06f: %s", CT_Ns2Sec(reqTime), errText);
+    return 0;
+  }
+  return 1;
+}
+// ==============================================================================================================
+// Request Address Claim from destination and await ACL as reponse within T3
+// returns 1: ok
+// returns 0: timeout.
+int CT_Request_And_Await_AC(pg J1939::J1939_CT_RT::AC pgAC, byte srcReq, byte dstReq, byte srcResp, qword responseDevName, char errText[])
+{
+  int64 reqTime;
+  
+  reqTime = CT_SendRequest(gc_PGN_AC, srcReq, dstReq, (byte)gc_PRIO_DEFAULT);
+  if (!CT_Await_AC(pgAC, srcResp, responseDevName, gc_TIMEOUT_TR, errText))
+  {
+    snprintf(errText, elcount(errText), "AC response to the request at t=%.06f from the device with NAME=0x%llX not found within %dms.",  CT_Ns2Sec(reqTime), responseDevName, gc_TIMEOUT_TR);
+    return 0;
+  }
+  return 1;
+}
+
+
+// ==============================================================================================================
+// Request non requestable message and await a NACK that also can be destination specific. 
+// returns 1: ok
+// returns 0: NACK not detected (timeout)
+int CT_Request_And_Await_NACK(pg* pgR, char errText[], dword pgn, byte src, byte dst, byte prio, word timeout, byte allowP2P)
+{
+  char text[1024];
+  CT_SendRequest(pgn, src, dst, prio);
+  if (!CT_AWAIT_NACK_FROM( pgR, dst, src, pgn, timeout, errText, allowP2P))
+  {
+    snprintf(errText, elCount(errText), "Timeout waiting for expected NACK message."); 
+    return 0;
+  }
+  return 1;
+}
+
+// ==============================================================================================================
+// Request message and await a ACK that also can be destination specific. 
+// returns 1: ok
+// returns 0: ACK not detected (timeout)
+int CT_Request_And_Await_ACK(pg* pgR, char errText[], dword pgn, byte src, byte dst, byte prio, word timeout, byte allowP2P)
+{
+  char text[1024];
+  CT_SendRequest(pgn, src, dst, prio);
+  if (!CT_AWAIT_ACK_FROM( pgR, dst, src, pgn, timeout, errText, allowP2P))
+  {
+    snprintf(errText, elCount(errText), "Timeout waiting for expected ACK message."); 
+    return 0;
+  }
+  return 1;
+}
+// ==============================================================================================================
+// Request message and await any ACK (with any control word) that also can be destination specific. 
+// returns 1: ok
+// returns 0: ACK not detected (timeout)
+int CT_Request_And_Await_ANY_ACK(pg* pgR, char errText[], dword pgn, byte src, byte dst, byte prio, word timeout, byte allowP2P)
+{
+  char text[1024];
+  //writeEx(-3,3, "A");
+  CT_SendRequest(pgn, src, dst, prio);
+  //writeEx(-3,3, "B");
+  if (!CT_AWAIT_ANY_ACK_FROM( pgR, dst, src, pgn, timeout, errText, allowP2P))
+  {
+    snprintf(errText, elCount(errText), "Timeout waiting for any expected ACK message."); 
+    return 0;
+  }
+  //writeEx(-3,3, "C");
+  return 1;
+}
+
+// ==============================================================================================================
+// Request message and await a ACK for access denied that also can be destination specific. 
+// returns 1: ok
+// returns 0: ACK not detected (timeout)
+int CT_Request_And_Await_ACK_DENY(pg* pgR, char errText[], dword pgn, byte src, byte dst, byte prio, word timeout, byte allowP2P)
+{
+  char text[1024];
+  CT_SendRequest(pgn, src, dst, prio);
+  if (!CT_AWAIT_ACK_DENY_FROM( pgR, dst, src, pgn, timeout, errText, allowP2P))
+  {
+    snprintf(errText, elCount(errText), "Timeout waiting for expected ACK DENY message."); 
+    return 0;
+  }
+  return 1;
+}
+
+// ==============================================================================================================
+// Request message and await a ACK for busy that also can be destination specific. 
+// returns 1: ok
+// returns 0: ACK not detected (timeout)
+int CT_Request_And_Await_ACK_BUSY(pg* pgR, char errText[], dword pgn, byte src, byte dst, byte prio, word timeout, byte allowP2P)
+{
+  char text[1024];
+  CT_SendRequest(pgn, src, dst, prio);
+  if (!CT_AWAIT_ACK_BUSY_FROM( pgR, dst, src, pgn, timeout, errText, allowP2P))
+  {
+    snprintf(errText, elCount(errText), "Timeout waiting for expected ACK BUSY message."); 
+    return 0;
+  }
+  return 1;
+}
+
+// ==============================================================================================================
+// Request a message and await a ACK/NACK that also can be destination specific. 
+// returns 1: ok
+// returns 0: ACK/NACK not detected (timeout)
+int CT_Request_And_Await_NACK_OR_ACK(pg* pgR, char errText[], dword pgn, byte src, byte dst, byte prio, word timeout, byte allowP2P)
+{
+  char text[1024];
+  CT_SendRequest(pgn, src, dst, prio);
+  if (!CT_AWAIT_ACK_OR_NACK_FROM( pgR, dst, src, pgn, timeout, errText, allowP2P))
+  {
+    snprintf(errText, elCount(errText), "Timeout waiting for expected ACK / NACK message."); 
+    return 0;
+  }
+  return 1;
+}
+
+// ==============================================================================================================
+// Request Address Claim from destination and await ACL as reponse
+// returns:
+// -1: unexpected SA.
+// 0: timeout.
+// 1: ok
+int CT_Send_AC_And_Await_AC(pg J1939::J1939_CT_RT::AC pgACResponse, pg J1939::J1939_CT_RT::AC pgSentAC, byte src, byte dst, qword devNameSrc, qword devNameDst, dword timeout, char errText[])
+{
+  CT_Send_AC(pgSentAC, src, devNameSrc, 0);
+  if (!CT_Await_AC(pgACResponse, dst, devNameDst, timeout, errText))
+  {
+    // AC from dut not detected - maybe it sends a wrong SA but devname fits...
+    if (gPgLastAC.qword(0) == devNameDst)
+    {
+      char reportText[1024];
+      snprintf(reportText, elcount(reportText), "AC from device with NAME=%llX using SA=0x%02X...", gPgLastAC.qword(0), gPgLastAC.sa);
+      //CT_Info(1, "", reportText);
+      // ok, devname fits, but source may be wrong.
+      CT_VALIDATE_AC_SA(gPgLastAC.time_ns, gPgLastAC.sa, dst, errText);
+      //snprintf(errText, elcount(errText), "Unexpected SA. (Got: 0x%X, Expected: 0x%X)", gPgLastAC.sa, dst);
+      snprintf(errText, elcount(errText), "Reaction on AC from node %d (0x%.02X) at t=%.06f.", src, src, CT_Ns2Sec(gTracker_AC[devNameSrc].time_ns));
+      pgACResponse = gPgLastAC;
+      pgACResponse.id = gPgLastAC.id;
+      
+      return -1;
+    }
+    else
+    {
+      // AC not detected from DUT (neigher SA, nor DevName) found.
+      snprintf(errText, elcount(errText), "Reaction timeout on AC from node %d (0x%.02X) at t=%.06f with NAME=0x%llX.", src, src, CT_Ns2Sec(gTracker_AC[devNameSrc].time_ns), devNameDst);
+    }
+    return 0;
+  }
+  return 1;
+}
+
+// ==============================================================================================================
+// step to check given ac..
+// cannotClaim set to 0 will only allow response from dutAddr
+// cannotClaim set to 1 will allow null addr only.
+// cannotClaim set to 2 will allow response from dutAddr or null addr (cannot claim)
+
+byte CT_STEP_CHECK_AC_RESPONSE(byte stepNr, pg J1939::J1939_CT_RT::AC pgACDut, byte dutAddr, qword devNameDut, byte cannotClaim, byte funcPathSuccess, byte funcPathOnFailedSA, byte funcPathOnFailedDevName, byte resetAfterCannotClaim)
+{
+  char errText[1024];
+  char reportText[1024];
+  byte expectedSA;
+  
+  expectedSA = dutAddr;
+  
+  switch(cannotClaim)
+  {
+    case 1: CT_STEP_BEGIN(stepNr, "Check Cannot Claim response..."); break;
+    case 2: CT_STEP_BEGIN(stepNr, "Check AC or Cannot Claim response..."); break;
+    default: CT_STEP_BEGIN(stepNr, "Check AC response..."); break;
+  }
+  if (pgACDut.sa == gc_NULL_ADDR)
+  {
+    snprintf(reportText, elcount(reportText), "Detected Cannot Claim from DUT at t=%.06f.", CT_Ns2Sec(pgACDut.time_ns));
+    if (cannotClaim>=1) expectedSA = gc_NULL_ADDR;
+  }
+  else
+  {
+    snprintf(reportText, elcount(reportText), "Detected AC from DUT at t=%.06f under address %d (0x%02X).", CT_Ns2Sec(pgACDut.time_ns), pgACDut.sa, pgACDut.sa);
+    if (cannotClaim==1) expectedSA = gc_NULL_ADDR;
+  }
+  CT_Info(1,"",reportText);
+  
+  if (dutAddr == gc_ANY_ADDR) expectedSA = pgACDut.sa;
+  
+  switch(CT_VALIDATE_AC(pgACDut, expectedSA, 1, devNameDut, errText))
+  {
+    case 1: CT_STEP_END_FAIL(funcPathOnFailedSA, errText); CT_DLG_TESTER_SHALL_RESET_THE_DUT(); return 0;
+    case 2: CT_STEP_END_FAIL(funcPathOnFailedDevName, errText); CT_DLG_TESTER_SHALL_RESET_THE_DUT(); return 0;
+  }
+    
+  // if dut sent cannot claim, it should be resetted for the next test step.
+  if (resetAfterCannotClaim && (pgACDut.sa == gc_NULL_ADDR)) CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+  
+  CT_STEP_END_PASS(funcPathSuccess);
+  return 1;
+}
+
+// ==============================================================================================================
+// await NACK message from given sender address potentially allow p2p NACKS
+// returns 
+//         0: expected NACK not detected.
+//         1: ok
+byte CT_AWAIT_NACK_FROM(pg* pgResult, byte senderAddress, byte receiverAddress, dword requestedPgn, word timeout, char errorText[], byte allowP2P)
+{
+  int64 t,dt;
+  enum gFlag_Cast cast;
+  cast = allowP2P ? gAnycast : gBroadcast;
+  
+  CT_STEP_BEGIN_CHECK("NACK...");
+  while(timeout>0)
+  {
+    //write("AWAIT NACK: for pgn %x from %x->%x (timeout=%d) p2pAllowed=%d", requestedPgn, senderAddress, receiverAddress, timeout, allowP2P);    
+    t=timeNowInt64();
+    if (CT_AWAIT_PG_FROM(pgResult, senderAddress, receiverAddress, gc_PGN_NACK, timeout, errorText, cast))
+    {
+      // sync with trace
+      CT_SYNC_WITH_PG(pgResult);
+      CT_WAIT(1);
+      
+      if (CT_CHECK_NACK(pgResult.qword(0), requestedPgn, receiverAddress, errorText)) 
+      {
+        CT_STEP_END_PASS("=> NACK OK.");
+        CT_CHK_Info("...NACK OK.");
+        return 1;
+      }
+    }
+    
+    dt = CT_Ns2Ms(timeNowInt64()-t);
+    //write("dt=%lld",dt);
+    if (dt >= timeout) timeout = 0; else timeout -= dt;
+  }
+  CT_CHK_Info("...NACK TIMEOUT.");
+  return 0;
+}
+
+// ==============================================================================================================
+// await ACK message from given sender address potentially allow p2p ack
+// returns 0: expected ACK not detected.
+//         1: ok
+byte CT_AWAIT_ACK_FROM(pg* pgResult,  byte senderAddress, byte receiverAddress, dword requestedPgn, word timeout, char errorText[], byte allowP2P)
+{
+  int64 t,dt;
+  enum gFlag_Cast cast;
+  cast = allowP2P ? gAnycast : gBroadcast;
+  
+  CT_STEP_BEGIN_CHECK("Positive ACK...");
+  while(timeout>0)
+  {
+    t=timeNowInt64();
+    //write("AWAIT ACK: for pgn %x from %x->%x (timeout=%d) p2pAllowed=%d", requestedPgn, senderAddress, receiverAddress, timeout, allowP2P);
+    if (CT_AWAIT_PG_FROM(pgResult, senderAddress, receiverAddress, gc_PGN_ACK, timeout, errorText, cast))
+    {
+      // sync with trace
+      CT_SYNC_WITH_PG(pgResult);
+      CT_WAIT(1);
+      
+      if (CT_CHECK_ACK(pgResult.qword(0), requestedPgn, receiverAddress, errorText)) 
+      {
+        CT_STEP_END_PASS("=> Positive ACK OK");
+        CT_Info(1, "CHK.", "...Positive ACK OK");
+        return 1;
+      }
+    }
+    
+    dt = CT_Ns2Ms(timeNowInt64()-t);
+    if (dt >= timeout) timeout = 0; else timeout -= dt;
+  }
+  CT_CHK_Info("...Positive ACK TIMEOUT.");
+  return 0;
+}
+
+// ==============================================================================================================
+// await ANY ACK message from given sender address potentially allow p2p ack
+// returns 0: expected ACK not detected.
+//         1: ok
+byte CT_AWAIT_ANY_ACK_FROM(pg* pgResult,  byte senderAddress, byte receiverAddress, dword requestedPgn, word timeout, char errorText[], byte allowP2P)
+{
+  int64 t,dt;
+  char text[255];
+  enum gFlag_Cast cast;
+  cast = allowP2P ? gAnycast : gBroadcast;
+  
+  CT_STEP_BEGIN_CHECK("ANY ACK...");
+  while(timeout>0)
+  {
+    t=timeNowInt64();
+    //write("AWAIT ANY ACK: for pgn %x from %x->%x (timeout=%d) p2pAllowed=%d", requestedPgn, senderAddress, receiverAddress, timeout, allowP2P);
+    if (CT_AWAIT_PG_FROM(pgResult, senderAddress, receiverAddress, gc_PGN_ACK, timeout, errorText, cast))
+    {
+      // sync with trace
+      CT_SYNC_WITH_PG(pgResult);
+      CT_WAIT(1);
+      
+      snprintf(text, elcount(text), " => FOUND ACK WITH CONTROL BYTE = %d.",pgResult.byte(0));
+      CT_STEP_END_PASS(text);
+      CT_Info(1, "CHK.", text);
+      return 1;
+    }
+    
+    dt = CT_Ns2Ms(timeNowInt64()-t);
+    if (dt >= timeout) timeout = 0; else timeout -= dt;
+  }
+  CT_CHK_Info("...ANY ACK TIMEOUT.");  
+  return 0;
+}
+
+// ==============================================================================================================
+// await ACK message for access denied from given sender address potentially allow p2p ack
+// returns 0: expected ACK not detected.
+//         1: ok
+byte CT_AWAIT_ACK_DENY_FROM(pg* pgResult,  byte senderAddress, byte receiverAddress, dword requestedPgn, word timeout, char errorText[], byte allowP2P)
+{
+  int64 t,dt;
+  enum gFlag_Cast cast;
+  cast = allowP2P ? gAnycast : gBroadcast;
+  
+  CT_STEP_BEGIN_CHECK("DENY...");
+  while(timeout>0)
+  {
+    t=timeNowInt64();
+    //write("AWAIT ACK: for pgn %x from %x->%x (timeout=%d) p2pAllowed=%d", requestedPgn, senderAddress, receiverAddress, timeout, allowP2P);
+    if (CT_AWAIT_PG_FROM(pgResult, senderAddress, receiverAddress, gc_PGN_ACK, timeout, errorText, cast))
+    {
+      // sync with trace
+      CT_SYNC_WITH_PG(pgResult);
+      CT_WAIT(1);
+      
+      if (CT_CHECK_ACK_DENY(pgResult.qword(0), requestedPgn, receiverAddress, errorText)) 
+      {
+        CT_STEP_END_PASS("=> DENY OK");
+        CT_Info(1, "CHK.", "...DENY OK.");
+        return 1;
+      }
+    }
+    
+    dt = CT_Ns2Ms(timeNowInt64()-t);
+    if (dt >= timeout) timeout = 0; else timeout -= dt;
+  }
+  
+  CT_CHK_Info("...DENY TIMEOUT.");
+  return 0;
+}
+
+// ==============================================================================================================
+// await ACK message for busy( cannot respond) from given sender address potentially allow p2p ack
+// returns 0: expected ACK not detected.
+//         1: ok
+byte CT_AWAIT_ACK_BUSY_FROM(pg* pgResult,  byte senderAddress, byte receiverAddress, dword requestedPgn, word timeout, char errorText[], byte allowP2P)
+{
+  int64 t,dt;
+  enum gFlag_Cast cast;
+  cast = allowP2P ? gAnycast : gBroadcast;
+  
+  CT_STEP_BEGIN_CHECK("BUSY...");
+  while(timeout>0)
+  {
+    t=timeNowInt64();
+    //write("AWAIT ACK: for pgn %x from %x->%x (timeout=%d) p2pAllowed=%d", requestedPgn, senderAddress, receiverAddress, timeout, allowP2P);
+    if (CT_AWAIT_PG_FROM(pgResult, senderAddress, receiverAddress, gc_PGN_ACK, timeout, errorText, cast))
+    {
+      // sync with trace
+      CT_SYNC_WITH_PG(pgResult);
+      CT_WAIT(1);
+      
+      if (CT_CHECK_ACK_BUSY(pgResult.qword(0), requestedPgn, receiverAddress, errorText)) 
+      {
+        CT_STEP_END_PASS("=> BUSY OK");
+        CT_Info(1, "CHK.", "...BUSY OK.");
+        return 1;
+      }
+    }
+    
+    dt = CT_Ns2Ms(timeNowInt64()-t);
+    if (dt >= timeout) timeout = 0; else timeout -= dt;
+  }
+  
+  CT_CHK_Info("...BUSY TIMEOUT.");
+  return 0;
+}
+
+// ==============================================================================================================
+// await ACK or NACK message from given sender address potentially allow p2p ACK/NACKS
+// returns 
+//         0: expected ACK/NACK not detected.
+//         1: ok
+byte CT_AWAIT_ACK_OR_NACK_FROM(pg* pgResult, byte senderAddress, byte receiverAddress, dword requestedPgn, word timeout, char errorText[], byte allowP2P)
+{
+  int64 t,dt;
+  byte ctrlWord;
+  enum gFlag_Cast cast;
+  cast = allowP2P ? gAnycast : gBroadcast;
+  
+  CT_STEP_BEGIN_CHECK("ACK or NACK...");
+  while(timeout>0)
+  {
+    t=timeNowInt64();
+    //write("AWAIT ACK/NACK: for pgn %x from %x->%x (timeout=%d) p2pAllowed=%d", requestedPgn, senderAddress, receiverAddress, timeout, allowP2P);    
+    if (CT_AWAIT_PG_FROM(pgResult, senderAddress, receiverAddress, gc_PGN_ACK, timeout, errorText, cast))
+    {
+      // sync with trace
+      CT_SYNC_WITH_PG(pgResult);
+      CT_WAIT(1);
+      
+      ctrlWord = pgResult.byte(0);
+      //write("check CTRL-WORD=%x", ctrlWord);
+      if (ctrlWord == gc_ACK_CTRL_WORD_ACK) // ACK?
+      {
+        // it's an ACK
+        // write("check ACK...");
+        if (CT_CHECK_ACK(pgResult.qword(0), requestedPgn, receiverAddress, errorText)) 
+        {
+          CT_STEP_END_PASS(" => Positive ACK OK");
+          CT_Info(1, "CHK.", "... Positive ACK OK.");
+          return 1;
+        }
+        // write("not the wanted one... reason: %s", errorText);
+      }
+      else if (ctrlWord == gc_ACK_CTRL_WORD_NACK) // NACK
+      {
+        // it's an NACK
+        // write("check NACK...");
+        if (CT_CHECK_NACK(pgResult.qword(0), requestedPgn, receiverAddress, errorText))
+        {
+          CT_STEP_END_PASS(" => NACK OK.");
+          CT_Info(1, "CHK.", "...NACK OK.");
+          return 1;
+        }
+        // write("not the wanted one... reason: %s", errorText);
+      }
+    }
+    
+    dt = CT_Ns2Ms(timeNowInt64()-t);
+    if (dt >= timeout) timeout = 0; else timeout -= dt;
+  }
+  CT_CHK_Info("...ACK TIMEOUT.");
+  return 0;
+}
+
+// ==============================================================================================================
+// await Transport PGN message from given sender address
+// returns 
+//         0: expected XFER not detected.
+//         1: ok
+byte CT_STEP_AWAIT_XFER_FROM(pg* pgResult, byte senderAddress, byte receiverAddress, dword requestedPgn, char errorText[])
+{
+  struct MsgBufEntry tpcmBufEntry;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  dword timeout;
+  char reportText[1024];
+  
+  CT_STEP_BEGIN_CHECK("XFER...");
+  if (CT_WaitForRTS(pgRTS, gc_PGN_XFER, senderAddress, receiverAddress) == 0)
+  {
+    timeout = pgRTS.TotalNumberOfPackets * gc_RESP_TIMEOUT;
+    snprintf(reportText, elcount(reportText), "AWAIT XFER: for pgn %x from %x->%x (%d packages -> timeout=%d)", requestedPgn, senderAddress, receiverAddress, pgRTS.TotalNumberOfPackets, timeout);
+    CT_INFO(1,"CHK.", reportText);
+    if (CT_AWAIT_PG_FROM(pgResult, senderAddress, receiverAddress, gc_PGN_XFER, timeout, errorText, gAnycast))
+    {
+      // sync with trace
+      CT_SYNC_WITH_PG(pgResult);
+      CT_WAIT(1);
+      
+      if (CT_CHECK_XFER_PG(pgResult, requestedPgn, errorText)) 
+      {
+        CT_STEP_END_PASS("=> XFER OK");
+        CT_Info(1, "CHK.", "...XFER OK.");
+        return 1;
+      }
+    }
+  }
+  CT_CHK_Info("...XFER / RTS TIMEOUT.");
+  return 0;
+}
+
+
+// ==============================================================================================================
+// wait for the end of a running tp up to given timeout.
+// timeout=0 means wait forever.
+// returns 0 for timeout
+// returns 1 for resume due event occured.
+byte CT_STEP_AWAIT_TPCM( pg J1939::J1939_CT_RT::TPCMxx pgResult, dword pgn, byte ctrlWord, byte src, byte dst, dword timeout, char errorText[])
+{
+  int64 t,dt;
+  
+  CT_STEP_BEGIN_CHECK("TPCM...");
+  while(timeout>0)
+  {
+    t=timeNowInt64();
+    // write("%d: AWAIT TPCM: for pgn %x from %x->%x (cw=%d, timeout=%d)", t, pgn, src, dst, ctrlWord, timeout);    
+    if (CT_AWAIT_PG_FROM(pgResult, src, dst, gc_PGN_TPCM, timeout, errorText, gUnicast))
+    {
+      // sync with trace
+      CT_SYNC_WITH_PG(pgResult);
+      CT_WAIT(1);
+      
+      if (CT_VALIDATE_TPCM(pgResult, pgn, ctrlWord, src, dst, errorText)==0) 
+      {
+        CT_STEP_END_PASS("=> TPCM OK");
+        CT_Info(1, "CHK.", "TPCM OK.");
+        return 1;
+      }
+    }
+    
+    dt = CT_Ns2Ms(timeNowInt64()-t);
+    if (dt >= timeout) timeout = 0; else timeout -= dt;
+  }
+  CT_CHK_Info("...TPCM TIMEOUT.");
+  return 0;
+}
+
+
+// ==============================================================================================================
+// helper step to check ANY (!) DUT aborts from given stepTime onwards.
+// normally src is tool and dst is DUT.
+// Also checks on a potentially new address (newAdr) of the DUT. If this shall not be done, give 0xFF (BC_ADDR) as newAdr.
+// returns 1 if DUT sends aborts 
+// returns 0 if DUT sends NO aborts 
+byte CT_CHECK_ANY_ABORTS( word bufIndices[long], byte src, byte dst, byte newAdr, int64 stepTime)
+{
+  byte result;
+  
+  // -----------------------------
+  // CHECK DUT TRANSMITS ABORTS
+  // -----------------------------
+  // check that DUT (dst) did not sent any TP.CM_ABORT's to the sender (src) or global address...
+  // for the transport for current pgn
+  result = CT_Check_For_Any_Abort_In_MsgBuf(bufIndices, stepTime, src, dst);
+  //write("chkabort msgbuf since=%lld from %x->%x, result=%d", stepTime, src, dst, result);
+  //MsgBuf_Print_Entrys(gc_CANID_BITMASK_PGN);
+  if (newAdr != gc_BC_ADDR) result |= CT_Check_For_Any_Abort_In_MsgBuf(bufIndices, stepTime, src, newAdr);
+  return result;
+}
+// without the resulting bufindices...
+// returns 1 if DUT sends aborts 
+// returns 0 if DUT sends NO aborts 
+byte CT_CHECK_ANY_ABORTS( byte src, byte dst, byte newAdr, int64 stepTime)
+{
+  word bufIndices[long];
+  return CT_CHECK_ANY_ABORTS(bufIndices, src, dst, newAdr, stepTime);
+}
+
+// ==============================================================================================================
+// check for abort in msgbuffer ( aborts to given dst as also global aborts are detected )
+// returns 0 if there are none
+// returns 1 if there are aborts.
+byte CT_CHECK_ABORTS_BY_PGN( word bufIndices[long], dword pgn, byte src, byte dst, int64 startTime )
+{
+  return CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, startTime, src, dst, gc_TPCM_CTRL_WORD_ABORT, pgn)
+    || CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, startTime, src, gc_BC_ADDR, gc_TPCM_CTRL_WORD_ABORT, pgn);
+}
+// without bufindice-array result...
+byte CT_CHECK_ABORTS_BY_PGN( dword pgn, byte src, byte dst, int64 startTime )
+{
+  word buf[long];
+  return CT_CHECK_ABORTS_BY_PGN(buf, pgn,src,dst,startTime);
+}
+
+// ==============================================================================================================
+// helper step to check ANY(!) DUT aborts from between given times
+// normally src is tool and dst is DUT.
+// Also checks on a potentially new address (newAdr) of the DUT. If this shall not be done, give 0xFF (BC_ADDR) as newAdr.
+// returns 1 if DUT sends aborts
+// returns 0 if DUT sends NO aborts
+byte CT_CHECK_ANY_ABORTS_BETWEEN( byte src, byte dst, byte newAdr, int64 stepTime, int64 endTime)
+{
+  byte result;
+  word bufIndices[long];
+  // -----------------------------
+  // CHECK DUT TRANSMITS ABORTS
+  // -----------------------------
+  // check that DUT (dst) did not sent any TP.CM_ABORT's to the sender (src) or global address...
+  result = CT_Check_For_Any_Abort_In_MsgBuf_Between(bufIndices, stepTime, endTime, src, dst);
+  if (newAdr != gc_BC_ADDR) result |= CT_Check_For_Any_Abort_In_MsgBuf_Between(bufIndices, stepTime, endTime, src, newAdr);
+  return result;
+}
+
+// ==============================================================================================================
+// helper step to check not ANY(!) DUT aborts from given stepTime onwards as complete TEST-STEP
+byte CT_STEP_CHECK_NO_ABORTS(byte passedFuncPath, byte failedFuncPath, byte src, byte dst, byte newAdr, int64 stepTime, char errText[])
+{
+  char text[4192];
+
+  snprintf(text, elcount(text), "aborts from 0x%X->0x%X or 0xFF, since t=%.06f...", src, dst,CT_Ns2Sec(stepTime));
+  CT_STEP_BEGIN_CHECK(text);
+ 
+  if (CT_CHECK_ANY_ABORTS(src, dst, newAdr, stepTime))
+  {
+    snprintf(text, elcount(text), "%s", errText);
+    if (strlen(text) == 0)
+    {
+      snprintf(text, elcount(text), "0x%X transmits aborts.", src);
+    }
+    // there are abort tpcm's from dut...
+    CT_STEP_END_FAIL(failedFuncPath, text);
+    return 0; // leave on fail.
+  }
+  CT_STEP_END_PASS(passedFuncPath);
+  return 1;
+}
+
+// ==============================================================================================================
+// helper step to check not ANY(!) DUT aborts from given stepTime onwards as complete TEST-STEP
+byte CT_STEP_CHECK_NO_ABORTS_BETWEEN(byte passedFuncPath, byte failedFuncPath, byte src, byte dst, byte newAdr, int64 stepTime, dword endTime, char errText[])
+{
+  char text[4192];
+
+  snprintf(text, elcount(text), "Checking for aborts from 0x%X->0x%X...", src, dst);
+  CT_STEP_BEGIN(text);
+ 
+  if (CT_CHECK_ANY_ABORTS_BETWEEN(src, dst, newAdr, stepTime, endTime))
+  {
+    snprintf(text, elcount(text), "%s", errText);
+    if (strlen(text) == 0)
+    {
+      snprintf(text, elcount(text), "0x%X transmits aborts.", src);
+    }
+    // there are abort tpcm's from dut...
+    CT_STEP_END_FAIL(failedFuncPath, text);
+    return 0; // leave on fail.
+  }
+  CT_STEP_END_PASS(passedFuncPath);
+  return 1;
+}
+
+
+// ==============================================================================================================
+// check for overlapping BAM 
+// results:
+// 0: no overlapping
+// 1: overlapping
+// 2: searching in msgbuf error.
+byte CT_Check_For_Overlapping_BAM(int64 startTime, dword pgn, byte src, char errText[] )
+{
+  word bufIndices[long];
+  int64 BAMInitTime[long];
+  byte BAMPgkCount[long];
+  byte i;
+  byte seqNr;
+  int64 tpStartTime;
+  int64 tpEndTime;
+  int64 t;
+  
+  // Get bam init times...
+  write("Start searching for TPCM.BAM from t=%.6f onwards...", CT_Ns2Sec(startTime));
+  if ( !CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(bufIndices, startTime, src, gc_TPCM_CTRL_WORD_BAM))
+  {
+    snprintf(errText, elcount(errText), "Searching TPCM.BAM in message buffer failure.");
+    return 2;
+  }
+  i=0;
+  for(long k: bufIndices)
+  {
+    BAMPgkCount[i]   = CT_GetTPCMRTSPkgCount(gMsgBuf[bufIndices[k]]);
+    BAMInitTime[i] = gMsgBuf[bufIndices[k]].time_ns;
+    write("i=%x, BAMInitTime[i]=%.6f, pkgCount=%d", i, CT_Ns2Sec(BAMInitTime[i]),BAMPgkCount[i]);
+    i++;
+  }
+    
+
+  // for each of the BAM init times:
+  // get the BAM time-ranges for checking there is no BAM-Init in between...
+  i=0;
+  for(long k:BAMInitTime)
+  {
+    tpStartTime = BAMInitTime[k];
+    seqNr = BAMPgkCount[k];
+    // end time is the time of the last TP.DT for this BAM.
+    if (!CT_Get_TPDTs_In_MsgBuf_with_SeqNr(bufIndices, seqNr, tpStartTime, src, gBC_Addr))
+    {
+      snprintf(errText, elcount(errText), "Searching TP.DTs in message buffer failure.");
+      return 2;
+    }
+    
+    // check BAM inits between start time and end-time.
+    tpEndTime = gMsgBuf[bufIndices[0]].time_ns; // last tp for started bam...
+    write("BAM init check between %.6f and %.6f...", CT_Ns2Sec(tpStartTime), CT_Ns2Sec(tpEndTime));
+    
+    if ( CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(bufIndices, tpStartTime, src, gc_TPCM_CTRL_WORD_BAM))
+    {
+      // at least 1 entry is found. The own BAM-init.
+      // if there is a second one, check it against the end-time...
+      if (bufIndices.size()>1)
+      {
+        t = gMsgBuf[bufIndices[1]].time_ns;
+        if (t <= tpEndTime)
+        {
+          // there are BAM init's between a running BAM.
+          snprintf(errText, elcount(errText), "Found BAM within a running BAM between t=%.6f and t=%.6f from DUT %d (0x%.02X) for PGN %d (0x%.05X) at t=%.6f", CT_Ns2Sec(tpStartTime), CT_Ns2Sec(tpEndTime), src, src, pgn, pgn, CT_Ns2Sec(t));
+          return 1;
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// Check within msg-buf, if src sends any AC's from given startTime onwards.
+// returns
+// 0: no AC's found.
+// 1: there are ACs
+byte CT_Check_For_AC_In_MsgBuf(int64 ts, byte src)
+{
+  return CT_Find_In_MsgBuf(ts, gc_PGN_AC, src, (byte)0, gc_CANID_BITMASK_PGN_SRC) != IDX_NOT_FOUND;
+}
+
+// ==============================================================================================================
+// Check within msg-buf, if src sends abort to dst or globally, starting from given time.
+// returns
+// 0: no abort found
+// 1: there are aborts.
+byte CT_Check_For_Any_Abort_In_MsgBuf(word bufIndices[long], int64 startTime, byte src, byte dst)
+{
+  word buf1[long], buf2[long];
+  byte result;
+  result =  (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(buf1, startTime, src, dst, gc_TPCM_CTRL_WORD_ABORT)) // any specific abort
+  ||        (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(buf2, startTime, src, gc_BC_ADDR, gc_TPCM_CTRL_WORD_ABORT))  // any global abort during BAM
+  ;
+  MsgBuf_Merge(bufIndices, buf1, buf2);
+  return result;
+}
+
+// ==============================================================================================================
+// Check within msg-buf, if src sends abort to dst or globally, between given time
+// returns
+// 0: no abort found
+// 1: there are aborts.
+byte CT_Check_For_Any_Abort_In_MsgBuf_Between(word bufIndices[long], int64 startTime, int64 endTime, byte src, byte dst)
+{
+  CT_Check_For_Any_Abort_In_MsgBuf(bufIndices, startTime, src, dst);
+  MsgBuf_FilterByTimestamp(bufIndices, startTime, endTime);
+  return (bufIndices.size()>0);
+}
+
+// ==============================================================================================================
+// Check within msg-buf, if src sends abort to dst or globally, starting from given time.
+// returns
+// 0: no EOMs found
+// 1: there are EOMs.
+byte CT_Check_For_EOM_In_MsgBuf(word bufIndices[long], int64 startTime, byte src, byte dst)
+{
+  word buf1[long], buf2[long];
+  byte result;
+  result =  (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(buf1, startTime, src, dst, gc_TPCM_CTRL_WORD_EOM)) // any specific eom
+  ||        (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(buf2, startTime, src, gc_BC_ADDR, gc_TPCM_CTRL_WORD_EOM)) // any global EOM during BAM
+  ;
+  MsgBuf_Merge(bufIndices, buf1, buf2);
+  return result;
+}
+
+// ==============================================================================================================
+// Check within msg-buf, if src sends NACK to dest or globally, starting from given time.
+byte CT_Check_For_NACKs_In_MsgBuf( word bufIndices[long], int64 startTime, byte src, byte dst, dword pgn)
+{
+  word buf1[long], buf2[long];
+  byte result;
+  char errText[1024];
+  result =  (CT_Get_NACKs_In_MsgBuf(buf1, startTime, src, dst, dst, pgn, errText)) // any specific nack
+  ||        (CT_Get_NACKs_In_MsgBuf(buf2, startTime, src, gc_BC_ADDR, dst, pgn, errText)) // any global nack
+  ;
+  MsgBuf_Merge(bufIndices, buf1, buf2);
+  
+  return result;
+}
+// ==============================================================================================================
+// Check within msg-buf, if src sends NACK to dest or globally, between given times.
+// returns:
+// 0: no NACKs found
+// 1: there are NACKs.
+byte CT_Check_For_NACKs_In_MsgBuf_Between( word bufIndices[long], int64 startTime, int64 endTime, byte src, byte dst, dword pgn)
+{
+  CT_Check_For_NACKs_In_MsgBuf(bufIndices, startTime, src, dst, pgn);
+  MsgBuf_FilterByTimestamp(bufIndices, startTime, endTime);
+  return (bufIndices.size()>0);
+}
+
+// ==============================================================================================================
+// check values for given for a tpcm
+// returns:
+//  0: ok.
+// -1: unexpected pgn.
+// -2: unexpected ctrl byte
+// -3: unexpected src
+// -4: unexpected dst
+int CT_VALIDATE_TPCM_EXPECTED_VALUES(dword gotPgn, dword expPgn, byte gotCtrlByte, byte expCtrlByte, byte gotSrc, byte expSrc, byte gotDst, byte expDst, char errText[])
+{
+  snprintf(errText, elcount(errText), "");
+  
+  if (gotPgn != expPgn)
+  {
+    snprintf(errText, elcount(errText), "TPCM contains wrong PGN. (got: 0x%.05X, expected: 0x%.05X)", gotPgn, expPgn);
+    return -1;
+  }
+  if (gotCtrlByte != expCtrlByte)
+  {
+    snprintf(errText, elcount(errText), "TPCM contains wrong control word. (got: 0x%.05X, expected: 0x%.05X)", gotCtrlByte, expCtrlByte);
+    return -2;
+  }
+  if (gotSrc != expSrc)
+  {
+    snprintf(errText, elcount(errText), "TPCM contains wrong source address. (got: 0x%.05X, expected: 0x%.05X)", gotSrc, expSrc);
+    return -3;
+  }
+  
+  if (gotDst != expDst)
+  {
+    snprintf(errText, elcount(errText), "TPCM contains wrong destination address. (got: 0x%.05X, expected: 0x%.05X)", gotDst, expDst);
+    return -4;
+  }
+
+  return 0;
+}
+
+// ==============================================================================================================
+// check given for a tpcm
+//  0: ok.
+// -1: unexpected pgn.
+// -2: unexpected ctrl byte
+// -3: unexpected src
+// -4: unexpected dst
+int CT_VALIDATE_TPCM(pg* pgR, dword reqPgn, byte ctrlByte, byte src, byte dst, char errText[])
+{
+  dword tpPgn;
+  byte sa,da,cb;
+  tpPgn = CT_GetTPCMPgn(pgR);
+  sa = pgR.sa;
+  da = pgR.da;
+  cb = CT_GetTPCMCtrlByte(pgR);
+
+  return CT_VALIDATE_TPCM_EXPECTED_VALUES(tpPgn, reqPgn, cb, ctrlByte, sa, src, da, dst, errText);
+}
+
+// ==============================================================================================================
+// check given for a tpcm
+//  0: ok.
+// -1: unexpected pgn.
+// -2: unexpected ctrl byte
+// -3: unexpected src
+// -4: unexpected dst
+int CT_VALIDATE_TPCM(struct MsgBufEntry msgBufEntry, dword reqPgn, byte ctrlByte, byte src, byte dst, char errText[])
+{
+  dword tpPgn;
+  byte sa,da,cb;
+  tpPgn = CT_GetTPCMPgn(msgBufEntry);
+  sa = CT_GetSrc(msgBufEntry);
+  da = CT_GetDst(msgBufEntry);
+  cb = CT_GetTPCMCtrlByte(msgBufEntry);
+  
+  return CT_VALIDATE_TPCM_EXPECTED_VALUES(tpPgn, reqPgn, cb, ctrlByte, sa, src, da, dst, errText);
+}
+// ==============================================================================================================
+// check given for a tpcm
+//  0: ok.
+// -1: unexpected pgn.
+// -2: unexpected ctrl byte
+// -3: unexpected src
+// -4: unexpected dst
+int CT_VALIDATE_TPCM(message* msg, dword reqPgn, byte ctrlByte, byte src, byte dst, char errText[])
+{
+  dword tpPgn;
+  byte sa,da,cb;
+  tpPgn = CT_GetTPCMPgn(msg);
+  sa = CT_GetSrc(msg);
+  da = CT_GetDst(msg);
+  cb = CT_GetTPCMCtrlByte(msg);
+  
+  return CT_VALIDATE_TPCM_EXPECTED_VALUES(tpPgn, reqPgn, cb, ctrlByte, sa, src, da, dst, errText);
+}
+
+// ==============================================================================================================
+byte CT_CHECK_CA_SUPPORT_ERROR(byte funcPathOnFailure)
+{
+  return CT_PRECOND_CHECK_CA_SUPPORT(funcPathOnFailure, 0);
+}
+// ==============================================================================================================
+byte CT_CHECK_CA_SUPPORT_INCONCLUSIVE(byte funcPathOnFailure)
+{
+  return CT_PRECOND_CHECK_CA_SUPPORT(funcPathOnFailure, 1);
+}
+// ==============================================================================================================
+byte CT_CHECK_NM_SUPPORT_ERROR(byte funcPathOnFailure)
+{
+  return CT_PRECOND_CHECK_NM_SUPPORT(funcPathOnFailure, 0);
+}
+// ==============================================================================================================
+byte CT_CHECK_NM_SUPPORT_INCONCLUSIVE(byte funcPathOnFailure)
+{
+  return CT_PRECOND_CHECK_NM_SUPPORT(funcPathOnFailure, 1);
+}
+// ==============================================================================================================
+byte CT_CHECK_ADDR_VIOLATION_DM_SUPPORT_ERROR(byte funcPathOnFailure)
+{
+  return CT_PRECOND_CHECK_ADDR_VIOLATION_DM_SUPPORT(funcPathOnFailure, 0);
+}
+// ==============================================================================================================
+byte CT_CHECK_ADDR_VIOLATION_DM_SUPPORT_INCONCLUSIVE(byte funcPathOnFailure)
+{
+  return CT_PRECOND_CHECK_ADDR_VIOLATION_DM_SUPPORT(funcPathOnFailure, 1);
+}
+
+// ==============================================================================================================
+// check if tp was used from the given timestamp onwards. searches in message buffer.
+// returns 0 if not used
+// >0 TP is used. The result is the timestamp of the TP starting.
+int64 CT_CHECK_BUF_TP_USED(long& msgBufIdx, int64 ts, dword pgn, byte src, byte dst)
+{
+  dword tpPgn;
+  word bufIndices[long];
+  msgBufIdx = 0;
+  CT_Find_All_In_MsgBuf(bufIndices, ts, gc_PGN_TPCM, src, dst, gc_CANID_BITMASK_PGN_SRC_DST);
+
+  // check all the TP-RTS that fits the given pgn.
+  //write("CHKTP from %.06f onwards. now = @%.06f pgn=%x, src=%x, dst=%x", CT_Ns2Sec(ts), CT_Ns2Sec(timeNowInt64()), gc_PGN_TPCM, src, dst);
+  for(long k: bufIndices)
+  {
+    //write("%d : %x", k, gMsgBuf[bufIndices[k]].ID);
+    tpPgn  = CT_GetTPCMPgn(gMsgBuf[bufIndices[k]]);
+    
+    // if its a TP-RTS for given pgn... then result is its timestamp.
+    //write("TP's pgn is %x. check against %x", tpPgn, pgn);
+    if (tpPgn == pgn)
+    {
+      // if TP starts (RTS || BAM) for pgn...
+      if (  (CT_GetTPCMCtrlByte(gMsgBuf[bufIndices[k]]) == gc_TPCM_CTRL_WORD_RTS) 
+        ||  (CT_GetTPCMCtrlByte(gMsgBuf[bufIndices[k]]) == gc_TPCM_CTRL_WORD_BAM) ) 
+      {
+        //write("RTS or BAM detected.");
+        msgBufIdx = bufIndices[k];
+        return gMsgBuf[bufIndices[k]].time_ns;
+      }
+      else
+      {
+        //write("Neither RTS nor BAM detected.");
+      }
+    }
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// check given pg-message for XFER
+// return 1 on ok.
+byte CT_CHECK_XFER_PG(pg* pgR, dword requestedPgn, char errText[])
+{
+  dword xferPgn;
+  xferPgn = pgR.dword(0) & 0x00FFFFFF;
+  snprintf(errText, elcount(errText), "");
+  if (requestedPgn != xferPgn)
+  {
+    snprintf(errText, elcount(errText), "Transport PGN contains wrong PGN. (got: 0x%.05X, expected: 0x%.05X)", xferPgn, requestedPgn);
+    return 0;
+  }
+
+  return 1;
+}
+
+// ==============================================================================================================
+// check given pg-message for NACK
+// returns 1 if ok.
+byte CT_CHECK_NACK(qword payload, dword requestedPgn, byte dst, char errText[])
+{
+  byte nackDst,isNACK;
+  dword nackPgn;
+  snprintf(errText, elcount(errText), "");
+  CT_GET_ACK_INFO(payload, isNACK, nackPgn, nackDst);
+  if (!isNACK || (nackPgn != requestedPgn) || (nackDst != dst))
+  {
+    if (!isNACK)                  snprintf(errText, elcount(errText), "Got ACK instead of NACK.\n");
+    if (nackPgn != requestedPgn)  snprintf(errText, elcount(errText), "Got NACK with unexpected PGN. (got 0x%.05X, expected 0x%.05X)\n", nackPgn, requestedPgn);
+    if (nackDst != dst)           snprintf(errText, elcount(errText), "Got NACK with unexpected destination. (got %X, expected %X)\n", nackDst, dst);
+    return 0;
+  }
+  return 1;
+}
+
+// ==============================================================================================================
+// check given pg-message for ACK positive
+// returns 1 if ok.
+byte CT_CHECK_ACK(qword payload, dword requestedPgn, byte dst, char errText[])
+{
+  byte nackDst,isNACK;
+  dword nackPgn;
+  snprintf(errText, elcount(errText), "");
+  CT_GET_ACK_INFO(payload, isNACK, nackPgn, nackDst);
+  if (isNACK || (nackPgn != requestedPgn) || (nackDst != dst))
+  {
+    if (isNACK)                  snprintf(errText, elcount(errText), "Got NACK instead of ACK.\n");
+    if (nackPgn != requestedPgn) snprintf(errText, elcount(errText), "Got NACK with unexpected PGN. (got 0x%.05X, expected 0x%.05X)\n", nackPgn, requestedPgn);
+    if (nackDst != dst)          snprintf(errText, elcount(errText), "Got NACK with unexpected destination. (got %X, expected %X)\n", nackDst, dst);
+    return 0;
+  }
+  return 1;
+}
+
+// ==============================================================================================================
+// check given pg-message for any ACK
+// returns 1 if ok.
+byte CT_CHECK_ANY_ACK(qword payload, dword requestedPgn, byte dst, char errText[])
+{
+  byte ackDst,isNACK;
+  dword ackPgn;
+  snprintf(errText, elcount(errText), "");
+  CT_GET_ACK_INFO(payload, isNACK, ackPgn, ackDst);
+  if ((ackPgn != requestedPgn) || (ackDst != dst))
+  {
+    if (ackPgn != requestedPgn) snprintf(errText, elcount(errText), "Got ACK with unexpected PGN. (got 0x%.05X, expected 0x%.05X)\n", ackPgn, requestedPgn);
+    if (ackDst != dst)          snprintf(errText, elcount(errText), "Got ACK with unexpected destination. (got %X, expected %X)\n", ackDst, dst);
+    return 0;
+  }
+  return 1;
+}
+// ==============================================================================================================
+// check given pg-message for ACK for access denied.
+// returns 1 if ok.
+byte CT_CHECK_ACK_DENY(qword payload, dword requestedPgn, byte dst, char errText[])
+{
+  byte ackDst;
+  dword ackPgn;
+  byte ctrlWord;
+  
+  snprintf(errText, elcount(errText), "");
+  CT_GET_ACK_INFO_EX(payload, ctrlWord, ackPgn, ackDst);
+  
+  if ((ctrlWord != gc_ACK_CTRL_WORD_DENY) || (ackPgn != requestedPgn) || (ackDst != dst))
+  {
+    if (ctrlWord != gc_ACK_CTRL_WORD_DENY)
+      snprintf(errText, elcount(errText), "Got ACK with unexpected control word. (got 0x%.02X, expected 0x%.02X)", ctrlWord, gc_ACK_CTRL_WORD_DENY);
+    if (ackPgn != requestedPgn)  snprintf(errText, elcount(errText), "Got ACK with unexpected PGN. (got 0x%.05X, expected 0x%.05X)\n", ackPgn, requestedPgn);
+    if (ackDst != dst)           snprintf(errText, elcount(errText), "Got ACK with unexpected destination. (got %X, expected %X)\n", ackDst, dst);
+    return 0;
+  }
+  return 1;
+}
+// ==============================================================================================================
+// check given pg-message for ACK for busy
+// returns 1 if ok.
+byte CT_CHECK_ACK_BUSY(qword payload, dword requestedPgn, byte dst, char errText[])
+{
+  byte ackDst;
+  dword ackPgn;
+  byte ctrlWord;
+  
+  snprintf(errText, elcount(errText), "");
+  CT_GET_ACK_INFO_EX(payload, ctrlWord, ackPgn, ackDst);
+  
+  if ((ctrlWord != gc_ACK_CTRL_WORD_BUSY) || (ackPgn != requestedPgn) || (ackDst != dst))
+  {
+    if (ctrlWord != gc_ACK_CTRL_WORD_BUSY)
+      snprintf(errText, elcount(errText), "Got ACK with unexpected control word. (got 0x%.02X, expected 0x%.02X)", ctrlWord, gc_ACK_CTRL_WORD_BUSY);
+    if (ackPgn != requestedPgn)  snprintf(errText, elcount(errText), "Got ACK with unexpected PGN. (got 0x%.05X, expected 0x%.05X)\n", ackPgn, requestedPgn);
+    if (ackDst != dst)           snprintf(errText, elcount(errText), "Got ACK with unexpected destination. (got %X, expected %X)\n", ackDst, dst);
+    return 0;
+  }
+  return 1;
+}
+
+// ==============================================================================================================
+// returns:
+// 0 if payload is CTS hold payload for given pgn.
+// 1: ctrl byte is wrong.
+// 2: number of packets is not 0
+// 3: next packet number is not 255
+// 4: reserved is not 0xFFFF
+// 5: pgn does not fit.
+byte CT_VALIDATE_CTS_HOLD(qword payload, dword pgn, dword& gotPgn)
+{
+  byte ctrlByte;
+  word reserved;
+  byte pkgs;
+  byte nextPkg;
+  
+  ctrlByte  = ((byte)payload & 0xFF);
+  pkgs     = ( payload & 0x000000000000FF00LL ) >> 8;
+  nextPkg  = ( payload & 0x0000000000FF0000LL ) >> 16;
+  reserved = ( payload & 0x000000FFFF000000LL ) >> 24;
+  gotPgn   = ( payload & 0xFFFFFF0000000000LL ) >> 40;
+
+  if (ctrlByte != gc_TPCM_CTRL_WORD_CTS) return 1;
+  if (pkgs != 0) return 2;
+  if (nextPkg != 0xFF) return 3;
+  if (reserved != 0xFFFF) return 4;
+  if (gotPgn != pgn) return 5;
+  //if (gotPgn != 0xFFFFFF) return 5; // this point is unclear. Tests wants this, spec does not define.
+  return 0;
+}
+
+// ==============================================================================================================
+// returns:
+// 0 ok
+// 1: unexpected abort reason
+// 2: unexpected pgn
+// 3: global address used as DA.
+byte CT_VALIDATE_ABORT(pg J1939::J1939_CT_RT::TPCMxx pgABORT, dword expPgn, byte expReason, char errText[])
+{
+  struct MsgBufEntry buf;
+  MsgBuf_Copy(buf, pgABORT);
+  return  CT_VALIDATE_ABORT(buf, expPgn, expReason, errText);
+}
+// ==============================================================================================================
+byte CT_VALIDATE_ABORT(struct MsgBufEntry bufAbort, dword expPgn, byte expReason, char errText[])
+{
+  char txtWarning[255];
+  byte reason;
+  dword pgn;
+  
+  reason = CT_GetDataByte(1, bufAbort);
+  pgn = CT_GetTPCMPgn(bufAbort);
+  snprintf(txtWarning,elcount(txtWarning),"");
+  // check the abort reason to be 3...
+  if (reason != expReason)
+  {
+    if ( (reason>=10) && (reason<=249) )
+    {
+      snprintf(txtWarning, elcount(txtWarning), " Warning: Using abort reason within SAE reserved range.");
+    }
+    else if ( (reason>=251) && (reason<=255) )
+    {
+      snprintf(txtWarning, elcount(txtWarning), " Warning: Using abort reason reserved for J1939-71 - Vehicle Application Layer.");
+    };
+    snprintf(errText, elcount(errText), "Abort at t=%.06f contains unexpected abort reason. (expected: %d, got: %d).%s", CT_Ns2Sec(bufAbort.time_ns), expReason, reason, txtWarning);
+    return 1;
+  }
+  if (CT_GetDst(bufAbort.id) == gc_BC_ADDR)
+  {
+    snprintf(errText, elcount(errText), "Abort at t=%.06f was sent to global address (invalid DA).", CT_Ns2Sec(bufAbort.time_ns));
+    return 2;
+  }
+  if (pgn != expPgn)
+  {
+    snprintf(errText, elcount(errText), "Abort at t=%.06f contains unexpected PGN. (expected: 0x%.05X, got: 0x%.05X)", CT_Ns2Sec(bufAbort.time_ns), expPgn, pgn);
+    return 3;
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// check tp dts from src to dst starting at given timestamp.
+// returns
+// -2000: Sequence nr > total nr of packets.
+// -1000: Duplicate seq nr.
+// -999: No entries found
+// -n: seq nr failure. Expected seq nr n
+// 0: OK
+// n: TP.DT with seq nr n timeout
+int CT_Check_TPDT_In_MsgBuf(byte totalNrOfPackets, int64 initTime, byte src, byte dst, char errText[])
+{
+  byte debug;
+  word bufIndices[long];
+  byte expSeqNr;
+  dword dtms;
+  debug = 0;
+  if (debug) write("Checking TPDT starting with init time %lld", initTime);
+  if (!CT_Get_TPDTs_In_MsgBuf(bufIndices, initTime, src, dst))
+  {
+    snprintf(errText, elcount(errText), "No TP.DTs found from %X->%X", src, dst);
+    return -999;
+  }
+  
+  expSeqNr = 0;
+  
+  for (long k: bufIndices)
+  {
+    byte gotSeqNr;
+    gotSeqNr = gMsgBuf[bufIndices[k]].data[0];
+    expSeqNr++;
+    if (debug) MsgBuf_Print_Entry(gMsgBuf[bufIndices[k]], gc_CANID_BITMASK_EPGN_SRC_DST);
+    if (debug) write("DBG: exp seq %d, got %d from %x->%x", expSeqNr, gotSeqNr, src, dst);
+    if (expSeqNr != gotSeqNr)
+    {
+      int result;
+      snprintf(errText, elcount(errText), "TP.DT @%.6f (0x%X -> 0x%X): Sequence number failure. Got seq nr %d, expected %d.", CT_Ns2Sec(gMsgBuf[bufIndices[k]].time_ns), src, dst, gotSeqNr, expSeqNr);
+      result = -expSeqNr;
+      if (expSeqNr > totalNrOfPackets)
+      {
+        if (gotSeqNr <= totalNrOfPackets)
+        {
+          snprintf(errText, elcount(errText), "TP.DT @%.6f (0x%X -> 0x%X): Sequence number failure. Duplicate seq nr %d", CT_Ns2Sec(gMsgBuf[bufIndices[k]].time_ns), src, dst, gotSeqNr);
+          result = -1000;
+        }
+        else
+        {
+          snprintf(errText, elcount(errText), "TP.DT @%.6f (0x%X -> 0x%X): Sequence number failure. Seq nr %d is beyond total packet number %d", CT_Ns2Sec(gMsgBuf[bufIndices[k]].time_ns), src, dst, gotSeqNr, totalNrOfPackets);
+          result = -2000;
+        }
+      }
+      if (debug) write("DBG: result=%d",result);
+      return result;
+    }
+    
+    // check distances..
+    {
+      int64 t1;
+      int64 t2;
+      t2 = gMsgBuf[bufIndices[k]].time_ns;
+      t1 = (k>0) ? gMsgBuf[bufIndices[k-1]].time_ns : initTime;
+      dtms =  CT_NS2Ms(t2 - t1);
+      if (debug) write("t1=%lld, t2=%lld, dtms=%d",t1, t2, dtms);
+      if (dtms > gc_TIMEOUT_TR)
+      {
+        snprintf(errText, elcount(errText), "TP.DT @%.6f (0x%X -> 0x%X): Sequence with number %d timed out (dt=%dms)", CT_Ns2Sec(gMsgBuf[bufIndices[k]].time_ns), src, dst, expSeqNr, dtms);
+        return 2;
+      }
+    }
+  }
+  if (debug) write("DBG: BUF CHK OK");
+  return 0;
+}
+
+// ==============================================================================================================
+// CT_Check_TP_AsResponder
+// - Request from testerAddr -> dutAddr
+// - await rts from dut
+// - send cts to dut
+// - await dt's from dut
+// - send eom to dut
+// - await the PG.
+// returns: 
+// 0: OK
+// 1: DT Timeout
+// 2: RTS timeout
+// 3: DT seq nr failure
+// 4: BAM timeout
+// 5: RTS error (inconsistent size and total number of packages)
+// 6: BAM error (inconsistent size and total number of packages)
+int CT_Check_TP_AsResponder(  byte reqSrcAddr
+                            , byte reqDstAddr // for BAM do NOT give BC ADDR into here but set asBAM to 1, else it's unknown from where the BAM init and TPDT are comming from.
+                            , dword pgn
+                            , int64& reqTime
+                            , pg* pgOutResponse
+                            , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                            , pg J1939::J1939_CT_RT::TPCMxx pgOutBAM
+                            , pg J1939::J1939_CT_RT::TPCMxx pgOutCTS
+                            , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                            , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                            , word eomDelay
+                            , byte asBAM
+                            , char errText[])
+{
+  word bufIndices[long];
+  int tpdtRes;
+  byte expPkgCount;
+  
+  initJ1939PGData(pgOutResponse);
+  initJ1939PGData(pgOutRTS);
+  initJ1939PGData(pgOutBAM);
+  initJ1939PGData(pgOutCTS);
+  initJ1939PGData(pgOutLastDT);
+  initJ1939PGData(pgOutEOM);
+  
+  reqTime = CT_SendRequest(pgn, reqSrcAddr, asBAM ? gc_BC_ADDR : reqDstAddr);
+
+  if (asBAM)
+  {
+    // await BAM init
+    if (CT_WaitForTPCM(pgOutBAM, pgn, reqDstAddr, gc_BC_ADDR, gc_TPCM_CTRL_WORD_BAM, gc_TIMEOUT_TR))
+    {
+      snprintf(errText, elcount(errText), "TP.CM_BAM timeout for request from %d (0x%X) -> %d (0x%X) at %.6f", reqSrcAddr, reqSrcAddr, reqDstAddr, reqDstAddr, CT_Ns2Sec(reqTime));
+      return 4; // leave on fail.
+    }
+    
+    // BAM init inconsistent size and total number of package check.
+    CT_Calc_TP_TotalPacketCount(pgOutBAM.TotalMessageSize, expPkgCount);
+    if (pgOutBAM.TotalNumberOfPacketsBAM != expPkgCount)
+    {
+      snprintf(errText, elcount(errText), "TP.CM_BAM total number of package count does not fit message size %d in BAM from %d (0x%0X) at %.06f. Got %d, Expected: %d", pgOutBAM.TotalMessageSize, pgOutBAM.sa, pgOutBAM.sa, CT_Ns2Sec(pgOutBAM.time_ns), pgOutBAM.TotalNumberOfPacketsBAM, expPkgCount );
+      return 6; // leave on fail.
+    }
+    
+    // await dts
+    if ((tpdtRes=CT_WaitForDTs( pgOutLastDT, pgOutBAM.sa, gc_BC_ADDR, 1, pgOutBAM.TotalNumberOfPackets )) >0)
+    {
+      snprintf(errText, elcount(errText), "Timeout of TP.DT with seq nr %d related for TP.BAM of global request at %.6f from %d (0x%X).", tpdtRes, CT_Ns2Sec(reqTime), reqSrcAddr, reqSrcAddr);
+      return 1; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(errText, elcount(errText), "TP.DT sequence number failure for packet at %.6f related to TP.BAM from %d (0x%X) at %.6f. Got seq nr %d, expected %d", pgOutBAM.sa, pgOutBAM.sa, CT_Ns2Sec(pgOutBAM.time_ns), CT_Ns2Sec(pgOutLastDT.time_ns), pgOutLastDT.SequenceNumber, abs(tpdtRes));
+      return 3; // leave on fail.
+    }
+    // before continue, wait a TR and check sequence number errors within this time...
+    CT_WAIT(gc_TIMEOUT_TR);
+    
+    // Additionally check seq nr errors in messagebuf before leaving BAM,
+    // there may be another BAM - init from the node - if so, then do not check any TDs in buffer anymore.
+    if (!CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(bufIndices, pgOutLastDT.time_ns, reqDstAddr, gc_TPCM_CTRL_WORD_BAM))
+    {
+      if (CT_Check_TPDT_In_MsgBuf(pgOutBAM.TotalNumberOfPacketsBAM, pgOutBAM.time_ns, reqDstAddr, gc_BC_ADDR, errText)<0)
+      {
+        // write("BAM TD ERR - EG DUP... errText=%s", errText);
+        return 3; // leave on fail.
+      }
+    }
+    
+  }
+  else
+  {
+    // await rts
+    if (CT_WaitForRTS(pgOutRTS, pgn, reqDstAddr, reqSrcAddr))
+    {
+      snprintf(errText, elcount(errText), "TP.RTS timeout for request from %d (0x%X) -> %d (0x%X) at %.6f", reqSrcAddr, reqSrcAddr, reqDstAddr, reqDstAddr, CT_Ns2Sec(reqTime));
+      return 2; // leave on fail.
+    }
+    
+    // RTS init inconsistent size and total number of package check.
+    CT_Calc_TP_TotalPacketCount(pgOutRTS.TotalMessageSize, expPkgCount);
+    if (pgOutRTS.TotalNumberOfPackets != expPkgCount)
+    {
+      snprintf(errText, elcount(errText), "TP.CM_RTS total number of package count does not fit message size %d in TP from %d (0x%0X) -> %d (0x%0X) at %.06f. Got %d, Expected: %d", pgOutRTS.TotalMessageSize, pgOutRTS.sa, pgOutRTS.sa, pgOutRTS.da, pgOutRTS.da, CT_Ns2Sec(pgOutRTS.time_ns), pgOutRTS.TotalNumberOfPackets, expPkgCount );
+      CT_SendABORT(pgn, reqSrcAddr, reqDstAddr, 3);
+      return 5; // leave on fail.
+    }
+  
+    // send cts
+    CT_SendCTS(pgOutCTS, pgn, reqSrcAddr, reqDstAddr, 1, pgOutRTS.TotalNumberOfPackets);
+  
+    // await dts
+    if ((tpdtRes=CT_WaitForDTs( pgOutLastDT, pgOutCTS )) >0)
+    {
+      snprintf(errText, elcount(errText), "Timeout of TP.DT with seq nr %d related for TP of request at %.6f from %d (0x%X) -> %d (0x%X).", tpdtRes, CT_Ns2Sec(reqTime), reqSrcAddr, reqSrcAddr, reqDstAddr, reqDstAddr);
+      CT_SendABORT(pgn, reqSrcAddr, reqDstAddr, 3);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return 1; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(errText, elcount(errText), "TP.DT sequence number failure for packet at %.6f. Got seq nr %d, expected %d", CT_Ns2Sec(pgOutLastDT.time_ns), pgOutLastDT.SequenceNumber, abs(tpdtRes));
+      CT_SendABORT(pgn, reqSrcAddr, reqDstAddr, 3);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return 3; // leave on fail.
+    }
+    
+    if (eomDelay>0)
+    {
+      CT_WAIT(eomDelay);
+    }
+    
+    // Additionally check seq nr errors in messagebuf before finalizing with EOM.
+    if (CT_Check_TPDT_In_MsgBuf(pgOutRTS.TotalNumberOfPackets, pgOutCTS.time_ns, reqDstAddr, reqSrcAddr, errText)<0)
+    {
+      // write("errText=%s", errText);
+      return 3; // leave on fail.
+    }
+    
+    // send EOM...
+    CT_SendEOM(pgOutEOM, pgn, pgOutCTS.sa, pgOutCTS.da, pgOutRTS.TotalMessageSize, pgOutRTS.TotalNumberOfPackets);
+  }
+  
+  initJ1939PGData(pgOutResponse);
+  if (testWaitForJ1939PG(pgn, reqDstAddr, reqSrcAddr, gc_TIMEOUT_T3)!=0)
+    testGetWaitJ1939PGData(pgOutResponse);
+  
+  return 0;
+}
+
+
+
+
+// ==============================================================================================================
+// CT_Check_TP_AsOriginator
+// - send rts to DUT
+// - start receiving CTS from dut in a loop
+// - react on the CTS and send the ordered TP.DT's to DUT
+// - After final TP.DT await EOM
+// returns: 
+// 0: OK
+// 1: CTS Timeout
+// 2: CTS Error: Number of packets that can be sent error.
+// 3: CTS Error: Next packet number to be send error.
+// 4: EOM Timeout
+// 5: EOM Error: Total message size error.
+// 6: responder sent abort.
+// 7: DUT declined with abort. (answer in pgOutLastCTS)
+// 8: Sending TP.DT error.
+// 9: Multiple CTS or CTS within transport error.
+int CT_Check_TP_AsOriginator( byte originatorAddr
+                            , byte responderAddr
+                            , dword pgn
+                            , byte pgnTest
+                            , byte messageSize
+                            , byte rtsMaxPkgs
+                            , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                            , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                            , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                            , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                            , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                            , word dtDistance
+                            , byte useDefaultDtPrio
+                            , char errText[]
+                            )
+{
+  word bufIndices[long];
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  dword ctsTimeout;
+  dword pgnToCheck;
+  byte expSeqNr, lastSeqStart, lastSeqEnd;
+  byte i;
+  
+  //write("init");
+  initJ1939PGData(pgOutRTS);
+  initJ1939PGData(pgOutLastCTS);
+  initJ1939PGData(pgOutEOM);
+  initJ1939PGData(pgOutFirstDT);
+  initJ1939PGData(pgOutLastDT);
+  pgOutFirstDT.byte(0) = 0;
+  pgOutLastDT.byte(0) = 0;
+  pgOutRTS.byte(0) = 0;
+  pgOutLastCTS.byte(0) = 0;
+  pgOutEOM.byte(0) = 0;
+  
+  pgnToCheck = pgnTest ? pgn : gc_PGN_ANY;
+  // send RTS from originator to responder...
+  CT_SendRTS(pgOutRTS, pgn, originatorAddr, responderAddr, messageSize, rtsMaxPkgs); // IL may find the wrong RTS if sending RTS too fast...
+  pgOutRTS.TotalMessageSize = messageSize; // due the point above correct the message size...
+  expSeqNr = 1;
+  lastSeqStart = 0;
+  lastSeqEnd = 0;
+  
+  // CTS awaiting loop...
+  ctsTimeout = gc_TIMEOUT_TR;
+  do
+  {
+    // await the CTS...
+    //write("ctsTimeout=%d",ctsTimeout);
+    //write("pgnToCheck=%x",pgnToCheck);
+    if (CT_WaitForCTS(pgOutLastCTS, pgnToCheck, responderAddr, originatorAddr, ctsTimeout))
+    {
+      if (pgOutLastDT.byte(0) == 0)
+      {
+        // first CTS - successor of an RTS
+        snprintf(errText, elcount(errText), "CTS timeout after TP.CM_RTS at t=%.06f", CT_Ns2Sec(pgOutRTS.time_ns));
+      }
+      else
+      {
+        // follow-up CTS - successor of a TP.DT
+        snprintf(errText, elcount(errText), "Consecutive CTS timeout after TP.CM_DT at t=%.06f", CT_Ns2Sec(pgOutLastDT.time_ns));
+      }
+      //write("TO");
+      
+      if (pgOutLastCTS.NumberOfPacketsThatCanBeSent == 0)
+      {
+        // error during CTS hold...
+        snprintf(errText, elcount(errText), "CTS hold timeout after RTS at t=%.06f. Stopped TP with abort.", CT_Ns2Sec(pgOutRTS.time_ns));
+      }
+      // check for aborts from responder for pgn in rts...
+      //write("p=%x",pgOutLastCTS.PGNumber);
+      //write("(pgOutLastCTS.ControlByte == gc_TPCM_CTRL_WORD_ABORT): %d",(pgOutLastCTS.ControlByte == gc_TPCM_CTRL_WORD_ABORT));
+      //write("(pgOutLastCTS.PGNumber <= gc_PGN_MAX_VALID) %x: %d", pgOutLastCTS.PGNumber, (pgOutLastCTS.PGNumber <= gc_PGN_MAX_VALID));
+      //write("( (pgOutLastCTS.PGNumber == pgn) || (pgnToCheck != gc_PGN_ANY) ): %d %d : %d)", (pgOutLastCTS.PGNumber == pgn), (pgnToCheck != gc_PGN_ANY), (pgOutLastCTS.PGNumber == pgn) || (pgnToCheck == gc_PGN_ANY) );
+      if ( (pgOutLastCTS.ControlByte == gc_TPCM_CTRL_WORD_ABORT) && (pgOutLastCTS.PGNumber <= gc_PGN_MAX_VALID) && ( (pgOutLastCTS.PGNumber == pgn) || (pgnToCheck == gc_PGN_ANY) ) )
+      {
+        snprintf(errText, elcount(errText), "Responder sent abort at t=%.06f after RTS at t=%.06f.", CT_Ns2Sec(pgOutLastCTS.time_ns), CT_Ns2Sec(pgOutRTS.time_ns));
+        return 7;
+      }
+      
+      if (expSeqNr>1) CT_SendABORT(pgn, originatorAddr, responderAddr, 3); // Timeout occured during running connection
+      return 1;
+    }
+
+    // check cts error (inconsistency)
+    
+    // support cts hold...
+    ctsTimeout = gc_TIMEOUT_TR;
+    if (pgOutLastCTS.NumberOfPacketsThatCanBeSent == 0)
+    {
+      // CTS HOLD for next cts...
+      ctsTimeout = gc_MAX_CTS_HOLD;
+      continue;
+    }
+    
+    // got no hold, but a normal cts..
+    // check the next packet number to be sent
+    if (pgOutLastCTS.NextPacketNumberToBeSent != expSeqNr)
+    {
+      if (expSeqNr == 1)
+      {
+        // first seq nr. Can not be a resend... it has to be 1.
+        snprintf(errText, elcount(errText), "CTS Error at t=%.06f: Next packet number to be send error. Got %d, expected %d. Sending abort.",CT_Ns2Sec(pgOutLastCTS.time_ns), pgOutLastCTS.NextPacketNumberToBeSent, expSeqNr);
+        CT_SendABORT(pgn, originatorAddr, responderAddr, 3); // Timeout occured during running connection
+        return 3;
+      }
+      else
+      {
+        // not first sequence and not expected - so no continue - check for resend...
+        // resending only can be done using one of the seq numbers in the last cts block. Size doesn't matter.
+        if (!CT_InRange((byte)pgOutLastCTS.NextPacketNumberToBeSent, (byte)lastSeqStart, (byte)lastSeqEnd))
+        {
+          // no resend
+          snprintf(errText, elcount(errText), "CTS Error at t=%.06f: Next packet number to be send error. Got %d, expected %d or a resend of an index within the range [%d;%d]. Stopped TP with abort.", CT_Ns2Sec(pgOutLastCTS.time_ns), pgOutLastCTS.NextPacketNumberToBeSent, expSeqNr, lastSeqStart, lastSeqEnd);
+          CT_SendABORT(pgn, originatorAddr, responderAddr, 3); // Timeout occured during running connection
+          return 3;
+        }
+        else
+        {
+          // its a resend. Accept it by setting the next expected seqNr to the next packet number in the CTS.
+          expSeqNr = pgOutLastCTS.NextPacketNumberToBeSent;
+        }
+      }
+    }
+    
+    // If next packet number to be sent is seen as plausible, check if the number of packages following is also plausible.
+    // total number of packets mismatch?
+    if (pgOutLastCTS.NumberOfPacketsThatCanBeSent > (pgOutRTS.TotalNumberOfPackets - pgOutLastCTS.NextPacketNumberToBeSent+1))
+    {
+      snprintf(errText, elcount(errText), " CTS Error at t=%.06f: Number of packets that can be sent error. Got: %d, expected: %d.", CT_Ns2Sec(pgOutLastCTS.time_ns), pgOutLastCTS.NumberOfPacketsThatCanBeSent, (pgOutRTS.TotalNumberOfPackets - pgOutLastCTS.NextPacketNumberToBeSent+1));
+      return 2;
+    }
+    if (pgOutLastCTS.NumberOfPacketsThatCanBeSent > pgOutRTS.MaximumNumberOfPackets)
+    {
+      snprintf(errText, elcount(errText), " CTS Error at t=%.06f: Number of packets that can be sent error exceeds MaximumNumberOfPackets in RTS at t=%.06f. Got: %d, Allowed: <= %d", CT_Ns2Sec(pgOutLastCTS.time_ns), CT_Ns2Sec(pgOutRTS.time_ns), pgOutLastCTS.NumberOfPacketsThatCanBeSent, pgOutRTS.MaximumNumberOfPackets);
+      return 2;
+    }
+    
+    // update the current block starting for the next iteration before expSeqNr is manipulated during CTS execution.
+    // NOW the last seq start and end is shows the range of the current CTS block that is executing.
+    lastSeqStart = pgOutLastCTS.NextPacketNumberToBeSent;
+    lastSeqEnd = pgOutLastCTS.NextPacketNumberToBeSent + pgOutLastCTS.NumberOfPacketsThatCanBeSent - 1;
+    
+    // execute the CTS...
+    //write("%d..%d",pgOutLastCTS.NextPacketNumberToBeSent, pgOutLastCTS.NextPacketNumberToBeSent + pgOutLastCTS.NumberOfPacketsThatCanBeSent -1 );
+    for (i=lastSeqStart; i<=lastSeqEnd; i++)
+    {
+      // just iterate the next expected sequence number by one after sending each block to count the normal successive sequencing.
+      expSeqNr++;
+      
+      // output the data packet i.
+      initJ1939PGData(pgDT);      // inits payload with 0xff
+      pgDT.sa = originatorAddr;
+      pgDT.da = responderAddr;
+      pgDT.prio = (useDefaultDtPrio ? gc_PRIO_TP_DATA : i%8);
+      pgDT.SequenceNumber = i;    // writes first byte
+      
+      // leave payload bytes to 0xFF - most devices see this as "ignore it".
+      CT_WAIT(dtDistance);
+      
+      // check for aborts from responder
+      if (CT_CHECK_ABORTS_BY_PGN(bufIndices, pgnToCheck, responderAddr, originatorAddr, pgOutLastCTS.time_ns))
+      {
+        snprintf(errText, elcount(errText), "Responder sent abort at t=%.06f during TP.DT-Block.", CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns) );
+        return 6;
+      }
+
+      // before sending DT...Check multiple CTS...
+      if (i==lastSeqStart)
+      {
+        // after CTS received do not allow multiple CTS before first DT...
+        //write("lastCTSTime=%.06f", CT_Ns2Sec(pgOutLastCTS.time_ns));
+        if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(bufIndices, pgOutLastCTS.time_ns, responderAddr, originatorAddr, gc_TPCM_CTRL_WORD_CTS))
+        {
+          if (bufIndices.size()>1)
+          {
+            snprintf(errText, elcount(errText), "Responder sends unexpected TP.CM_CTS at t=%.06f, after t=%.06f before the TP.DT block starts. Stopped TP with abort.", CT_Ns2Sec(gMsgBuf[bufIndices[1]].time_ns), CT_Ns2Sec(pgOutLastCTS.time_ns));
+            CT_SendABORT(pgn, originatorAddr, responderAddr, 4); // CTS received during data transfer is running
+            return 9;
+          }
+        }
+      }
+      else
+      {
+        if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(bufIndices, pgDT.time_ns, responderAddr, originatorAddr, gc_TPCM_CTRL_WORD_CTS))
+        {
+          snprintf(errText, elcount(errText), "Responder sends unexpected TP.CM_CTS at t=%.06f, during a TP.DT block error. Stopped TP with abort.", CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+          CT_SendABORT(pgn, originatorAddr, responderAddr, 4); // CTS received during data transfer is running
+          return 9;
+        }
+      }
+      
+      
+      if (!CT_SendDT(pgDT))
+      {
+        snprintf(errText, elcount(errText), "Sending TP.DT with seqNr %d at t=%.06f failed. Stopped TP with abort.", i, CT_Ns2Sec(pgDT.time_ns));
+        CT_SendABORT(pgn, originatorAddr, responderAddr, 3); // Timeout occured during running connection
+        return 8;
+      }
+
+      if (i==1)
+      {
+        pgOutFirstDT = pgDT;
+        //write("noted first dt. time=%lld", pgOutFirstDT.time_ns);
+      }
+      pgOutLastDT = pgDT;
+      //write("noted last dt... seq = %d, time = %lld", pgOutLastDT.SequenceNumber, pgOutLastDT.time_ns);
+    
+    }
+    
+  } while(pgDT.SequenceNumber < pgOutRTS.TotalNumberOfPackets);
+  
+  // after sending the data packets, await eom...
+  
+  if (CT_WaitForEOM(pgOutEOM, pgnToCheck, responderAddr, originatorAddr))
+  {
+    // check for aborts from responder
+    if (CT_CHECK_ANY_ABORTS(bufIndices, responderAddr, originatorAddr, gc_BC_ADDR, pgOutLastCTS.time_ns))
+    {
+      snprintf(errText, elcount(errText), "Responder sent abort at t=%.06f after CTS at t=%.06f, but TP.CM_EndOfMsgACK was expected.", CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns), CT_Ns2Sec(pgOutLastCTS.time_ns) );
+      return 6;
+    }
+
+    snprintf(errText, elcount(errText), "EOM Timeout after last TP.DT at t=%.6f. Stopped TP with abort.", CT_Ns2Sec(pgDT.time_ns));
+    CT_SendABORT(pgn, originatorAddr, responderAddr, 3); // Timeout occured during running connection
+    return 4;
+  }
+
+  if (pgOutEOM.TotalMessageSizeEoMA != pgOutRTS.TotalMessageSize)
+  {
+    snprintf(errText, elcount(errText), "EOM Error at %.6f: Total message size error. Got %d, Expected %d. Stopped TP with abort.", CT_Ns2Sec(pgOutEOM.time_ns),pgOutEOM.TotalMessageSizeEoMA, pgOutRTS.TotalMessageSize);
+    CT_SendABORT(pgn, originatorAddr, responderAddr, 3); // Timeout occured during running connection
+    return 5;
+  }
+  
+  return 0;
+}
+
+// ==============================================================================================================
+// check dut sends non ac messages within given time
+byte CT_Check_For_Allowed_Messages_During_AC_Between(word bufIndices[long], int64 ts, int64 te, byte dutAddr, byte checkListenMode, char errText[])
+{
+  byte debug = 0;
+  
+  // get all buf indices in message buffer...
+  MsgBuf_FindAllByID(bufIndices, 0, CT_BuildId(0, dutAddr, 0), gc_CANID_BITMASK_SRC);
+  CT_DEBUG32(debug | @CT::DEBUG::CHECKS, "Found %d messages from DUT between t=%.06f to t=%.06f...", bufIndices.size(), CT_Ns2Sec(ts), CT_Ns2Sec(te));
+  
+  // filter out all messages before starting timestamp...
+  MsgBuf_FilterByTimestamp(bufIndices, ts, -1, gFT_HIGHPASS);
+
+  // filter out all messages after
+  if (te>ts) MsgBuf_FilterByTimestamp(bufIndices, te, -1, gFT_LOWPASS);
+  
+  // filter out all allowed AC messages from DUT...
+  if (checkListenMode) CT_DEBUG32(debug | @CT::DEBUG::CHECKS, "Checking Listen Only Mode - just filter out cannot claim...", bufIndices.size());  
+  MsgBuf_FilterByID(bufIndices, CT_BuildId(gc_PGN_AC, checkListenMode ? gc_NULL_ADDR : dutAddr, 0), gc_CANID_BITMASK_PGN_SRC, gFT_FILTEROUT);
+  CT_DEBUG32(debug | @CT::DEBUG::CHECKS, "... Without allowed AC messages there are %d messages left...", bufIndices.size());
+  
+  // check if there are messages left -> these are the non-AC message from DUT within waiting time.
+  if (bufIndices.size()>0)
+  {
+    int64 msgTime;
+    // there are non AC messages found in message buffer during waiting time.
+    msgTime = gMsgBuf[bufIndices[0]].time_ns;
+    if (checkListenMode)
+    {
+      snprintf(errText, elcount(errText), "DUT went offline (listen only) with Cannot Claim at t=%.06f, but sent a message afterwards at t=%.06f.", CT_Ns2Sec(ts), CT_Ns2Sec(msgTime));
+    }
+    else
+    {
+      snprintf(errText, elcount(errText), "Message at t=%.06f was sent %dms after last AC at t=%.6f. Before going online there has to be a break of %dms", CT_Ns2Sec(msgTime), CT_Ns2Ms(msgTime - ts), CT_Ns2Sec(ts), gc_TIMEOUT_AC);
+    }
+    
+    return 0; // leave on fail.
+  }
+  return 1;
+}
+byte CT_Check_For_Allowed_Messages_During_AC_Between(int64 ts, int64 te, byte dutAddr, byte checkListenMode, char errText[])
+{
+  word bufIndices[long];
+  return CT_Check_For_Allowed_Messages_During_AC_Between(bufIndices, ts, te, dutAddr, checkListenMode, errText);
+}
+
+byte CT_Check_For_Allowed_Messages_During_AC(word bufIndices[long], int64 ts, byte dutAddr, byte checkListenMode, char errText[])
+{
+  return CT_Check_For_Allowed_Messages_During_AC_Between(bufIndices, ts, -1, dutAddr, checkListenMode, errText);
+}
+byte CT_Check_For_Allowed_Messages_During_AC(int64 ts, byte dutAddr, byte checkListenMode, char errText[])
+{
+  word bufIndices[long];
+  return CT_Check_For_Allowed_Messages_During_AC(bufIndices, ts, dutAddr, checkListenMode, errText);
+}

@@ -1,0 +1,208 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+variables
+{
+}
+
+// This callback function is called before TCP/IP stack receive packet
+long OnIpReceivePrepare(ethernetPacket * packet)
+{
+  word  dstSocket;
+  dword socketHandle;
+  long  ttlSeconds;
+  char  buf[30];
+  
+  //
+  // check wether received packet is IPv4?
+  //
+  if(IPv4IsEthTypeIPv4(packet) == 1)
+  {
+    //
+    // check wether received packet has IPv4Option?
+    //
+    if(IPv4IsExistIPv4Option(packet) == 1)
+    {
+      byte bParamProblemPointer; // Parameter Problem Msg Pointer
+      
+      // block TCP/IP stack if Security Option is not only one
+      if(IPv4IsMultiSecurityOption(packet) == 1){
+        return 0;
+      }
+      
+      // return 1(Not send ICMP Parameter Problem Msg) if it's ICMP Parameter Problem Msg
+      if((ICMPv4IsExist(packet) == 1) && (ICMPv4IsParamProblemMsg(packet) == 1)){
+        return 1;
+      }
+      
+      // return 1(Not send ICMP Parameter Problem Msg) if IPv4 Fragment offset is not 0
+      if(IPv4GetFragmentOffset(packet) != 0){
+        return 1;
+      }
+
+      // return 1(Not send ICMP Parameter Problem Msg) if IPv4 DestAddress is Broadcast
+      if(IPv4GetDstAddress(packet) == kBROADCAST_IP_ADDRESS){
+        return 1;
+      }
+
+      // block TCP/IP stack if Timestamp Option is not only one
+      if(IPv4IsMultiTimestampOption(packet, bParamProblemPointer) == 1){
+        if(bParamProblemPointer != 0x00){
+          // send ICMP Parameter Problem Msg
+          sendIcmpv4ParameterProblemdMsg(packet, bParamProblemPointer);
+        }
+        return 0;
+      }
+      
+      // block TCP/IP stack if Timestamp Option does not have enough room
+      if(IPv4IsExistTimestampOptionRoom(packet, bParamProblemPointer) == 0){
+        if(bParamProblemPointer != 0x00){
+          // send ICMP Parameter Problem Msg
+          sendIcmpv4ParameterProblemdMsg(packet, bParamProblemPointer);
+        }
+        return 0;
+      }
+    }
+
+    //
+    // check wether received packet is ICMPv4?
+    //
+    //ICMPv4 packet
+    if(ICMPv4IsExist(packet) == 1 )
+    {
+      // ICMP receive and forward : GENERIC version
+      if(IsICMPv4FwdEnabled() == 1)
+      {
+        forwardReceivedICMP4vMessage(packet);
+      }
+
+      // Stop DF bit if the received packet is ICMPv4 DstUnreachMsg/FragmentNeeded with Next-Hop MTU = 0
+      if((ICMPv4IsDstUnreachMsg(packet) == 1) && (ICMPv4IsFragmentNeeded(packet) == 1)){
+        if(ICMPv4GetNextHopMTU(packet) == 0){
+          ipSetStackParameter("net.inet.tcp.path_mtu_discovery", 0);  // Stop DF bit
+        }
+      }
+      
+      ttlSeconds = kIPV4_DEF_FRAG_REASSEMBLY_TIMEOUT;
+      
+      // IPv4 workarounds
+      if(@sysvar::TC8_DUT_Config::TestGroup == kIpv4)
+      {
+        // IPv4_REASSEMBLY_11 + 12 workaround
+        if(packet.ipv4.ttl > kIPV4_DEF_FRAG_REASSEMBLY_TIMEOUT)          
+          ttlSeconds = packet.ipv4.ttl;
+        
+        SetIpReassemblyTimout(ttlSeconds);
+        
+        // IPv4_REASSEMBLY_13: Workarround -> ignore second fragment
+        sysGetVariableString(sysvar::TC8_DUT_Config::CurrentTestcaseName, buf, elcount(buf));
+        if(strncmp(buf, "IPv4_REASSEMBLY_13", strlen(buf)) == 0 && packet.ipv4.offset == 2 && packet.ipv4.byteLength == 24)
+          return 0;
+      }
+      
+      cancelTimer(IPv4FragReassemblyTimer);
+      // Send ICMPv4 Time Exceeded msg if received ICMPv4 message with MF=1 and timeout was expired
+      if((packet.ipv4.flags & 1) == 1)
+        setTimer(IPv4FragReassemblyTimer, ttlSeconds);
+    }
+  }
+  
+  // prepare for TCP
+  if(OnTcpReceivePrepare(packet) == 0)
+  {
+    return 0;
+  }
+  
+  //TCP behaviors which are not implemented by TCP/IP stack
+  if(isTcp(packet) == 1)
+  //if(isTcp(packet) == 1 && IPv4GetDstAddress(packet) == GetDutIpAsNummer())
+  {
+    //check if TCP mss option is invalid
+    if(@sysvar::TC8_DUT_Config::TcpMSSInvalidLengthReset == 1)
+    {
+      if( checkIfMSSOptionIsInvalid(packet) == 1)
+      {
+        //send RST
+        sendResetFlagPacket(packet);
+      }
+    }
+    // Retransmission monitring buffer management
+    if(@sysvar::TC8_DUT_Config::RetransmitPacketSameIPID == 1)
+    {
+      checkIfPacketReceived(packet);
+    }
+  
+    if(@sysvar::TC8_DUT_Config::TCPChangeOfferedWinowSizeEnable == 1)
+    {
+      changeOfferedWindowSize(packet);
+    }
+  }
+  
+  return 1;
+}
+
+
+// This callback function is called before TCP/IP stack send packet
+long OnIpSendPrepare( dword socket, ethernetPacket * packet)
+{
+  int lSocketId;
+  
+  if(getUDPSocketIndexFromHandle(lSocketId, socket) == kTrue)
+  {
+    if(isUDPSocketTimestampInfoEnable(lSocketId) == kTrue)
+    {
+      AddIPTimeStampOptionInfo(packet, lSocketId);
+      return 1;
+    }
+  }
+  
+  // protocol check
+  if(isTcp(packet) == 1)
+  {
+    // Retransmission monitoring and change IP indentification to be same.
+    if(@sysvar::TC8_DUT_Config::RetransmitPacketSameIPID == 1)
+    {
+      changeRetransmitPacketSameID(packet); // written in portTCP.cin
+    }
+    // Add MSS Option for data packet
+    if(@sysvar::TC8_DUT_Config::TcpMssOptionForDataPacket == 1)
+    {
+      addMssOptionForDataPacket(packet); //written in portTCP.cin
+    }
+    //Specifal handling for TCP_LAYER_ACTION_04
+    if(@sysvar::TC8_DUT_Config::TcpLayerAction04 == 1)
+    {
+      countDataPacket(packet);
+      return 1;
+    }
+    else if(@sysvar::TC8_DUT_Config::TcpLayerAction04 == 2)
+    {
+      return blockSendingSegments(packet);
+    }
+                
+    return OnTcpSendPrepare(packet, socket);
+  }
+  
+  return 1; // send packet
+}

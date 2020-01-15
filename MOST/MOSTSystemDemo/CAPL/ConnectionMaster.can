@@ -1,0 +1,1878 @@
+/*@@var:*/
+//
+// Simulation of a connection master FBlock
+//
+// The ConnectionMaster FBlock manages synchronous connections.
+//
+
+variables
+{
+  const byte cFBlockID = 0x3;
+  //max number of connections
+  const int cNoConnections = 64;
+  //max number of channels
+  const int cNoChannelsMax = 60;
+  //status connection not used
+  const int cConnectionUnused = 0;
+  //status connection establishing
+  const int cConnectionEstablishing = 1;
+  //status connection established
+  const int cConnectionEstablished = 2;
+  //timeout for the deadlock prevention timer
+  const int tDeadlockPrev = 1000;
+
+  //idle state of the ConnectionMaster
+  const byte cCMIdle = 0;
+  //states for building a connection 
+  const byte cBSAllocate = 1;
+  const byte cBSConnect = 2;
+  const byte cBSSourceActivity = 3;
+  //states for removing a connection
+  const byte cRSSourceActivityOff = 4;
+  const byte cRSDisConnect = 5;
+  const byte cRSDeAllocate = 6;
+
+  //error codes
+  const byte cErrorNotEnoughChannels = 0x10;
+  const byte cErrorDeviceBusy = 0x11;
+  const byte cErrorSourceError = 0x12;
+  const byte cErrorSinkError = 0x13;
+  const byte cErrorSinkInUse = 0x14;
+  const byte cErrorSourceSinkMismatch = 0x15;
+
+  //notification address
+  const long cNotificationAdr = 0xFFFF;
+  
+  //current number of channels
+  byte currentNoChannels = 0;
+
+  //state of the ConnectionMaster for building/removing a connection
+  byte cmState = cCMIdle;
+
+  //deadlock prevention timer
+  mstimer deadlockTimer;
+  byte deadlockTimerActive = 0;
+
+  //current Source and Sink data
+  byte currentSourceFBlockID;
+  byte currentSourceInstID;
+  byte currentSourceNr;
+  byte currentSinkFBlockID;
+  byte currentSinkInstID;
+  byte currentSinkNr;
+  word currentSenderHandle;
+  int currentConnectionNr;
+
+  //initial message for the current operation
+  mostAMSMessage * initMsg;
+
+  //Array containing channel use data -> don't change, use funtion addConnection() and removeConnection()
+  //The values in this array indicate the source which uses the channel.
+  int channelUseIDs[cNoChannelsMax];
+
+  int connectionSourceLabel[cNoConnections];
+  int connectionLabelWidth[cNoConnections];
+
+  //arrays containing connection data -> don't change, use functions addConnection(), removeConnection() and getS...().
+  //Source FBlockID
+  byte connectionSourceFBlockID[cNoConnections];
+  //Source InstID
+  byte connectionSourceInstID[cNoConnections];
+  //Source Nr
+  byte connectionSourceNr[cNoConnections];
+  //source delay
+  byte connectionSourceDelay[cNoConnections];
+ //Sink FBlockID
+  byte connectionSinkFBlockID[cNoConnections];
+  //Sink InstID
+  byte connectionSinkInstID[cNoConnections];
+  //Sink Nr
+  byte connectionSinkNr[cNoConnections];
+  //Status of the connection
+  byte connectionStatus[cNoConnections];
+  //This array contains an ID of the source which allocated the channel.
+  int connectionChannelUseID[cNoConnections];
+
+  /* Array description:
+
+             channelUseIDs    0    1    2 .. cNoChannelsMax (physical channel, i.e. byte of the synchronous part of the message)
+                           0x01 0x05 0x01 ..                (ID of the source which uses the channel. In most cases this is the
+                                                             number of the first connection which uses the source)
+
+  connectionSourceFBlockID    0    1    2 .. cNoConnections (connection number)
+                           0x31 0x32 0x31 ..                (ID of the source which uses the channel)
+                       ...
+          connectionStatus    0    1    2 .. cNoConnections (connection number)
+                           0x02 0x00 0x02 ..                (Is the connection used? 2 = yes, 1 = building, 0 = no)
+
+    connectionChannelUseID    0    1    2 .. cNoConnections (connection number)
+                           0x01 0x05 0x01 ..                (ID of the source which uses the channel)
+
+  The ConnectionMaster stores its internal data in these arrays as follows:
+
+  ConnectionNr 0
+   - uses the source 0x31 (see first element of connectionSourceFBlockID, other
+       information like InstID, SourceNr and sink information is stored in the
+       same way in the corresponding arrays.)
+   - has the internal "sourceID" 0x01 (see connectionChannelUseID). This sourceID
+       is unique for each tripple consisting of FBlockID, InstID and sourceNr
+   - uses channel 0 and 2 (first and third element of channelUseIDs have the sourceID 0x01)
+
+  ConnectionNr 2 uses the same source and the same channels (third element of
+  connectionChannelUseID has the sourceID 0x01, too)
+
+  Note that connectionNr 1 seems to use channel 1, but the first element of
+  connectionStatus is 0x00 which means that the connection is deleted.
+
+  This concept allows identification of channels belonging to a connection.
+  But each channel can be used by several connections (not several sources).
+
+  Adding a connection
+  When the ConnectionMaster adds a connection, it must check if the source is
+  already "known" and must use this ID. Otherwise it creates a new unique sourceID.
+
+  Removing a connection
+  The ConnectionMaster removes a connection by setting connectionStatus to 0x00.
+  This means the connection data is just hidden and will be overwritten when
+  the connectionNr is used again. When the source is not used by another
+  connection, it deallocates its channels and the value of channelUseIDs
+  must be deleted. This is done by setting channelUseIDs to -1 because any
+  higher value is a valid sourceID.*/
+
+
+  // Most Spec Version
+  const long v25 = 0x0205;
+  const long v30 = 0x0300;
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+
+  int i;
+  
+  //reset connection table
+  clearConnectionTable(0);
+
+  //set the message length to 0 to show that no message has arrived
+  initMsg.DLC = 0;
+
+  //configure CAPL node as application node
+  MostApplicationNode();
+  //enable Notification Service
+  MostAsNtfEnable();
+  //enable service for functions
+  MostAsNtfFunctionEnable(0x401, "sendStatus_AvailableChannels");
+
+  if(mostGetSpecVersion(mostGetChannel()) == v25)
+  {
+    MostAsNtfFunctionEnable(0x400, "sendStatus_SyncConnectionTable");
+  }
+  else
+  {
+    MostAsNtfFunctionEnable(0xF40, "sendStatus_SyncConnectionTableLabel");
+  }
+}
+/*@@end*/
+
+/*@@mostAmsMsg:ConnectionMaster.BuildSyncConnection.StartResultAck (0x032006):*/
+//handle buildSyncConnection message
+on mostAMSMessage ConnectionMaster.BuildSyncConnection.StartResultAck
+{
+  //check if the ConnectionMaster was the right receiver
+  if (!validReception(this))
+  {
+    return;
+  }
+
+  //check if we're building or removing a connection
+  if (cmState)
+  {
+    mostSendError_Code(this, cErrorDeviceBusy);
+    return;
+  }
+
+  //check if there are available connections
+  if ((getFreeConnectionNr() == -1) || (getAvailableChannelsCount() == 0))
+  {
+    mostSendError_Code(this, cErrorNotEnoughChannels);
+    return;
+  }
+
+  if (!isCompatible(this.SourceFBlock, this.SourceInstID, this.SinkFBlock, this.SinkInstID, this.SinkNr))
+  {
+    mostSendError_Code(this, cErrorSourceSinkMismatch);
+    return;
+  }
+
+  //save the initial message
+  initMsg = this;
+
+
+  CM_BuildSyncConnection(this.SenderHandle, this.SourceFBlock, this.SourceInstID, this.SourceNr, this.SinkFBlock, this.SinkInstID, this.SinkNr);
+}
+/*@@end*/
+
+/*@@caplFunc:getFreeConnectionNr():*///function
+//retrieves the next free connection
+int getFreeConnectionNr ()
+{
+  int i;
+  //iterate over connections
+  for (i = 0; i < cNoConnections; i++)
+  {
+    if (!connectionUsed(i))
+    {
+      return i;
+    }
+  }
+  //if not found
+  return -1;
+}
+/*@@end*/
+
+/*@@caplFunc:getAvailableChannelsCount():*///function
+//retrieves the number of available channels
+int getAvailableChannelsCount ()
+{
+  int i;
+  //result
+  int count;
+  //get the number of channels used for synchronous transfer
+  count = currentNoChannels;
+
+  //iterate over channels
+  for (i = 0; i < currentNoChannels; i++)
+  {
+    //if the channel is used by a source, decrement available channels...
+    if (channelUsed(i))
+    {
+      count--;
+    }
+  }
+
+  return count;
+}
+/*@@end*/
+
+/*@@caplFunc:channelUsed(int):*///function
+//tests if the given channel is used
+byte channelUsed (int channelNr)
+{
+  //get connection nr of belonging to the channel
+  byte connectionNr;
+  int channelUseID;
+  int i;
+
+  if(mostGetSpecVersion(mostGetChannel()) != v25)
+    return 0;
+
+  //get the channelUseID belonging to this channel
+  channelUseID = channelUseIDs[channelNr];
+  
+  //find all connections with this channelUseID and test if they are in use
+  for (i = 0; i < cNoConnections; i++)
+  {
+    if ((connectionChannelUseID[i] == channelUseID) && connectionUsed(i))
+    {
+      return 1;
+    }
+  }
+
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:getSourceFBlockID(int):*///function
+//retrieves the FBlockID of the source for the given connection
+byte getSourceFBlockID (int connectionNr)
+{
+  return connectionSourceFBlockID[connectionNr];
+}
+/*@@end*/
+
+/*@@caplFunc:getSourceInstID(int):*///function
+//retrieves the InstID of the source for the given connection
+byte getSourceInstID (int connectionNr)
+{
+  return connectionSourceInstID[connectionNr];
+}
+/*@@end*/
+
+/*@@caplFunc:getSourceNr(int):*///function
+//retrieves the number of the source for the given connection
+byte getSourceNr (int connectionNr)
+{
+  return connectionSourceNr[connectionNr];
+}
+/*@@end*/
+
+/*@@caplFunc:getSinkFBlockID(int):*///function
+//retrieves the FBlockID of the source for the given connection
+byte getSinkFBlockID (int connectionNr)
+{
+  return connectionSinkFBlockID[connectionNr];
+}
+/*@@end*/
+
+/*@@caplFunc:getSinkInstID(int):*///function
+//retrieves the InstID of the source for the given connection
+byte getSinkInstID (int connectionNr)
+{
+  return connectionSinkInstID[connectionNr];
+}
+/*@@end*/
+
+/*@@caplFunc:getSinkNr(int):*///function
+//retrieves the InstID of the source for the given connection
+byte getSinkNr (int connectionNr)
+{
+  return connectionSinkNr[connectionNr];
+}
+/*@@end*/
+
+/*@@caplFunc:addConnection(int,int,byte,byte,byte,byte,byte,byte,byte):*///function
+//adds a connection
+byte addConnection (int connectionNr, int channelNr, byte sourceFBlockID, byte sourceInstID, byte sourceNr,
+                                   byte sourceDelay, byte sinkFBlockID,   byte sinkInstID,   byte sinkNr)
+{
+  int sourceConnectionNr;
+  int channelUseID;
+  //look if the source has already allocated the channels
+  sourceConnectionNr = getConnectionNr(sourceFBlockID, sourceInstID, sourceNr);
+  //if found...
+  if (sourceConnectionNr > -1)
+  {
+    //use the exisiting "channel usage ID"
+    channelUseID = getChannelUseID(sourceConnectionNr);
+  }
+  else
+  {
+    //create a new one
+    channelUseID = getFreeChannelUseID(connectionNr);
+  }
+
+  //reserve channel for the given connection
+  channelUseIDs[channelNr] = channelUseID;
+  //add connection data
+  connectionSourceFBlockID[connectionNr] = sourceFBlockID;
+  connectionSourceInstID[connectionNr] = sourceInstID;
+  connectionSourceNr[connectionNr] = sourceNr;
+  connectionSourceDelay[connectionNr] = sourceDelay;
+  connectionSinkFBlockID[connectionNr] = sinkFBlockID;
+  connectionSinkInstID[connectionNr] = sinkInstID;
+  connectionSinkNr[connectionNr] = sinkNr;
+  connectionChannelUseID[connectionNr] = channelUseID;
+  //mark connection as establishing
+  connectionStatus[connectionNr] = cConnectionEstablishing;
+
+  return 1;
+}
+/*@@end*/
+
+/*@@caplFunc:setConnectionStatus(int,int):*///function
+//sets the status of a connection
+setConnectionStatus (int connectionNr, int newStatus)
+{
+  connectionStatus[connectionNr] = newStatus;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:ConnectionMaster.AvailableChannels.Get (0x034011):*/
+//request for the number of available channels
+on mostAMSMessage ConnectionMaster.AvailableChannels.Get
+{
+  //check if the ConnectionMaster was the right receiver
+  if (!validReception(this))
+  {
+    return;
+  }
+
+  sendStatus_AvailableChannels(this.SA);
+}
+/*@@end*/
+
+/*@@caplFunc:getConnectionNr(byte,byte,byte):*///function
+//get connectionNr for the given source
+int getConnectionNr (byte sourceFBlockID, byte sourceInstID, byte sourceNr)
+{
+  int i;
+  //iterate over connections
+  for (i = 0; i < cNoConnections; i++){
+    if ((connectionUsed(i)) &&
+        (sourceFBlockID == getSourceFBlockID(i)) &&
+        (sourceInstID == getSourceInstID(i)) &&
+        (sourceNr == getSourceNr(i)))
+    {
+      return i;
+    }
+  }
+  //if not found...
+  return -1;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:*:*/
+//handle generic messages
+on mostAMSMessage *
+{
+  //check if the ConnectionMaster was the right receiver
+  if (!validReception(this))
+  {
+    return;
+  }
+
+  switch(this.FunctionID)
+  {
+    case 0x101: //Allocate
+      if (this.OpType == 0xC)//Result
+      {
+        //do we build a connection?
+        if (cmState == cBSAllocate)
+        {
+          handleAllocateMsg(this);
+        } 
+        else
+        {
+          write("ConnectionMaster: Warning - unexpected Allocate reply message received.");
+        }
+      }
+      break;
+
+    case 0x111: //Connect
+      if (this.OpType == 0xC)//Result
+      {
+        //did we start a connect?
+        if (cmState == cBSConnect)
+        {
+          handleConnectMsg(this);
+        }
+      }
+      break;
+
+    case 0x103: //SourceActivity
+      if (this.OpType == 0xC)//Result
+      {
+        //did we start source activity?
+        if ( (cmState == cBSSourceActivity) || (cmState == cRSSourceActivityOff) )
+        {
+          handleSourceActivityMsg(this);
+        }
+        else
+        {
+          write("ConnectionMaster: Warning - unexpected SourceActivity reply message received.");
+        }
+      }
+      break;
+
+    case 0x112: //DisConnect
+      if (this.OpType == 0xC)//Result
+      {
+        //are we removing?
+        if (cmState == cRSDisConnect)
+        {
+          handleDisConnectMsg(this);
+        } 
+        else
+        {
+          write("ConnectionMaster: Warning - unexpected DisConnect reply message received.");
+        }
+      }
+      break;
+
+    case 0x102: //DeAllocate
+      if (this.OpType == 0xC)//Result
+      {
+        //do we remove a connection?
+        if (cmState == cRSDeAllocate)
+        {
+          handleDeAllocateMsg(this);
+        }
+        else
+        {
+          write("ConnectionMaster: Warning - unexpected DeAllocate reply message received.");
+        }
+      }
+      break;
+
+      case 0xF01: //Allocate
+      if (this.OpType == 0xD)//Result
+      {
+        //do we build a connection?
+        if (cmState == cBSAllocate)
+        {
+          handleAllocateLabelMsg(this);
+        } 
+      }
+      break;
+
+    case 0xF11: // ConnectLabel
+      if (this.OpType == 0xC)//Result
+      {
+        //did we start a connect?
+        if (cmState == cBSConnect)
+        {
+          handleConnectLabelMsg(this);
+        }
+      }
+      break;
+  }
+}
+/*@@end*/
+
+/*@@mostAmsMsg:ConnectionMaster.SyncConnectionTable.Get (0x034001):*/
+on mostAMSMessage ConnectionMaster.SyncConnectionTable.Get
+{
+  //check if the ConnectionMaster was the right receiver
+  if (!validReception(this))
+  {
+    return;
+  }
+
+  //send the table as status message
+  sendStatus_SyncConnectionTable(this.SA);
+}
+/*@@end*/
+
+/*@@caplFunc:connectionUsed(int):*///function
+//tests if the given connection is used
+byte connectionUsed (int connectionNr)
+{
+  return (connectionNr > -1) && 
+         (connectionNr < cNoConnections) && 
+         (connectionStatus[connectionNr] != cConnectionUnused);
+}
+/*@@end*/
+
+/*@@caplFunc:getSourceDelay(int):*///function
+//retrieves the delay of the source for the given connection
+byte getSourceDelay (int connectionNr)
+{
+  return connectionSourceDelay[connectionNr];
+}
+/*@@end*/
+
+/*@@caplFunc:getChannelCount(int):*///function
+//retrieves the number of channels for the given connection nr
+byte getChannelCount (int connectionNr)
+{
+  int i, count, channelUseID;
+
+  count = 0;
+  //get channelUseID
+  channelUseID = connectionChannelUseID[connectionNr];
+  //iterate over channels
+  for (i = 0; i < currentNoChannels; i++)
+  {
+    if (channelUseIDs[i] == channelUseID)
+    {
+      count ++;
+    }
+  }
+  return count;
+}
+/*@@end*/
+
+/*@@caplFunc:getChannelID(int,int):*///function
+//retrieves the channelID for a given connection
+//example: getChannelID(1,2) returns the position of the third channel belonging to the second connection in the connection table (numbering starts with zero).
+byte getChannelID (int connectionNr, int channelNr)
+{
+  int i, channel, channelUseID;
+  channel = 0;
+  //get channelUseID
+  channelUseID = connectionChannelUseID[connectionNr];
+
+  //iterate over channels
+  for (i = 0; i < currentNoChannels; i++)
+  {
+    //check if channel is used by our connection
+    if (channelUseIDs[i] == channelUseID)
+    {
+      //get the right channel
+      if (channelNr == channel)
+      {
+        return i;
+      }
+      channel ++;
+    }
+  }
+
+  //this should not happen
+  write("ConnectionMaster Error: getChannelID failed.");
+  return 0xFF;
+}
+/*@@end*/
+
+/*@@caplFunc:allocateChannels(byte,byte,byte):*///function
+//make a source allocate channels
+allocateChannels (byte sourceFBlockID, byte sourceInstID, byte sourceNr)
+{
+  //message
+  mostAMSMessage * allocateMsg;
+
+  //set state
+  cmState = cBSAllocate;
+  //set length
+  allocateMsg.DLC = 1;
+  //set address etc.
+  allocateMsg.MsgChannel = mostGetChannel();
+  allocateMsg.FBlockId = sourceFBlockID;
+  allocateMsg.InstanceID = sourceInstID;
+  allocateMsg.FunctionId = 0x101;
+  allocateMsg.OpType = 0x2;//StartResult
+ 
+  //set the sourceNr
+  allocateMsg.byte(0) = sourceNr;
+
+  //send the message
+  output(allocateMsg);
+
+}
+/*@@end*/
+
+/*@@timer:deadlockTimer:*/
+//when the deadlock timer arrives, building or removing failed.
+on timer deadlockTimer
+{
+  byte errorCode;
+
+  deadlockTimerActive = 0;
+
+  switch(cmState)
+  {
+    case cBSAllocate:
+    case cBSSourceActivity:
+    case cRSSourceActivityOff:
+    case cRSDeAllocate:
+      errorCode = cErrorSourceError;
+      break;
+    case cBSConnect:
+    case cRSDisConnect:
+      errorCode = cErrorSinkError;
+      break;
+    default:
+      errorCode = 0x42;//processing error
+  }
+  if (initMsg.DLC != 0)
+  {
+    //if a message was sent to start operation, send an answer
+    mostSendError_Code(initMsg, errorCode);
+  }
+  //try to undo all prior operations
+  undoOperations();
+}
+/*@@end*/
+
+/*@@caplFunc:handleAllocateMsg(mostAmsMessage*):*///function
+//handles the allocate message for building a connection via "allocate"
+handleAllocateMsg (mostAMSMessage * msg)
+{
+  int i, channel;
+  byte sourceDelay;
+  //check if it is the right sender and sourceNr 
+  if ((currentSourceFBlockID == msg.FBlockID) && 
+      (currentSourceInstID == msg.InstanceID) && 
+      (currentSourceNr == msg.byte(0)))
+  {
+    //verify that at least one channel is allocated
+    if (msg.DLC <= 2)
+    {
+      if (initMsg.DLC != 0)
+      {
+        //if a message was sent, reply an error
+        mostSendError_Code(initMsg, cErrorSourceError);
+      }
+      else
+      {
+        write("ConnectionMaster - Warning: Allocate.Result message didn't contain any channels.");
+      }
+      undoOperations();
+      return;
+    }
+
+    //read channels from message
+    for (i = 0; i < msg.DLC - 2; i++)
+    {
+      channel = msg.byte(i + 2);
+      sourceDelay = msg.byte(1);
+      //add connection to connection table
+      addConnection(currentConnectionNr, channel, currentSourceFBlockID, currentSourceInstID, currentSourceNr,
+                                       sourceDelay, currentSinkFBlockID,   currentSinkInstID,   currentSinkNr);
+    }
+    //connect the sink
+    connectSink(currentConnectionNr);
+  }
+  else
+  {
+    write("ConnectionMaster: Warning - Allocate reply message doesn't match expected source values.");
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:connectSink(int):*///function
+//connect the sink of a specific connection
+connectSink (int connectionNr)
+{
+  int msgLength, i, channelCount;
+  //message
+  mostAMSMessage * connectMsg;
+
+  //set the state
+  cmState = cBSConnect;
+  //message length
+  msgLength = 0;
+
+  if (sinkInUse(getSinkFBlockID(connectionNr), getSinkInstID(connectionNr), getSinkNr(connectionNr)))
+  {
+     //error, sink is already in use. Generate an error message
+     if (initMsg.DLC != 0)
+     {
+       mostSendError_Code(initMsg, cErrorSinkInUse);
+     }
+     undoOperations();
+     return;
+  }
+
+  //assemble the message
+  //SinkNr
+  connectMsg.byte(msgLength) = getSinkNr(connectionNr);
+  msgLength++;
+  //Source Delay
+  connectMsg.byte(msgLength) = getSourceDelay(connectionNr);
+  msgLength++;
+
+  //get the number of channels for this connection
+  channelCount = getChannelCount(connectionNr);
+  //add the channel IDs
+  for (i = 0; i < channelCount; i++)
+  {
+    connectMsg.byte(msgLength) = getChannelID(connectionNr, i);
+    msgLength++;
+  }
+
+  //set the length
+  connectMsg.DLC = msgLength;
+  //set address etc.
+  connectMsg.MsgChannel = mostGetChannel();
+  connectMsg.FBlockId = getSinkFBlockID(connectionNr);
+  connectMsg.InstanceID = getSinkInstID(connectionNr);
+  connectMsg.FunctionId = 0x111;//Connect
+  connectMsg.OpType = 0x2;//StartResult
+ 
+  //send the message
+  output(connectMsg);
+}
+/*@@end*/
+
+/*@@caplFunc:handleConnectMsg(mostAmsMessage*):*///function
+//handles the connect message for building a connection via "allocate"
+handleConnectMsg (mostAMSMessage * msg)
+{
+  int i, channel;
+  byte sourceDelay;
+
+  //check if it is the right sender and sinkNr 
+  if ((currentSinkFBlockID == msg.FBlockID) && 
+      (currentSinkInstID == msg.InstanceID) && 
+      (currentSinkNr == msg.byte(0)))
+  {
+    //mark connection as established
+    setConnectionStatus(currentConnectionNr, cConnectionEstablished);
+    //start source activity
+    setSourceActivity(currentConnectionNr, 0x02); //on
+  }
+  else
+  {
+    write("ConnectionMaster: Warning - Connect reply message doesn't match expected sink values.");
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:setSourceActivity(int,byte):*///function
+//sets the source activity for a specific connection
+setSourceActivity (int connectionNr, byte activity)
+{
+  //message
+  mostAMSMessage * saMsg;
+
+  //set the state
+  cmState = (activity == 0x02) ? cBSSourceActivity : cRSSourceActivityOff;
+  saMsg.byte(0) = getSourceNr(connectionNr);
+  saMsg.byte(1) = activity;
+  //set the length
+  saMsg.DLC = 2;
+  //set address etc.
+  saMsg.MsgChannel = mostGetChannel();
+  saMsg.FBlockID = getSourceFBlockID(connectionNr);
+  saMsg.InstanceID = getSourceInstID(connectionNr);
+  saMsg.FunctionID = 0x103;//SourceActivity
+  saMsg.OpType = 0x2;//StartResult
+ 
+  //send the message
+  output(saMsg);
+}
+/*@@end*/
+
+/*@@caplFunc:handleSourceActivityMsg(mostAmsMessage*):*///function
+//handles the SourceActivity message
+handleSourceActivityMsg (mostAMSMessage * msg)
+{
+  int i, channel;
+  byte sourceDelay;
+
+  //check if it is the right sender and sourceNr 
+  if ((currentSourceFBlockID == msg.FBlockID) &&
+      (currentSourceInstID == msg.InstanceID) && 
+      (currentSourceNr == msg.byte(0)) )
+  {
+    if ( (cmState == cBSSourceActivity) && (msg.byte(1) == 0x02) )//on
+    {
+      //building finished
+      sendOperationResult(initMsg, currentConnectionNr);
+      return;
+    }
+    else if ( (cmState == cRSSourceActivityOff) && (msg.byte(1) == 0x00) )//off
+    {
+      disConnectSink(currentConnectionNr);
+      return;
+    }
+  }
+  write("ConnectionMaster: Warning - SourceActivity reply message doesn't match expected source values.");
+}
+/*@@end*/
+
+/*@@caplFunc:sendOperationResult(mostAmsMessage*,int):*///function
+//sends the result message
+sendOperationResult(mostAMSMessage * cmdMsg, int connectionNr)
+{
+  //result message
+  mostAMSMessage ConnectionMaster.BuildSyncConnection.ResultAck msg;
+  
+  //only send a result message if there was an initial message
+  if (initMsg.DLC != 0)
+  {
+    //prepare message
+    mostPrepareReport(cmdMsg, msg);
+  
+    //assemble message
+    msg.SinkFBlock = getSinkFBlockID(connectionNr);
+    msg.SinkInstID = getSinkInstID(connectionNr);
+    msg.SinkNr = getSinkNr(connectionNr);
+    msg.SourceFBlock = getSourceFBlockID(connectionNr);
+    msg.SourceInstID = getSourceInstID(connectionNr);
+    msg.SourceNr = getSourceNr(connectionNr);
+    //send the message
+    output(msg);
+  }
+
+  //set back state and timer
+  finishOperation();
+
+  //notify other nodes that the connection table has changed
+  sendStatus_AvailableChannels(cNotificationAdr);
+  sendConnectionTableNotifications();
+}
+/*@@end*/
+
+/*@@mostAmsMsg:ConnectionMaster.RemoveSyncConnection.StartResultAck (0x032016):*/
+//handle removeSyncConnection message
+on mostAMSMessage ConnectionMaster.RemoveSyncConnection.StartResultAck
+{
+  //check if the ConnectionMaster was the right receiver
+  if (!validReception(this))
+  {
+    return;
+  }
+
+  //check if ConnectionMaster is busy
+  if (cmState)
+  {
+    mostSendError_Code(this, cErrorDeviceBusy);
+    return;
+  }
+
+  //save the initial message
+  initMsg = this;
+  //remove the connection
+  CM_RemoveSyncConnection(this.SourceFBlock, this.SourceInstID, this.SourceNr, this.SinkFBlock, this.SinkInstID, this.SinkNr);
+}
+/*@@end*/
+
+/*@@caplFunc:getConnectionNr(byte,byte,byte,byte,byte,byte):*///function
+//get connection Nr for the given source and sink
+int getConnectionNr(byte sourceFBlockID, byte sourceInstID, byte sourceNr, byte sinkFBlockID, byte sinkInstID, byte sinkNr)
+{
+  int i;
+  //iterate over connections
+  for (i = 0; i < cNoConnections; i++){
+    if ((connectionUsed(i)) &&
+        (sourceFBlockID == getSourceFBlockID(i)) &&
+        (sourceInstID == getSourceInstID(i)) &&
+        (sourceNr == getSourceNr(i)) &&
+        (sinkFBlockID == getSinkFBlockID(i)) &&
+        (sinkInstID == getSinkInstID(i)) &&
+        (sinkNr == getSinkNr(i)))
+    {
+      return i;
+    }
+  }
+  //if not found...
+  return -1;
+}
+/*@@end*/
+
+/*@@caplFunc:disConnectSink(int):*///function
+//disconnects a sink
+disConnectSink (int connectionNr)
+{
+  //message
+  mostAMSMessage * disConnectMsg;
+
+  //set the state
+  cmState = cRSDisConnect;
+  
+  //assemble the message
+  //SinkNr
+  disConnectMsg.byte(0) = getSinkNr(connectionNr);
+  //set the length
+  disConnectMsg.DLC = 1;
+  //set address etc.
+  disConnectMsg.MsgChannel = mostGetChannel();
+  disConnectMsg.FBlockID = getSinkFBlockID(connectionNr);
+  disConnectMsg.InstanceID = getSinkInstID(connectionNr);
+  disConnectMsg.FunctionID = 0x112;//Connect
+  disConnectMsg.OpType = 0x2;//StartResult
+ 
+  //send the message
+  output(disConnectMsg);
+}
+/*@@end*/
+
+/*@@caplFunc:handleDisConnectMsg(mostAmsMessage*):*///function
+//handles the disConnect message for removing a connection via "deallocate"
+handleDisConnectMsg (mostAMSMessage * msg)
+{
+  //check if it is the right sender and sinkNr 
+  if ((getSinkFBlockID(currentConnectionNr) == msg.FBlockID) && 
+      (getSinkInstID(currentConnectionNr) == msg.InstanceID) &&
+      (getSinkNr(currentConnectionNr) == msg.byte(0)))
+  {
+    //deallocate channels
+    deAllocateChannels(currentConnectionNr);
+  }
+  else
+  {
+    write("ConnectionMaster: Warning - DisConnect reply message doesn't match expected sink values.");
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:deAllocateChannels(int):*///function
+//deallocate channels
+deAllocateChannels(int connectionNr)
+{
+  //message
+  mostAMSMessage * deAllocateMsg;
+  int otherConnectionNr;
+  long funcID;
+
+  //check if source of this connection is used for another connection
+  //hide this connection temporary
+  setConnectionStatus(connectionNr, cConnectionUnused);
+  //search for another connection
+  otherConnectionNr = getConnectionNr(getSourceFBlockID(connectionNr), getSourceInstID(connectionNr), getSourceNr(connectionNr));
+  //make this connection visible again
+  setConnectionStatus(connectionNr, cConnectionEstablished);
+  if (otherConnectionNr > -1)
+  {
+    //another connection uses this sink, so don't deallocate channels
+    removeConnection(connectionNr);
+    return;
+  }
+
+
+  //otherwise send the message to deallocate the channels
+  //set state
+  cmState = cRSDeAllocate;
+  //set length
+  deAllocateMsg.DLC = 1;
+  //set address etc.
+  deAllocateMsg.MsgChannel = mostGetChannel();
+  deAllocateMsg.FBlockID = getSourceFBlockID(connectionNr);
+  deAllocateMsg.InstanceID = getSourceInstID(connectionNr);
+  deAllocateMsg.FunctionID = 0x102; //DeAllocate
+  deAllocateMsg.OpType = 0x2;//StartResult
+  //set the sourceNr
+  deAllocateMsg.byte(0) = getSourceNr(connectionNr);
+
+  //send the message
+  output(deAllocateMsg);
+}
+/*@@end*/
+
+/*@@caplFunc:handleDeAllocateMsg(mostAmsMessage*):*///function
+//handles the deAllocate message for removing a connection via "DeAllocate"
+handleDeAllocateMsg (mostAMSMessage * msg)
+{
+  int i, channel;
+  byte sourceDelay;
+
+  //check if it is the right sender and sourceNr 
+  if ((getSourceFBlockID(currentConnectionNr) == msg.FBlockID) &&
+      (getSourceInstID(currentConnectionNr) == msg.InstanceID) &&
+      (getSourceNr(currentConnectionNr) == msg.byte(0)))
+  {
+    freeChannels(getChannelUseID(currentConnectionNr));
+    removeConnection(currentConnectionNr);
+    finishOperation();
+  }
+  else
+  {
+    write("ConnectionMaster: Warning - DeAllocate reply message doesn't match expected source values.");
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:removeConnection(int):*///function
+//remove a connection from the arrays
+removeConnection (int connectionNr)
+{
+  int i;
+
+  //mark connection as unused -> other arrays will be overriden if this connection is used again.
+  connectionStatus[connectionNr] = cConnectionUnused;
+
+  //send remove succeeded
+  sendOperationResult(initMsg, currentConnectionNr); 
+}
+/*@@end*/
+
+/*@@caplFunc:sendStatus_SyncConnectionTable(long):*///function
+//send the connection table as status message
+long sendStatus_SyncConnectionTable (long destAdr)
+{
+  int i, msgLength;
+  byte data[200];
+  mostAMSMessage ConnectionMaster.SyncConnectionTable.Status tableMsg;
+
+  //get the connection table data
+  msgLength = getConnectionTable(data);
+
+  if (msgLength > -1)
+  {
+    //set the length
+    tableMsg.DLC = msgLength;
+    //set address
+    tableMsg.InstanceID = MostApGetInstID();
+    //copy data into the message
+    for (i = 0; i < msgLength; i++)
+    {
+      tableMsg.byte(i) = data[i];
+    }
+
+    //send the message
+    mostasNtfOutput(destAdr, tableMsg);
+
+    return 0;
+  }
+
+  //this should not happen
+  write("ConnectionMaster: Warning - Buffer for ConnectionTable too small.");
+
+  return 1;
+}
+/*@@end*/
+
+/*@@caplFunc:sendStatus_AvailableChannels(long):*///function
+//sends a status message for available channels
+long sendStatus_AvailableChannels (long destAdr)
+{
+  //message to send
+  mostAMSMessage ConnectionMaster.AvailableChannels.Status availMsg;
+  //assemble
+  availMsg.NoChannels = getAvailableChannelsCount();
+  availMsg.InstanceID = MostApGetInstID();
+  //send it
+  mostasNtfOutput(destAdr, availMsg);
+
+  return 0;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:ConnectionMaster.FktIDs.Get (0x030001):*/
+on mostAMSMessage ConnectionMaster.FktIDs.Get
+{
+
+  //send a status message
+  mostAMSMessage ConnectionMaster.FktIDs.Status msg;
+
+  long fktIds[20];
+
+  //check if the ConnectionMaster was the right receiver
+  if(!validReception(this))
+  {
+    return;
+  }
+  
+  fktIds[0] = 0x000;
+  fktIds[1] = 0x200;
+  fktIds[2] = 0x201;
+  fktIds[3] = 0x400;
+  fktIds[4] = 0x401;
+  mostMsgEncodeRLE(msg, fktIds, 5);
+  mostPrepareReport(this, msg);
+
+  output(msg);
+}
+/*@@end*/
+
+/*@@caplFunc:undoOperations():*///function
+//if we detect an error, try to undo the prior steps
+undoOperations ()
+{
+  if (cmState)//there is an operation...
+  {
+    //check if timer is already running
+    if (deadlockTimerActive)
+    {
+      cancelTimer(deadlockTimer);
+    }
+    //set a timer
+    setTimer(deadlockTimer, tDeadlockPrev);
+    deadlockTimerActive = 1;
+    //roll back building commands
+    switch(cmState)
+    {
+      case cBSSourceActivity:
+        //Workaround: when the CM detected an error, no positive result message should be sent
+        initMsg.DLC = 0;
+        //when sourceActivity was startet, we did a connect and an allocate before.
+        disConnectSink(currentConnectionNr);
+        break;
+      case cBSConnect:
+      case cRSDisConnect:
+        //Workaround: when the CM detected an error, no positive result message should be sent
+        initMsg.DLC = 0;
+        deAllocateChannels(currentConnectionNr);
+        break;
+      default:
+        //cleanup
+        finishOperation();
+        break;
+    }   
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:sinkInUse(byte,byte,byte):*///function
+//tests if a given sink is already in use. To find out,
+//we simply look through our connection table ignoring the current connection.
+byte sinkInUse (byte sinkFBlockID, byte sinkInstID, byte sinkNr)
+{
+  int i;
+  //iterate over connections
+  for (i = 0; i < cNoConnections; i++)
+  {
+    if ((i != currentConnectionNr) &&
+        (connectionUsed(i)) &&
+        (getSinkFBlockID(i) == sinkFBlockID) &&
+        (getSinkInstID(i) == sinkInstID) &&
+        (getSinkNr(i) == sinkNr))
+    {
+      //sink found
+      return 1;
+    }
+  }
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:finishOperation():*///function
+//clean up the current operation
+finishOperation ()
+{
+  //set the ConnectionMaster to idle-mode
+  cmState = cCMIdle;
+  //reset deadlock timer
+  if (deadlockTimerActive)
+  {
+    cancelTimer(deadlockTimer);
+    deadlockTimerActive = 0;
+  }
+  //set the initial message length to 0
+  initMsg.DLC = 0;
+}
+/*@@end*/
+
+/*@@mostSBC:OnMostSBC(long):*/
+OnMostSBC(long sbc)
+{
+//react on changes of the boundary between synchronous und asynchronous message bytes
+  int newNoChannels;
+  newNoChannels = sbc * 4;
+  //clear connection table if there are changes in the number of channels
+  if (currentNoChannels != newNoChannels)
+  {
+    //empty connection table
+    clearConnectionTable(0);
+    //register sbc contains the number of quadlets reserved for synchronous transfer
+    currentNoChannels = sbc * 4;
+    //notify other nodes that the connection table has changed
+    sendStatus_AvailableChannels(cNotificationAdr);
+    sendConnectionTableNotifications();
+    //further improvement: automatic rebuild of exisiting connections
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:freeChannels(int):*///function
+//mark the channels of the given channelUseID as unused
+freeChannels (int channelUseID)
+{
+  int i;
+
+  if(mostGetSpecVersion(mostGetChannel()) != v25)
+  {
+    return;
+  }
+
+  //iterate over channels
+  for (i = 0; i < currentNoChannels; i++)
+  {
+    //mark the channels of this connection as free
+    if (channelUseIDs[i] == channelUseID)
+    {
+      channelUseIDs[i] = -1;
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:clearConnectionTable(byte):*///function
+//remove all entries from the connection table
+clearConnectionTable (byte notify)
+{
+  int i;
+  //mark channels as unused
+  for (i = 0; i < cNoChannelsMax; i++)
+  {
+    channelUseIDs[i] = -1;
+  }
+  for (i = 0; i < cNoConnections; i++)
+  {
+    connectionStatus[i] = cConnectionUnused;
+  }
+  //notify the environment
+  if (notify)
+  {
+    sendStatus_AvailableChannels(cNotificationAdr);
+    sendConnectionTableNotifications();
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:validReception(mostAmsMessage*):*///function
+//tests the received message
+byte validReception (mostAMSmessage * msg)
+{ 
+  //only accept messages to our device
+  return (msg.Dir == Rx);
+}
+/*@@end*/
+
+/*@@caplFunc:isCompatible(byte,byte,byte,byte,byte):*///function
+//checks if source and sink have compatible data formats
+byte isCompatible(byte sourceFBlock, byte SourceInstID, byte SinkFBlock, byte SinkInstID, byte SinkNr)
+{
+  //further improvement: gather information about sink and source via SourceInfo.Get and SinkInfo.Get
+  return 1;
+}
+/*@@end*/
+
+/*@@caplFunc:getConnectionTable(byte[]):*///function
+//This function copies the connection table into the given array.
+//Since CAPL doesn't support dynamic structures, use an array which is
+//long enough (200 bytes for example). The result is the number of bytes
+//used. When the array is too short, the function will return -1.
+int getConnectionTable (byte data[]){
+  int i, j, length, channelCount, dataSize;
+
+  //current length of the table
+  length = 0;
+  //get length of the array
+  dataSize = elCount(data);
+
+  //create a table containing all connections
+  for (i = 0; i < cNoConnections; i++)
+  {
+    if (connectionUsed(i))
+    {
+      //get the number of channels for this connection
+      channelCount = getChannelCount(i);
+      //check array length
+      if ((dataSize - length - channelCount) < 0)
+      {
+        return -1;
+      }
+      //add the connection data
+      data[length] = getSourceFBlockID(i);
+      length++;
+      data[length] = getSourceInstID(i);
+      length++;
+      data[length] = getSourceNr(i);
+      length++;
+      data[length] = getSinkFBlockID(i);
+      length++;
+      data[length] = getSinkInstID(i);
+      length++;
+      data[length] = getSinkNr(i);
+      length++;
+      data[length] = getSourceDelay(i);
+      length++;
+      data[length] = channelCount;
+      length++;
+      //add the channel IDs
+      for (j = 0; j < channelCount; j++)
+      {
+        data[length] = getChannelID(i, j);
+        length++;
+      }
+    }
+  }
+
+  return length;
+}
+/*@@end*/
+
+/*@@caplFunc:CM_BuildSyncConnection(long,long,long,long,long,long,long):*///function
+//The following code handles the command for building a connection.
+CM_BuildSyncConnection (long senderHandle, long sourceFBlockID, long sourceInstID, long sourceNr, long sinkFBlockID, long sinkInstID, long sinkNr)
+{
+  int newConnectionNr, tmpConnectionNr, foundConnection, i;
+
+  //get a free connection Nr
+  newConnectionNr = getFreeConnectionNr();
+
+  //check if we're building or removing a connection
+  if (cmState)
+  {
+    write("ConnectionMaster: Warning - Can't build connection because device is busy.");
+    return;
+  }
+
+  //check if there are available connections
+  if ((newConnectionNr == -1) || (getAvailableChannelsCount() == 0))
+  {
+    write("ConnectionMaster: Warning - Not enough connections/channels to build connection.");
+    return;
+  }
+
+  if (!isCompatible(sourceFBlockID, sourceInstID, sinkFBlockID, sinkInstID, sinkNr))
+  {
+    write("ConnectionMaster: Warning - Source is not compatible to sink.");
+    return;
+  }
+  //start the deadlock timer
+  setTimer(deadlockTimer, tDeadlockPrev);
+  deadlockTimerActive = 1;
+
+  //save current connection temporary
+  currentSourceFBlockID = sourceFBlockID;
+  currentSourceInstID = sourceInstID;
+  currentSourceNr = sourceNr;
+  currentSinkFBlockID = sinkFBlockID;
+  currentSinkInstID = sinkInstID;
+  currentSinkNr = sinkNr;
+  currentConnectionNr = newConnectionNr;
+  currentSenderHandle = senderHandle;
+  //check if source has to allocate channels
+  foundConnection = getConnectionNr(currentSourceFBlockID, currentSourceInstID, currentSourceNr);
+  if (foundConnection == -1)
+    {
+      //allocate channels
+      if(mostGetSpecVersion(mostGetChannel()) == v25)
+      {
+        allocateChannels(currentSourceFBlockID, currentSourceInstID, currentSourceNr);
+      }
+      else
+      {
+        allocateLabel(currentSenderHandle, currentSourceFBlockID, currentSourceInstID, currentSourceNr);
+      }
+    }
+  else
+  {
+    //In this case, we might test if the requested connection already exists.
+    tmpConnectionNr = getConnectionNr(currentSourceFBlockID, currentSourceInstID, currentSourceNr, 
+                                      currentSinkFBlockID,   currentSinkInstID,   currentSinkNr);
+    if (tmpConnectionNr > -1)
+    {
+      //connection already exists
+      if (initMsg.DLC != 0)
+      {
+        //if a message was sent
+        mostSendError_Code(initMsg, cErrorSinkInUse);
+      }
+      else
+      {  
+        //if this function was called without a message
+        write("ConnectionMaster: Warning - Connection already exists.");
+      }
+    }
+    else
+    {
+      // MOST50/150 doesn't allow multiple connections per label
+      if(mostGetSpecVersion(mostGetChannel()) != v25)
+      {
+        write("ConnectionMaster: Warning - Connection already exists.");
+        return;
+      }
+
+      //source is already there, add connection for each channel
+      for (i = 0; i < getChannelCount(foundConnection); i++)
+      {
+        //add the new connection with channels from the "old" connection
+        addConnection(newConnectionNr, getChannelID(foundConnection, i), currentSourceFBlockID, currentSourceInstID,
+                    currentSourceNr, getSourceDelay(foundConnection), currentSinkFBlockID, currentSinkInstID, currentSinkNr);
+      }
+      //connect to the sink
+      connectSink(newConnectionNr);
+      
+    }
+  }  
+}
+/*@@end*/
+
+/*@@caplFunc:CM_RemoveSyncConnection(long,long,long,long,long,long):*///function
+//Handles the request for removing a connection.
+CM_RemoveSyncConnection (long sourceFBlockID, long sourceInstID, long sourceNr, long sinkFBlockID, long sinkInstID, long sinkNr)
+{
+  //check if ConnectionMaster is busy
+  if (cmState)
+  {
+    write("ConnectionMaster: Warning - Can't remove connection because device is busy.");
+    return;
+  }
+
+  //set a deadlock timer
+  setTimer(deadlockTimer, tDeadlockPrev);
+  deadlockTimerActive = 1;
+
+  //get connection to remove
+  currentConnectionNr = getConnectionNr(sourceFBlockID, sourceInstID, sourceNr, sinkFBlockID, sinkInstID, sinkNr);
+  //check if we found this connection
+  if (currentConnectionNr > -1)
+  {
+    currentSourceFBlockID = sourceFBlockID;
+    currentSourceInstID = sourceInstID;
+    currentSourceNr = sourceNr;
+    currentSinkFBlockID = sinkFBlockID;
+    currentSinkInstID = sinkInstID;
+    currentSinkNr = sinkNr;
+    setSourceActivity(currentConnectionNr, 0x00); //off
+  }
+  else
+  {
+    //check if a message was sent to remove the connection
+    if (initMsg.DLC != 0)
+    {
+      mostSendError_Code(initMsg, cErrorSourceError);
+    }
+    else
+    {
+      //if this function was called without a message
+      write("ConnectionMaster: Warning - Connection doesn't exists.");
+    }
+  }
+
+}
+/*@@end*/
+
+/*@@caplFunc:getChannelUseID(int):*///function
+//retrieves the ID indicating the channel reservation
+byte getChannelUseID (int connectionNr)
+{
+  return connectionChannelUseID[connectionNr];
+}
+/*@@end*/
+
+/*@@caplFunc:getFreeChannelUseID(int):*///function
+//get a channelUseID for this connection
+int getFreeChannelUseID (int connectionNr)
+{
+  byte free;
+  int i;
+  int newChannelUseID;
+
+  //in most cases the conectionNr can be used, but in special cases it is already in use
+  newChannelUseID = connectionNr;
+  free = 0;
+
+  while (!free)
+  {
+    free = 1;
+    //search if any channel is used by this ID
+    for (i = 0; i < currentNoChannels; i++)
+    {
+      //if so, increment the new channelUseID and try again
+      if (channelUseIDs[i] == newChannelUseID)
+      {
+        free = 0;
+        newChannelUseID += 10;
+        break;
+      }
+    }
+  }
+
+  return newChannelUseID;
+}
+/*@@end*/
+
+/*@@mostNetState:OnMostNetState(long,long):*/
+OnMostNetState(long oldstate, long newstate)
+{
+  if ((oldstate == 5) && //configOK
+      (newstate < 5))
+  {
+    clearConnectionTable(1);
+  }
+}
+/*@@end*/
+
+/*@@mostCriticalUnlock:OnMostCriticalUnlock():*/
+//handles a critical light unlock event
+OnMostCriticalUnlock()
+{
+  //clear the connection table
+  clearConnectionTable(1);
+}
+/*@@end*/
+
+/*@@caplFunc:handleAllocateLabelMsg(mostAmsMessage*):*///function
+//handles the allocate message for building a connection via "allocate label"
+handleAllocateLabelMsg (mostAMSMessage * msg)
+{
+  int i;
+  byte sourceDelay;
+
+  long connectionLabel, labelWidth, sourceNr;
+
+  if(!mostParamIsAvailable(msg, "ConnectionLabel") || 
+     !mostParamIsAvailable(msg, "SourceNr") ||
+     !mostParamIsAvailable(msg, "BlockWidth") )
+  {
+    write("ConnectionMaster: Warning - Allocate reply message doesn't match expected source values.");  
+    return;
+  }
+  connectionLabel = mostParamGet(msg, "ConnectionLabel");
+  sourceNr = mostParamGet(msg, "SourceNr");
+  labelWidth = mostParamGet(msg, "BlockWidth");
+
+
+  //check if it is the right sender and sourceNr 
+  if ((currentSourceFBlockID == msg.FBlockID) && 
+      (currentSourceInstID == msg.InstanceID) && 
+      (currentSourceNr == sourceNr))
+  {
+    //verify that at least one channel is allocated
+    if (msg.DLC <= 2)
+    {
+      if (initMsg.DLC != 0)
+      {
+        //if a message was sent, reply an error
+        mostSendError_Code(initMsg, cErrorSourceError);
+      }
+      else
+      {
+        write("ConnectionMaster - Warning: Allocate.Result message didn't contain any channels.");
+      }
+      undoOperations();
+      return;
+    }
+
+
+    sourceDelay = msg.byte(1);  
+
+    addConnectionLabel(currentConnectionNr, connectionLabel, labelWidth, currentSourceFBlockID, currentSourceInstID, currentSourceNr,
+                                       sourceDelay, currentSinkFBlockID,   currentSinkInstID,   currentSinkNr);
+
+    //connect the sink
+    connectLabelSink(currentConnectionNr);
+  }
+  else
+  {
+    write("ConnectionMaster: Warning - Allocate reply message doesn't match expected source values.");
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:connectLabelSink(int):*///function
+connectLabelSink (int connectionNr)
+{
+  int msgLength, i, channelCount;
+  //message
+  mostAMSMessage * connectMsg;
+  long label;
+
+  //set the state
+  cmState = cBSConnect;
+  //message length
+  msgLength = 0;
+
+  if (sinkInUse(getSinkFBlockID(connectionNr), getSinkInstID(connectionNr), getSinkNr(connectionNr)))
+  {
+     //error, sink is already in use. Generate an error message
+     if (initMsg.DLC != 0)
+     {
+       mostSendError_Code(initMsg, cErrorSinkInUse);
+     }
+     undoOperations();
+     return;
+  }
+
+  //assemble the message
+  //SinkNr
+  connectMsg.byte(msgLength) = getSinkNr(connectionNr);
+  msgLength++;
+  //Source Delay
+  connectMsg.byte(msgLength) = getSourceDelay(connectionNr);
+  msgLength++;
+  //Label
+  label = getLabel(i);        // 2Byte
+  connectMsg.byte(msgLength) = (label >> 8) & 0xFF;  // use MSB
+  msgLength++;
+  connectMsg.byte(msgLength) = label & 0xFF;   // use LSB
+  msgLength++;
+
+
+  //set the length
+  connectMsg.DLC = msgLength;
+  //set address etc.
+  connectMsg.MsgChannel = mostGetChannel();
+  connectMsg.FBlockId = getSinkFBlockID(connectionNr);
+  connectMsg.InstanceID = getSinkInstID(connectionNr);
+  connectMsg.FunctionId = 0xF11;//Connect
+  connectMsg.OpType = 0x2;//StartResult
+ 
+  //send the message
+  output(connectMsg);
+}
+/*@@end*/
+
+/*@@caplFunc:handleConnectLabelMsg(mostAmsMessage*):*///function
+//handles the connect message for building a connection via "allocate"
+handleConnectLabelMsg (mostAMSMessage * msg)
+{
+
+  int i, channel;
+  byte sourceDelay;
+
+  //check if it is the right sender and sinkNr 
+  if ((currentSinkFBlockID == msg.FBlockID) && 
+      (currentSinkInstID == msg.InstanceID) && 
+      (currentSinkNr == msg.byte(0)))
+  {
+    //mark connection as established
+    setConnectionStatus(currentConnectionNr, cConnectionEstablished);
+    //start source activity
+    setSourceActivity(currentConnectionNr, 0x02); //on
+  }
+  else
+  {
+    write("ConnectionMaster: Warning - Connect reply message doesn't match expected sink values.");
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:allocateLabel(word,byte,byte,byte):*///function
+//make a source allocate channels
+allocateLabel (word senderHandle, byte sourceFBlockID, byte sourceInstID, byte sourceNr)
+{
+  //message
+  mostAMSMessage AudioDiskPlayer.AllocateLabel.StartResultAck allocateMsg;
+
+  //set state
+  cmState = cBSAllocate;
+
+  //set address etc.
+  allocateMsg.MsgChannel = mostGetChannel();
+  allocateMsg.FBlockId = sourceFBlockID;
+  allocateMsg.InstanceID = sourceInstID;
+  //allocateMsg.FunctionId = 0xF01; //AllocateLabel
+  //allocateMsg.OpType = 0x2;//StartResult
+  allocateMsg.senderHandle = senderHandle;
+
+  //set the sourceNr
+  allocateMsg.SourceNr = sourceNr;
+
+  //send the message
+  output(allocateMsg);
+}
+/*@@end*/
+
+/*@@caplFunc:sendStatus_SyncConnectionTableLabel(long):*///function
+//send the connection table as status message
+long sendStatus_SyncConnectionTableLabel (long destAdr)
+{
+  int i, msgLength;
+  byte data[200];
+  mostAMSMessage ConnectionMaster.SyncConnectionTableLabel.Status tableMsg;
+
+  //get the connection table data
+  msgLength = getConnectionTableLabel(data);
+
+  
+
+  if (msgLength > -1)
+  {
+    //set the length
+    tableMsg.DLC = msgLength;
+    //set address
+    tableMsg.InstanceID = MostApGetInstID();
+    //copy data into the message
+    for (i = 0; i < msgLength; i++)
+    {
+      tableMsg.byte(i) = data[i];
+    }
+
+    
+
+
+    //send the message
+    mostasNtfOutput(destAdr, tableMsg);
+
+    return 0;
+  }
+
+  //this should not happen
+  write("ConnectionMaster: Warning - Buffer for ConnectionTable too small.");
+
+  return 1;
+}
+/*@@end*/
+
+/*@@caplFunc:getConnectionTableLabel(byte[]):*///function
+//This function copies the connection table into the given array.
+//Since CAPL doesn't support dynamic structures, use an array which is
+//long enough (200 bytes for example). The result is the number of bytes
+//used. When the array is too short, the function will return -1.
+int getConnectionTableLabel (byte data[]){
+  int i, j, length, dataSize;
+  long label, labelWidth;
+
+  //current length of the table
+  length = 0;
+  //get length of the array
+  dataSize = elCount(data);
+
+  //create a table containing all connections
+  for (i = 0; i < cNoConnections; i++)
+  {
+    if (connectionUsed(i))
+    {
+      //check array length
+      if ((dataSize - length) < 0)
+      {
+        return -1;
+      }
+      //add the connection data
+      data[length] = getSourceFBlockID(i);
+      length++;
+      data[length] = getSourceInstID(i);
+      length++;
+      data[length] = getSourceNr(i);
+      length++;
+      data[length] = getSinkFBlockID(i);
+      length++;
+      data[length] = getSinkInstID(i);
+      length++;
+      data[length] = getSinkNr(i);
+      length++;
+
+      labelWidth = getLabelWidth(i);
+      data[length] = (labelWidth >> 8) & 0xFF; 
+      length++;
+      data[length] = labelWidth & 0xFF; 
+      length++;
+
+      label = getLabel(i);        // 2Byte
+      data[length] = (label >> 8) & 0xFF;  // use MSB
+      length++;
+      data[length] = label & 0xFF;   // use LSB
+      length++;
+    }
+  }
+  return length;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:ConnectionMaster.SyncConnectionTableLabel.Get (0x03F401):*/
+on mostAMSMessage ConnectionMaster.SyncConnectionTableLabel.Get
+{
+  //check if the ConnectionMaster was the right receiver
+  if (!validReception(this))
+  {
+    return;
+  }
+
+  //send the table as status message
+  sendStatus_SyncConnectionTableLabel(this.SA);
+}
+/*@@end*/
+
+/*@@caplFunc:sendConnectionTableNotifications():*///function
+sendConnectionTableNotifications ()
+{
+  //notify other nodes that the connection table has changed
+
+  if(mostGetSpecVersion(mostGetChannel()) == v25)
+  {
+    sendStatus_SyncConnectionTable(cNotificationAdr);
+  }
+  else
+  {
+    sendStatus_SyncConnectionTableLabel(cNotificationAdr);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:addConnectionLabel(int,long,long,byte,byte,byte,byte,byte,byte,byte):*///function
+//adds a connection
+byte addConnectionLabel (int connectionNr, long label, long labelWidth, byte sourceFBlockID, byte sourceInstID, byte sourceNr,
+                                   byte sourceDelay, byte sinkFBlockID,   byte sinkInstID,   byte sinkNr)
+{
+
+  //reserve channel for the given connection
+  connectionSourceLabel[connectionNr] = label;
+  connectionLabelWidth[connectionNr] = labelWidth;
+  //add connection data
+  connectionSourceFBlockID[connectionNr] = sourceFBlockID;
+  connectionSourceInstID[connectionNr] = sourceInstID;
+  connectionSourceNr[connectionNr] = sourceNr;
+  connectionSourceDelay[connectionNr] = sourceDelay;
+  connectionSinkFBlockID[connectionNr] = sinkFBlockID;
+  connectionSinkInstID[connectionNr] = sinkInstID;
+  connectionSinkNr[connectionNr] = sinkNr;
+  connectionChannelUseID[connectionNr] = -1;
+  //mark connection as establishing
+  connectionStatus[connectionNr] = cConnectionEstablishing;
+
+  return 1;
+}
+/*@@end*/
+
+/*@@caplFunc:getLabel(int):*///function
+long getLabel (int connectionNr)
+{
+  return connectionSourceLabel[connectionNr];
+}
+/*@@end*/
+
+/*@@caplFunc:getLabelWidth(int):*///function
+long getLabelWidth (int connectionNr)
+{
+  return connectionLabelWidth[connectionNr];
+}
+/*@@end*/
+

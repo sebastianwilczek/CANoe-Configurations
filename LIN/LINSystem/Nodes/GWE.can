@@ -1,0 +1,165 @@
+/*@!Encoding:1252*/
+variables
+{
+  const long kACTIVE   = 1;
+  const long kINACTIVE = 0;
+ 
+  char gECU[255] = "%NODE_NAME%";
+
+  msTimer tResetDoorInfoLights;
+  msTimer tResetDoorInfoLightsCLOSE;
+
+  const long kDOOR_INFO_LIGHTS_TIME_OPEN  = 1500; // in ms
+  const long kDOOR_INFO_LIGHTS_TIME_CLOSE = 1200; // in ms
+
+  msTimer tSleep;
+  long tSleepTime = 2000;  // in ms
+
+  const int tClosingCount = 4;
+  int tCloseCounter = 0;
+}
+
+on start
+{
+  SendLINClustersInSleepMode();
+}
+
+on sysvar sysvar::Console::DrivingLight
+{
+  $ExteriorLight::GWE_01::GWE_DrivingLight = @sysvar::Console::DrivingLight;   
+  Update_SystemView();
+}
+
+on sysvar sysvar::Console::SwitchHazard
+{
+  $ExteriorLight::GWE_01::GWE_WarningLight = @sysvar::Console::SwitchHazard;
+  Update_SystemView();
+}
+
+on sysvar sysvar::Console::Wiber
+{
+  $ExteriorLight::GWE_02::GWE_Wiper = @sysvar::Console::Wiber;
+  Update_SystemView();
+}
+
+on linFrame ExteriorLight::WWS_01
+{
+  if($WWS_01::WWS_RainSensor == kACTIVE)
+    SysSetVariableString("Console", "WWSDsp", "Rain Sensor is Active");
+  else 
+    SysSetVariableString("Console", "WWSDsp", "");
+}
+
+on linFrame ExteriorLight::DLFLeft_01
+{
+  if($ExteriorLight::DLFLeft_01::DLFL_CurvesLight == kACTIVE)  
+    SysSetVariableString("Console", "DLR_LDsp", "Curves Light Left is Active");
+  else 
+    SysSetVariableString("Console", "DLR_LDsp", " ");
+}
+
+on linFrame ExteriorLight::DLFRight_01
+{
+  if($ExteriorLight::DLFRight_01::DLFR_CurvesLight == kACTIVE)
+    SysSetVariableString("Console", "DLR_RDsp", "Curves Light Right is Active");
+  else 
+    SysSetVariableString("Console", "DLR_RDsp", "");
+}
+
+on sysvar sysvar::GWE::WakeUpGWE
+{
+  if(@sysvar::GWE::WakeUpGWE == kACTIVE)  
+  {
+    SendWakeUp();
+    cancelTimer(tSleep);
+    cancelTimer(tResetDoorInfoLights);
+    setTimer(tResetDoorInfoLights,kDOOR_INFO_LIGHTS_TIME_OPEN);
+    $ExteriorLight::GWE_01::GWE_WarningLight  = kACTIVE;
+  }
+  else  
+  {
+    cancelTimer(tSleep);
+    cancelTimer(tResetDoorInfoLightsCLOSE);
+    setTimer(tResetDoorInfoLightsCLOSE,kDOOR_INFO_LIGHTS_TIME_CLOSE);
+    $ExteriorLight::GWE_01::GWE_WarningLight = kACTIVE;  
+  }
+}
+
+SendLINClustersInSleepMode ()
+{
+  LINSendSleepModFrm(0, 0 , 0xFF); 
+}
+
+SendWakeUp ()
+{
+  LINChangeSchedtable(1);
+  linSendWakeup();
+}
+
+on timer tResetDoorInfoLights
+{
+  $ExteriorLight::GWE_01::GWE_WarningLight  = kINACTIVE;
+}
+
+on timer tSleep
+{
+  SendLINClustersInSleepMode();
+}
+
+Update_SystemView ()
+{
+  if(@sysvar::Console::DrivingLight ||
+     @sysvar::Console::SwitchHazard ||
+     $ExteriorLight::GWE::GWE_01::GWE_TurnIndicationLeft||
+     $ExteriorLight::GWE::GWE_01::GWE_TurnIndicationRight)
+  {
+    @sysvar::LINSysView::LINSysViewDL = kACTIVE;
+  }
+  else if(!@sysvar::Console::DrivingLight &&
+     !@sysvar::Console::SwitchHazard &&
+     !$ExteriorLight::GWE::GWE_01::GWE_TurnIndicationLeft||
+     !$ExteriorLight::GWE::GWE_01::GWE_TurnIndicationRight)
+  {
+    @sysvar::LINSysView::LINSysViewDL = kINACTIVE;
+  }
+}
+
+on signal ExteriorLight::GWE_01::GWE_TurnIndicationLeft
+{
+  Update_SystemView();
+}
+
+on signal ExteriorLight::GWE_01::GWE_TurnIndicationRight
+{
+  Update_SystemView();
+}
+
+on timer tResetDoorInfoLightsCLOSE
+{
+    if(tCloseCounter >= tClosingCount)
+    {
+        tCloseCounter = 0;
+        cancelTimer(tResetDoorInfoLightsCLOSE);
+        $ExteriorLight::GWE_01::GWE_WarningLight  = kINACTIVE;
+        return;
+    }
+    
+    if(tCloseCounter == 0)
+    {
+        $ExteriorLight::GWE_01::GWE_WarningLight  = kINACTIVE;
+        
+    }
+    else if(tCloseCounter == 2)
+    {
+        $ExteriorLight::GWE_01::GWE_WarningLight  = kINACTIVE;
+        
+    }
+    else
+    {
+        $ExteriorLight::GWE_01::GWE_WarningLight  = kACTIVE;
+    }
+    tCloseCounter++;
+    setTimer(tResetDoorInfoLightsCLOSE,kDOOR_INFO_LIGHTS_TIME_CLOSE);
+    
+}
+

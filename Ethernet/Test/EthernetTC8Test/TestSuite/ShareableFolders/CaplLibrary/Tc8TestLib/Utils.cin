@@ -1,0 +1,724 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+variables
+{
+  // helper variables for DHCP syspar::Server1IpAddress and syspar::Server2IpAddress
+  // which are defined in DhcpParameters.vparam (but Utils.cin is used in all Test Units)
+  dword gDhcpv4Server1IpAddress = 0;
+  dword gDhcpv4Server2IpAddress = 0;
+  dword gAIface0IpLinkLocalAddr = 0;
+}
+
+
+/**
+ * Makes the checksum of the given protocol invalid
+ */
+void MakeChecksumInvalid(long packetHandle,char protocol[])
+{
+  int64 checksum;
+  long result;
+  
+  //raise checksum by one to make it invalid
+  checksum = EthGetTokenInt64(packetHandle, protocol, "checksum");
+  result = EthGetLastError();
+  if(result != 0) write("Error @ EthGetTokenInt64 checksum %d", result);
+  checksum++;
+  
+  result = EthSetTokenInt64(packetHandle, protocol, "checksum", checksum);
+  if(result != 0) write("error at making checksum invalid; error code=%d", result);
+}
+
+/**
+* Converts a MAC address to an int64.
+* @param macAddress The MAC address.
+*/
+int64 ConvertMacAddressStringToInt64(char macAddress[])
+{
+  char reverseMacAddress[18];
+  reverseMacAddress[0] = macAddress[15];
+  reverseMacAddress[1] = macAddress[16];
+  reverseMacAddress[2] = ':';
+  reverseMacAddress[3] = macAddress[12];
+  reverseMacAddress[4] = macAddress[13];
+  reverseMacAddress[5] = ':';
+  reverseMacAddress[6] = macAddress[9];
+  reverseMacAddress[7] = macAddress[10];
+  reverseMacAddress[8] = ':';
+  reverseMacAddress[9] = macAddress[6];
+  reverseMacAddress[10] = macAddress[7];
+  reverseMacAddress[11] = ':';
+  reverseMacAddress[12] = macAddress[3];
+  reverseMacAddress[13] = macAddress[4];
+  reverseMacAddress[14] = ':';
+  reverseMacAddress[15] = macAddress[0];
+  reverseMacAddress[16] = macAddress[1];
+  reverseMacAddress[17] = '\0';
+  return ethGetMacAddressAsNumber(reverseMacAddress);
+}
+
+/**
+ * Converts a MAC address saved as int64 to a string MAC address
+ * @param macAddress The MAC address as int64
+ * @param result The converted MAC address as a string
+ */
+ConvertMacAddressInt64ToString(int64 macAddress, char result[])
+{
+  char reverseMacAddress[18];
+  ethGetMacAddressAsString(macAddress, reverseMacAddress, elcount(reverseMacAddress));
+  result[0] = reverseMacAddress[15];
+  result[1] = reverseMacAddress[16];
+  result[2] = ':';
+  result[3] = reverseMacAddress[12];
+  result[4] = reverseMacAddress[13];
+  result[5] = ':';
+  result[6] = reverseMacAddress[9];
+  result[7] = reverseMacAddress[10];
+  result[8] = ':';
+  result[9] = reverseMacAddress[6];
+  result[10] = reverseMacAddress[7];
+  result[11] = ':';
+  result[12] = reverseMacAddress[3];
+  result[13] = reverseMacAddress[4];
+  result[14] = ':';
+  result[15] = reverseMacAddress[0];
+  result[16] = reverseMacAddress[1];
+  result[17] = '\0';
+}
+
+/** 
+* Convert an ip address number in network-byte order (big endian) to an ipv4 address string.
+* Note: IpGetAddressAsString converts from a host-byte order (little endian)
+* @param ipAddr The IP address to convert.
+* @param result The resulting IP address string.
+*/
+void ConvertIpAddressInt64ToString(dword ipAddr, char result[])
+{
+  ipAddr = swapDWord(ipAddr);
+  ipGetAddressAsString(ipAddr, result, elcount(result));
+}
+
+int64 ConvertIpAddressStringToInt64(char ipAddr[])
+{
+  return swapDword(IpGetAddressAsNumber(ipAddr));
+}
+
+/**
+ * Converts an IP address in human readable notation, i.e. 270.0.0.1 or 1234:5678:90ab:cdef:1234:5678:90ab:cdef
+ * into a byte array which is ready to be used with EthSetTokenData()
+ * @param ipAddr The IP address.
+ * @param outIpAddress The resulting byte array.
+ * returns The IP version
+ */
+int ConvertIpAddressStringToByteArray(char ipAddr[], byte outIpAddress[])
+{
+  int version;
+  version = IpVersionOfString(ipAddr);
+  
+  if(version == 4)
+  {
+    outIpAddress.qword(0) = IpGetAddressAsNumber(ipAddr);
+  }
+  else if(version == 6)
+  {
+    if(IpGetAddressAsArray(ipAddr, outIpAddress) != 0)
+    {
+      write("Could not convert IPv6 address (%s) to byte array. ", ipAddr);
+    }
+  }
+  else
+  {
+    write("Could not convert IP address (%s). Invalid format", ipAddr);
+  }
+  return version;
+}
+
+/**
+ * Compare two IP addresses.
+ * @param ipAddr The first IP address.
+ * @param otherIpAddr The second IP address.
+ * @returns kTrue if the IP addresses are equal, kFalse otherwise
+ */
+enum Bool CompareIpAddresses(char ipAddr[], char otherIpAddr[])
+{
+  int version, otherVersion, i;
+  byte ipData[16], otherData[16];
+  
+  version = ConvertIpAddressStringToByteArray(ipAddr, ipData);
+  otherVersion = ConvertIpAddressStringToByteArray(otherIpAddr, otherData);
+  
+  if(version != otherVersion || version < 0)
+    return kFalse;
+  
+  for(i = 0; i < BytesPerIpVersion(version); i++)
+  {
+    if(ipData[i] != otherData[i])
+      return kFalse;
+  }
+  return kTrue;
+}
+
+/**
+ * Returns the amount of bytes of an IP address in the given IP version
+ * @param ipVersion The IP version
+ */
+int BytesPerIpVersion(int ipVersion)
+{
+  if(ipVersion == 4)
+    return 4;
+  if(ipVersion == 6)
+    return 16;
+  write("Unknown IP version in BytesPerIpAddress");
+  return -1;    
+}
+
+/**
+ * Set the eth token representing an ipv4 or ipv6 address using a human readable IP address.
+ * @param packet handle of a packet that has been created with EthInitPacket
+ * @param protocolDesignator name of the protocol, e.g. "ipv4", "dhcp"
+ * @param tokenDesignator name of the token, e.g. "source"
+ * @param ipAddr the ip address in human readable notation
+ * @returns 0: success, else: eth error code
+ */
+long EthSetAnyIpAddressToken(long packet, char protocolDesignator[], char tokenDesignator[], char ipAddr[])
+{
+  byte ipAddressData[16];
+  int version;
+  
+  version = ConvertIpAddressStringToByteArray(ipAddr, ipAddressData);
+  
+  return EthSetTokenData(packet, protocolDesignator, tokenDesignator, BytesPerIpVersion(version), ipAddressData);
+}
+
+/**
+ * Set the eth token representing an ipv4 or ipv6 address using a human readable IP address and automatically choose between the ipv4 and ipv6 protocol.
+ * The protocol is automatically set to IPv4 or IPv6 depending on the ipAddr
+ * @param packet handle of a packet that has been created with EthInitPacket
+ * @param protocolDesignator name of the protocol, e.g. "ipv4"
+ * @param tokenDesignator name of the token, e.g. "source"
+ * @param ipAddr the ip address in human readable notation
+ * @returns 0: success, else: eth error code
+ */
+long EthSetIpAddressToken(long packet, char tokenDesignator[], char ipAddr[])
+{
+  byte ipAddressData[16];
+  int version;
+  version = ConvertIpAddressStringToByteArray(ipAddr, ipAddressData);
+    
+  if(version == 4)
+    return EthSetTokenData(packet, "ipv4", tokenDesignator, BytesPerIpVersion(version), ipAddressData);
+  if(version == 6)
+    return EthSetTokenData(packet, "ipv6", tokenDesignator, BytesPerIpVersion(version), ipAddressData);
+  return 1;
+}
+
+
+/**
+ * Checks if a string is a wildcard.
+ * @return Returns 1 if the string is a wildcard, 0 otherwise.
+ */
+int IsWildcard(char value[])
+{
+  if (strncmp(value, syspar::Wildcard, strlen(syspar::Wildcard)) == 0)
+    return 1;
+  else
+    return 0;
+}
+
+/**
+ * Calculates the header checksum for a given packet and protocol.
+ * @param packetHandle The packet.
+ * @param protocol The protocol.
+ */
+word CalculateChecksum(long packetHandle, char protocol[])
+{
+  byte buffer1[1540]; // The pseudo header including data
+  byte buffer2[1540]; // The payload of the underlying protocol
+  byte buffer3[16]; // Temp buffer for getting ip address data
+  long copiedBytes;
+  int64 theoreticalChecksum;
+  int64 actualHeaderLength; // The header length indicated by ihl (so far only for ipv4)
+  long Offset; // The offset of the checksum field
+  int i;
+  char token[64];
+  const int kSizeOfPseudoHeader = 12;
+  const int kSizeOfPseudoHeaderV6 = 40;
+  byte pseudoHeader[kSizeOfPseudoHeader];
+  byte pseudoHeaderV6[kSizeOfPseudoHeaderV6];
+  
+  for(i = 0; i < elcount(buffer1); i++)
+  {
+    buffer1[i] = 0;
+    buffer2[i] = 0;
+  }
+
+  if (strncmp(protocol, "ipv4", strlen(protocol)) == 0)
+  {
+    actualHeaderLength = EthGetTokenInt64(packetHandle, "ipv4", "ihl");
+    Offset = 10;
+    copiedBytes = EthGetTokenData(packetHandle, "eth", "data", elcount(buffer1), buffer1);
+    actualHeaderLength = EthGetTokenInt64(packetHandle, "ipv4", "ihl");
+    actualHeaderLength *= 4;
+  }
+  else if (strncmp(protocol, "udp", strlen(protocol)) == 0)
+  {
+    //Check if previous header is ipv4 or ipv6
+    copiedBytes = EthGetTokenData(packetHandle, "ipv4", "data", elcount(buffer2), buffer2);
+    
+    if(EthGetLastError() == 0)
+    {
+      // UDP over IPv4
+      actualHeaderLength = -1;
+      Offset = 6 + kSizeOfPseudoHeader;
+      
+      pseudoHeader.Dword(0) = swapDword(EthGetTokenInt64(packetHandle, "ipv4", "source"));
+      pseudoHeader.Dword(4) = swapDword(EthGetTokenInt64(packetHandle, "ipv4", "destination"));
+      pseudoHeader[8] = 0;
+      pseudoHeader[9] = 17; // udp
+      pseudoHeader.Word(10) = swapWord(EthGetTokenInt64(packetHandle, "udp", "length"));
+      
+      memcpy(buffer1, pseudoHeader, elcount(pseudoHeader));
+      memcpy_off(buffer1, elcount(pseudoHeader), buffer2, 0, copiedBytes);
+      actualHeaderLength = kSizeOfPseudoHeader + copiedBytes;
+    }
+    else
+    {
+      // UDP over IPv6
+      copiedBytes = EthGetTokenData(packetHandle, "ipv6", "data", elcount(buffer2), buffer2);
+      
+      actualHeaderLength = -1;
+      Offset = 6 + kSizeOfPseudoHeaderV6;
+      
+      EthGetTokenData(packetHandle, "ipv6", "source", 16, pseudoHeaderV6);
+      EthGetTokenData(packetHandle, "ipv6", "destination", 16, buffer3);
+      memcpy_off(pseudoHeaderV6, 16, buffer3, 0, 16);
+      pseudoHeaderV6.dword(32) = swapdWord(EthGetTokenInt64(packetHandle, "udp", "length"));
+      pseudoHeaderV6[36] = 0; //Zeroes
+      pseudoHeaderV6[37] = 0;
+      pseudoHeaderV6[38] = 0;
+      pseudoHeaderV6[39] = 17; // next header = udp
+      
+      memcpy(buffer1, pseudoHeaderV6, elcount(pseudoHeaderV6));
+      memcpy_off(buffer1, elcount(pseudoHeaderV6), buffer2, 0, copiedBytes);
+      actualHeaderLength = kSizeOfPseudoHeaderV6 + copiedBytes;
+    }
+  }
+  else if (strncmp(protocol, "tcp", strlen(protocol)) == 0)
+  {
+    //Check if previous header is ipv4 or ipv6
+    copiedBytes = EthGetTokenData(packetHandle, "ipv4", "data", elcount(buffer2), buffer2);
+    
+    if(EthGetLastError() == 0)
+    {
+      // TCP over IPv4
+      actualHeaderLength = -1;
+      Offset = 16 + kSizeOfPseudoHeader;
+      
+      pseudoHeader.Dword(0) = swapDword(EthGetTokenInt64(packetHandle, "ipv4", "source"));
+      pseudoHeader.Dword(4) = swapDword(EthGetTokenInt64(packetHandle, "ipv4", "destination"));
+      pseudoHeader[8] = 0;
+      pseudoHeader[9] = 6; // tcp
+      pseudoHeader.Word(10) = swapWord(EthGetTokenLengthBit(packetHandle, "ipv4", "data") / 8);
+      
+      memcpy(buffer1, pseudoHeader, elcount(pseudoHeader));
+      memcpy_off(buffer1, elcount(pseudoHeader), buffer2, 0, copiedBytes);
+      actualHeaderLength = kSizeOfPseudoHeader + copiedBytes;
+    }
+    else
+    {
+      // TCP over IPv6
+      copiedBytes = EthGetTokenData(packetHandle, "ipv6", "data", elcount(buffer2), buffer2);
+      
+      actualHeaderLength = -1;
+      Offset = 16 + kSizeOfPseudoHeaderV6;
+      
+      EthGetTokenData(packetHandle, "ipv6", "source", 16, pseudoHeaderV6);
+      EthGetTokenData(packetHandle, "ipv6", "destination", 16, buffer3);
+      memcpy_off(pseudoHeaderV6, 16, buffer3, 0, 16);
+      pseudoHeaderV6.dWord(32) = swapdWord(EthGetTokenLengthBit(packetHandle, "ipv6", "data") / 8);
+      pseudoHeaderV6[36] = 0; //Zeroes
+      pseudoHeaderV6[37] = 0;
+      pseudoHeaderV6[38] = 0;
+      pseudoHeaderV6[39] = 6; // next header = tcp
+      
+      memcpy(buffer1, pseudoHeaderV6, elcount(pseudoHeaderV6));
+      memcpy_off(buffer1, elcount(pseudoHeaderV6), buffer2, 0, copiedBytes);
+      actualHeaderLength = kSizeOfPseudoHeaderV6 + copiedBytes;
+    }
+  }
+  else
+  {
+    write("protocol %s not supported", protocol);
+    return 0;
+  }
+  
+  theoreticalChecksum = 0;  
+  for (i = 0; i < actualHeaderLength; i += 2)
+  {
+    if (i != Offset)
+    {
+      //write("%04X", SwapWord(buffer1.Word(i))); // for debugging purposes
+      theoreticalChecksum += SwapWord(buffer1.Word(i));
+    }
+  }
+  while ((theoreticalChecksum >> 16 != 0))
+  {
+    theoreticalChecksum = (theoreticalChecksum & 0xFFFF) + (theoreticalChecksum >> 16);
+  }
+  return ~theoreticalChecksum;
+}
+
+/**
+ * Fragments an IP packet
+ * @param packetHandle The packet
+ * @param part Which part of the original packet shall be created      
+ * @param totalParts How many parts in total shall be created
+ * @param offsetOffset This will be added to the offset field in the IP header
+ * @param mfFlag Set to zero or one or wildcard for default value
+ */
+void FragmentIpPacketParts(long packetHandle, int part, int totalParts, int offsetOffset, char mfFlag[])
+{
+  long payloadLength;
+  int startByte;
+  int fragmentLength;
+  payloadLength = EthGetTokenLengthBit(packetHandle, "ipv4", "data") / 8;
+  fragmentLength = payloadLength / totalParts;
+  startByte = (part - 1) * fragmentLength;
+  FragmentIpPacketBytes(packetHandle, startByte, fragmentLength, offsetOffset, mfFlag);
+}
+
+/**
+ * Fragments an IP packet
+ * @param packetHandle The packet
+ * @param startByte At this byte of payload the fragmentation will start
+ * @param fragmentLength Size of the fragment in bytes
+ * @param offsetOffset This will be added to the offset field in the IP header
+ * @param mfFlag set to zero or one or wildcarf for default value
+ */
+void FragmentIpPacketBytes(long packetHandle, int startByte, int fragmentLength, int offsetOffset, char mfFlag[])
+{
+  long payloadLength, headerLength;
+  byte buffer[1480];
+  long result, checksum;
+  byte mfBit, flags;
+  
+  //get payload
+  payloadLength = EthGetTokenData(packetHandle, "ipv4", "data", elcount(buffer), buffer);
+  result = EthGetLastError();
+  if(result != 0) write("Error @ EthGetTokenData FragmentIpPacket %d", result);
+  
+  //set payload
+  result = EthResizeToken(packetHandle, "ipv4", "data", fragmentLength*8);
+  if(result != 0) write("Error @ EthResizeToken FragmentIpPacket %d", result);
+  memcpy_off(buffer, 0, buffer, startByte, fragmentLength);
+  result = EthSetTokenData(packetHandle, "ipv4", "data", fragmentLength, buffer);
+  if(result != 0) write("Error @ EthSetTokenData FragmentIpPacket %d", result);
+  
+  //set offset
+  result = EthSetTokenInt64(packetHandle, "ipv4", "offset", startByte/8 + offsetOffset);
+  if(result != 0) write("Error @ EthSetTokenInt64 FragmentIpPacket offset %d", result);
+  
+  //set mfbit
+  if(IsWildcard(mfFlag))
+  {
+    mfBit = ((startByte + fragmentLength) < payloadLength) ? 1 : 0;
+  }
+  else
+  {
+    mfBit = atol(mfFlag);
+  }
+  flags = EthGetTokenInt64(packetHandle, "ipv4", "flags");
+  result = EthGetLastError();
+  if(result != 0) write("Error @ EthGetTokenInt64 flags FragmentIpPacket %d", result);
+  flags = flags & ~1; // clearing last bit
+  flags = flags + mfBit; // setting last bit to value of mfBit
+  result = EthSetTokenInt64(packetHandle, "ipv4", "flags", flags);
+  if(result != 0) write("Error @ EthSetTokenInt64 flags FragmentIpPacket %d", result);
+  
+  //recalculate length
+  headerLength = EthGetTokenLengthBit(packetHandle, "ipv4", "header") / 8;
+  result = EthSetTokenInt64(packetHandle, "ipv4", "length", headerLength + fragmentLength);
+  if(result != 0) write("Error @ EthSetTokenInt64 length FragmentIpPacket %d", result);
+  
+  //recalculate checksum
+  checksum = CalculateChecksum(packetHandle, "ipv4");
+  result = EthSetTokenInt64(packetHandle, "ipv4", "checksum", checksum);
+  if(result != 0) write("Error @ EthSetTokenInt64 checksum FragmentIpPacket %d", result); 
+}
+
+/**
+ * Checks whether an ethernet packet is a DHCP message
+ * @param packetHandle The handle of the ethernet packet
+ * @returns kTrue if packet is a DHCP message, kFalse otherwise
+ */
+enum Bool IsDhcpMessage(long packetHandle)
+{
+  if(EthGetTokenInt64(packetHandle, "eth", "type") != 0x800)
+  {
+    return kFalse;
+  }
+  if(EthGetTokenInt64(packetHandle, "ipv4", "protocol") != 0x11)
+  {
+    return kFalse;
+  }
+  if(EthGetTokenInt64(packetHandle, "udp", "source") != atol(syspar::UdpPortOfDhcpClient))
+  {
+    return kFalse;
+  }
+  if(EthGetTokenInt64(packetHandle, "udp", "destination") != atol(syspar::UdpPortOfDhcpServer))
+  {
+    return kFalse;
+  }
+  return kTrue;
+}
+
+/**
+ * Checks if the packet is an NDP Neighbor Solicitation for one of the testers potential destination addresses and then answers the request.
+ * @param packetHandle The packet handle.
+ * returns kTrue if the packet was answered, kFalse otherwise.
+ */
+enum Bool AnswerNdpSolicitation(long incomingPacketHandle)
+{
+  byte incomingTargetAddr[16];
+  byte dutIpAddr[16];
+  byte hostIpAddr[16];
+  byte optionData[8];
+  int64 hostMacInt;
+  long outgoingPacketHandle;
+  enum Bool match;
+  int i;
+  
+  //Check if packet is a ndp solicitation
+  if(EthGetTokenInt64(incomingPacketHandle, "eth", "type") != 0x86DD) // Ipv6
+    return kFalse;
+  
+  if(EthGetTokenInt64(incomingPacketHandle, "ipv6", "next") != 0x3A) // Icmpv6
+    return kFalse;
+  
+  if(EthGetTokenInt64(incomingPacketHandle, "icmpv6", "type") != 0x87) // Neighbor Solicitation
+    return kFalse;
+  
+  write("Tester received Neighbor Solicitation");
+  
+  EthGetTokenData(incomingPacketHandle, "ndp", "target", 16, incomingTargetAddr);
+  EthGetTokenData(incomingPacketHandle, "ipv6", "source", 16, dutIpAddr);
+  
+  ConvertIpAddressStringToByteArray(syspar::Host1Ip, hostIpAddr);
+  hostMacInt = ConvertMacAddressStringToInt64(syspar::Host1Mac);
+  
+  //Try to match to Host1Ip
+  match = kTrue;
+  for(i = 0; i < 16; i++)
+    if(hostIpAddr[i] != incomingTargetAddr[i])
+      match = kFalse;
+  
+  if(match == kFalse)
+  {
+    //IP Address does not match Host1Ip
+    ConvertIpAddressStringToByteArray(syspar::Host2Ip, hostIpAddr);
+    hostMacInt = ConvertMacAddressStringToInt64(syspar::Host2Mac);
+    
+    //Try to match to Host2Ip
+    match = kTrue;
+    for(i = 0; i < 16; i++)
+      if(hostIpAddr[i] != incomingTargetAddr[i])
+        match = kFalse;
+    
+    if(match == kFalse)
+    {
+      write("NDP Solicited IP Address does not match any tester IP address");      
+      return kFalse;
+    }
+      
+  }
+  
+  //respond
+  outgoingPacketHandle = EthInitPacket("ndp", "neighborAdvertisement");
+  
+  EthSetTokenInt64(outgoingPacketHandle, "eth", "destination", ConvertMacAddressStringToInt64(syspar::MacAddressBroadcast));
+  EthSetTokenInt64(outgoingPacketHandle, "eth", "source", hostMacInt);
+  
+  EthSetTokenData(outgoingPacketHandle, "ipv6", "destination", 16, dutIpAddr);
+  EthSetTokenData(outgoingPacketHandle, "ipv6", "source", 16, incomingTargetAddr);
+  EthSetTokenInt64(outgoingPacketHandle, "ipv6", "hopLimit", 0xFF);
+  
+  EthSetTokenInt64(outgoingPacketHandle, "ndp", "routerFlag", 0);
+  EthSetTokenInt64(outgoingPacketHandle, "ndp", "solicitedFlag", 1);
+  EthSetTokenInt64(outgoingPacketHandle, "ndp", "overrideFlag", 1);
+  EthSetTokenData(outgoingPacketHandle, "ndp", "target", 16, incomingTargetAddr);
+  
+  //Set ndp target link layer option
+  optionData.qword(0) = swapqword(hostMacInt);
+  optionData[0] = 2; //type
+  optionData[1] = 1; //length including type and length field
+  EthResizeToken(outgoingPacketHandle, "ndp", "data", 64);
+  EthSetTokenData(outgoingPacketHandle, "ndp", "data", 8, optionData);
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(outgoingPacketHandle, "eth", "vlanId");
+    EthSetTokenInt(outgoingPacketHandle, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  EthCompletePacket(outgoingPacketHandle);
+  EthOutputPacket(outgoingPacketHandle);
+  EthReleasePacket(outgoingPacketHandle);
+  
+  return kTrue;
+}
+
+/**
+ * Checks if the packet is an ARP request for one of the testers potential destination addresses and then answers the request.
+ * @param packetHandle The packet handle.
+ * returns kTrue if the packet was answered, kFalse otherwise.
+ */
+enum Bool AnswerArpRequestForHost1(long incomingPacketHandle)
+{
+  int64 incomingProtDestAddr;
+  int64 outgoingHwSourceAddr;
+  long outgoingPacketHandle;
+  char incomingProtDestAddrString[50];
+  
+  if(gAutoAnswerArpRequests == kFalse)
+  {
+    return kFalse;
+  }
+  if(EthGetTokenInt64(incomingPacketHandle, "eth", "type") != 0x0806)
+  {
+    return kFalse;
+  }
+  if(EthGetTokenInt64(incomingPacketHandle, "arp", "operation") != 1)
+  {
+    return kFalse;
+  }
+  
+  incomingProtDestAddr = EthGetTokenInt64(incomingPacketHandle, "arp", "protDestinationAddr");
+  ConvertIpAddressInt64ToString(incomingProtDestAddr, incomingProtDestAddrString);
+  if(incomingProtDestAddr == ConvertIpAddressStringToInt64(syspar::Host1Ip)
+    || (gDhcpv4Server1IpAddress != 0 && incomingProtDestAddr == gDhcpv4Server1IpAddress))
+  {
+    write("Responding to ARP request for IP address %s with %s.", incomingProtDestAddrString , syspar::Host1Mac);
+    outgoingHwSourceAddr = ConvertMacAddressStringToInt64(syspar::Host1Mac);
+  }
+  else if(incomingProtDestAddr == ConvertIpAddressStringToInt64(syspar::Host2Ip)
+    || (gDhcpv4Server2IpAddress != 0 && incomingProtDestAddr == gDhcpv4Server2IpAddress))
+  {
+    write("Responding to ARP request for IP address %s with %s.", incomingProtDestAddrString , syspar::Host2Mac);
+    outgoingHwSourceAddr = ConvertMacAddressStringToInt64(syspar::Host2Mac);
+  }
+  else if(incomingProtDestAddr == gAIface0IpLinkLocalAddr && gAIface0IpLinkLocalAddr != 0)
+  {
+    write("Responding to ARP request for IP address %s with %s.", incomingProtDestAddrString, syspar::Host1Mac);
+    outgoingHwSourceAddr = ConvertMacAddressStringToInt64(syspar::Host1Mac);
+  }
+  else
+  {
+    // Unknown destination IP address
+    write("Received ARP request for unknown IP address(%s)", incomingProtDestAddrString);
+    return kFalse;
+  }
+  
+  outgoingPacketHandle = EthInitPacket("arp");
+  
+  EthSetTokenInt64(outgoingPacketHandle, "eth", "destination", ConvertMacAddressStringToInt64(syspar::MacAddressBroadcast));
+  EthSetTokenInt64(outgoingPacketHandle, "eth", "source", ConvertMacAddressStringToInt64(syspar::Host1Mac));
+  EthSetTokenInt64(outgoingPacketHandle, "arp", "operation", 2);
+  EthSetTokenInt64(outgoingPacketHandle, "arp", "protSourceAddr", incomingProtDestAddr);
+  EthSetTokenInt64(outgoingPacketHandle, "arp", "hwDestinationAddr", EthGetTokenInt64(incomingPacketHandle, "arp", "hwSourceAddr"));
+  EthSetTokenInt64(outgoingPacketHandle, "arp", "protDestinationAddr", EthGetTokenInt64(incomingPacketHandle, "arp", "protSourceAddr"));
+  EthSetTokenInt64(outgoingPacketHandle, "arp", "hwSourceAddr", outgoingHwSourceAddr); 
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(outgoingPacketHandle, "eth", "vlanId");
+    EthSetTokenInt(outgoingPacketHandle, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  EthCompletePacket(outgoingPacketHandle);
+  EthOutputPacket(outgoingPacketHandle);
+  EthReleasePacket(outgoingPacketHandle);
+  
+  return kTrue;
+}
+
+/**
+ * Matches the format of an IP address string to IPv4 or IPv6.
+ * Returns: 
+ * -1 = unknown format
+ * 4 = IPv4
+ * 6 = IPv6
+ * @param ipAddr The IP address.
+ */
+int IpVersionOfString(char ipAddr[])
+{
+  byte dummy[16];
+  
+  if(ipGetAddressAsNumber(ipAddr) != 0xFFFFFFFF)
+    return 4;
+  else if (ipGetAddressAsArray(ipAddr, dummy) == 0)
+    return 6;
+  else
+    return -1; 
+}
+  
+/**
+ * Checks whether a string has the format of an ip address
+ * @param value the potential IP address
+ * @returns kTrue if the value is an IP address, kFalse otherwise
+ */
+enum Bool IsIpAddress(char value[])
+{
+  if(IpVersionOfString(value) > 0)
+    return kTrue;
+  else
+    return kFalse;
+}
+
+/**
+ * Checks whether a token stands for an IP address
+ * @param token the name of the token (see CANoe help)
+ * @returns kTrue if the token stands for an IP address, kFalse otherwise
+ */
+enum Bool IsIpAddressToken(char token[])
+{
+  if(strncmp(token, "clientAddr", elcount(token)) == 0)
+  {
+    return kTrue;
+  }
+  if(strncmp(token, "magicCookie", elcount(token)) == 0)
+  {
+    return kTrue;
+  }
+  //to do: add other fields that represent an ip address
+  return kFalse;
+}
+  
+
+export testfunction TestCaseOnlyIPv4(char reason[])
+{
+  if(IpVersionOfString(syspar::Host1Ip) == 6)
+  {
+    testStepFail("TestCaseOnlyIPv4", reason);
+  }
+}

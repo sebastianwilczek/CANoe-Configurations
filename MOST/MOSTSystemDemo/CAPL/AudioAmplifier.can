@@ -1,0 +1,548 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+  #include "FCatDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+//
+// Simulation of a MOST AudioAmplifier FBlock
+//
+// Note: Only basic audio sink functionality is simulated here.
+//
+variables
+{
+  // Maximum value of volume property
+  const byte  kVolumeValMax = 30;
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_Volume(long):*/
+long SendStatus_Volume(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage AudioAmplifier.Volume.Status msg;
+
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = MostApGetInstID();
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.Volume = @AMP::AA_Volume;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // send message
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  // property initialisation
+  @AMP::AA_Volume = 20;
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // configure CAPL node as application node (don't receive spy messages...)
+  MostApplicationNode();
+
+  // configure FBlock AmFmTuner
+  ConfigureFBlock();
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioAmplifier.ConnectTo.StartResult (0x221152):*/
+on mostAMSMessage AudioAmplifier.ConnectTo.StartResult
+{
+  mostAMSMessage AudioAmplifier.ConnectTo.Result msgResult;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 4))
+    return;
+
+  //}}} --- end default code --------------------
+
+  // prepare report message
+  mostPrepareReport(this, msgResult);
+
+  msgResult.SourceNr = this.SourceNr;  
+
+  output(msgResult);
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioAmplifier.Mute.SetGet (0x221132):*/
+on mostAMSMessage AudioAmplifier.Mute.SetGet
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 2))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // check range
+  if(this.SinkNr != 1)
+  {
+    MostSendError_CodeByteByte(this, kErrParamWrong, 1, this.SinkNr);
+    return;
+  }
+
+  // set property
+  @AMP::AA_Mute = this.Status;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_Mute(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioAmplifier.Volume.Decrement (0x224004):*/
+on mostAMSMessage AudioAmplifier.Volume.Decrement
+{
+  word newVolume;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  newVolume = @AMP::AA_Volume - this.NSteps;
+  if((newVolume < 0) || (newVolume > kVolumeValMax))
+    newVolume = 0;
+
+  // set property
+  @AMP::AA_Volume = newVolume;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_Volume(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioAmplifier.Volume.Get (0x224001):*/
+on mostAMSMessage AudioAmplifier.Volume.Get
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 0))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_Volume(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioAmplifier.Volume.Increment (0x224003):*/
+on mostAMSMessage AudioAmplifier.Volume.Increment
+{
+  word newVolume;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  newVolume = @AMP::AA_Volume + this.NSteps;
+  if(newVolume > kVolumeValMax)
+    newVolume = kVolumeValMax;
+
+  // set property
+  @AMP::AA_Volume = newVolume;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_Volume(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioAmplifier.Volume.Set (0x224000):*/
+on mostAMSMessage AudioAmplifier.Volume.Set
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // check range
+  if((this.Volume < 0) || (this.Volume > kVolumeValMax))
+  {
+    MostSendError_CodeByteByte(this, kErrParamWrong, 1, this.Volume);
+    return;
+  }
+
+  // set property
+  @AMP::AA_Volume = this.Volume;
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioAmplifier.Volume.SetGet (0x224002):*/
+on mostAMSMessage AudioAmplifier.Volume.SetGet
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // check range
+  if((this.Volume < 0) || (this.Volume > kVolumeValMax))
+  {
+    MostSendError_CodeByteByte(this, kErrParamWrong, 1, this.Volume);
+    return;
+  }
+
+  // set property
+  @AMP::AA_Volume = this.Volume;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_Volume(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_Mute(long):*///function
+long SendStatus_Mute(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage AudioAmplifier.Mute.Status msg;
+
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = MostApGetInstID();
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.SinkNr  = 1;
+  msg.Status = @AMP::AA_Mute;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // send message
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioAmplifier.Connect.StartResult (0x221112):*/
+on mostAMSMessage AudioAmplifier.Connect.StartResult
+{
+  mostAMSMessage AudioAmplifier.Connect.Result msgResult;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReception(this))
+    return;
+
+  //}}} --- end default code --------------------
+
+  // prepare report message
+  mostPrepareReport(this, msgResult);
+
+  msgResult.SinkNr = this.SinkNr;
+
+  output(msgResult);
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioAmplifier.DisConnect.StartResult (0x221122):*/
+on mostAMSMessage AudioAmplifier.DisConnect.StartResult
+{
+  mostAMSMessage AudioAmplifier.DisConnect.Result msgResult;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+  // prepare report message
+  mostPrepareReport(this, msgResult);
+
+  msgResult.SinkNr = this.SinkNr;  
+
+  output(msgResult);
+}
+/*@@end*/
+
+/*@@caplFunc:CheckNormalOperation():*///function
+long CheckNormalOperation()
+{
+  // Description:
+  //   Checks if FBlock is able to process commands
+  //   (Maybe used for power simulation later.)
+  // Return:
+  //   0: failed; 1: Ok
+
+  //{{{ --- begin application section -----------
+
+  return 1;
+
+  //}}} --- end application section -------------
+
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioAmplifier.Mute.Get (0x221131):*/
+on mostAMSMessage AudioAmplifier.Mute.Get
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // check range
+  if(this.SinkNr != 1)
+  {
+    MostSendError_CodeByteByte(this, kErrParamWrong, 1, this.SinkNr);
+    return;
+  }
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_Mute(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostApInstID:OnMostApInstID():*/
+OnMostApInstID()
+{
+  // reconfigure FBlock
+  ConfigureFBlock();
+}
+/*@@end*/
+
+/*@@caplFunc:ConfigureFBlock():*///function
+void ConfigureFBlock()
+{
+  // Configures the FBlock.
+  // Therefore functions are registered at CANoe's Function and 
+  // Notification Service.
+
+  long oldInstId = -1; // static variable
+  long newInstId;
+
+  newInstId = mostApGetInstId();
+
+  if(newInstId < 0)
+  {
+    newInstId = -1;
+  }
+
+  if(oldInstId != -1)
+  {
+    // disable Notification Service
+    mostAsNtfDisableEx(kFB_AA, oldInstId);
+    // disable Function Service
+    mostAsFsDisableEx(kFB_AA, oldInstId);
+  }
+
+  if(newInstId != -1)
+  {
+    // enable Notification Service
+    mostAsNtfEnable();
+    // enable Function Service
+    mostAsFsEnable();
+
+    // Enable all functions and all operations defined in the XML function catalog
+    // for the FBlock. Additionally, functions of type 'property' will be registered
+    // at the Notification Service if a corresponding CAPL function for sending 
+    // the status message is defined.
+    mostAsFsFunctionEnable(kFctAllInFCat, kOpTFAllInFCat, "SendStatus_");
+  }
+  oldInstId = newInstId;
+}
+/*@@end*/
+
+/*@@sysvarChange:AMP::AA_Mute:*/
+on sysvar AMP::AA_Mute
+{
+  //{{{ --- begin default code ------------------
+
+  // send status message to all notification clients
+  SendStatus_Mute(kAsNtfDestAdr);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@sysvarChange:AMP::AA_Volume:*/
+on sysvar AMP::AA_Volume
+{
+  //{{{ --- begin default code ------------------
+
+  // send status message to all notification clients
+  SendStatus_Volume(kAsNtfDestAdr);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioAmplifier.ConnectLabel.StartResult (0x22F112):*/
+on mostAMSMessage AudioAmplifier.ConnectLabel.StartResult
+{
+  mostAMSMessage AudioAmplifier.ConnectLabel.Result msgResult;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReception(this))
+    return;
+
+  //}}} --- end default code --------------------
+
+  // prepare report message
+  mostPrepareReport(this, msgResult);
+
+  msgResult.SinkNr = this.SinkNr;
+  output(msgResult);
+}
+/*@@end*/
+

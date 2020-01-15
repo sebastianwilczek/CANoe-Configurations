@@ -1,0 +1,83 @@
+/*@!Encoding:1252*/
+variables
+{
+  char    gECU[15] = "FrontLeftDoor";
+  long    gNodeAddress = 7;
+  dword linBusContext;
+  dword canBusContext;
+  
+  enum eSchedTables
+  {
+    MasterReq = 0,
+    DiagResp  = 1,
+    Send      = 3
+  };
+  long gCanTPHandle = 0;
+}
+
+
+on start
+{ 
+  gCanTPHandle = CanTpCreateConnection(0); // normal mode
+  CanTpSetTxIdentifier( gCanTPHandle, 0x600);
+  CanTpSetRxIdentifier( gCanTPHandle, 0x700);
+  
+  if( 0 != DiagSetTarget( "FrontLeftDoor"))  write( "Error setting target!");
+
+  canBusContext = GetBusNameContext("CANBackbone");
+  linBusContext = GetBusNameContext("LINDoor");
+}
+
+/*************************** LIN TP ************************/
+
+LINtp_DataInd( long count, DWORD nad)
+{
+  BYTE rxBuffer[4095];
+
+  write( "%s: LINtp_DataInd(%d, 0x%x)", gECU, count, nad);
+
+  LINtp_GetRxData(rxBuffer, count);
+  linChangeSchedTable(Send);
+  
+  setBusContext(canBusContext);
+  CanTpSendData(gCanTPHandle, rxBuffer, count);
+}
+
+LINtp_DataCon(long count)
+{
+  write("LINMaster: Data Confirmation");
+  linChangeSchedTable(DiagResp);
+}
+
+LINtp_ErrorInd( int error)
+{
+  write( "%s: LINtp_ErrorInd(%d)", gECU, error);
+}
+
+
+/*************************** CAN TP ************************/
+
+void CanTp_ReceptionInd(long connHandle, byte data[])
+{
+  /* This function returns the number of data received */
+
+  write("%s: CanTp_ReceptionInd", gECU);
+
+  setBusContext(linBusContext);
+  linChangeSchedTable(MasterReq);
+  LINtp_DataReq(data, elcount(data), gNodeAddress);
+}
+
+void CanTp_ErrorInd( long connHandle, long error)
+{
+  write( "%s: Error %d for connection %d", gECU, error, connHandle);
+}
+
+/**************** SYS VAR **********************************/
+
+on sysvar sysvar::LINTP::NAD
+{
+  gNodeAddress = @this;
+}
+
+

@@ -1,0 +1,308 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "GAIN.cin"
+}
+
+/*
+ * CoffeeMaker - Galley Insert Coffee Maker System Version 1.0
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Pr) Created 
+ */
+variables
+{
+  char gCoffeeMaker_NodeName[32] = "Coffee Maker";   // Name of the node, is used for output to write window
+
+  // process handling
+  enum Request
+  {
+    kRequestNone,
+    kRequestBrew,
+    kRequestHotWater
+  };
+
+  enum Request gPendingRequest = kRequestNone;
+
+  word FilleCycle[enum Request];
+
+  const byte kCoffeeMaker_LoopCycleMs = 250;
+  const word kCoffeeMaker_BrewCycleMs = 3000;
+  const word kCoffeeMaker_FillCyclelMs = 1000;
+
+  mstimer gCoffeeMaker_Loop;
+  mstimer gCoffeeMaker_Fill;
+
+  // temperature management (unit is 1/100 deg celcius)
+  const byte kCoffeeMaker_WarmPerCycle    = 50;
+  const byte kCoffeeMaker_CoolPerCycle    = 10;
+  const word kCoffeeMaker_TargetTemp      = 9000;
+  const word kCoffeeMaker_EnvironmentTemp = 2000;
+  const word kCoffeeMaker_HysterisisTemp  = 1000;
+
+  long gCoffeeMaker_Temperature = kCoffeeMaker_EnvironmentTemp;
+
+  const byte kCoffeeMaker_PotStateCount = 5;
+}
+
+on preStart
+{
+  strncpy(gNode_FuncRO         , CoffeeMaker.CFG2_0_0_GAIN_REMOTE_FUNCTION, 32);
+  strncpy(gNode_FuncPC_CENTR   , CoffeeMaker.CFG2_1_0_CENTRALIZED_POWER_CONTR, 32);
+  strncpy(gNode_FuncPC_DECENTR , CoffeeMaker.CFG2_2_0_DECENTRALIZED_POWER_CON, 32);
+  strncpy(gNode_FuncDIAG       , CoffeeMaker.CFG2_3_0_DIAGNOSIS_FUNCTION, 32);
+
+  gNode_LevelId                = CoffeeMaker.GAINCFG5_1_0_FEEDER_NUMBER;
+  gNode_DeviceId               = CoffeeMaker.GAINCFG5_2_0_DEVICE_NUMBER;
+
+  gNode_NM_STA_CycleTimeMs     = CoffeeMaker.GAINCFG9_9_0_TIMER_STA_GAIN;
+  gNode_NM_STA_TimeoutTimeMs   = CoffeeMaker.GAINCFG9_9_1_TIMER_STA_TIMEOUT_G;
+
+  gNode_CounterDeltaInc        = CoffeeMaker.GAINCFG12_1_0_GAIN_COUNTER_DELTA;
+  gNode_CounterDeltaDec        = CoffeeMaker.GAINCFG12_1_1_GAIN_COUNTER_DELTA;
+  gNode_CounterThreshold       = CoffeeMaker.GAINCFG12_1_2_GAIN_COUNTER_THRES;
+
+  gNode_SequenceTimeoutMs      = CoffeeMaker.GAINCFG9_2_0_SEQUENCE_TIMEOUT_TI;
+
+  gGAIN_MaxPowerBudget         = CoffeeMaker.GAINCFG3_0_0_MAXIMUM_POWER_BUDGE;
+  gGAIN_StandbyPowerBudget     = CoffeeMaker.GAINCFG3_3_0_STANDBY_POWER_THRES;
+
+  gGAIN_UsedPowerBudget        = gGAIN_StandbyPowerBudget;
+
+  FilleCycle[kRequestBrew]     = kCoffeeMaker_BrewCycleMs;
+  FilleCycle[kRequestHotWater] = kCoffeeMaker_FillCyclelMs;
+}
+
+on start
+{
+  @CoffeeMaker_Feeder = gNode_LevelId;
+  @CoffeeMaker_Device = gNode_DeviceId;
+  @CoffeeMaker_TempCurrent = (float)gCoffeeMaker_Temperature / 100.;
+
+  enableControl(gCoffeeMaker_NodeName, "ColdWater", 0);
+  enableControl(gCoffeeMaker_NodeName, "HotWater", 0);
+  enableControl(gCoffeeMaker_NodeName, "HotPlateOn", 0);
+  enableControl(gCoffeeMaker_NodeName, "Brew", 0);
+  enableControl(gCoffeeMaker_NodeName, "Insert", 1);
+}
+
+on envVar CoffeeMaker_Power
+{
+  int potState;
+
+  potState = getValue(CoffeeMaker_Pot);
+  
+  if (getValue(this) > 0) {
+    GAIN_PowerUp();
+
+    enableControl(gCoffeeMaker_NodeName, "HotWater", potState == 1 ? 1 : 0);
+    enableControl(gCoffeeMaker_NodeName, "ColdWater", potState == 1 ? 1 : 0);
+    enableControl(gCoffeeMaker_NodeName, "Brew", potState == 1 ? 1 : 0);
+    enableControl(gCoffeeMaker_NodeName, "HotPlateOn", 1);
+  }
+  else {
+    GAIN_PowerDown();
+
+    enableControl(gCoffeeMaker_NodeName, "ColdWater", 0);
+    enableControl(gCoffeeMaker_NodeName, "HotWater", 0);
+    enableControl(gCoffeeMaker_NodeName, "HotPlateOn", 0);
+    enableControl(gCoffeeMaker_NodeName, "Brew", 0);
+  }
+}
+
+on timer gCoffeeMaker_Loop
+{
+  word time10ms;
+  byte cont;
+  int  targetTemp;
+  int  timeRemaining10Ms;
+
+  if (gGAIN_State == kGAINStateOn) {
+    targetTemp = kCoffeeMaker_TargetTemp + (kCoffeeMaker_HysterisisTemp / 2);
+
+    gCoffeeMaker_Temperature += kCoffeeMaker_WarmPerCycle;
+
+    if (gCoffeeMaker_Temperature > targetTemp) {
+      GAIN_ChangeState(kGAINStateStandbyOn);
+
+      if (gPendingRequest != kRequestNone)
+      {
+        setTimer(gCoffeeMaker_Fill, FilleCycle[gPendingRequest]);
+      }
+    }
+    else {
+      gGAIN_PBRemainingTime10ms = (targetTemp - gCoffeeMaker_Temperature) * kCoffeeMaker_LoopCycleMs / kCoffeeMaker_WarmPerCycle / 10;
+    }
+  }
+  else {
+    targetTemp = kCoffeeMaker_TargetTemp - (kCoffeeMaker_HysterisisTemp / 2);
+
+    if (gCoffeeMaker_Temperature > kCoffeeMaker_EnvironmentTemp) {
+      gCoffeeMaker_Temperature -= kCoffeeMaker_CoolPerCycle;
+    }
+
+    if (gCoffeeMaker_Temperature < targetTemp) {
+      timeRemaining10Ms = (targetTemp - gCoffeeMaker_Temperature) * kCoffeeMaker_LoopCycleMs / kCoffeeMaker_WarmPerCycle / 10;
+      GAIN_PBR_Send(PBTypeNotInterruptable, gGAIN_MaxPowerBudget, (float)timeRemaining10Ms / 100 + 0.5, gGAIN_MaxPowerBudget, (float)timeRemaining10Ms / 100 + 0.5);
+    }
+    else {
+      gGAIN_PBRemainingTime10ms = (kCoffeeMaker_HysterisisTemp - (targetTemp - gCoffeeMaker_Temperature)) * kCoffeeMaker_LoopCycleMs / kCoffeeMaker_CoolPerCycle / 10;
+      
+    }
+  }
+
+  @CoffeeMaker_TempCurrent = (float)gCoffeeMaker_Temperature / 100.;
+  @CoffeeMaker_PowerUsed = gGAIN_UsedPowerBudget;
+
+  if (gGAIN_State != kGAINStateStandbyOff) {
+    setTimer(gCoffeeMaker_Loop, kCoffeeMaker_LoopCycleMs);
+  }
+}
+
+on envVar CoffeeMaker_ColdWater
+{
+  if (getValue(this) != 0) {
+    enableControl(gCoffeeMaker_NodeName, "ColdWater", 0);
+    enableControl(gCoffeeMaker_NodeName, "HotWater", 0);
+    enableControl(gCoffeeMaker_NodeName, "Brew", 0);
+    enableControl(gCoffeeMaker_NodeName, "Insert", 0);
+
+    setTimer(gCoffeeMaker_Fill, kCoffeeMaker_FillCyclelMs);
+  }
+}
+
+on envVar CoffeeMaker_Insert
+{
+  byte potState;
+
+  if (getValue(this) == 0 ) {
+    potState = getValue(CoffeeMaker_Pot);
+
+    @CoffeeMaker_Pot = (potState == 0 ? 1 : 0);
+
+    enableControl(gCoffeeMaker_NodeName, "HotWater", gGAIN_State != 0 && gGAIN_State != kGAINStateStandbyOff && potState == 0 ? 1 : 0);
+    enableControl(gCoffeeMaker_NodeName, "ColdWater", gGAIN_State != 0 && gGAIN_State != kGAINStateStandbyOff && potState == 0 ? 1 : 0);
+    enableControl(gCoffeeMaker_NodeName, "Brew", gGAIN_State != 0 && gGAIN_State != kGAINStateStandbyOff && potState == 0 ? 1 : 0);
+
+    if (potState != 0) {
+      @CoffeeMaker_Serve = 0;
+    }
+  }
+}
+
+on timer gCoffeeMaker_Fill
+{
+  byte count;
+
+  count = getValue(CoffeeMaker_Pot);
+
+  if (count < kCoffeeMaker_PotStateCount - 1 && count > 0) {
+    count++;
+    @CoffeeMaker_Pot = count;
+    setTimer(gCoffeeMaker_Fill, @CoffeeMaker_ColdWater != 0 || (@CoffeeMaker_HotWater != 0 ? kCoffeeMaker_FillCyclelMs : kCoffeeMaker_BrewCycleMs));
+  }
+  
+  if (count == 0 || count == kCoffeeMaker_PotStateCount - 1) {
+    @CoffeeMaker_Brew = 0;
+    @CoffeeMaker_ColdWater = 0;
+    @CoffeeMaker_HotWater = 0;
+
+    enableControl(gCoffeeMaker_NodeName, "HotWater", 0);
+    enableControl(gCoffeeMaker_NodeName, "ColdWater", 0);
+    enableControl(gCoffeeMaker_NodeName, "Brew", 0);
+    enableControl(gCoffeeMaker_NodeName, "Insert", 1);
+
+    @CoffeeMaker_Serve = 1;
+
+    gPendingRequest = kRequestNone;
+  }
+}
+
+on envVar CoffeeMaker_HotWater
+{
+  if (getValue(this) != 0) {
+    enableControl(gCoffeeMaker_NodeName, "ColdWater", 0);
+    enableControl(gCoffeeMaker_NodeName, "HotWater", 0);
+    enableControl(gCoffeeMaker_NodeName, "Brew", 0);
+    enableControl(gCoffeeMaker_NodeName, "Insert", 0);
+
+    if (gCoffeeMaker_Temperature > kCoffeeMaker_TargetTemp - (kCoffeeMaker_HysterisisTemp / 2)) {
+      setTimer(gCoffeeMaker_Fill, FilleCycle[kRequestHotWater]);
+    }
+    else if (gPendingRequest == kRequestNone)
+    {
+      gPendingRequest = kRequestHotWater;
+    }
+  }
+}
+
+on envVar CoffeeMaker_Brew
+{
+  if (getValue(this) != 0) {
+    enableControl(gCoffeeMaker_NodeName, "ColdWater", 0);
+    enableControl(gCoffeeMaker_NodeName, "HotWater", 0);
+    enableControl(gCoffeeMaker_NodeName, "Brew", 0);
+    enableControl(gCoffeeMaker_NodeName, "Insert", 0);
+
+    if (gCoffeeMaker_Temperature > kCoffeeMaker_TargetTemp - (kCoffeeMaker_HysterisisTemp / 2)) {
+      setTimer(gCoffeeMaker_Fill, FilleCycle[kRequestBrew]);
+    }
+    else if (gPendingRequest == kRequestNone)
+    {
+      gPendingRequest = kRequestBrew;
+    }
+  }
+}
+
+void OnNode_NMAvailabilityChanged(BYTE levelId, BYTE deviceId, int newAvailability)
+{
+}
+
+void OnGAIN_ChangeState (int oldState, int newState)
+{
+  switch (oldState) {
+    case kGAINStateOn:
+      @CoffeeMaker_On = 0;
+      break;
+    case kGAINStateError:
+      @CoffeeMaker_Fault = 0;
+      break;
+  }
+
+  switch (newState) {
+    case kGAINStateStandbyOn:
+      if (oldState == kGAINStateInitialization) {
+        @CoffeeMaker_HotPlateOn = 1;
+        setTimer(gCoffeeMaker_Loop, kCoffeeMaker_LoopCycleMs);
+      }
+      break;
+    case kGAINStateOn:
+      @CoffeeMaker_On = 1;
+      break;
+    case kGAINStateError:
+      @CoffeeMaker_Fault = 1;
+      break;
+    case kGAINStateStandbyOff:
+      cancelTimer(gCoffeeMaker_Fill);
+      cancelTimer(gCoffeeMaker_Loop);
+      @CoffeeMaker_HotPlateOn = 0;
+      @CoffeeMaker_On         = 0;
+      @CoffeeMaker_Fault      = 0;
+      @CoffeeMaker_Serve      = 0;
+      break;
+  }
+}
+
+void OnGAIN_PBM(word power, word time)
+{
+  if (abs(gGAIN_MaxPowerBudget - power) <= kPBResolution) {
+	  // we got the power
+	  gGAIN_UsedPowerBudget = power;
+    gGAIN_PBRemainingTime10ms = time * 100;
+
+    GAIN_ChangeState(kGAINStateOn);
+  }
+}
+

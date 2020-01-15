@@ -1,0 +1,92 @@
+/*@!Encoding:1252*/
+includes
+{
+#include "ECL_Observer.cin"
+}
+
+//
+// AppECLObserver.can:
+//  Passive observation of a MOST150 Electrical Control Line (ECL) System Test and Electrical Wakeup.
+//
+//  This program is placed as CAPL-Node into the "Measurement Setup" window. It detects
+//  an ongoing ECL system test and electrical wakeup impulses and writes the values to
+//  the CAPL/.NET output window.
+//
+//
+variables
+{
+  // Hint for System-Integrators: modify this constant for your current setup for the observer to work correctly.
+  const long OBSERVER_NO_PARTICIPANTS = 5;
+  //const long OBSERVER_NO_PARTICIPANTS = cECL_MAX_PARTICIPANTS;
+}
+
+// Callback to be implemented: results of the system test received...
+void ECL_O_CB_OnSystemTestResultsReceived(long testParameter, long electricalStates[], long opticalStates[], long numResults)
+{
+  int i, deviceClass;
+  char tmpStr1[256], tmpStr2[256];
+
+  write("%FILE_NAME%: ECL_O_CB_OnSystemTestResultsReceived: testParameter: %d, numResults: %d", testParameter, numResults);
+
+  ECL_GetStringForSystemTestParameter(testParameter, tmpStr1);
+  write("------------\n%FILE_NAME%: ECL_O_CB_OnSystemTestResultsReceived:\nreceiving results for system test %d (%s) ...", testParameter, tmpStr1);
+
+  for(i = 0; i < numResults; i++) {
+    deviceClass = i+1;
+
+    ECL_GetStringForSystemTestResult(testParameter,  electricalStates[i], opticalStates[i], tmpStr1, tmpStr2);
+    write("STP device class %d: electrical state: %d (%s) optical state: %d (%s)",
+        deviceClass, electricalStates[i], tmpStr1, opticalStates[i], tmpStr2);
+  }
+
+}
+
+// Callback to be implemented: when the observer has read the test parameter
+void ECL_O_CB_OnSystemTestParameterReceived(long testParameter)
+{
+  write("%FILE_NAME%: callback ECL_O_CB_OnSystemTestParameterRecv: received test-parameter %d", testParameter);
+}
+
+// forward all messages - this does not work in a simulation node!!
+on *
+{
+#if MEASUREMENT_SETUP
+  output(this);
+#endif
+}
+
+// Callback to be implemented: when the ECL startup sequence has been detected ...
+void ECL_O_CB_OnStartupSequenceReceived ()
+{
+  write("%FILE_NAME%: callback ECL_O_CB_OnStartupSequenceReceived: startup sequence detected!");
+}
+
+
+// Callback to be implemented: will be called on EWU detection.
+void ECL_O_CB_OnElectricalWakeupReceived()
+{
+  write("%FILE_NAME%: callback ECL_O_CB_OnElectricalWakeupReceived: electrical wakup impulse received!");
+}
+
+on start
+{
+  // Hint: use 'ECL_O_SetNumParticipants()' to set the number of participants lower than 'cECL_MAX_PARTICIPANTS'
+  // if you want to reduce output or speedup result evaluation. If you have the ECL-Initiator inside your setup, you can use 
+  // ECL_O_SetNumParticipants(@sysvar::ECL_ST_Initiator::NumParticipants); here and listen to this system variable if it
+  // changes during measurement.
+
+  ECL_O_SetNumParticipants(OBSERVER_NO_PARTICIPANTS);
+
+  ECL_SetECLVerbose(@sysvar::DoSetECLVerbose ? ECL_Verbose_Default : ECL_Verbose_Off);
+}
+
+on sysvar DoSetECLVerbose
+{
+  ECL_SetECLVerbose(/*(enum eECL_VerboseLevel)(@this)*/ @this ? ECL_Verbose_Default : ECL_Verbose_Off);
+}
+
+void ECL_CB_OnECLError (char msg[])
+{
+  write("%FILE_NAME%: ECL_CB_OnECLError: %s", msg);
+}
+

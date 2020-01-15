@@ -1,0 +1,341 @@
+/*@!Encoding:1252*/
+/*
+ * Sender Vector Simple ASN.1 Protocol              Version 1.0
+ *
+ * Copyright Vector Informatik GmbH - All right reserved
+ *
+ * This node creates packets with the Vector simple ASN.1 protocol
+ * which includes all supported data type of ASN.1 
+ * once. The example illustrates the use of every data type. 
+ *
+ * The Packet API of the C2X_IL ist used to transmit the packets.
+ *
+ * History:
+ * 1.0   (sbj) Created
+ * 2.0   (bje) Enhanced
+ */
+
+includes
+{
+  #include  "..\DataSources\ASNV_Template_ASN1Protocol.cin"
+}
+
+variables
+{
+  //timer that calls SendPacket() each second  
+  MsTimer gVectorSimpleASN1MessageTimer;
+
+  LONG gPacket;
+  BYTE sourceMAC[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+  CHAR gErrorString[4096];
+
+  //time between two Vector Simple ASN.1 Messages
+  LONG    kDuration = 1000;   // ms, sending packets each second
+  
+  struct ASN1Protocol asn1;
+  
+  INT gBit0IsSet = 0;
+  INT gBit1IsSet = 0;
+  
+  INT gMessageCounter = 0;
+}
+
+on start
+{
+  gPacket = API_InitASN1ProtocolPacket();
+  
+  C2xSetTokenData(gPacket, "wlan"  , "address2"    , elcount(sourceMAC), sourceMAC);
+  C2xSetTokenData(gPacket, "eth"   , "source"      , elcount(sourceMAC), sourceMAC);
+  C2xSetTokenData(gPacket, "geo_eh", "lpvGNAddrMID", elcount(sourceMAC), sourceMAC);
+  
+  if (gPacket == 0)
+  {
+    write("could not initialize Packet with ASN.1 protocol 'ASN1Protocol'");    
+  }
+  else
+  {   
+    setTimer(gVectorSimpleASN1MessageTimer, kDuration);
+  }
+}
+
+on timer gVectorSimpleASN1MessageTimer
+{  
+  if (  @SysVar::Sender_Simple::SysVarSendVectorSimpleASN1Message == 1
+     && gPacket                                                   != 0)
+  {
+    SendPacket();
+  }
+
+  setTimer(gVectorSimpleASN1MessageTimer, kDuration);  
+}
+
+on sysvar Sender_Simple::SysVarBoolean
+{
+  if(@SysVar::Sender_Simple::SysVarBoolean == 1)
+  {  
+    asn1.sequenceField.booleanField = 1;
+  }
+  else
+  {
+    asn1.sequenceField.booleanField = 0;
+  }
+}
+
+on sysvar Sender_Simple::SysVarIntOpt
+{
+  if(@SysVar::Sender_Simple::SysVarIntOpt == 1)
+  {  
+    asn1.sequenceField.intFieldOptional.isValidFlag = 1;
+    asn1.sequenceField.intFieldOptional.value = 1;
+  }
+  else
+  {
+    asn1.sequenceField.intFieldOptional.isValidFlag = 0;
+    asn1.sequenceField.intFieldOptional.value = 0;
+  }
+}
+
+on sysvar Sender_Simple::SysVarIntPhys
+{
+  asn1.sequenceField.intFieldPhys = @sysvar::Sender_Simple::SysVarIntPhys;
+}
+
+on sysvar Sender_Simple::SysVarEnumerated
+{
+  if (@this == 0)
+  {
+    asn1.sequenceField.enumeratedField = 0;
+  }
+  else if (@this == 1)
+  {
+    asn1.sequenceField.enumeratedField = 1;
+  }
+  else if (@this == 2)
+  {
+    asn1.sequenceField.enumeratedField = 2;
+  }
+}
+
+on sysvar Sender_Simple::SysVarAddString
+{
+  char string[2048];
+
+  if (!(@this == 1))
+  {
+    return;
+  }
+
+  if (SysGetVariableString(SysVar::Sender_Simple::SysVarArrayString, string, elcount(string)) != 0)
+  {
+    write("On sysvar_change Sender_Simple::SysVarAddString: unable to get panels string which we should add to the array");
+    return;
+  }
+  
+  AddStringToASN1ProtocolArrayField(string);
+}
+
+on sysvar Sender_Simple::SysVarAddNumber
+{
+  if (!(@this == 1))
+  {
+    return;
+  }
+ 
+  AddNumberToASN1ProtocolArrayField(@SysVar::Sender_Simple::SysVarArrayNumber);  
+}
+
+on sysvar Sender_Simple::SysVarSetBit
+{
+  if (!(@this == 1))
+  {
+    return;
+  }
+
+  SetBitOfASN1ProtocolBitStringField(@SysVar::Sender_Simple::SysVarBitNumber);
+}
+
+on sysvar Sender_Simple::SysVarClearBit
+{
+  if (!(@this == 1))
+  {
+    return;
+  }
+
+  ClearBitOfASN1ProtocolBitStringField(@SysVar::Sender_Simple::SysVarBitNumber);
+}
+
+on sysvar Sender_Simple::SysVarRemoveAll
+{
+  if (!(@this == 1))
+  {
+    return;
+  }
+ 
+  RemoveAllASN1ProtocolArrayField();
+}
+
+on sysvar Sender_Simple::SysVarAddOctetString
+{
+  if (!(@this == 1))
+  {
+    return;
+  }
+  
+  AddOctetStringToASN1Protocol(@sysvar::Sender_Simple::SysVarOctetStringNumber);
+}
+
+void AddNumberToASN1ProtocolArrayField(int number)
+{
+  int arrayLength;
+  int i = 0;
+
+  /* first step: get array's current length */
+  arrayLength = C2xGetTokenInt(gPacket, "ASN1Protocol", "sequenceField.arrayField"); 
+  
+  /* second step: treat possible errors */
+  if (C2xGetLastError())
+  {
+    C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+    write("AddNumberToASN1ProtocolArrayField: GetToken failed %s", gErrorString); 
+    return;
+  }
+
+  if (arrayLength == 10)
+  {
+    write("AddNumberToASN1ProtocolArrayField: array has already the maximum of 10 entries");
+    return;
+  }
+  
+  /* third step: set the number in the field */
+  asn1.sequenceField.arrayField.length = arrayLength + 1;
+  asn1.sequenceField.arrayField.arrayValue[arrayLength].choice = 0;
+  asn1.sequenceField.arrayField.arrayValue[arrayLength].numberChoice = number;
+}
+
+void AddStringToASN1ProtocolArrayField(char string[])
+{
+  int arrayLength;
+  int i = 0;
+
+  /* first step: get array's current length */
+  arrayLength = C2xGetTokenInt(gPacket, "ASN1Protocol", "sequenceField.arrayField"); 
+  
+  /* second step: treat possible errors */
+  if (C2xGetLastError())
+  {
+    C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+    write("AddStringToASN1ProtocolArrayField: GetToken failed %s", gErrorString); 
+    return;
+  }
+
+  if (arrayLength == 10)
+  {
+    write("AddStringToASN1ProtocolArrayField: array has already the maximum of 10 entries");
+    return;
+  }
+  
+  /* third step: copy the string in the field */
+  asn1.sequenceField.arrayField.length = arrayLength + 1;
+ 
+  asn1.sequenceField.arrayField.arrayValue[arrayLength].choice = 1;
+  asn1.sequenceField.arrayField.arrayValue[arrayLength].ia5StringChoice.stringLength = 20;
+  memcpy(asn1.sequenceField.arrayField.arrayValue[arrayLength].ia5StringChoice.string, string, asn1.sequenceField.arrayField.arrayValue[arrayLength].ia5StringChoice.stringLength);
+}
+
+SetBitOfASN1ProtocolBitStringField(int bitNumber)
+{
+  asn1.sequenceField.bitStringField.stringLength = 2;
+  
+  // set the first bit
+  if(bitNumber == 0)
+  {
+    memcpy(asn1.sequenceField.bitStringField.string, "10", 2);
+    gBit0IsSet = 1;
+  }
+    
+  // set the second bit
+  if(bitNumber == 1)
+  {
+    memcpy(asn1.sequenceField.bitStringField.string, "01", 2);
+    gBit1IsSet = 1;
+  }
+   
+  // both bits were set
+  if(gBit0IsSet == 1 && gBit1IsSet == 1)
+    memcpy(asn1.sequenceField.bitStringField.string, "11", 2);
+  
+  // error treatment
+  if(bitNumber > 1)
+    write("SetBitOfASN1ProtocolBitStringField: buffer too small!");
+}
+
+ClearBitOfASN1ProtocolBitStringField(int bitNumber)
+{
+  asn1.sequenceField.bitStringField.stringLength = 2;
+  
+  // Clear the first bit, the second bit is set
+  if(bitNumber == 0 && gBit1IsSet == 1)
+  {
+    memcpy(asn1.sequenceField.bitStringField.string, "01", 2);
+    gBit0IsSet = 0;
+  }
+  // Clear the first bit, the second bit is not set
+  else if(bitNumber == 0 && gBit1IsSet == 0)
+  {
+    memcpy(asn1.sequenceField.bitStringField.string, "00", 2);
+    gBit0IsSet = 0;
+  }
+  // Clear the second bit, the first bit is set
+  else if(bitNumber == 1 && gBit0IsSet == 1)
+  {
+    memcpy(asn1.sequenceField.bitStringField.string, "10", 2);
+    gBit1IsSet = 0;
+  }
+  // Clear the second bit, the first bit is not set
+  else if(bitNumber == 1 && gBit0IsSet == 0)
+  {
+    memcpy(asn1.sequenceField.bitStringField.string, "00", 2);
+    gBit1IsSet = 0;
+  }
+  
+  // error treatment
+  if(bitNumber > 1)
+    write("SetBitOfASN1ProtocolBitStringField: buffer too small!");
+}
+
+RemoveAllASN1ProtocolArrayField ()
+{
+  asn1.sequenceField.arrayField.length = 0;
+}
+
+AddOctetStringToASN1Protocol(int number)
+{
+  asn1.octetString.isValidFlag = 1;  
+  asn1.octetString._Blob_Definition.isValidFlag = 1;
+  asn1.octetString._Blob_Definition.integerValue = number;
+}
+
+
+/* 
+ * SendPacket
+ *
+ * retrieves values entered into the node's panel, sets the corresponding
+ * tokens of the packet and send it
+ */
+void SendPacket ()
+{
+  gMessageCounter++;
+  asn1.messageCounter = gMessageCounter;
+  
+  API_SetASN1ProtocolParams(gPacket, asn1);
+  
+        //C2xCompletePacket encodes the ASN.1 tokens into the payload of 
+        //the underlying protocol that has been selected
+        //while importing the ASN.1 protocol with the ASN.1-to-ASNV Converter
+  if (  C2xCompletePacket(gPacket) != 0 
+     || C2xOutputPacket(gPacket)   != 0)
+  {
+    C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+    write("SendPacket: failed %s", gErrorString);    
+  }
+}

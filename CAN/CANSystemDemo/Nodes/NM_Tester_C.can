@@ -1,0 +1,324 @@
+/*@@var:*/
+/*------------------------------------------------------------------------
+|
+| Modulename : NM.can
+| Exercise   : Network Management test and display node 
+|
+|-------------------------------------------------------------------------
+|*************************************************************************
+|-------------------------------------------------------------------------
+|                             COPYRIGHT
+|-------------------------------------------------------------------------
+|               Copyright (c) by Vector Informatik GmbH Abt. Support 2002
+|-------------------------------------------------------------------------
+|                     A U T H O R  I D E N T I T Y
+|-------------------------------------------------------------------------
+| Initials	      Name	            Company
+| --------        ----              -------
+|
+| Br	          Alexander Büttner Vector Informatik GmbH Stuttgart 
+|
+|-------------------------------------------------------------------------
+|                          REVISION HISTORY
+|-------------------------------------------------------------------------
+|  Date	     Ver     Author	       Description
+|  ----      ---     ------        ------------
+|
+| 30.08.02   1.0      Br           Creation
+| 24.02.04   1.1      Br           Modified 
+|
+| -------------------------------------------------------------------------
+*/
+
+variables
+{
+  int gNMStatus[64];
+  int gNMReceiver[64];
+  int gBusSleep;
+
+  message NMMessage  mnmNMMessage;
+  msTimer tWakeUpDsp;
+  msTimer tResetBusComActive;
+
+  const long gNodeAddConsole = 0x1A; //26
+  const long gNodeDoorL      = 0x1B; //27
+  const long gNodeDoorR      = 0x1C; //28
+  const long gNodeAddGateway = 0x1D; //29
+
+  enum enumNM_State{ALIVE = 1, RING = 2, SLEEP_IND = 3, SLEEP_ACK = 4};
+
+  const int gTRUE = 1;
+  const int gFALSE = 0;
+}
+/*@@end*/
+
+/*@@msg:CAN1.0x401-0x440:*/
+on message CAN1.0x401-0x440
+{
+  int iSgNr;
+  int iBusSleep;
+
+  iSgNr = this.ID - 0x400;
+
+  if((iSgNr >= 0) && (iSgNr < 0x40))    // NM-ID
+  {
+    mnmNMMessage = (message NMMessage)this;
+    gNMReceiver[iSgNr] = mnmNMMessage.NM_CmdReceiver;
+
+    DisplayAllReceivers();
+
+    if(this.byte(1) == 0x01)
+    {
+      gNMStatus[iSgNr] = ALIVE; 
+    }
+    else if(this.byte(1) == 0x02)
+    {
+      gNMStatus[iSgNr] = RING; 
+    }
+    else if(this.byte(1) == 0x12)
+    {
+      gNMStatus[iSgNr] = SLEEP_IND; 
+    }
+    else if(this.byte(1) == 0x32)
+    {
+      gNMStatus[iSgNr] = SLEEP_ACK;
+    }
+    //--------------------------------------------------------
+
+    switch(iSgNr)
+    {
+      case gNodeAddConsole:  
+        if(gNMStatus[iSgNr] == SLEEP_IND)
+        {
+          @sysvar::NMTester::NMSleepIndDsp26 = 1; 
+          @sysvar::NMTester::NMStatusDsp26 = 2;
+        }
+        else  
+        {
+          @sysvar::NMTester::NMSleepIndDsp26 = 0; 
+        }
+
+        if(gNMStatus[iSgNr] == SLEEP_ACK)  
+        {
+          @sysvar::NMTester::NMSleepAckDsp26 = 1;  
+          @sysvar::NMTester::NMStatusDsp26 = 2;
+        }
+        else 
+        {
+          @sysvar::NMTester::NMSleepAckDsp26 = 0; 
+        }
+
+        if(gNMStatus[iSgNr] == ALIVE || gNMStatus[iSgNr] == RING)
+        {
+          @sysvar::NMTester::NMStatusDsp26 = gNMStatus[gNodeAddConsole];
+        }             
+      break;
+      case gNodeDoorL:	
+        if(gNMStatus[iSgNr] == SLEEP_IND) 
+        {
+          @sysvar::NMTester::NMSleepIndDsp27 = 1; 
+          @sysvar::NMTester::NMStatusDsp27 = 2;
+        }
+        else  
+        {
+          @sysvar::NMTester::NMSleepIndDsp27 = 0;  
+        }
+
+        if(gNMStatus[iSgNr] == SLEEP_ACK) 
+        {
+          @sysvar::NMTester::NMSleepAckDsp27 = 1;  
+          @sysvar::NMTester::NMStatusDsp27 = 2;
+        }
+        else  
+        {
+          @sysvar::NMTester::NMSleepAckDsp27 = 0; 
+        }
+           
+        if(gNMStatus[iSgNr] == ALIVE || gNMStatus[iSgNr] == RING)
+        {
+          @sysvar::NMTester::NMStatusDsp27 = gNMStatus[gNodeDoorL];                 
+        }
+      break;
+      case gNodeDoorR:	
+        if(gNMStatus[iSgNr] == SLEEP_IND)  
+        {
+          @sysvar::NMTester::NMSleepIndDsp28 = 1; 
+          @sysvar::NMTester::NMStatusDsp28 = 2;
+        }
+        else 
+        {
+          @sysvar::NMTester::NMSleepIndDsp28 = 0;
+        }
+           
+        if(gNMStatus[iSgNr] == SLEEP_ACK)  
+        {
+          @sysvar::NMTester::NMSleepAckDsp28 = 1; 
+          @sysvar::NMTester::NMStatusDsp28 = 2;
+        }   
+        else 
+        {
+          @sysvar::NMTester::NMSleepAckDsp28 = 0;   
+        }   
+        
+        if(gNMStatus[iSgNr] == ALIVE || gNMStatus[iSgNr] == RING) 
+          @sysvar::NMTester::NMStatusDsp28 = gNMStatus[gNodeDoorR];                 
+      break;
+      case gNodeAddGateway:	
+        if(gNMStatus[iSgNr] == SLEEP_IND)  
+        {
+          @sysvar::NMTester::NMSleepIndDsp29 = 1; 
+          @sysvar::NMTester::NMStatusDsp29 = 2;
+        }
+        else 
+        {
+          @sysvar::NMTester::NMSleepIndDsp29 = 0; 
+        }
+
+        if(gNMStatus[iSgNr] == SLEEP_ACK)  
+        {
+          @sysvar::NMTester::NMSleepAckDsp29 = 1;
+          @sysvar::NMTester::NMStatusDsp29 = 2;
+        }
+        else 
+        {
+          @sysvar::NMTester::NMSleepAckDsp29 = 0;     
+        }
+
+        if(gNMStatus[iSgNr] == ALIVE || gNMStatus[iSgNr] == RING) 
+          @sysvar::NMTester::NMStatusDsp29 = gNMStatus[gNodeAddGateway];                 
+      break;
+    }
+
+    // WakeUp 
+    if (gNMStatus[iSgNr] == ALIVE) 
+    {	
+      if (iBusSleep == gTRUE) 
+      {	
+        ResetLEDAfterWakeUp();
+        // Set the WakeUp-display
+        switch(iSgNr)
+        {
+          case gNodeAddConsole:   
+            @sysvar::NMTester::NMWakeUpDsp26 = 0;  
+          break;
+          case gNodeDoorL:	      
+            @sysvar::NMTester::NMWakeUpDsp27 = 0;  
+          break;
+          case gNodeDoorR:        
+            @sysvar::NMTester::NMWakeUpDsp28 = 0;  
+          break;
+          case gNodeAddGateway:	  
+            @sysvar::NMTester::NMWakeUpDsp29 = 0;  
+          break;  			
+        }
+         cancelTimer(tWakeUpDsp);
+         setTimer(tWakeUpDsp,1500); // reset the Wakeup-display
+      }	
+      iBusSleep = gFALSE;
+    }	
+
+    // SleepAcknowledge will be treated like a BusSleep 
+    if (mnmNMMessage.NM_SleepAck && mnmNMMessage.NM_SleepInd)
+    {  
+      iBusSleep = gTRUE;
+
+      // set mode-display to grey 
+      @sysvar::NMTester::NMStatusDsp26 = 0;
+      @sysvar::NMTester::NMStatusDsp27 = 0;
+      @sysvar::NMTester::NMStatusDsp28 = 0;
+      @sysvar::NMTester::NMStatusDsp29 = 0;
+    }
+  } 
+}
+/*@@end*/
+
+/*@@msg:CAN1.*:*/
+on message CAN1.*
+{
+  cancelTimer(tResetBusComActive);
+  @sysvar::NMTester::BusCommActiveDisplay = 1;
+  setTimer(tResetBusComActive,100);
+}
+/*@@end*/
+
+/*@@timer:tResetBusComActive:*/
+on timer tResetBusComActive
+{
+  @sysvar::NMTester::BusCommActiveDisplay = 0;
+}
+/*@@end*/
+
+/*@@timer:tWakeUpDsp:*/
+on timer tWakeUpDsp
+{
+  @sysvar::NMTester::NMWakeUpDsp26 = 0;
+  @sysvar::NMTester::NMWakeUpDsp27 = 0;
+  @sysvar::NMTester::NMWakeUpDsp28 = 0;
+  @sysvar::NMTester::NMWakeUpDsp29 = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:DisplayAllReceivers():*///function
+DisplayAllReceivers ()
+{
+  @sysvar::NMTester::NMReceiver26 = gNMReceiver[gNodeAddConsole];
+  @sysvar::NMTester::NMReceiver27 = gNMReceiver[gNodeDoorL];
+  @sysvar::NMTester::NMReceiver28 = gNMReceiver[gNodeDoorR];
+  @sysvar::NMTester::NMReceiver29 = gNMReceiver[gNodeAddGateway];
+}
+/*@@end*/
+
+/*@@caplFunc:ResetLEDAfterWakeUp():*///function
+ResetLEDAfterWakeUp ()
+{
+  @sysvar::NMTester::NMSleepIndDsp26 = 0; 
+  @sysvar::NMTester::NMSleepAckDsp26 = 0;  
+  @sysvar::NMTester::NMSleepIndDsp27 = 0; 
+  @sysvar::NMTester::NMSleepAckDsp27 = 0;  
+  @sysvar::NMTester::NMSleepIndDsp28 = 0; 
+  @sysvar::NMTester::NMSleepAckDsp28 = 0;  
+  @sysvar::NMTester::NMSleepIndDsp29 = 0; 
+  @sysvar::NMTester::NMSleepAckDsp29 = 0;  
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NMTester::NMOnOff26:*/
+on sysvar_update sysvar::NMTester::NMOnOff26
+{
+  gNMStatus[gNodeAddConsole] = 0; 
+  @sysvar::NMTester::NMSleepIndDsp26 = 0; 
+  @sysvar::NMTester::NMSleepAckDsp26 = 0; 
+  @sysvar::NMTester::NMStatusDsp26 = 0;
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NMTester::NMOnOff27:*/
+on sysvar_update sysvar::NMTester::NMOnOff27
+{
+  gNMStatus[gNodeDoorL] = 0; 
+  @sysvar::NMTester::NMSleepIndDsp27 = 0; 
+  @sysvar::NMTester::NMSleepAckDsp27 = 0; 
+  @sysvar::NMTester::NMStatusDsp27 = 0;
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NMTester::NMOnOff28:*/
+on sysvar_update sysvar::NMTester::NMOnOff28
+{
+  gNMStatus[gNodeDoorR] = 0; 
+  @sysvar::NMTester::NMSleepIndDsp28 = 0; 
+  @sysvar::NMTester::NMSleepAckDsp28 = 0; 
+  @sysvar::NMTester::NMStatusDsp28 = 0;
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NMTester::NMOnOff29_PT:*/
+on sysvar_update sysvar::NMTester::NMOnOff29_PT
+{
+  gNMStatus[gNodeAddGateway] = 0; 
+  @sysvar::NMTester::NMSleepIndDsp29 = 0; 
+  @sysvar::NMTester::NMSleepAckDsp29 = 0; 
+  @sysvar::NMTester::NMStatusDsp29 = 0;
+}
+/*@@end*/
+

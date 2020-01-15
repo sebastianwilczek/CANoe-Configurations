@@ -1,0 +1,928 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+  #include "FCatDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+//
+// CAN - MOST Gateway node
+//
+// Passes ignition status, disc player and amplifier commands from CAN to MOST.
+// Passes disc player and amplifier states from MOST to CAN.
+//
+variables
+{
+  // Application phase
+  const byte  kAppOff      = 0; // no power; no communication
+  const byte  kAppOn       = 1; // power on
+  const byte  kAppShutdown = 2; // power on; shutdown started
+  byte  gAppPhase = kAppOff;
+
+  // timer for sending TimeRelative message on CAN cyclically
+  msTimer     tTimeRelative;
+  const long  kTimeRelativeCycle = 1000;
+
+  // timer for led flash
+  msTimer     tLedC2M;
+  msTimer     tLedM2C;
+  const long  kFlashDur = 160; // in ms
+
+  // constants for volume control
+  const long  kMinSpeed = 30;
+  const long  kMaxSpeed = 130;
+  const long  kIncVolume = 40;
+
+  // actuel ignition state
+  byte gIgnition;
+
+  // actual speed, volume and reference volume
+  int gActSpeed = 0;
+  int gActVolume = 0;
+  int gRefVolume = 0;
+
+  // auto volume control on/off (1/0)
+  int gVolCtrlOn = 0;
+
+
+  //
+  // FBlock shadows
+  //
+
+  // VectorSystemManager
+  long  gInstId_VSM = -1; // -1: InstID not known yet
+  // VectorSystemManager properties of interest
+  word  gShadowProp_VSM[2] = {
+     kFct_VSM_CurrentAudioSource
+    ,kFct_VSM_AvailableAudioSources };
+  const byte kSourceId_None        = 0;
+  const byte kSourceId_DiscPlayer  = 1;
+  const byte kSourceId_Tuner       = 2;
+  byte  gShadowProp_VSM_CurrentAudioSource;
+  byte  gShadowProp_VSM_AvailableAudioSources;
+
+  // AudioAmplifier
+  long  gInstId_AA  = -1; // -1: InstID not known yet
+  // AudioAmplifier properties of interest
+  word  gShadowProp_AA[2] = {
+     kFct_AA_Mute
+    ,kFct_AA_Volume };
+  byte  gShadowProp_AA_Mute;
+  byte  gShadowProp_AA_Volume;
+
+  // AudioDiskPlayer
+  long  gInstId_ADP = -1; // -1: InstID not known yet
+  // AudioDiskPlayer properties of interest
+  word  gShadowProp_ADP[3] = {
+     kFct_ADP_DeckStatus
+    ,kFct_ADP_TimePosition
+    ,kFct_ADP_TrackPosition };
+  // shadowed properties
+  byte  gShadowProp_ADP_DeckStatus;
+  dword gShadowProp_ADP_TrackTime;
+  byte  gShadowProp_ADP_TrackTime_Received;
+  byte  gShadowProp_ADP_TrackPosition;
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::SetCDPlayer (0x101):*/
+on message SetCDPlayer
+{
+  // Receives CAN commands for the CDPlayer and
+  // sends it on the MOST ring.
+
+  mostAMSMessage AudioDiskPlayer.DeckStatus.Set msg;
+
+  // do not handle messages if gateway is disabled
+  if(@sysvar::GW::MySwitch == 0)
+    return;
+
+  if((gInstId_ADP == -1) || (gShadowProp_VSM_CurrentAudioSource != kSourceId_DiscPlayer))
+    return;
+
+  // create MOST message
+  msg.DeckStatus = this.CDPlayerCmd; // set Mode of CDPlayer
+
+  // output the message on the MOST ring
+  output(msg);
+
+  FlashLedC2M();
+}
+/*@@end*/
+
+/*@@caplFunc:FlashLedC2M():*/
+FlashLedC2M()
+{
+  // starts flash of LED CAN->MOST
+  cancelTimer(tLedC2M);
+  setTimer(tLedC2M, kFlashDur);
+  @sysvar::GW::LedC2M = 1;
+}
+/*@@end*/
+
+/*@@timer:tLedC2M:*/
+on timer tLedC2M
+{
+  // switch LED CAN->MOST off after flash
+  @sysvar::GW::LedC2M = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:FlashLedM2C():*/
+FlashLedM2C()
+{
+  // starts flash of LED MOST->CAN
+  cancelTimer(tLedM2C);
+  setTimer(tLedM2C, kFlashDur);
+  @sysvar::GW::LedM2C = 1;
+}
+/*@@end*/
+
+/*@@timer:tLedM2C:*/
+on timer tLedM2C
+{
+  // switch LED MOST->CAN off after flash
+  @sysvar::GW::LedM2C = 0;
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::SetAmplifier (0x102):*/
+on message SetAmplifier
+{
+  // Receives CAN commands for the amplifier and
+  // sends it on the MOST ring.
+
+  // do not handle messages if gateway is disabled
+  if(@sysvar::GW::MySwitch == 0)
+    return;
+
+  if(gInstId_AA == -1)
+    return;
+
+  // MOST message depends on command sent via CAN
+  if(this.AmplifierCmd == SetAmplifier.AmplifierCmd::VolumeInc)
+  {
+    mostAmsOutput(mostGetChannel(), "AudioAmplifier.Volume.Increment(1)", gInstId_AA);
+  }
+  else if(this.AmplifierCmd == SetAmplifier.AmplifierCmd::VolumeDec)
+  {
+    mostAmsOutput(mostGetChannel(), "AudioAmplifier.Volume.Decrement(1)", gInstId_AA);
+  }
+  else if(this.AmplifierCmd == SetAmplifier.AmplifierCmd::Mute)
+  {
+    mostAmsOutput(mostGetChannel(), "AudioAmplifier.Mute.SetGet(1,1)", gInstId_AA);
+  }
+  else if(this.AmplifierCmd == SetAmplifier.AmplifierCmd::Demute)
+  {
+    mostAmsOutput(mostGetChannel(), "AudioAmplifier.Mute.SetGet(1,0)", gInstId_AA);
+  }
+
+  FlashLedC2M();
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::SetTrack (0x105):*/
+on message SetTrack
+{
+  // Receives CAN commands for the CDPlayer and
+  // sends it on the MOST ring.
+
+  // do not handle messages if gateway is disabled
+  if(@sysvar::GW::MySwitch == 0)
+    return;
+
+  if((gInstId_ADP == -1) || (gShadowProp_VSM_CurrentAudioSource != kSourceId_DiscPlayer))
+    return;
+
+  // next track or previous track?
+  if (this.TrackChangeCmd == 0)
+  {
+    // send MOST next track message
+    mostAmsOutput(mostGetChannel(), "AudioDiskPlayer.TrackPosition.Increment(1)", gInstId_ADP);
+  }
+  else if (this.TrackChangeCmd == 1)
+  {
+    // previous track
+    mostAmsOutput(mostGetChannel(), "AudioDiskPlayer.TrackPosition.Decrement(1)", gInstId_ADP);
+  }
+
+  FlashLedC2M();
+}
+/*@@end*/
+
+/*@@caplFunc:CalcReferenceVolume():*/
+// calculates reference volume (= volume at min speed)
+// from actual speed and volume
+int CalcReferenceVolume ()
+{
+  int newVolume;
+
+  if(gActSpeed < kMinSpeed)
+  {
+    // if speed is slower then min speed, new ref
+    // volume is actual volume
+    newVolume = gActVolume;
+  }
+  else
+  {
+    if(gActSpeed > kMaxSpeed)
+    {
+      // speed is faster then max speed
+      newVolume = gActVolume - kIncVolume;
+    }
+    else
+    {
+      newVolume = gActVolume - (((gActSpeed - kMinSpeed) * kIncVolume) /
+                               (kMaxSpeed - kMinSpeed));
+    }
+  }
+
+  // never set ref volume < 1 or > 100
+  if(newVolume < 1)
+  {
+    newVolume = 1;
+  }
+  if(newVolume > 100)
+  {
+    newVolume = 100;
+  }
+
+  return newVolume;
+}
+/*@@end*/
+
+/*@@caplFunc:CalcNewVolume():*/
+// calculates new volume for volume control
+// from actual speed and volume
+int CalcNewVolume ()
+{
+  int newVolume;
+
+  // calculate new volume
+  if(gActSpeed >= kMaxSpeed)
+  {
+    // max volume if faster then max speed
+    newVolume = gRefVolume + kIncVolume;
+  }
+  else
+  {
+    if(gActSpeed <= kMinSpeed)
+    {
+      // min volume if slower then min speed
+      newVolume = gRefVolume;
+    }
+    else
+    {
+      newVolume = gRefVolume + (((gActSpeed - kMinSpeed) * kIncVolume) /
+                                 (kMaxSpeed - kMinSpeed));
+    }
+  }
+
+  // clip new volume, volume is never < 1 or > 100
+  if(newVolume < 1)
+  {
+    newVolume = 1;
+  }
+  if(newVolume > 100)
+  {
+    newVolume = 100;
+  }
+
+  return newVolume;
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::SpeedNotify (0x103):*/
+on message SpeedNotify
+{
+  // Receives speed notification message from the
+  // engine and changes volume if auto volume
+  // control is active.
+
+  mostAMSMessage AudioAmplifier.Volume.Set msgSet;
+
+  // store speed
+  gActSpeed = this.Speed;
+
+  // do not handle messages if gateway is disabled
+  if(@sysvar::GW::MySwitch == 0)
+    return;
+
+  // dont change volume if volume = 0
+  if(gActVolume == 0)
+    return;
+  // dont change volume if volume control off
+  if(gVolCtrlOn == 0)
+    return;
+
+  // calculate new volume
+  gActVolume = CalcNewVolume();
+
+  // send volume change command
+  if(gInstId_AA == -1)
+    return;
+
+  // create set volume message
+  msgSet.Volume = (gActVolume * 31.0) / 100.0; // set volume
+  msgSet.InstanceId = gInstId_AA;
+  output(msgSet);
+}
+/*@@end*/
+
+/*@@caplFunc:VolumeInPercent(int):*/
+// calculates percentage from absolut volume value
+int VolumeInPercent (int volume)
+{
+  return (volume * 100.0) / 31.0;
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::ChangeVolumeCtrl (0x106):*/
+on message ChangeVolumeCtrl
+{
+  // Toggle auto volume control when message received.
+
+  message VolumeCtrlNotify msg;
+
+  // do not handle messages if gateway is disabled
+  if(@sysvar::GW::MySwitch == 0)
+    return;
+
+  // switch auto volume control on or off?
+  if(gVolCtrlOn == 1) 
+  {
+    // switch off
+    gVolCtrlOn = 0;
+  }
+  else
+  {
+    // switch on
+    gVolCtrlOn = 1;
+
+    // set new reference volume
+    gRefVolume = calcReferenceVolume();
+  }
+
+  // send notification on status of volume control
+  msg.VolCtrlStatus = gVolCtrlOn;
+  output(msg);
+  FlashLedC2M();
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::GetTrack (0x108):*/
+on message GetTrack
+{
+  // Receives CAN command for the CDPlayer and
+  // sends it on the MOST ring.
+
+  // do not handle messages if gateway is disabled
+  if(@sysvar::GW::MySwitch == 0)
+    return;
+
+  if(gInstId_ADP == -1)
+    return;
+
+  // send 'request track'
+  mostAmsOutput(mostGetChannel(), "AudioDiskPlayer.TrackPosition.Get()", gInstId_ADP);
+
+  FlashLedC2M();
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::IgnitionKeyStatus (0x111):*/
+on message IgnitionKeyStatus
+{
+  // Pack CAN event into a MOST control frame.
+
+  mostAMSMessage Gateway.CANEvent.Status msg;
+  long i;
+  byte oldIgnitionState = 0;
+
+  gIgnition = this.Ignition;
+
+  // positive edge of ignition
+  if((oldIgnitionState == 0) && (gIgnition > 0))
+  {
+    if(gAppPhase == kAppOff) // MOST is sleeping
+    {
+      // wakeup the MOST system if ignition key changes from off to on
+      if(@sysvar::GW::MySwitch != 0)
+        mostWakeUp(mostGetChannel(), 500);
+    }
+
+    // cyclic sending of TimeRelative
+    cancelTimer(tTimeRelative);
+    setTimer(tTimeRelative, kTimeRelativeCycle);
+  }
+  else if((oldIgnitionState > 0) && (gIgnition == 0))
+  {
+    // stop cyclic sending of TimeRelative
+    cancelTimer(tTimeRelative);
+  }
+
+
+  oldIgnitionState = this.Ignition;
+
+
+  // do not send MOST message if gateway is disabled or MOST part is off
+  if((@sysvar::GW::MySwitch == 0) || (gAppPhase == kAppOff))
+    return;
+
+  // put CAN message into a MOST message
+  msg.CANID = this.ID; // save CAN ID
+  msg.DLC = this.DLC + 2;// adapt TelLen
+  msg.DA = 0x3C8; // broadcast
+  for(i = 0; i < this.DLC; ++i)  // copy data bytes
+    msg.byte(i+2) = this.byte(i);
+
+  // send on MOST
+  output(msg);
+  
+  FlashLedC2M();
+}
+/*@@end*/
+
+/*@@mostNetState:OnMostNetState(long,long):*/
+OnMostNetState(long oldstate, long newstate)
+{
+  if(newstate == kNetStatePowerOff)
+  {
+    AppExit();
+  }
+
+  ConfigureShadowFBlocks();
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.DeckStatus.Status (0x31200C):*/
+on mostAMSMessage AudioDiskPlayer.DeckStatus.Status
+{
+  message DeckStatusStatus msgCAN;
+
+  // do not handle messages if gateway is disabled
+  if(@sysvar::GW::MySwitch == 0)
+    return;
+
+  // copy information, conversion not needed
+  msgCAN.CDPlayerCmd = this.DeckStatus;
+
+  // output the message on the CAN bus
+  output(msgCAN);
+
+  FlashLedM2C();
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.TimePosition.Status (0x31201C):*/
+on mostAMSMessage AudioDiskPlayer.TimePosition.Status
+{
+  // Receives time of track from CDPlayer and updates TimeRelative signal
+  // which is cyclically send on CAN.
+
+  long milliSec, sec;
+  
+  if(mostParamIsAvailable(this, "Data.TrackTime"))
+  {
+    milliSec = mostParamGet(this, "Data.TrackTime");
+    sec = milliSec / 1000;
+  }
+  else
+  {
+    return;
+  }
+
+  gShadowProp_ADP_TrackTime = sec;
+  gShadowProp_ADP_TrackTime_Received = 1;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.TrackPosition.Status (0x31202C):*/
+on mostAMSMessage AudioDiskPlayer.TrackPosition.Status
+{
+  // Receives track information from CDPlayer and
+  // sends it on the CAN bus.
+
+  message TrackStatus msgCAN;
+
+  // do not handle messages if gateway is disabled
+  if(@sysvar::GW::MySwitch == 0)
+    return;
+
+  // copy information, conversion not needed
+  msgCAN.Track = this.Track;
+
+  // output the message on the CAN bus
+  output(msgCAN);
+
+  FlashLedM2C();
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioAmplifier.Mute.Status (0x22113C):*/
+on mostAMSMessage AudioAmplifier.Mute.Status
+{
+  message MuteStatus msgCAN;
+
+  // do not handle messages if gateway is disabled
+  if(@sysvar::GW::MySwitch == 0)
+    return;
+
+  // copy information, conversion not needed
+  msgCAN.MuteStatus = this.Status;
+
+  // output the message on the CAN bus
+  output(msgCAN);
+
+  FlashLedM2C();
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioAmplifier.Volume.Status (0x22400C):*/
+on mostAMSMessage AudioAmplifier.Volume.Status
+{
+  // Receive MOST message: notification on volume status
+
+  // store actual volume
+  gActVolume = VolumeInPercent(this.Volume);
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // configure CAPL node as MOST application node (don't receive spy messages...)
+  mostApplicationNode();
+  mostApRegisterEx(kFB_Gateway,1);
+
+  // configure FBlock
+  ConfigureFBlock();
+
+  // enable FBlock requests
+  // node will poll the Network Master for addresses of these FBlocks after ConfigOk
+  mostAsShdEnable(kFB_VSM, kInstIdBroadcast);
+  mostAsShdEnable(kFB_AA,  kInstIdBroadcast);
+  mostAsShdEnable(kFB_ADP, kInstIdBroadcast);
+}
+/*@@end*/
+
+/*@@sysvarChange:GW::MySwitch:*/
+on sysvar GW::MySwitch
+{
+  mostAMSMessage AudioDiskPlayer.DeckStatus.Get msgDeckStatus;
+  mostAMSMessage AudioDiskPlayer.TrackPosition.Get msgTrackPos;
+
+  if((@this == 1) && // gateway is active
+     (gInstId_ADP != -1))
+  {
+    msgDeckStatus.InstanceId = gInstId_ADP;
+    output(msgDeckStatus);
+    msgTrackPos.InstanceId = gInstId_ADP;
+    output(msgTrackPos);
+  }
+  else // gateway is inactive
+  {
+  }
+}
+/*@@end*/
+
+/*@@mostAsRegistry:OnMostAsRegistry(long):*/
+OnMostAsRegistry(long rgtype)
+{
+  // The event procedure indicates a change in the 
+  // Local FBlock list or Bus Registry
+ 
+  if(gAppPhase != kAppOn) 
+    return;
+
+  if(rgtype == kBusRegistry)
+  {
+    // Bus Registy has changed -> re-configure FBlock shadows
+    ConfigureShadowFBlocks();
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:GetInstIdOfFirstFBlock(byte):*///function
+long GetInstIdOfFirstFBlock(byte fblockId)
+{
+  // Finds the first FBlock with fblockId in the Bus Registry
+  // and returns its InstId.
+  // Returns -1 if FBlock is not available.
+
+  long i;
+  if(mostGetNetState() != kNetStateConfigOk)
+    return -1;
+
+  for(i = 0; i < mostAsRgGetSize(kBusRegistry); ++i)
+  {
+    if(mostAsRgGetFBlockID(kBusRegistry, i) == fblockId)
+    {
+       return mostAsRgGetInstID(kBusRegistry, i);
+    }
+  }
+  return -1;
+}
+/*@@end*/
+
+/*@@caplFunc:ConfigureShadowFBlocks():*///function
+void ConfigureShadowFBlocks()
+{
+  // Configures the shadow FBlocks of interest.
+  // Therefore the properties of interest will be registered at the
+  // Notification Shadow Service, which registers the device in the
+  // Notification Matrix of the FBlocks as soon as the FBlock is
+  // known to the device.
+
+  long instId_VSM, instId_AA, instId_ADP, instId_AFT, instId_Nav;
+
+
+  // check InstIds of VectorSystemManager shadow
+  instId_VSM = GetInstIdOfFirstFBlock(kFB_VSM);
+
+  if(instId_VSM != gInstId_VSM)
+  {
+    // InstId has changed; update entries in notification matrix
+    if(gInstId_VSM != -1) // unregister old
+      ConfigureShadowProperties(kFB_VSM, gInstId_VSM, gShadowProp_VSM, 0);
+    if(instId_VSM != -1) // register new
+      ConfigureShadowProperties(kFB_VSM, instId_VSM, gShadowProp_VSM, 1);
+    
+    gInstId_VSM = instId_VSM; // set new InstId
+  }
+
+
+  // check InstIds of AudioAmplifier shadow
+  instId_AA = GetInstIdOfFirstFBlock(kFB_AA);
+
+  if(instId_AA != gInstId_AA)
+  {
+    // InstId has changed; update entries in notification matrix
+    if(gInstId_AA != -1) // unregister old
+      ConfigureShadowProperties(kFB_AA, gInstId_AA, gShadowProp_AA, 0);
+    if(instId_AA != -1) // register new
+      ConfigureShadowProperties(kFB_AA, instId_AA, gShadowProp_AA, 1);
+    
+    gInstId_AA = instId_AA; // set new InstId
+  }
+
+
+  // check InstIds of AudioDiskPlayer shadow
+  instId_ADP = GetInstIdOfFirstFBlock(kFB_ADP);
+
+  if(instId_ADP != gInstId_ADP)
+  {
+    // InstId has changed; update entries in notification matrix
+    if(gInstId_ADP != -1) // unregister old
+      ConfigureShadowProperties(kFB_ADP, gInstId_ADP, gShadowProp_ADP, 0);
+    if(instId_ADP != -1) // register new
+      ConfigureShadowProperties(kFB_ADP, instId_ADP, gShadowProp_ADP, 1);
+    
+    gInstId_ADP = instId_ADP; // set new InstId
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ConfigureShadowProperties(byte,byte,word[],long):*///function
+void ConfigureShadowProperties(byte fblockId, byte instId, word shadowProp[], long init)
+{
+  // Registers/unregisters properties at the Notification Shadow Service.
+  // Service will send Notification.Set(SetFunction/ClearFunction) as soon
+  // as the FBlock is known to this device.
+ 
+  long i;
+
+  if(init)
+  {
+    // register properties in Notification Shadow Service
+    for(i = 0; i < elcount(shadowProp); ++i)
+    {
+      mostAsNtfShdFunctionEnable(fblockId, instId, shadowProp[i]);
+    }
+  }
+  else
+  {
+    // unregister properties from Notification Shadow Service
+    for(i = 0; i < elcount(shadowProp); ++i)
+    {
+      mostAsNtfShdFunctionDisable(fblockId, instId, shadowProp[i]);
+    }
+  }
+}
+/*@@end*/
+
+/*@@mostNetOn:OnMostNetOn():*/
+OnMostNetOn()
+{
+  AppInit();
+}
+/*@@end*/
+
+/*@@caplFunc:AppExit():*///function
+void AppExit()
+{
+  // Called on final exit of the application.
+
+  if(gAppPhase == kAppOff)
+    return;
+
+  // power off
+  gAppPhase = kAppOff;
+}
+/*@@end*/
+
+/*@@caplFunc:AppInit():*///function
+void AppInit()
+{
+  // Called on first start of the application.
+
+  if(gAppPhase == kAppOn)
+    return;
+
+  // application has started now
+  gAppPhase = kAppOn;
+
+  // initialize FBlock shadows
+  ConfigureShadowFBlocks();
+}
+/*@@end*/
+
+/*@@caplFunc:AppShutdown():*///function
+void AppShutdown()
+{
+  // Called for a regular shut down of the application.
+  
+  if(gAppPhase == kAppShutdown)
+    return;
+  
+  // application is in shutdown mode now
+  gAppPhase = kAppShutdown;
+}
+/*@@end*/
+
+/*@@caplFunc:ConfigureFBlock():*///function
+void ConfigureFBlock()
+{
+  // Configures the FBlock.
+  // Therefore functions are registered at CANoe's Function and 
+  // Notification Service.
+
+  long oldInstId = -1; // static variable
+  long newInstId;
+
+  // OpType flags: Properties
+  long kFlagSet          = 0x0001;
+  long kFlagGet          = 0x0002;
+  long kFlagSetGet       = 0x0004;
+  long kFlagInc          = 0x0008;
+  long kFlagDec          = 0x0010;
+  long kFlagGetIf        = 0x0020;
+  long kFlagStatus       = 0x1000;
+  long kFlagIf           = 0x4000;
+  long kFlagError        = 0x8000;
+  long kFlagStdPropR     = 0x0002|0x1000|0x8000;
+  long kFlagStdPropRW    = 0x0001|0x0002|0x0004|0x1000|0x8000;
+  // OpType flags: Methods
+  long kFlagStart        = 0x0001;
+  long kFlagAbort        = 0x0002;
+  long kFlagStartRes     = 0x0004;
+  long kFlagStartResAck  = 0x0040;
+  long kFlagAbortAck     = 0x0080;
+  long kFlagStartAck     = 0x0100;
+  long kFlagErrorAck     = 0x0200;
+  long kFlagProcAck      = 0x0400;
+  long kFlagProc         = 0x0800;
+  long kFlagRes          = 0x1000;
+  long kFlagResAck       = 0x2000;
+  long kFlagStdMeth      = 0x0004|0x1000|0x8000;
+
+  newInstId = mostApGetInstId();
+
+  if(newInstId < 0)
+  {
+    newInstId = -1;
+  }
+
+  if(oldInstId != -1)
+  {
+    // disable Function Service
+    mostAsFsDisableEx(kFB_Gateway, oldInstId);
+  }
+
+  if(newInstId != -1)
+  {
+    // enable Function Service
+    mostAsFsEnable();
+
+    // enable functions and operations
+
+    // properties without notification ability
+    mostAsFsFunctionEnable(kFct_Gateway_CANEvent, kFlagStatus | kFlagError);
+  }
+  oldInstId = newInstId;
+}
+/*@@end*/
+
+/*@@caplFunc:IsAudioSourceAvailable(byte):*///function
+long IsAudioSourceAvailable(byte sourceId)
+{
+  // Returns true, if audio source is available in the system.
+  return ((gShadowProp_VSM_AvailableAudioSources >> sourceId) & 0x01 == 0x01);
+}
+/*@@end*/
+
+/*@@mostAmsMsg:VectorSystemManager.AvailableAudioSources.Status (0xD0D05C):*/
+on mostAMSMessage VectorSystemManager.AvailableAudioSources.Status
+{
+  // store property value for later usage
+  gShadowProp_VSM_AvailableAudioSources = this.byte(0);
+}
+/*@@end*/
+
+/*@@mostAmsMsg:VectorSystemManager.CurrentAudioSource.Status (0xD0D01C):*/
+on mostAMSMessage VectorSystemManager.CurrentAudioSource.Status
+{
+  message CurrentAudioSource msgCAN;
+
+  // store property value for later usage
+  gShadowProp_VSM_CurrentAudioSource = this.SourceID;
+
+  // do not handle messages if gateway is disabled
+  if(@sysvar::GW::MySwitch == 0)
+    return;
+
+  // copy information, conversion not needed
+  msgCAN.SourceID = this.SourceID;
+
+  // output the message on the CAN bus
+  output(msgCAN);
+
+  FlashLedM2C();
+}
+/*@@end*/
+
+/*@@timer:tTimeRelative:*/
+on timer tTimeRelative
+{
+  message TimeRelative msgTimeRelCAN;
+
+  // Reset shadowed property TrackTime if it was not received in the previous interval.
+  if(gShadowProp_ADP_TrackTime_Received == 0)
+  {
+    gShadowProp_ADP_TrackTime = 0;
+  }
+
+  // flag will be set on reception of ADP_TimePosition_Status
+  gShadowProp_ADP_TrackTime_Received = 0;
+
+
+  setTimer(tTimeRelative, kTimeRelativeCycle);
+
+
+  // do nothing if gateway is disabled
+  if(@sysvar::GW::MySwitch == 0)
+    return;
+
+  // just copy the information, the conversion 
+  // is made via database description
+  msgTimeRelCAN.TrackTime = gShadowProp_ADP_TrackTime;
+
+  // output the message on the CAN bus
+  output(msgTimeRelCAN);
+
+}
+/*@@end*/
+
+/*@@sysvarChange:HU::Button_LowTraffic:*/
+on sysvar HU::Button_LowTraffic
+{
+  // In order to have less traffic on MOST, this environment variable disables/enables 
+  // all cyclic messages by removing the functions from the Notification Shadow servcie.
+
+  mostAmsMessage * msg;
+  long i;
+
+  if(gAppPhase != kAppOn) 
+    return;
+
+  if(@this == 1)
+  {
+    // clear from Notification Matrix
+    if(gInstId_ADP != -1)
+    {
+      mostAsNtfShdFunctionDisable(kFB_ADP, gInstId_ADP, kFct_ADP_TimePosition);
+    }
+  }
+  else
+  {
+    // set in Notification Matrix
+    if(gInstId_ADP != -1)
+    {
+      mostAsNtfShdFunctionEnable(kFB_ADP, gInstId_ADP, kFct_ADP_TimePosition);
+    }
+  }
+}
+/*@@end*/
+

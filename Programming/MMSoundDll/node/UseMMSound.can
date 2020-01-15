@@ -1,0 +1,378 @@
+/*@@includes:*/
+includes
+{
+  //
+  // MMSound.dll inclusion
+  //
+  // The 'library' directive works with CANoe/CANalyzer version 6.1
+  // and newer only.
+  #pragma library ("..\Exec32\MMSound.dll")
+
+  // To run the program with older versions, remove the entire 'includes'
+  // section and assign the MMSound.Dll using the options dialog of
+  // CANoe/CANalyzer (menu: Configuration|Options...|CAPL DLL).
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  ////////////////////////////////////////////////////////////////////////
+  // Set the media file folder used by the DLL for loading files
+  // folder must be within the configuration's directory and gets extended 
+  // automatically
+  const int kStringLen = 256;
+  char gSoundFolderName[kStringLen] = "Sounds"; 
+  char gSoundFilesPath[kStringLen];   
+  
+  ////////////////////////////////////////////////////////////////////////
+  // Enter your audio files list here. Key commands for the first 3 
+  // entries will load and playback the corresponding file.
+  const int kNOfSoundFiles = 3;
+  const int kArraySize = 256;
+
+  char gFileNames[kNOfSoundFiles][kArraySize] = 
+            {"track01.WAV",
+             "track02.mp3",
+             "track03.mp3"};
+  // Alternatively, you can also use relative of absolute paths, e.g.
+  /*
+  char gFileNames[kNOfSoundFiles][kArraySize] = 
+            {"D:\\Music\\track01.WAV",
+             "..\\folder1\\track02.mp3",
+             "track03.mp3"};
+   */
+
+  /////////////////////////////////////////////////////////////////
+  // Array for storing handles returned when whole folder is opened 
+  dword gSoundHandles[kArraySize];
+  dword gNumOfHandles;      
+
+  int gCurrentHandlePos;  // handle of currently playbacked audio file
+
+  // Verbose levels
+  const dword kVerboseAll    = 2; // output for all actions
+  const dword kVerboseErrors = 1; // output only in case of errors
+  const dword kVerboseNone   = 0; // no output
+
+  dword gVerboseLevel = 2;
+
+  
+  int gTogglePause = 0; 
+
+  // Player states
+  const dword kPlayerState_Stop   = 0;
+  const dword kPlayerState_Play   = 1;
+  const dword kPlayerState_Pause  = 2;
+  const dword kPlayerState_Record = 3;
+
+  // Available file info fields
+  const dword kFileInfo_Title     = 0;
+  const dword kFileInfo_Interpret = 1;
+  const dword kFileInfo_Genre     = 2;
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  gCurrentHandlePos = 0;
+  
+  PrintKeyCommands();
+    
+  if(getAbsFilePath(gSoundFolderName, gSoundFilesPath, kStringLen) < 0)
+  {
+    Write("Error. Unable to locate folder '%s' in folder of current configuration.", gSoundFolderName);
+    Stop(); 
+  }
+ 
+  mmsndSetMediaPath(gSoundFilesPath);
+  Write("Media file path is set to '%s'", gSoundFilesPath);
+
+  mmsndSetVerbose(gVerboseLevel);
+}
+/*@@end*/
+
+/*@@key:'l':*/
+// [L]oad all sound files and store handles
+on key 'l'
+{
+  gNumOfHandles = mmsndOpenFolder("", gSoundHandles, kArraySize);
+  if(gNumOfHandles > 0)
+    gCurrentHandlePos = 1;
+}
+/*@@end*/
+
+/*@@key:'p':*/
+// [P]layback of current sound file
+on key 'p'
+{
+  if(gCurrentHandlePos == 0)
+  {
+     Write("No audio files loaded. Press 'l' for loading.");
+     return;
+  }
+
+   mmsndPlay(gSoundHandles[gCurrentHandlePos - 1]);
+}
+/*@@end*/
+
+/*@@key:'s':*/
+// [S]top playback
+on key 's'
+{
+  mmsndStop();  
+}
+/*@@end*/
+
+/*@@key:'n':*/
+// [N]ext file
+on key 'n'
+{
+  if(gCurrentHandlePos == 0)
+  {
+     Write("No audio files loaded. Press 'l' for loading audio files.");
+     return;
+  }
+
+//  if(gCurrentHandlePos + 1 >  kNOfSoundFiles)
+  if(gCurrentHandlePos + 1 >  gNumOfHandles)
+    gCurrentHandlePos = 1;
+  else
+    gCurrentHandlePos++;
+
+  mmsndPlay(gSoundHandles[gCurrentHandlePos - 1]);
+}
+/*@@end*/
+
+/*@@key:'c':*/
+// [C]lose (unload) all audio files 
+on key 'c'
+{
+  CloseAllFiles();
+}
+/*@@end*/
+
+/*@@caplFunc:PrintKeyCommands():*/
+PrintKeyCommands ()
+{
+  Write("---------------------------------------------------------");
+  Write("MMSound.dll Demo - Commands:");  
+  Write("'l': Load all audio files. ");
+  Write("'p': Playback current track.");
+  Write("'n': Playback next track.");
+  Write("'s': Stop playback.");
+  Write("'c': Close (unload) all audio files.");
+  Write("'1': Load 1. audio file in array and start playback.");
+  Write("'2': Load 2. audio file in array and start playback.");
+  Write("'3': Load 3. audio file in array and start playback.");
+  Write("'w': Get current playback position.");
+  Write("'f': Fast Forward by 1000 ms steps.");
+  Write("'r': Rewind by 1000 ms steps.");
+  Write("'h': Toggle pause."); 
+  Write("'i': Output Title, Artist and Genre of current audio file");
+  Write("'d': Get player state.");
+  Write("'v': Set verbose level.");
+  Write("'a': Start recording.");
+  Write("'o': Start playback of 3. audio file at 5000 ms.");
+  Write("---------------------------------------------------------");
+}
+/*@@end*/
+
+/*@@key:'1':*/
+// Load and playback first audio file in array
+on key '1'
+{
+  mmsndPlay(gFileNames[0]);
+}
+/*@@end*/
+
+/*@@key:'2':*/
+// load and playback second audio file in array
+on key '2'
+{
+  mmsndPlay(gFileNames[1]);
+}
+/*@@end*/
+
+/*@@key:'3':*/
+// load and playback third audio file in array
+on key '3'
+{
+  mmsndPlay(gFileNames[2]);
+}
+/*@@end*/
+
+/*@@stop:StopMeasurement:*/
+on stopMeasurement
+{
+  mmsndStop(); 
+  CloseAllFiles();
+}
+/*@@end*/
+
+/*@@caplFunc:CloseAllFiles():*/
+CloseAllFiles()
+{
+  int i;
+  mmsndCloseAll();
+  for(i = 0; i < kArraySize; ++i)
+    gSoundHandles[i] = 0;
+
+  gCurrentHandlePos = 0;
+}
+/*@@end*/
+
+/*@@key:'v':*/
+// Set [V]erbose level
+on key 'v'
+{
+  if(gVerboseLevel == 2)
+    gVerboseLevel = 0;
+  else
+    gVerboseLevel++;
+
+  mmsndSetVerbose(gVerboseLevel);
+}
+/*@@end*/
+
+/*@@key:'w':*/
+// returns the current playback time position
+on key 'w'
+{
+  Write("Current playback position is %lu ms.", mmsndGetCurrPlayPos());
+}
+/*@@end*/
+
+/*@@key:'f':*/
+// [F]ast forward
+on key 'f'
+{
+  dword pos;
+
+  pos = mmsndGetCurrPlayPos();
+  mmsndSetPlayPos(pos + 1000); // increase position by 1 second
+}
+/*@@end*/
+
+/*@@key:'r':*/
+// [R]ewind
+on key 'r'
+{
+  dword pos;
+
+  pos = mmsndGetCurrPlayPos();
+  mmsndSetPlayPos(pos - 1000); // decrease position by 1 second
+}
+/*@@end*/
+
+/*@@key:'o':*/
+// Play from [o]ffset position
+on key 'o'
+{
+  // API with file name
+  mmsndPlay(gFileNames[2], 5000);
+  Write("Start playback from position %lu (ms).", mmsndGetCurrPlayPos());
+
+/*
+  // API with handle
+  dword handle;
+  handle = mmsndOpen(gFileNames[2]);
+  mmsndPlay(handle, 5000);  
+  Write("Start playback from position %lu (ms).", mmsndGetCurrPlayPos());
+*/
+
+
+}
+/*@@end*/
+
+/*@@key:'h':*/
+// [H]old / pause playback
+on key 'h'
+{
+  if(mmsndGetPlayerState() == kPlayerState_Play)
+  {
+    mmsndPause();
+    return;
+  }
+
+  if(mmsndGetPlayerState() == kPlayerState_Pause)
+  {
+    mmsndContinue();
+    return;
+  }
+}
+/*@@end*/
+
+/*@@key:'d':*/
+// Player state
+on key 'd'
+{
+  dword playerState;
+  
+  playerState = mmsndGetPlayerState(); 
+
+  switch(playerState)
+  {
+  case kPlayerState_Stop:
+    Write("Player is stopped.");
+    break;
+  case kPlayerState_Play:
+    Write("Player is playing.");
+    break;
+  case kPlayerState_Pause:
+    Write("Player is paused");
+    break;
+  case kPlayerState_Record:
+    Write("Player is recording.");
+    break;
+  default:
+    Write("Unknown player state");
+    break;
+  }
+}
+/*@@end*/
+
+/*@@key:'a':*/
+on key 'a'
+{
+  mmsndStartRecord("aufnahme.wav"); 
+}
+/*@@end*/
+
+/*@@key:'i':*/
+// [i]nformation about currently playbacked file
+on key 'i'
+{
+  char filename[kStringLen];
+  char info[kStringLen];
+  dword handle;
+  
+  handle = mmsndGetCurrHandle();
+  if(handle != 0)
+  {
+    mmsndGetFilePath(handle, filename, kStringLen);  // get filename for handle
+    Write("Handle %d associated with filename: %s", handle, filename); 
+  }
+  else
+  {
+    mmsndGetFilePath(filename, kStringLen);          // get filename of currently playbacked track
+    Write("Filename; %s", filename);
+  }
+  snprintf(info, kStringLen, "");  
+  mmsndGetFileInfo(kFileInfo_Title, info, kStringLen);
+  Write("Title: %s", info);
+  mmsndGetFileInfo(kFileInfo_Interpret, info, kStringLen);
+  Write("Interpret: %s", info);
+  mmsndGetFileInfo(kFileInfo_Genre, info, kStringLen);
+  Write("Genre: %s", info);
+}
+/*@@end*/
+
+/*@@key:*:*/
+on key *
+{
+  PrintKeyCommands();
+}
+/*@@end*/
+

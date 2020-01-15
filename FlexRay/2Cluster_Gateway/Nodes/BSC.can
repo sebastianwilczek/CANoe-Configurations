@@ -1,0 +1,136 @@
+/*@!Encoding:1252*/
+variables
+{
+  Timer   tBrakeSystemCheck;
+  msTimer tBrakePressure;
+  msTimer ResetBrakePedal;
+
+  int gBrakeSystemCheckTime   = 2;
+  int gBrakePressureTimer     = 10;
+  int gBrakePressureCounter   = 0;
+  int gBrakePedalStatus       = 0;
+  int SystemCheck             = 0;
+
+  const int ASR_FACTOR        = 6000;
+  const int PRESS             = 1;
+  const Int NOPRESS           = 0;
+  const int ACTIVE            = 1;
+  const int INACTIVE          = 0;
+
+}
+
+on sysVar PowerTrain::BrakeActive
+{
+  if(@this)  
+    gBrakePedalStatus = PRESS;
+  else  
+    gBrakePedalStatus = NOPRESS;
+
+  $BrakeLight = @this;
+}
+
+on timer tBrakeSystemCheck
+{
+  DisableSystemLamps(); 
+}
+
+on start
+{
+  setTimer(tBrakeSystemCheck,gBrakeSystemCheckTime);
+  setTimer(tBrakePressure,gBrakePressureTimer);
+
+  $BrakeLight = 0;
+
+  EnableSystemLamps();
+}
+
+EnableSystemLamps ()
+{
+  SystemCheck = ACTIVE;
+  $ASRMode          = 1;
+  $ABSWarningLamp   = 1;
+  $BrakeWarningLamp = 1;
+  $ESPWarningLamp   = 1;
+}
+
+DisableSystemLamps ()
+{
+  SystemCheck = INACTIVE;
+  $ASRMode          = 0;
+  $ABSWarningLamp   = 0;
+  $BrakeWarningLamp = 0;
+  $ESPWarningLamp   = 0;
+}
+
+on timer tBrakePressure
+{
+  if(gBrakePedalStatus == PRESS && gBrakePressureCounter <  10000.0)
+    gBrakePressureCounter = gBrakePressureCounter + 100;
+  else if(gBrakePedalStatus == NOPRESS) 
+    gBrakePressureCounter = 0.0;  
+
+  $BrakePressure = gBrakePressureCounter;
+  SetTimer(tBrakePressure,gBrakePressureTimer);
+}
+
+on sysVar PowerTrain::ABSError
+{
+  if(SystemCheck == ACTIVE)
+    return;
+  else
+  {
+    //Write("Setting ABS LED = %d", GetValue(this));
+    $ABSWarningLamp = @this;
+  }
+}
+
+on sysVar PowerTrain::ESPError
+{
+  if(SystemCheck == ACTIVE)
+    return;
+  else
+    $ESPWarningLamp = @this; 
+}
+
+on sysVar PowerTrain::ASRError
+{
+  if(SystemCheck == ACTIVE)
+    return;
+  else
+    $ASRMode = @this;
+}
+
+on sysVar PowerTrain::BrakeError
+{
+  if(SystemCheck == ACTIVE)
+    return;
+  else
+    $BrakeWarningLamp = @this;
+}
+
+on key 'b'
+{
+  CancelTimer(ResetBrakePedal);
+  @PowerTrain::BrakeActive = 1;
+  ResetBrake();
+}
+
+ResetBrake ()
+{
+  CancelTimer(ResetBrakePedal);
+  SetTimer(ResetBrakePedal,550);
+}
+
+on timer ResetBrakePedal
+{
+  @PowerTrain::BrakeActive = 0;
+}
+
+on signal_update Gear
+{
+  if(this == 0) 
+    $BackUpLight = 1;
+  else
+    $BackUpLight = 0;
+}
+

@@ -1,0 +1,137 @@
+/*@@var:*/
+variables
+{
+message msg_Receive m;
+message msg_Transmit m2;
+msTimer delayRight; 
+msTimer delayLeft;
+
+const NM_Uninit = 0;
+const NM_BusSleep = 1;
+const NM_PrepareBusSleep = 2;
+const NM_ReadySleep = 3;
+const NM_NormalOperation = 4;
+const NM_RepeatMessage = 5;
+}
+/*@@end*/
+
+/*@@msg:CAN1.CAN::msg_Transmit (0x200):*/
+on message msg_Transmit
+{
+  @sysvar::AMDSysVars::RearInteriorLight = this.Signal_SwitchRearInteriorLight;
+}
+/*@@end*/
+
+/*@@caplFunc:ApCanOff():*///callback
+ApCanOff ()
+{
+    write("can off");
+}
+/*@@end*/
+
+/*@@caplFunc:ApCanOn():*///callback
+ApCanOn ()
+{
+    write("CAN on");
+}
+/*@@end*/
+
+/*@@timer:delayRight:*/
+on timer delayRight
+{
+  if (@sysvar::AMDSysVars::RearLeftDoor == 0) 
+  {
+    Nm_NetworkRelease();
+    Write("released!");
+  }
+}
+/*@@end*/
+
+/*@@timer:delayLeft:*/
+on timer delayLeft
+{
+  if (@sysvar::AMDSysVars::RearRightDoor== 0) 
+  {
+    Nm_NetworkRelease();
+    Write("released!");
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:Nm_StateChangeNotification(long,long):*///callback
+void Nm_StateChangeNotification(long previousState, long currentState)
+{
+    if(currentState == NM_RepeatMessage) //NM state repead message was entered
+    {
+        
+        if(xcpIsConnected("MyECU") == 0x0) //xcp master is not connected to MyECU
+        {
+            xcpConnect("MyECU"); //xcp connet to MyECU 
+        }
+    }
+    else if(currentState == NM_PrepareBusSleep) //NM state prepare bus sleep was entered
+    {
+        
+        if(xcpIsConnected("MyECU") == 0x1) //xcp master is connected to MyECU
+        {
+            xcpDisconnect("MyECU"); //xcp disconnect MyECU 
+        }       
+    }
+    
+}
+/*@@end*/
+
+/*@@sysvarUpdate:AMDSysVars::RearInteriorLight:*/
+on sysvar_update sysvar::AMDSysVars::RearInteriorLight
+{
+  if(@this == 1)
+  {  
+    $Signal_RearInteriorLight = 1;     
+  }
+  else
+  {
+    $Signal_RearInteriorLight = 0; 
+     
+  }
+}
+/*@@end*/
+
+/*@@sysvarUpdate:AMDSysVars::RearLeftDoor:*/
+on sysvar_update sysvar::AMDSysVars::RearLeftDoor
+{
+  if(@this == 1)
+  {  
+    $Signal_RearLeftDoor = 1; 
+   Nm_NetworkRequest();   
+  }
+  else
+  {
+    $Signal_RearLeftDoor = 0;   
+    setTimer(delayLeft, 200);    
+  }
+}
+/*@@end*/
+
+/*@@sysvarUpdate:AMDSysVars::RearRightDoor:*/
+on sysvar_update sysvar::AMDSysVars::RearRightDoor
+{
+  if(@this == 1)
+  {  
+    $Signal_RearRightDoor= 1;
+    Nm_NetworkRequest();    
+  }
+  else 
+  {
+    $Signal_RearRightDoor= 0;    
+    setTimer(delayRight, 200);
+  }
+}
+/*@@end*/
+
+/*@@sysvarUpdate:AMDSysVars::OpenReadme:*/
+on sysvar_update sysvar::AMDSysVars::OpenReadme
+{
+   openPanel("Readme");
+}
+/*@@end*/
+

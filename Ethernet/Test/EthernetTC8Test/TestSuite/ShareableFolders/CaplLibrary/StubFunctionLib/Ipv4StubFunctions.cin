@@ -1,0 +1,120 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "../StubFunctionLib/StubFunctions.cin"
+}
+
+
+/**
+ * Assign an IP address to the DUT.
+ */
+export testfunction Stub_AssignIpAddress(char ifName[], char ipAddr[], char subnetMask[])
+{
+   long stubResult;
+   
+  stubResult = Internal_Stub_IpStaticAddress(ifName, ipAddr, ConvertSubnetMaskFromStringToCiddr(subnetMask));
+
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_AssignIpAddress", "Assign static ip address on DUT succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_AssignIpAddress", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_AssignIpAddress", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_AssignIpAddress", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_AssignIpAddress", "Unknown error.");
+    break;
+  }  
+}
+
+void CheckIpv4ReceiveAndForwardEventParameters( 
+  char srcIpAddress[],
+  char outSrcAddr[],
+  char destIpAddress[],
+  char outDestAddress[],
+  char ttl[],
+  byte outTTL,
+  char options[],
+  word optionsLength,
+  byte outOptions[],
+  word outOptionsLength,
+  enum Bool expectedMessage)
+{
+  char parameterTemp[5], outDataString[0x1FFFF];
+  byte i;
+  
+  if(expectedMessage == kTrue)
+  {
+    //Check if received data matches expected values.
+    if(!isWildcard(srcIpAddress) && strncmp(srcIpAddress, outSrcAddr, strlen(srcIpAddress)) != 0)
+    {
+      testStepFail("Stub_Ipv4ReceiveAndForwardEvent", "Receive and check IPv4 data on DUT failed. Source IP mismatch.");
+      return;
+    }
+    if(!isWildcard(destIpAddress) && strncmp(destIpAddress, outDestAddress, strlen(destIpAddress)) != 0)
+    {
+      testStepFail("Stub_Ipv4ReceiveAndForwardEvent", "Receive and check IPv4 data on DUT failed. Destination IP mismatch.");
+      return;
+    }
+    if(!isWildcard(ttl) && atol(ttl) != outTTL)
+    {
+      testStepFail("Stub_Ipv4ReceiveAndForwardEvent", "Receive and check IPv4 data on DUT failed. Time to Live mismatch.");
+      return;
+    }
+    if(!isWildcard(options))
+    {
+      if(outOptionsLength != optionsLength)
+      {
+        testStepFail("Stub_Ipv4ReceiveAndForwardEvent", "Receive and check IPv4 data on DUT failed. Options length mismatch.");
+        return;
+      }
+      outDataString[0] = '\0';
+      for (i = 0; i < optionsLength; i++) 
+      {
+        snprintf(parameterTemp, 3, "%02X", outOptions[i]);
+        strncat(outDataString, parameterTemp, 0x1FFFF);
+      }
+      
+      if (strncmp(options, outDataString, optionsLength) != 0)
+      {
+        testStepFail("Stub_Ipv4ReceiveAndForwardEvent", "Receive and check IPv4 data on DUT failed. Options mismatch.");
+        return;
+      }
+    }
+    
+    testStepPass("Stub_Ipv4ReceiveAndForwardEvent", "UDP data have been received by DUT.");
+  }
+  else
+  {
+    testStepFail("Stub_Ipv4ReceiveAndForwardEvent", "Received unexpected IPv4 data.");
+  }
+}  

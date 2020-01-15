@@ -1,0 +1,398 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "DiagResponses.cin"
+	#include "TesterECUSettings.cin"
+	#include "KLine_Utilities.cin"
+  #include "KLine_ErrorInd.cin"
+}
+
+variables
+{
+  char gPrefix[20];
+  long gKLineHandle;
+  
+  // These flags will determine if the CAPL callback interface handles certain requests (1), or if
+  // they are forwarded to the diagnostics layer (0).
+  BYTE gKLineHandleStartCommunication     = 1;
+  BYTE gKLineHandleStopCommunication      = 1;
+  BYTE gKLineHandleAccessTimingParameters = 1;
+  
+  BYTE gKLineReplaceByRawFrame = 0;  // set to 1 to change the frame sent
+  BYTE gKLinePatchFrame = 0;    // set to 1 to patch the frame in preSend
+  
+  const cNs2s = 1000000000.0;
+  
+  const cTesterAddress = 0xF1;
+  const cEcuAddress = 0xE9;
+  char  gEcuQual[15] = "ECU";
+  int   gValidFastInitPatter = 1;
+  
+  msTimer tByteIndResetTimer;
+  msTimer tByteConResetTimer;
+}
+
+on preStart
+{
+  // ECU Representation assigned to channel
+  gMsgChannel = DiagGetCommParameter(gEcuQual, 0, "CANoe.ChannelNumber");
+  gKLineHandle = KLine_CreateECURepresentation( gMsgChannel);
+ 
+  write( "KLine_CreateECURepresentation at K-Line%d returns Handle %d", gMsgChannel, gKLineHandle);
+}
+
+on start
+{
+  long status;
+  long value;
+  char statusByName[30];
+  dword useAddresses    = 1;
+  dword forceLengthByte = 0;
+  
+  value = DiagGetCommParameter(gEcuQual, 0, "KLine.InitType");
+  status = KLine_SetInitType( value); // fast init
+  
+  // Setting init type
+  // Init type can only be switched between the pre configured init type (fast or 5 baud) and "no init"
+  switch (value)
+  {
+    case FIVE_BAUD:
+      // Not supported for ECU simulation
+      snprintf(statusByName, elcount(statusByName), "%s", "Five Baud");
+      break;
+    case FAST:
+      snprintf(statusByName, elcount(statusByName), "%s", "Fast Init");
+      break;
+    case NONE:
+      snprintf(statusByName, elcount(statusByName), "%s", "No Init");
+      break;
+    default:
+      snprintf(statusByName, elcount(statusByName), "%s", "Error: No valid init type!");
+      break;
+  }
+  
+  // Init Type
+  if (status == kReturnSuccess)
+  {
+    write("KLine_SetInitType(%s) returns %s", statusByName, "SUCCESS");
+  }
+  else
+  {
+    write("KLine_SetInitType(%s) returns %s", statusByName, "ERROR");
+  }
+  
+  
+  // Baud Rate
+  value = DiagGetCommParameter(gEcuQual, 0, "KLine.Baudrate");
+  status = KLine_SetBaudrate( value);
+  
+  if (status == kReturnSuccess)
+  {
+    write("KLine_SetBaudrate(%d) returns %s", value, "SUCCESS");
+  }
+  else
+  {
+    write("KLine_SetBaudrate(%d) returns %s", value, "ERROR");
+  }
+  
+  // ECU Address
+  value = DiagGetCommParameter(gEcuQual, 0, "KLine.EcuAddress");
+  status = KLine_SetECUAddress( value);
+  
+  if (status == kReturnSuccess)
+  {
+    write("KLine_SetECUAddress(0x%02x) returns %s", value, "SUCCESS");
+  }
+  else
+  {
+    write("KLine_SetECUAddress(0x%02x) returns %s", value, "ERROR");
+  }
+  
+  // Tester Address
+  value = DiagGetCommParameter(gEcuQual, 0, "KLine.TesterAddress");
+  status = KLine_SetTesterAddress( value);
+  
+  if (status == kReturnSuccess)
+  {
+    write("KLine_SetTesterAddress(0x%02x) returns %s", value, "SUCCESS");
+  }
+  else
+  {
+    write("KLine_SetTesterAddress(0x%02x) returns %s", value, "ERROR");
+  }
+}
+
+_Diag_Presend(BYTE data[], WORD& dataLenInOut, WORD headerLen)
+{
+  if (!gKLinePatchFrame)
+  {
+    return;
+  }
+  
+  SetPrefix();
+  write( "%s: PATCH: Change the checksum byte to a invalid value ...", gPrefix);
+  data[dataLenInOut - 1] = 0x99;
+}
+
+_KLine_FastInitPatternReceived( DWORD TiniL_us, DWORD Twup_us, int64 timestampTwup)
+{
+  gValidFastInitPatter = 0;
+  SetPrefix();
+  write( "%s: FastInitPattern @%.3f received, TiniL = %d us, Twup = %d us", gPrefix, timestampTwup / cNs2s, TiniL_us, Twup_us);
+  
+  TiniL_us = ((TiniL_us + 5)/1000) * 1000;
+  Twup_us  = ((Twup_us + 5)/1000) * 1000;
+  
+  if (TiniL_us < 24000  || TiniL_us > 26000)
+  {
+    gValidFastInitPatter = 0;
+  }
+  else if (Twup_us < 49000  || Twup_us > 51000)
+  {
+    gValidFastInitPatter = 0;
+  }
+  else
+  {
+    gValidFastInitPatter = 1;
+  }
+  
+  @sysvar::KLineECUSimulation::TWup = (Twup_us + 100)  / 1000; // ms  
+  @sysvar::KLineECUSimulation::TiniL = (TiniL_us + 100) / 1000; // ms  
+  
+  @sysvar::KLineECUSimulation::RxFrameIndicated = 0;
+  @sysvar::KLineECUSimulation::TxFrameConfirmed = 0;
+}
+
+// KLine TP Layer
+_KLine_DataInd( byte data[])
+{
+  SetPrefix();
+  if (gValidFastInitPatter == 1)
+  {
+    if (gKLineHandleStartCommunication && data[0] == 0x81)
+    {
+      BYTE StartCommunicationResp_raw[3] = { 0xC1, 0xEF, 0x8F };
+      _Diag_DataRequest( StartCommunicationResp_raw, elcount( StartCommunicationResp_raw), 0);
+    } 
+    else if( gKLineHandleStopCommunication && data[0] == 0x82)
+    {
+      BYTE StopCommunicationResp_raw[1] = { 0xC2 };
+      _Diag_DataRequest( StopCommunicationResp_raw, elcount( StopCommunicationResp_raw), 0);
+    } 
+    else if (gKLineHandleAccessTimingParameters && data[0] == 0x83)
+    {
+       BYTE AccessTimingParametersResp_raw[7] = { 0xC3, 0x00, 0x32, 0x02, 0x6E, 0x14, 0x0A};
+      _Diag_DataRequest( AccessTimingParametersResp_raw, elcount( AccessTimingParametersResp_raw), 0);
+    }
+    else
+    {
+      Diag_DataInd( data, elcount(data), 0);
+    }
+  
+    @sysvar::KLineECUSimulation::TPRequestIndicated += 1;   
+  }
+  else
+  {
+    KLine_ResetECUConnection();
+  }
+}
+
+
+_KLine_DataCon( long count)
+{   
+  diag_DataCon( count);
+  @sysvar::KLineECUSimulation::TPResponseConfirmed += 1;  
+}
+
+// Frame Layer
+_KLine_FrameReceptionInd(BYTE data[], int64 timestamps[])
+{
+  SetPrefix();
+  
+  switch (@sysvar::KLineECUSimulation::HeaderFormat)
+  {
+    case DefaultHeader:
+    case FourByteHeader:
+       SetSimulationBehavior(data[4]);
+      break;
+    case ThreeByteHeader:
+      SetSimulationBehavior(data[3]);
+      break;
+    case TwoByteHeader:
+      SetSimulationBehavior(data[2]);
+      break;
+    case OneByteHeader:
+      SetSimulationBehavior(data[1]);
+      break;
+  }
+  
+  @sysvar::KLineECUSimulation::RxFrameIndicated += 1;
+}
+
+void SetSimulationBehavior(byte sid)
+{
+  if (sid != cSidStartCom && sid != cSidStartCom)
+  {
+    SetResponseBehaviour();
+  }
+  else if (sid == cSidStopCom)
+  {
+    @sysvar::KLineECUSimulation::TWup = 0; 
+    @sysvar::KLineECUSimulation::TiniL = 0;
+  }
+}
+
+void ResetSimulationBehavior(byte sid)
+{
+  ResetResponseBehavior();
+  
+  @sysvar::KLineECUSimulation::TxFrameConfirmed += 1;
+  
+  if (gKLineHandleStopCommunication && sid == cRSidStopCom)
+  {
+    KLine_ResetECUConnection();
+  }
+}
+
+_KLine_FrameTransmissionCon(BYTE data[], int64 timestamps[])
+{ 
+  switch (@sysvar::KLineECUSimulation::HeaderFormat)
+  {
+    case DefaultHeader:
+    case FourByteHeader:
+      ResetSimulationBehavior(data[4]);
+      data[4] == 0x50 ?  KLine_SetBaudrate(38400) : 0;
+      data[4] == 0x60 ?  KLine_SetBaudrate(10400) : 0;
+      break;
+    case ThreeByteHeader:
+      ResetSimulationBehavior(data[3]);
+      data[3] == 0x50 ?  KLine_SetBaudrate(38400) : 0;
+      data[3] == 0x60 ?  KLine_SetBaudrate(10400) : 0;
+      break;
+    case TwoByteHeader:
+      ResetSimulationBehavior(data[2]);
+      data[2] == 0x50 ?  KLine_SetBaudrate(38400) : 0;
+      data[2] == 0x60 ?  KLine_SetBaudrate(10400) : 0;
+      break;
+    case OneByteHeader:
+      ResetSimulationBehavior(data[1]);
+      data[1] == 0x50 ?  KLine_SetBaudrate(38400) : 0;
+      data[1] == 0x60 ?  KLine_SetBaudrate(10400) : 0;
+      break;
+  }
+}
+
+// KLine Byte Layer
+_KLine_ByteReceptionInd(BYTE byteIn, int64 endOfByteTime_ns)
+{
+  setTimer(tByteIndResetTimer, 500);
+  @sysvar::KLineECUSimulation::TxByteConfirmed = 0;
+  @sysvar::KLineECUSimulation::RxByteIndicated += 1;  
+}
+
+_KLine_ByteTransmissionCon(BYTE byteIn, int64 endOfByteTime_ns)
+{ 
+  setTimer(tByteConResetTimer, 500); 
+  @sysvar::KLineECUSimulation::TxByteConfirmed += 1;  
+}
+
+// Generic TP Layer
+_Diag_DataRequest( BYTE data[], DWORD count, long furtherSegments)
+{
+  long status;
+  SetPrefix();
+  
+  if (gKLineReplaceByRawFrame)
+  {
+    SendRawResponse(data[0]);
+  }
+  else
+  {
+    KLine_SendFrame(data, count);
+    
+    if (gKLinePatchFrame)
+    {
+      writeLineEx(-3, ERROR, "[%.3f] Response patched. Response send with checksum Error", timenow()/100000.0);
+    }
+  }
+}
+
+
+void SendRawResponse(BYTE rsid)
+{
+  BYTE checksum;
+  // Define raw response
+  BYTE rawResponse[10] = { 0x80, cTesterAddress, cEcuAddress, 0x05 , 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  rawResponse[4] = rsid;
+  checksum = 0x80 + cTesterAddress + cEcuAddress + 0x05 + rsid + 0xFF + 0xFF + 0xFF + 0xFF;
+ 
+  rawResponse[9] = checksum;
+
+  // Send raw response
+  DiagSendResponsePDU(rawResponse, elcount(rawResponse));
+  ResetResponseBehavior();
+  
+  writeLineEx(-3, ERROR, "[%.3f] Send invalid raw response. Response too long", timenow()/100000.0);
+}
+
+on timer tByteIndResetTimer
+{
+	 @sysvar::KLineECUSimulation::RxByteIndicated = 0;
+}
+
+on timer tByteConResetTimer
+{
+	 @sysvar::KLineECUSimulation::TxByteConfirmed = 0;
+}
+
+on sysvar_update sysvar::KLineECUSimulation::P1_Time
+{
+  SetPrefix();
+	
+  if( @this > 20 || @this < 0)
+  {
+    write( "%s: P1 change rejected!", gPrefix);
+    return;
+  }
+  
+  write( "%s: Setting P1 of ECU to %d ms returns %d", gPrefix, @this, KLine_SetP1ECU(@this * 1000));
+}
+
+_Diag_SetChannelParameters()
+{
+  SetPrefix();
+  write( "%s: Set Channel Parameters.", gPrefix);
+}
+
+SetPrefix()
+{
+  snprintf( gPrefix, elcount( gPrefix), "[%.3f] EcuSim", timenow()/100000.0);
+}
+
+void SetResponseBehaviour()
+{
+	switch(@sysvar::KLineECUSimulation::ResponseBehavior)
+  {
+    case 1:
+        gKLinePatchFrame   = 0;
+        gKLineReplaceByRawFrame = 0;
+      break;
+    case 2:
+        gKLinePatchFrame = 1;
+      break;
+    case 3:
+        gKLineReplaceByRawFrame = 1;
+      break;
+    default:
+        gKLinePatchFrame   = 0;
+        gKLineReplaceByRawFrame = 0;
+      break;
+  }
+}
+
+void ResetResponseBehavior()
+{
+  gKLinePatchFrame   = 0;
+  gKLineReplaceByRawFrame = 0;
+}
+

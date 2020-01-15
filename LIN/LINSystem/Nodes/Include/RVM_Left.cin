@@ -1,0 +1,152 @@
+/*@@var:*/
+variables
+{
+  msTimer tMoveTimer;
+  const long kMOVE_PERIOD = 80;
+  const long kMAX_STEPS_PER_COMMAND = 3;
+  const long kINACTIVE = 0;
+  const long kACTIVE   = 1;
+
+
+  long gMoveDirection = 0;
+  long gTimerActive = 0;
+  long gStepsSinceLastCommand = 0;
+  long gMirrorPosition = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:Up():*/
+int Up()
+{
+  if (gMirrorPosition / 8 < 9)
+  {
+    gMirrorPosition += 8;
+    UpdatePositionMessage();
+
+    return gMirrorPosition / 8 < 9;
+  }
+  else
+  {
+    return 0;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:Down():*/
+int Down()
+{
+  if (gMirrorPosition >= 8)
+  {
+    gMirrorPosition -= 8;
+    UpdatePositionMessage();
+
+    return gMirrorPosition >= 8;
+  }
+  else
+  {
+    return 0;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:Left():*/
+int Left()
+{
+  if ((gMirrorPosition % 8) > 0)
+  {
+    --gMirrorPosition;
+    UpdatePositionMessage();
+
+    return (gMirrorPosition % 8) > 0;
+  }
+  else
+  {
+    return 0;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:Right():*/
+int Right()
+{
+  if ((gMirrorPosition % 8) < 7)
+  {
+    ++gMirrorPosition;
+    UpdatePositionMessage();
+
+    return (gMirrorPosition % 8) < 7;
+  }
+  else
+  {
+    return 0;
+  }
+}
+/*@@end*/
+
+/*@@timer:tMoveTimer:*/
+on timer tMoveTimer
+{
+  int canMoveFurther;
+
+  canMoveFurther = 0;
+  switch (gMoveDirection)
+  {
+    case 1: // move left
+      canMoveFurther = Left();
+      break;
+
+    case 2: // move up
+      canMoveFurther = Up();
+      break;
+
+    case 3: // move right
+      canMoveFurther = Right();
+      break;
+
+    case 4: // move down
+      canMoveFurther = Down();
+      break;
+  }
+
+  if (++gStepsSinceLastCommand < kMAX_STEPS_PER_COMMAND && canMoveFurther)
+  {
+    cancelTimer(this);
+    setTimer(this, kMOVE_PERIOD);
+  }
+  else
+  {
+    gTimerActive = 0;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:UpdatePositionMessage():*/
+void UpdatePositionMessage()
+{
+  if ($RVML_MirrorPosition.raw != gMirrorPosition)
+    $RVML_MirrorPosition.raw = gMirrorPosition;
+}
+/*@@end*/
+
+/*@@updateSignal:GWI_MirrorCommandLeft:*/
+on signal_update GWI_MirrorCommandLeft
+{
+  if (this.raw == 0) // don't move
+  {
+    cancelTimer(tMoveTimer);
+    gTimerActive   = kINACTIVE;
+    gMoveDirection = 0;
+  }
+  else if (this.raw >= 1 && this.raw <= 4)
+  {
+    gStepsSinceLastCommand = 0;
+    gMoveDirection = this.raw;
+    if (!gTimerActive)
+    {
+      gTimerActive = kACTIVE;
+      cancelTimer(tMoveTimer);
+      setTimer(tMoveTimer, 0);
+    }
+  }}
+/*@@end*/
+

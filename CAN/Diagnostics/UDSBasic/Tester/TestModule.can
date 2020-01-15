@@ -1,0 +1,149 @@
+/*@!Encoding:1252*/
+// --------------------------------------------------
+// Simple test module for automated tests.
+// For the sake of simplicity, this example omits 
+// security access mechanisms, especially for the
+// write services. In some cases, return parameters
+// are not checked.
+//
+// CANoe 10.0 and higher
+// --------------------------------------------------
+
+includes
+{
+  // As this is a test module, neither including the CAPL callback interface nor adding
+  // the corresponding transport protocol node layer DLL is necessary, because in this case,
+  // the "built-in" diagnostic channel of CANoe can be used.
+}
+
+variables
+{
+  enum bool {true=1, false=0};
+
+  const cAccessModeNumerical=0;
+  const cAccessModePhysical=1;
+  const cAccessModeCoded=2;
+
+  const test_vehicle_Speed_kmh = 40.0;
+  
+  // This timeout is used just to force CANoe to continue, i.e. normally a TestWaitForDiag...
+  // function will return much earlier due to diagnostic level timing!
+  const cApplicationTimeoutMs = 5000; 
+  
+  char gTestIdStr[10];    // Test step ID for test report
+  word gTestCaseIndex=0;
+  word gTestStepIndex=0;
+
+  char gResultString[200]; // String for temporary test step result outputs  
+}
+
+// Set and increment test step ID for test report
+updateTestIdStr()
+{
+  snprintf(gTestIdStr, elcount(gTestIdStr), "%d.%d", gTestCaseIndex, gTestStepIndex);
+}
+
+setTestId(word tcIndex, word tsIndex)
+{
+  gTestCaseIndex=tcIndex;
+  gTestStepIndex=tsIndex;
+  updateTestIdStr();
+}
+
+incTestStepId()
+{
+  gTestStepIndex++;
+  updateTestIdStr();  
+}
+
+word SendRequestAndWaitForResponse(diagRequest *req, enum bool posResponseExpected)
+{
+  long ret;
+
+  // Trigger sending the request
+  if (0 > (ret=req.SendRequest())) { 
+    snprintf(gResultString, elcount(gResultString), "Trigger sending the request failed (Return code=%d)!", ret);
+    testStepFail(gTestIdStr, gResultString);
+    return 0;
+  }
+  testStepPass(gTestIdStr, "Trigger sending the request succeded.");
+
+  incTestStepId();
+  // Wait until the complete request has been sent, e.g. in case of long requests which spread over several messages (segmented message)
+  if (1!=(ret=testWaitForDiagRequestSent(req, cApplicationTimeoutMs))){ 
+    snprintf(gResultString, elcount(gResultString), "Failed to finish sending the request (Return code=%d)!", ret);
+    testStepFail(gTestIdStr, gResultString);
+    return 0;
+  }
+  testStepPass(gTestIdStr, "Request was sent successfully.");
+
+  incTestStepId();
+  // Wait until the complete response has been received, e.g. segmented messages might take some time for transmission
+  if (1!=(ret=testWaitForDiagResponse(req, cApplicationTimeoutMs))) {          
+    snprintf(gResultString, elcount(gResultString), "Valid response missing or received too late (Return code=%d)!", ret);
+    testStepFail(gTestIdStr, gResultString);
+    return 0;
+  }
+  testStepPass(gTestIdStr, "Response received successfully.");
+
+  incTestStepId();
+  // Check whether the response was a positive response
+  if (-1==(ret=diagGetLastResponseCode(req))) {
+    if (!posResponseExpected) {
+      snprintf(gResultString, elcount(gResultString), "Positive response received although negative response was expected!");
+      testStepFail(gTestIdStr, gResultString);
+      return 0;
+    }
+    testStepPass(gTestIdStr, "Positive Response received as expected.");
+  }
+  else if (ret>0) {
+    if (posResponseExpected) {
+      snprintf(gResultString, elcount(gResultString), "Negative response received (NRC=0x%02x) although positive response was expected!", ret);
+      testStepFail(gTestIdStr, gResultString);
+      return 0;
+    }
+    testStepPass(gTestIdStr, "Negative Response received as expected (NRC=%d).", ret);
+  }
+  return 1;
+}
+
+// Check whether writing the vehicle speed parameter is done correctly by reading its value after writing
+testcase tcWriteAndReadVehicleSpeed()
+{
+  diagRequest Door.Variant_Coding_Write req_write;
+  diagRequest Door.Variant_Coding_Read req_read;
+  double ret;
+  word testCaseIndex; 
+  
+  setTestId(1,1);
+  TestStep(gTestIdStr, "Writing variant coding");
+  if (0>req_write.SetParameter(cAccessModePhysical, "Codingstring.VehicleSpeedToLockDoor", test_vehicle_Speed_kmh)) {
+    testStepFail(gTestIdStr, "Could not set parameter 'VehicleSpeedToLockDoor' in write request!");
+  }
+  else {
+    if (0>req_write.SetParameter("Codingstring.VehicleType", "Sedan")) {
+      testStepFail(gTestIdStr, "Could not set parameter 'VehicleType' in write request!");
+    }
+    else {
+      sendRequestAndWaitForResponse(req_write, true);
+    }
+  }
+  incTestStepId();
+  TestStep(gTestIdStr, "Reading variant coding");
+  if (sendRequestAndWaitForResponse(req_read, true)) {
+    incTestStepId();
+    ret=req_read.GetRespParameter(cAccessModePhysical, "Codingstring.VehicleSpeedToLockDoor");
+    if (test_vehicle_Speed_kmh == ret) {
+      testStepPass(gTestIdStr, "VehicleSpeedToLockDoor read as expected!");
+    }
+    else {
+      testStepFail(gTestIdStr, "Read VehicleSpeedToLockDoor value is wrong (value=%f)!", ret);
+    }
+  }
+}
+
+void MainTest ()
+{
+  tcWriteAndReadVehicleSpeed();
+}
+

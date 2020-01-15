@@ -1,0 +1,198 @@
+/*@!Encoding:1252*/
+variables
+{
+  const dword kBufLength = 100000;
+  
+  dword gConnectedListenerHandle[long],
+        gConnectedListenerHandleToListenerHandle[long];
+  
+  dword gClientHandle[long],
+        gFileHandle[long],
+        gMediaTypeHandle;
+}
+
+void OnAvbReceive(dword listenerHandle2, long result, byte buffer[], dword length)
+{
+  dword listenerHandle;
+  int64 startTimeNs;
+      
+  listenerHandle = gConnectedListenerHandleToListenerHandle[listenerHandle2];
+
+  if (result == kAvbInsufficientBuffer)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: insufficient buffer, data truncated...", result);
+  }
+  else if (result == kAvbPresentationTimeLessThanPacketTime)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: presentation time is less than global PTP time at packet reception...", result);
+  }
+  else if (result != 0)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: result is %d", result);
+    Stop();
+    return;
+  }
+  
+  if (gFileHandle[listenerHandle] != kInvalidHandle)
+  {
+    if (gMediaTypeHandle == 0)
+    {   
+      // First frame
+      gMediaTypeHandle = AvbGetMediaType(listenerHandle2);
+      
+      if (CheckHandleAndStopIfError(gMediaTypeHandle, "AvbGetMediaType") != 0)
+      {
+        return;
+      }
+      
+      MediaSetMediaType(gFileHandle[gConnectedListenerHandleToListenerHandle[listenerHandle2]], 0, gMediaTypeHandle);
+      
+      startTimeNs = timeNowNs();
+    }
+      
+    result = MediaWrite(gFileHandle[listenerHandle], 0, timeNowNs() - startTimeNs, buffer, length);
+    
+    if (StopIfError(result, "MediaWrite") != 0)
+    {
+      return;
+    }
+  }
+  
+  Receive(listenerHandle, buffer);
+}
+
+void OnMediaWrite(dword sinkWriterHandle, long result, dword streamIndex, dword streamFlags, byte buffer[], dword length)
+{
+}
+
+void Listener_Accept(dword listenerHandle)
+{
+  dword ret, handle;
+  byte buffer[kBufLength];
+  
+  handle = AvbAccept(listenerHandle);
+  
+  if (CheckHandleAndStopIfError(handle, "AvbAccept") != 0)
+  {
+    return;
+  }
+  
+  gConnectedListenerHandle[listenerHandle] = handle; 
+  gConnectedListenerHandleToListenerHandle[handle] = listenerHandle;
+  
+  Receive(listenerHandle, buffer);
+}
+
+dword Listener_Start(char onListenCallback[], dword& listenerHandle)
+{
+  long ret;
+  dword fileHandle, audioRendererHandle;
+    
+  ret = AvbSetProperty("StreamReservation", 0);
+    
+  if (StopIfError(ret, "AvbSetProperty") != 0)
+  {
+    return kInvalidHandle;
+  }
+  
+  listenerHandle = AvbOpenListener();
+    
+  if (CheckHandleAndStopIfError(listenerHandle, "AvbOpenListener") != 0)
+  {
+    return kInvalidHandle;
+  }
+  
+  gClientHandle[listenerHandle] = listenerHandle;
+    
+  audioRendererHandle = MediaCreateAudioRenderer();
+  
+  if (audioRendererHandle != kInvalidHandle)
+  {
+    fileHandle = MediaCreateSinkWriterFromMediaSink(audioRendererHandle);
+     
+    if (CheckHandleAndStopIfError(fileHandle, "MediaCreateSinkWriterFromMediaSink") != 0)
+    {
+      return kInvalidHandle;
+    }
+    
+    gFileHandle[listenerHandle] = fileHandle;
+  
+    ret = MediaReleaseAudioRenderer(audioRendererHandle);
+    
+    if (StopIfError(ret, "MediaReleaseAudioRenderer") != 0)
+    {
+      return kInvalidHandle;
+    }
+  }
+  else
+  {
+    write("Please attach a speaker or headphone to playback audio.");
+  }
+  
+  return AvbListen(listenerHandle, onListenCallback);
+}
+
+dword Listener_Stop(dword listenerHandle)
+{
+  long ret;
+  
+  gMediaTypeHandle = kInvalidHandle;
+     
+  if (gFileHandle[listenerHandle] != kInvalidHandle)
+  {   
+    ret = MediaReleaseSinkWriter(gFileHandle[listenerHandle]);
+
+    if (StopIfError(ret, "MediaReleaseSinkWriter") != 0)
+    {
+      return ret;
+    }
+    
+    gFileHandle[listenerHandle] = kInvalidHandle;
+  }
+  
+  if (gConnectedListenerHandle[listenerHandle] != 0)
+  {
+    ret = AvbCloseListener(gConnectedListenerHandle[listenerHandle]);
+    
+    if (StopIfError(ret, "AvbCloseListener") != 0)
+    {
+      return ret;
+    }
+  
+    gConnectedListenerHandle[listenerHandle] = kInvalidHandle;
+  }
+  
+  if (gClientHandle[listenerHandle] != 0)
+  {
+    ret = AvbCloseListener(gClientHandle[listenerHandle]);
+    
+    if (StopIfError(ret, "AvbCloseListener") != 0)
+    {
+      return ret;
+    }
+  
+    gClientHandle[listenerHandle] = kInvalidHandle;
+  }
+  
+  return 0;
+}
+
+void Receive(dword listenerHandle, byte buffer[])
+{
+  long ret;
+  dword length;
+  
+  length = elCount(buffer);
+  
+  ret = AvbReceive(gConnectedListenerHandle[listenerHandle], buffer, length, "OnAvbReceive");
+  
+  if (StopIfError(ret, "AvbReceive") != kAvbOK)
+  {
+    return;
+  }
+  
+  if (ret != kAvbIoPending)
+  {
+    OnAvbReceive(gConnectedListenerHandle[listenerHandle], ret, buffer, length);
+  }
+}

@@ -1,0 +1,153 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "Diagnostics/CCI_CanTp.cin"
+}
+
+variables
+{
+  // Global variables needed for CAPL Callback Interface (CCI)
+  char gECU[10] = "ECU";
+  int cIsTester=0;
+  // Flag to determine the data transfer sequence
+  int gIsSecondDataTransfer=0;
+}
+
+on start
+{
+  // do not show all the write messages on level 1
+  setWriteDbgLevel(0);
+}
+
+
+/*
+ * Simulate responses to known vFlash Requests
+ * (do not parse requests in detail...)
+ */
+on diagRequest DiagnosticSessionControl_Process
+{
+  diagResponse this resp;
+  byte buffer[6] = {0x50, 0x03, 0x00, 0x64, 0x01, 0xF4};
+  
+  diagResize(resp, elcount(buffer));
+  diagSetPrimitiveData(resp, buffer, elcount(buffer));
+  
+  if (0x02==DiagGetPrimitiveByte(this,1)) {
+    DiagSetPrimitiveByte(resp, 1, 0x02);
+  }
+
+  diagSendPositiveResponse(resp);
+}
+
+
+on diagRequest SecurityAccess_Process
+{
+  diagResponse this resp;
+  byte buffer[6] = {0x67, 0x11, 0x0E, 0x1E, 0x91, 0x3B};
+
+  if (0x12==DiagGetPrimitiveByte(this,1)) {
+    diagResize(resp, 2);
+    DiagSetPrimitiveByte(resp, 1, 0x12);
+  }
+  else {
+    diagResize(resp, elcount(buffer));
+    diagSetPrimitiveData(resp, buffer, elcount(buffer));
+  }
+
+  diagSendPositiveResponse(resp);
+}
+
+
+on diagRequest WriteDataByIdentifier_Process
+{
+  diagResponse this resp;
+  byte buffer[3] = {0x6E, 0xF1, 0x5A};
+
+  diagResize(resp, elcount(buffer));
+  diagSetPrimitiveData(resp, buffer, elcount(buffer));
+
+  diagSendPositiveResponse(resp);
+}
+
+
+
+on diagRequest RequestDownload_Process
+{
+  diagResponse this resp;
+  byte buffer[4] = {0x74, 0x20, 0x0F, 0xFA};
+
+  diagResize(resp, elcount(buffer));
+  diagSetPrimitiveData(resp, buffer, elcount(buffer));
+
+  diagSendPositiveResponse(resp);
+}
+
+
+on diagRequest TransferData_Process
+{
+  diagResponse this resp;
+  char blockID;
+  
+  blockID=diagGetPrimitiveByte(this, 1);
+  diagResize(resp, 2);
+  DiagSetPrimitiveByte(resp, 1, blockID);
+
+  diagSendPositiveResponse(resp);
+}
+
+
+on diagRequest RequestTransferExit_Process
+{
+  diagResponse this resp;
+
+  diagSendPositiveResponse(resp);
+}
+
+
+on diagRequest RoutineControl_Process
+{
+  diagResponse this resp;
+  byte buffer_RoutineID_02[5] = {0x71, 0x01, 0x02, 0x02, 0x00};
+  byte buffer_RoutineID_FF_Seq1[5] = {0x71, 0x01, 0xFF, 0x00, 0x00};
+  byte buffer_RoutineID_FF_Seq2[5] = {0x71, 0x01, 0xFF, 0x01, 0x00};
+
+  if (DiagGetPrimitiveByte(this,2)==0x02) {   // If Routine ID == 0x2 use corresponding buffer
+    diagResize(resp, elcount(buffer_RoutineID_02));
+    diagSetPrimitiveData(resp, buffer_RoutineID_02, elcount(buffer_RoutineID_02));
+  }
+  else {                                      
+    if (gIsSecondDataTransfer) {             // Assume Routine ID == 0xFF and use buffer depending on data transfer sequence
+      diagResize(resp, elcount(buffer_RoutineID_FF_Seq2));
+      diagSetPrimitiveData(resp, buffer_RoutineID_FF_Seq2, elcount(buffer_RoutineID_FF_Seq2));
+      gIsSecondDataTransfer=0;
+    }
+    else {
+      diagResize(resp, elcount(buffer_RoutineID_FF_Seq1));
+      diagSetPrimitiveData(resp, buffer_RoutineID_FF_Seq1, elcount(buffer_RoutineID_FF_Seq1));
+      gIsSecondDataTransfer=1;
+    }
+  }
+
+  diagSendPositiveResponse(resp);
+}
+
+
+on diagRequest TesterPresent_Process
+{
+  diagResponse this resp;
+  
+  diagSendPositiveResponse(resp);
+}
+
+
+on diagRequest EcuReset_Process
+{
+  diagResponse this resp;
+  char rstType;
+  
+  rstType=diagGetPrimitiveByte(this, 1);
+  diagResize(resp, 2);
+  DiagSetPrimitiveByte(resp, 1, rstType);
+
+  diagSendPositiveResponse(resp);
+}

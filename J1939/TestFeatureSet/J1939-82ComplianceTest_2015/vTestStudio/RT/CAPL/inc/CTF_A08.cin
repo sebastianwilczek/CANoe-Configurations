@@ -1,0 +1,4538 @@
+/*@!Encoding:1252*/
+/*@!Encoding:1252*/
+includes
+{
+  #include "RT_checks.cin"
+}
+
+variables
+{
+}
+
+// ==============================================================================================================
+// functionality of the test A8 01
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react (timeout) (FAIL)
+// 3: DUT seems not to inspect PGN including DP/EDP bits in CTS/Abort. (FAIL)
+// 4: DUT unexpectedly aborts RTS->CTS. (FAIL)
+// 5: DUT does not abort RTS->Abort (FAIL)
+// 6: CTS error (FAIL)
+// 7: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_01_TP_Receive_RTS(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  char reportText[1024];
+  char errText[1024];
+  char expectedAnswerText[20];
+  byte ok;
+  dword pgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  byte expectAbort;
+  
+  // RTS->CTS or RTS->Abort pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(7, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) && !CT_IsRTSAbort(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(7, pgis[k], "RTS->CTS or RTS->Abort");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    expectAbort = (pgis[k].RTS != gRTSCTS);
+    snprintf(expectedAnswerText, elcount(expectedAnswerText), "CTS");
+    if (expectAbort) snprintf(expectedAnswerText, elcount(expectedAnswerText), "Abort");
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/3 Start RTS...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Check RTS -> %s...", expectedAnswerText);
+    CT_STEP_BEGIN(-3, reportText);
+    // ---------------------------------------------------------------------------------------------------------------------
+    // 0: OK
+    // 1: CTS Timeout
+    // 2: CTS Error: Number of packets that can be sent error.
+    // 3: CTS Error: Next packet number to be send error.
+    // 4: EOM Timeout
+    // 5: EOM Error: Total message size error.
+    // 6: responder sent abort.
+    // 7: Dut declined with abort. (answer in pgOutLastCTS)
+    // 8: Sending TP.DT error.
+    // 9: Multiple CTS or CTS within transport error.
+    tpChkRes = CT_Check_TP_AsOriginator(   toolAddr, dutAddr            //   byte originatorAddr, byte responderAddr
+                                         , pgn                          // , dword pgn
+                                         , 0                            // , byte pgnTest
+                                         , 52                           // , byte messageSize
+                                         , 255                          // , byte rtsMaxPkgs
+                                         , pgRTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                         , pgCTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                         , pgFirstDT                    // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                         , pgLastDT                     // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                         , pgEOM                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                         , 50                           // , word dtDistance
+                                         , 1                            // , useDefaultDtPrio
+                                         , errText);                    // , char errText[])
+    
+    // write("tpChkRes=%d, expectAbort=%d",tpChkRes, expectAbort);
+    switch(tpChkRes)
+    {
+      case 0: break;
+      case 1:
+      {
+        CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // wait to synchronize with trace warnings...
+        CT_STEP_END_FAIL(2, errText);
+        return; // leave on fail
+      }
+      case 6: /* fallthrough */
+      case 7:
+      {
+        if (!expectAbort)
+        {
+          CT_STEP_END_FAIL(4,"DUT unexpectedly aborts RTS->CTS.");
+          return; // leave on fail
+        }
+        break;
+      }
+      case 9: CT_STEP_END_FAIL(6, errText); return; // leave on fail.
+        
+      default:
+      {
+        //write("tpChkRes = %d",tpChkRes);
+        CT_WAIT(gc_TIMEOUT_T3); // on any case not related to this case, await a T3 timeout.
+        break;
+      }
+    }
+    CT_STEP_END_PASS(0);
+    
+    CT_WAIT(1);
+    // ====================
+    // step 2/3 Checking response...
+    // ====================
+    CT_STEP_BEGIN("Checking response...");
+    
+    // check pgn in pgCTS... (nevertheless if this is the CTS or the Abort... PGN must fit...)
+    if (pgCTS.PGNumber != pgn)
+    {
+      snprintf(reportText, elcount(reportText), "DUT seems not to inspect PGN including DP/EDP bits in %s. (expected: 0x%.05X, got: 0x%.05X)", expectedAnswerText, pgn, pgCTS.PGNumber);
+      CT_STEP_END_FAIL(3, reportText);
+      return; // leave on fail
+    }
+    
+    // check DUT declined if PGI is configured to be RTS->Abort
+    if ( expectAbort && (pgCTS.ControlByte != gc_TPCM_CTRL_WORD_ABORT) )
+    {
+      CT_STEP_END_FAIL(5, "DUT does not abort RTS->Abort");
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    
+    CT_WAIT(1);
+    // ====================
+    // step 3/3 Checking DP / EDP bits
+    // ====================
+    CT_STEP_BEGIN("Checking DP / EDP bits");
+    for (i=1; i<=2; i++)
+    {
+      dword bits;
+      bits=i*0x10000;
+      // ---------------------------------------------------------------------------------------------------------------------
+      // 0: OK
+      // 1: CTS Timeout
+      // 2: CTS Error: Number of packets that can be sent error.
+      // 3: CTS Error: Next packet number to be send error.
+      // 4: EOM Timeout
+      // 5: EOM Error: Total message size error.
+      // 6: responder sent abort.
+      // 7: Dut declined with abort. (answer in pgOutLastCTS)
+      // 8: Sending TP.DT error.
+      // 9: Multiple CTS or CTS within transport error.
+      tpChkRes = CT_Check_TP_AsOriginator(   toolAddr, dutAddr            //   byte originatorAddr, byte responderAddr
+                                           , pgn|bits                     // , dword pgn
+                                           , 0                            // , byte pgnTest
+                                           , 52                           // , byte messageSize
+                                           , 255                          // , byte rtsMaxPkgs
+                                           , pgRTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                           , pgCTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                           , pgFirstDT                    // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                           , pgLastDT                     // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                           , pgEOM                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                           , 50                           // , word dtDistance
+                                           , 1                            // , useDefaultDtPrio
+                                           , errText);                    // , char errText[])
+      //write("tpChkRes = %d", tpChkRes);
+      if (tpChkRes == 1)
+      {
+        CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // wait to synchronize with trace warnings...
+        CT_STEP_END_FAIL(2, errText);
+        CT_WAIT(gc_TIMEOUT_T3);
+        return; // leave on fail
+      }
+      if (tpChkRes == 4)
+      {
+        CT_WAIT(gc_TIMEOUT_T3);
+      }
+      
+      // check pgn in pgCTS... (nevertheless if this is the CTS or the Abort... PGN must fit...)
+      if (pgCTS.PGNumber != (pgn|bits))
+      {
+        CT_WAIT(gc_TIMEOUT_T3);
+        snprintf(reportText, elcount(reportText), "DUT seems not to inspect PGN including DP/EDP bits. (expected: 0x%.05X, got: 0x%.05X)", pgn|bits, pgCTS.PGNumber);
+        CT_STEP_END_FAIL(3, reportText);
+        return; // leave on fail
+      }
+    }
+    
+    CT_STEP_END_PASS(1);
+    
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A8 02
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react (timeout) (FAIL)
+// 3: CTS: 'Next packet number to be sent' error (FAIL)
+// 4: DUT unexpectedly aborts RTS->CTS. (FAIL)
+// 5: DUT sends CTS to global address. (FAIL)
+// 6: CTS: 'Number of packets that can be sent' is not less than or equal to the smaller of the 'Total number of packets' and 'Maximum number of packets' in RTS. (FAIL)
+// 7: CTS error. (FAIL)
+// 8: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_02_TP_Receive_RTS_Validate_CTS(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(8, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(8, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/1 Start RTS...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Check RTS -> CTS...");
+    stepTime = CT_STEP_BEGIN(-1, reportText);
+    // ---------------------------------------------------------------------------------------------------------------------
+    // 0: OK
+    // 1: CTS Timeout
+    // 2: CTS Error: Number of packets that can be sent error.
+    // 3: CTS Error: Next packet number to be send error.
+    // 4: EOM Timeout
+    // 5: EOM Error: Total message size error.
+    // 6: responder sent abort.
+    // 7: DUT declined with abort. (answer in pgOutLastCTS)
+    // 8: Sending TP.DT error.
+    // 9: Multiple CTS or CTS within transport error.
+    tpChkRes = CT_Check_TP_AsOriginator(   toolAddr, dutAddr            //   byte originatorAddr, byte responderAddr
+                                         , pgn                          // , dword pgn
+                                         , 1                            // , byte pgnTest
+                                         , 52                           // , byte messageSize
+                                         , 255                          // , byte rtsMaxPkgs
+                                         , pgRTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                         , pgCTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                         , pgFirstDT                    // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                         , pgLastDT                     // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                         , pgEOM                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                         , 50                           // , word dtDistance
+                                         , 1                            // , useDefaultDtPrio
+                                         , errText);                    // , char errText[])
+    
+    //write("tpChkRes=%d",tpChkRes);
+    switch(tpChkRes)
+    {
+      case 0: break;
+      case 1:
+      {
+        // CTS timeout...
+        // a) check if DUT sent an CTS to global address...
+        if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dutAddr, gc_BC_ADDR, gc_TPCM_CTRL_WORD_CTS, pgn))
+        {
+          snprintf(reportText, elcount(reportText), "DUT sends CTS to global address at t=%.05f", CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+          CT_STEP_END_FAIL(5, reportText);
+          return; // leave on fail.
+        }
+        
+        // b) no CTS found at all... this is an timeout error.
+        CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // wait to synchronize with trace warnings...
+        CT_STEP_END_FAIL(2, errText);
+        return; // leave on fail
+      }
+      case 2: CT_STEP_END_FAIL(6, errText); return;
+      case 3: CT_STEP_END_FAIL(3, errText); return;
+      case 6: /* fallthrough */
+      case 7:
+      {
+        CT_STEP_END_FAIL(4,"DUT unexpectedly aborts RTS->CTS.");
+        return; // leave on fail
+      }
+      case 9: CT_STEP_END_FAIL(7, errText); return;
+      default:
+      {
+        //write("tpChkRes = %d",tpChkRes);
+        CT_WAIT(gc_TIMEOUT_T3); // on any case not related to this case, await a T3 timeout.
+        break;
+      }
+    }
+    
+    CT_STEP_END_PASS(1);
+    
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A8 03
+// FuncPath's:
+//  1: DUT reacts as expected. (PASS)
+//  2: DUT does not react (timeout) (FAIL)
+//  3: DUT responds with multiple / unexpected TP.CM_CTS messages (FAIL)
+//  4: DUT unexpectedly aborts RTS->CTS. (INCONCLUSIVE)
+//  5: DUT sends CTS to global address. (FAIL)
+//  6: DUT does not use the most recent RTS. (J1939-21, 5.10.3.1) (FAIL) 
+//  7: DUT does not send TP.CM_EndOfMsgACK (FAIL)
+//  8: Sending TP.DT error (FAIL)
+//  9: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_03_TP_Receive_Multiple_RTS(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  dword pgn;
+  byte ok;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS1;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS2;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;
+  word i;
+  byte tpdtLatency;
+  byte rtsMsgBytes;
+  byte dtDistance;
+  byte eomTimeout;
+  
+  tpdtLatency = 150;
+  rtsMsgBytes = 52;
+  dtDistance = 5;
+  
+  // PRECONDITIONS...
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(9, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(9, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+        
+    // ====================
+    // step 1/2 Send 2 RTS as quick as possible
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    snprintf(reportText, elcount(reportText), "Send 2 RTS as quick as possible...");
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+    
+    // send one extranous RTS with no wait...
+    CT_SendRTS(pgRTS1, pgn, toolAddr, dutAddr, rtsMsgBytes-1, 1); // last 1 is nowait flag.
+    
+    // immediately start a transport using the originator managing function...
+    // ---------------------------------------------------------------------------------------------------------------------
+    // 0: OK
+    // 1: CTS Timeout
+    // 2: CTS Error: Number of packets that can be sent error.
+    // 3: CTS Error: Next packet number to be send error.
+    // 4: EOM Timeout
+    // 5: EOM Error: Total message size error.
+    // 6: responder sent abort.
+    // 7: DUT declined with abort. (answer in pgOutLastCTS)
+    // 8: Sending TP.DT error.
+    // 9: Multiple CTS or CTS within transport error.
+    tpChkRes = CT_Check_TP_AsOriginator(   toolAddr, dutAddr            //   byte originatorAddr, byte responderAddr
+                                         , pgn                          // , dword pgn
+                                         , 1                            // , byte pgnTest
+                                         , rtsMsgBytes                  // , byte messageSize
+                                         , 255                          // , byte rtsMaxPkgs
+                                         , pgRTS2                       // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                         , pgCTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                         , pgFirstDT                    // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                         , pgLastDT                     // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                         , pgEOM                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                         , dtDistance                   // , word dtDistance
+                                         , 1                            // , useDefaultDtPrio
+                                         , errText);                    // , char errText[])
+
+    // write("tpChkRes=%d, expectAbort=%d",tpChkRes, expectAbort);
+    eomTimeout = 0;
+    switch(tpChkRes)
+    {
+      case 0: break;
+      case 1:
+      {
+        // CTS timeout...
+        // a) check if DUT sent an CTS to global address...
+        if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dutAddr, gc_BC_ADDR, gc_TPCM_CTRL_WORD_CTS, pgn))
+        {
+          snprintf(reportText, elcount(reportText), "DUT sends CTS to global address at t=%.06f", CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+          CT_STEP_END_FAIL(5, reportText);
+          return; // leave on fail.
+        }
+        
+        // b) no CTS found at all... this is an timeout error.
+        CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // wait to synchronize with trace warnings...
+        CT_STEP_END_FAIL(2, errText);
+        return; // leave on fail
+      }
+      case 2: /* ignore CTS error */; break;
+      case 3: /* ignore CTS error */; break;
+      
+      case 4: 
+      {
+        eomTimeout=1;
+        break; // just continue, due we want to check the multiple CTS before a EOM timeout.
+      }
+      case 5: /* ignore EOM error */; break;
+        
+      case 6:
+      case 7:
+      {
+        CT_STEP_END_INCONCLUSIVE(4,"DUT unexpectedly aborts RTS->CTS. It's ok to reject an RTS, but this PGN is configured with the RTS->CTS flag, and not the RTS->Abort flag. The test can't decide this case, due for a decision the DUT has to accept the connection.");
+        return; // leave on fail
+      }
+      
+      case 8: CT_STEP_END_FAIL(8, errText); return;
+      case 9: CT_STEP_END_FAIL(3, errText); return;
+    }
+    
+    CT_STEP_END_PASS(0);
+    CT_WAIT(1);
+        
+    // ====================
+    // step 2/2 Checking TP.CM_EndOfMsgACK
+    // ====================
+    CT_STEP_BEGIN("Checking TP.CM_EndOfMsgACK...");
+    if (eomTimeout)
+    {
+        CT_WAIT(gc_TIMEOUT_T3); // sync to trace
+        CT_STEP_END_FAIL(7, errText);
+        return; // leave on fail.
+    }
+    
+    // Check the EOM that the last recent RTS was used (compare the message sizes)
+    if (pgEOM.TotalMessageSizeEoMA != pgRTS2.TotalMessageSize)
+    {
+      snprintf(reportText, elcount(reportText), "DUT does not use the most recent RTS at t=%.06f. (see J1939-21, 5.10.3.1). EoM message size: %d, most recent RTS message size: %d", CT_Ns2Sec(pgRTS2.time_ns), pgEOM.TotalMessageSizeEoMA, pgRTS2.TotalMessageSize);
+      CT_STEP_END_FAIL(6, reportText);
+      return; // leave on fail.
+    }
+
+    CT_WAIT(gc_TIMEOUT_T3);
+    
+    CT_STEP_END_PASS(1);
+    
+  } // end pgn loop (CT_LOOP)
+
+}
+
+// ==============================================================================================================
+// functionality of the test A8 04 and A8 05
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react (timeout) (FAIL)
+// 3: DUT sends wrong PGN in abort (FAIL)
+// 4: DUT does not reject the connection. (FAIL)
+// 5: DUT sends Abort to global address. (FAIL)
+// 6: DUT sends an abort reason out of expected range [1..5] (FAIL)
+// 7: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_COMBI_04_TO_05(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgAbort;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // RTS->Abort pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(7, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSAbort(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(7, pgis[k], "RTS->Abort");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/2 Start RTS...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Check RTS -> Abort...");
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+    // ---------------------------------------------------------------------------------------------------------------------
+    // 0: OK
+    // 1: CTS Timeout
+    // 2: CTS Error: Number of packets that can be sent error.
+    // 3: CTS Error: Next packet number to be send error.
+    // 4: EOM Timeout
+    // 5: EOM Error: Total message size error.
+    // 6: responder sent abort.
+    // 7: Dut declined with abort. (answer in pgOutLastCTS)
+    // 8: Sending TP.DT error.
+    // 9: Multiple CTS or CTS within transport error.
+    tpChkRes = CT_Check_TP_AsOriginator(   toolAddr, dutAddr            //   byte originatorAddr, byte responderAddr
+                                         , pgn                          // , dword pgn
+                                         , 0                            // , byte pgnTest
+                                         , 52                           // , byte messageSize
+                                         , 255                          // , byte rtsMaxPkgs
+                                         , pgRTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                         , pgCTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                         , pgFirstDT                    // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                         , pgLastDT                     // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                         , pgEOM                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                         , 50                           // , word dtDistance
+                                         , 1                            // , useDefaultDtPrio
+                                         , errText);                    // , char errText[])
+    
+    // write("tpChkRes=%d, expectAbort=%d",tpChkRes, expectAbort);
+    switch(tpChkRes)
+    {
+      case 4: /* eom timeout - fallthrough */ CT_WAIT(gc_TIMEOUT_T3);
+      case 0:
+      {
+        snprintf(reportText, elcount(reportText), "DUT does not abort/reject the connection for RTS at t=%.06f ",CT_Ns2Sec(pgRTS.time_ns));
+        CT_STEP_END_FAIL(4, reportText);
+        return; // leave on fail.
+      }
+      case 1:
+      {
+        // CTS timeout...
+        // a) check if DUT sent an Abort to global address...
+        if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dutAddr, gc_BC_ADDR, gc_TPCM_CTRL_WORD_ABORT, pgn))
+        {
+          snprintf(reportText, elcount(reportText), "DUT sends Abort to global address at t=%.06f", CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+          CT_STEP_END_FAIL(5, reportText);
+          return; // leave on fail.
+        }
+        
+        // b) no CTS found at all... this is an timeout error.
+        CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // wait to synchronize with trace warnings...
+        CT_STEP_END_FAIL(2, errText);
+        return; // leave on fail
+      }
+      case 2: /* ignore */; break;
+      case 3: /* ignore */; break;
+      case 5: /* ignore */; break;
+      case 6: /* ignore */; break;
+      case 7: break; // this is the expected result...
+    }
+    
+    CT_STEP_END_PASS(0);
+    CT_WAIT(1);
+
+    pgAbort = pgCTS;
+    
+    // ====================
+    // step 2/2 Checking DUT's abort answer...
+    // ====================
+    CT_STEP_BEGIN("Checking DUT's abort answer...");
+
+    // 3: DUT sends wrong PGN in abort (FAIL)
+    if (pgAbort.PGNumber != pgn)
+    {
+      snprintf(reportText, elcount(reportText), "Abort at t=%.06f: DUT sends wrong PGN in abort. Expected: 0x%X, Got: 0x%X", CT_Ns2Sec(pgAbort.time_ns), pgn, pgAbort.PGNumber);
+      CT_STEP_END_FAIL(3, reportText);
+      return; // leave on fail.
+    }
+    
+    // 5: DUT sends Abort to global address. (FAIL)
+    if (pgAbort.da == gc_BC_ADDR)
+    {
+      snprintf(reportText, elcount(reportText), "Abort at t=%.06f: DUT sends Abort to global address.",CT_Ns2Sec(pgAbort.time_ns));
+      CT_STEP_END_FAIL(5, reportText);
+      return; // leave on fail.
+    }
+    
+    // 6: DUT sends an abort reason out of expected range [1..5] (FAIL)
+    if (!CT_InRange( (byte)pgAbort.ConnectionAbortReason, (byte)1, (byte)5 ))
+    {
+      snprintf(reportText, elcount(reportText), "Abort at t=%.06f: DUT sends unexpected abort reason %d out of expected range [1..5].",CT_Ns2Sec(pgAbort.time_ns), pgAbort.ConnectionAbortReason);
+      CT_STEP_END_FAIL(6, reportText);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+
+
+
+// ==============================================================================================================
+void CTF_A08_04_TP_Receive_RTS_Rejection(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  CTF_A08_COMBI_04_TO_05(toolAddr, dutAddr, pgis);
+}
+
+// ==============================================================================================================
+void CTF_A08_05_TP_Receive_RTS_Unsupported(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  CTF_A08_COMBI_04_TO_05(toolAddr, dutAddr, pgis);
+}
+
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A8 06
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not abort the connection. (FAIL)
+// 3: DUT sends Abort to global address. (FAIL)
+// 4: DUT sends abort on RTS sent to global address (FAIL)
+// 5: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_06_TP_Receive_RTS_Invalid(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn;
+  word i;
+  word messageSize;
+  byte wrongNrOfPkgs;
+  pg J1939::J1939_CT_RT::TPCMxx pgAbort;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  
+  // RTS->* pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(5, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/4 Send RTS with invalid package size
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Send RTS with invalid number of packets and await abort within Tr(200ms)");
+    stepTime = CT_STEP_BEGIN(-4, reportText);
+    messageSize = 52;
+    wrongNrOfPkgs = 3;
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, messageSize, wrongNrOfPkgs, 255, WF_WAIT);
+    if (CT_AWAIT_ABORT(pgAbort, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR) == 1)
+    {
+      // abort timeout.
+      // check if the abort was sent to global address...
+      if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dutAddr, gc_BC_ADDR, gc_TPCM_CTRL_WORD_ABORT, pgn))
+      {
+        snprintf(reportText, elcount(reportText), "DUT sends Abort to global address at t=%.06f", CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+        CT_WAIT(gc_TIMEOUT_T3);
+        CT_STEP_END_FAIL(3, reportText);
+        return; // leave on fail.
+      }
+      // no gobal abort found. comply about missing abort.
+      snprintf(reportText, elcount(reportText), "DUT does not abort the connection for invalid RTS at t=%.06f within Tr(200 ms)",CT_Ns2Sec(pgRTS.time_ns));
+      CT_STEP_END_FAIL(2, reportText);
+      return; // leave on fail.
+    }
+    
+    CT_WAIT(1); // Wait before the next RTS...
+    CT_STEP_END_PASS(0);    
+
+    // ====================
+    // step 2/4 Send RTS with message size <9
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Send RTS with message size <9 and await abort within Tr(200ms)");
+    stepTime = CT_STEP_BEGIN(reportText);
+    messageSize = 8;
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, messageSize, 255, WF_WAIT);
+    if (CT_AWAIT_ABORT(pgAbort, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR) == 1)
+    {
+      // abort timeout.
+      // check if the abort was sent to global address...
+      if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dutAddr, gc_BC_ADDR, gc_TPCM_CTRL_WORD_ABORT, pgn))
+      {
+        snprintf(reportText, elcount(reportText), "DUT sends Abort to global address at t=%.06f", CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+        CT_WAIT(gc_TIMEOUT_T3);
+        CT_STEP_END_FAIL(3, reportText);
+        return; // leave on fail.
+      }
+      // no gobal abort found. comply about missing abort.
+      snprintf(reportText, elcount(reportText), "DUT does not abort the connection for invalid RTS at t=%.06f within Tr(200 ms)",CT_Ns2Sec(pgRTS.time_ns));
+      CT_STEP_END_FAIL(2, reportText);
+      return; // leave on fail.
+    }
+    
+    CT_WAIT(1); // Wait before the next RTS...
+    CT_STEP_END_PASS(0);    
+
+    // ====================
+    // step 3/4 Send RTS with message size >1785
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Send RTS with message size >1785 and await abort within Tr(200ms)");
+    stepTime = CT_STEP_BEGIN(reportText);
+    messageSize = 1786;
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, messageSize, 255, WF_WAIT);
+    if (CT_AWAIT_ABORT(pgAbort, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR) == 1)
+    {
+      // abort timeout.
+      // check if the abort was sent to global address...
+      if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dutAddr, gc_BC_ADDR, gc_TPCM_CTRL_WORD_ABORT, pgn))
+      {
+        snprintf(reportText, elcount(reportText), "DUT sends Abort to global address at t=%.06f", CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+        CT_WAIT(gc_TIMEOUT_T3);
+        CT_STEP_END_FAIL(3, reportText);
+        return; // leave on fail.
+      }
+      // no gobal abort found. comply about missing abort.
+      snprintf(reportText, elcount(reportText), "DUT does not abort the connection for invalid RTS at t=%.06f within Tr(200 ms)",CT_Ns2Sec(pgRTS.time_ns));
+      CT_STEP_END_FAIL(2, reportText);
+      return; // leave on fail.
+    }
+    
+    // DUT sent abort...
+    CT_WAIT(1); // Wait before the next RTS...
+    CT_STEP_END_PASS(1);
+    
+    // ====================
+    // step 4/4 Send RTS to global address -> DUT shall not abort this!
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Send RTS to global address -> DUT shall not abort within T3(1250ms) + Tr(200ms) ");
+    stepTime = CT_STEP_BEGIN(reportText);
+    messageSize = 52;
+    CT_SendRTS(pgRTS, pgn, toolAddr, gc_BC_ADDR, messageSize, 255, WF_WAIT);
+    if (CT_AWAIT_ABORT(pgAbort, pgn, dutAddr, gc_ANY_ADDR, gc_TIMEOUT_T3 + gc_TIMEOUT_TR) == 0)
+    {
+      snprintf(reportText, elcount(reportText), "DUT sends abort at t=%.06f on RTS sent to global address at t=%.06f", CT_Ns2Sec(pgAbort.time_ns), CT_Ns2Sec(pgRTS.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3);
+      CT_STEP_END_FAIL(4, reportText);
+      return; // leave on fail.
+    }
+    
+    CT_WAIT(1); // Wait before the next RTS...
+    CT_STEP_END_PASS(1);
+    
+  } // end CT-LOOP
+}
+
+
+// ==============================================================================================================
+// functionality of the test A8 07
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react (timeout) (FAIL)
+// 3: DUT declined with abort. (FAIL)
+// 4: Next packet number to be send error (FAIL)
+// 5: Other TP error (FAIL)
+// 6: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_07_TP_Send_CTS_Numbering(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgAbort;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(5, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/1 Check CTS numbering during TP...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Check CTS numbering during TP...");
+    stepTime = CT_STEP_BEGIN(-1, reportText);
+    // ---------------------------------------------------------------------------------------------------------------------
+    // 0: OK
+    // 1: CTS Timeout
+    // 2: CTS Error: Number of packets that can be sent error.
+    // 3: CTS Error: Next packet number to be send error.
+    // 4: EOM Timeout
+    // 5: EOM Error: Total message size error.
+    // 6: responder sent abort.
+    // 7: Dut declined with abort. (answer in pgOutLastCTS)
+    // 8: Sending TP.DT error.
+    // 9: Multiple CTS or CTS within transport error.
+    tpChkRes = CT_Check_TP_AsOriginator(   toolAddr, dutAddr            //   byte originatorAddr, byte responderAddr
+                                         , pgn                          // , dword pgn
+                                         , 0                            // , byte pgnTest
+                                         , 52                           // , byte messageSize
+                                         , 3                            // , byte rtsMaxPkgs
+                                         , pgRTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                         , pgCTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                         , pgFirstDT                    // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                         , pgLastDT                     // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                         , pgEOM                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                         , 50                           // , word dtDistance
+                                         , 1                            // , useDefaultDtPrio
+                                         , errText);                    // , char errText[])
+    
+    // write("tpChkRes=%d, expectAbort=%d",tpChkRes, expectAbort);
+    if (tpChkRes != 0) CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // wait to synchronize with trace warnings...
+    switch(tpChkRes)
+    {
+      case 0: break; // OK
+      case 1:
+      {
+        // CTS timeout...
+        
+        CT_STEP_END_FAIL(2, errText);
+        return; // leave on fail
+      }
+      case 3:
+      {
+        // Next packet number error.
+        CT_STEP_END_FAIL(4, errText);
+        return; // leave on fail
+      }
+      case 7:
+      {
+        // Dut declined with abort.
+        CT_STEP_END_FAIL(3, errText);
+        return; // leave on fail
+      }
+      default:
+      {
+        CT_STEP_END_FAIL(5, errText);
+        return; // leave on fail.
+      }
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(1);
+
+  } // end CT-LOOP
+}
+
+
+// ==============================================================================================================
+// functionality of the test A8 08
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: TP error (FAIL)
+// 3: DUT sends a TP.CM_CTS for PGNs not in a connection (FAIL)
+// 4: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_08_TP_Send_CTS_Foreign_PGN(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn,gotPgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgAbort;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(4, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(4, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/1 Start TP...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Start TP with DUT and check for CTS with foreign PGNs...");
+    stepTime = CT_STEP_BEGIN(-1, reportText);
+    // ---------------------------------------------------------------------------------------------------------------------
+    // 0: OK
+    // 1: CTS Timeout
+    // 2: CTS Error: Number of packets that can be sent error.
+    // 3: CTS Error: Next packet number to be send error.
+    // 4: EOM Timeout
+    // 5: EOM Error: Total message size error.
+    // 6: responder sent abort.
+    // 7: Dut declined with abort. (answer in pgOutLastCTS)
+    // 8: Sending TP.DT error.
+    // 9: Multiple CTS or CTS within transport error.
+    tpChkRes = CT_Check_TP_AsOriginator(   toolAddr, dutAddr            //   byte originatorAddr, byte responderAddr
+                                         , pgn                          // , dword pgn
+                                         , 0                            // , byte pgnTest
+                                         , 52                           // , byte messageSize
+                                         , 255                          // , byte rtsMaxPkgs
+                                         , pgRTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                         , pgCTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                         , pgFirstDT                    // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                         , pgLastDT                     // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                         , pgEOM                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                         , 50                           // , word dtDistance
+                                         , 1                            // , useDefaultDtPrio
+                                         , errText);                    // , char errText[])
+    
+    // write("tpChkRes=%d, expectAbort=%d",tpChkRes, expectAbort);
+    switch(tpChkRes)
+    {
+      case 0: /* OK */; break;
+      default: /* everything else... */
+      {
+        // before bailing out with error, check if there was a CTS for a foreign PGN (outside the current connection)
+        CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(bufIndices, pgRTS.time_ns, dutAddr, toolAddr, gc_TPCM_CTRL_WORD_CTS);
+        for (long i: bufIndices)
+        {
+          gotPgn = CT_GetTPCMPGN( gMsgBuf[bufIndices[i]] );
+          if (gotPgn != pgn)
+          {
+            snprintf(reportText, elcount(reportText), "DUT sends a TP.CM_CTS at 5=%.06f for PGN not in a connection. TP started at t=%.06f. got: PGN %d (0x%.05X), expected: PGN %d (0x%.05X)", CT_Ns2Sec(gMsgBuf[bufIndices[i]].time_ns), CT_Ns2Sec(pgRTS.time_ns), gotPgn, gotPgn, pgn, pgn);
+            CT_STEP_END_FAIL(3, reportText);
+            return; // leave on fail.
+          }
+        }
+        
+        CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // wait to synchronize with trace warnings...
+        CT_STEP_END_FAIL(2, errText);
+        return; // leave on fail
+      }
+    }
+    
+    CT_STEP_END_PASS(1);
+
+  } // end CT-LOOP
+}
+
+
+
+// ==============================================================================================================
+// functionality of the test A8 09
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react on RTS (FAIL)
+// 3: DUT tries to reorder TP.CM_CTS within timeout T2 (1250ms) on missing data block.
+// 4: DUT tries to reorder TP.CM_CTS within TP.DT timeout T1 (750ms)
+// 5: DUT sends unexpected multiple TP.CM_CTS (FAIL)
+// 6: Other TP errors (FAIL)
+// 7: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_09_TP_Send_Multiple_CTS(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn,gotPgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgAbort;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(7, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(7, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  initJ1939PGData(pgFirstDT);      // inits payload with 0xff
+  pgFirstDT.sa = toolAddr;
+  pgFirstDT.da = dutAddr;
+  pgFirstDT.SequenceNumber = 1;
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/3 Check reaction for missing data.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Check reaction for missing data.");
+    stepTime = CT_STEP_BEGIN(-3, reportText);
+    
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 52, 255);
+    if (CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout for RTS at %.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    // Now DUT shall NOT reorder packages with CTS within T2
+    if (!CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_T2))
+    {
+      CT_SendABORT(pgn, toolAddr, dutAddr, 250);
+      snprintf(errText, elcount(errText), "DUT tries to reorder packets with TP.CM_CTS at t=%.06f, within timeout T2 (1250ms) during missing data block.", CT_Ns2Sec(pgCTS.time_ns));
+      CT_STEP_END_FAIL(3, errText);
+      return; // leave on fail.
+    }
+    
+    // if DUT did not abort the connection so far...
+    if (CT_CHECK_ABORTS_BY_PGN(pgn, dutAddr, toolAddr, pgRTS.time_ns) == 0)
+    {
+      // Await DUT's abort within TR
+      if (CT_AWAIT_ABORT(pgn, dutAddr, toolAddr, gc_TIMEOUT_TR)==1)
+      {
+        // DUT missed to send abort after T2 + Tr -> tester aborts the connection.
+        CT_SendABORT(pgn, toolAddr, dutAddr, 250);
+      }
+    }
+        
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+
+    // ====================
+    // step 2/3 Check reaction for TP.DT timeout.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Check reaction for TP.DT timeout.");
+    stepTime = CT_STEP_BEGIN(reportText);
+    
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 52, 255);
+    if (CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout for RTS at %.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    // after CTS was received, send the first data entry only, and wait for T1 to timeout the second TP.DT
+    CT_SendDT(pgFirstDT);
+    
+    // Now DUT shall not reorder CTS within Timeout T1
+    if (!CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_T1))
+    {
+      // DUT reorders within timeout.
+      CT_SendABORT(pgn, toolAddr, dutAddr, 250);
+      snprintf(errText, elcount(errText), "DUT tries to reorder packets with TP.CM_CTS at t=%.06f, within TP.DT timeout T1 (750ms)", CT_Ns2Sec(pgCTS.time_ns));
+      CT_STEP_END_FAIL(4, errText);
+      return; // leave on fail.
+    }
+
+    // if DUT did not abort the connection so far...
+    if (CT_CHECK_ABORTS_BY_PGN(pgn, dutAddr, toolAddr, pgRTS.time_ns) == 0)
+    {
+      // Await DUT's abort within TR
+      if (CT_AWAIT_ABORT(pgn, dutAddr, toolAddr, gc_TIMEOUT_TR)==1)
+      {
+        // DUT missed to send abort after T1 + Tr -> tester aborts the connection.
+        CT_SendABORT(pgn, toolAddr, dutAddr, 250);
+      }
+    }
+  
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 3/3 Check multiple CTS or CTS within transport.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Check multiple CTS or CTS within transport.");
+    stepTime = CT_STEP_BEGIN(reportText);
+    
+    // ---------------------------------------------------------------------------------------------------------------------
+    // 0: OK
+    // 1: CTS Timeout
+    // 2: CTS Error: Number of packets that can be sent error.
+    // 3: CTS Error: Next packet number to be send error.
+    // 4: EOM Timeout
+    // 5: EOM Error: Total message size error.
+    // 6: responder sent abort.
+    // 7: Dut declined with abort. (answer in pgOutLastCTS)
+    // 8: Sending TP.DT error.
+    // 9: Multiple CTS or CTS within transport error.
+    tpChkRes = CT_Check_TP_AsOriginator(   toolAddr, dutAddr            //   byte originatorAddr, byte responderAddr
+                                         , pgn                          // , dword pgn
+                                         , 0                            // , byte pgnTest
+                                         , 52                           // , byte messageSize
+                                         , 255                          // , byte rtsMaxPkgs
+                                         , pgRTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                         , pgCTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                         , pgFirstDT                    // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                         , pgLastDT                     // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                         , pgEOM                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                         , 50                           // , word dtDistance
+                                         , 1                            // , useDefaultDtPrio
+                                         , errText);                    // , char errText[])
+    
+    if (tpChkRes != 0)
+    {
+      switch(tpChkRes)
+      {
+        case 1:   CT_STEP_END_FAIL(2, errText); break; // CTS timeout
+        case 9:   CT_STEP_END_FAIL(5, errText); break; // Multiple / unexpected CTS within TP detected
+        default:  CT_STEP_END_FAIL(6, errText); break; // Other TP errors.
+      }
+      return; // leave on fail.
+    }
+    
+    CT_WAIT(1);
+    CT_STEP_END_PASS(1);
+
+  } // end CT-LOOP
+}
+
+
+// ==============================================================================================================
+// functionality of the test A8 10
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: TP error occured (FAIL)
+// 3: TP.CM_CTS Hold: Next Packet Number is not 0xFF (FAIL)
+// 4: TP.CM_CTS Hold: Reserved field is not 0xFFFF (FAIL)
+// 5: TP.CM_CTS Hold: PGN error (FAIL)
+// 6: No TP.CM_CTS Hold found within TP. (INCONCLUSIVE)
+// 7: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_10_TP_Send_First_CTS_Hold(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn,gotPgn;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgAbort;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  long n;
+  byte noCaseFound;
+  
+  noCaseFound = 1;
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(7, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(7, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/2 Start TP...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Start TP with DUT...");
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+    // ---------------------------------------------------------------------------------------------------------------------
+    // 0: OK
+    // 1: CTS Timeout
+    // 2: CTS Error: Number of packets that can be sent error.
+    // 3: CTS Error: Next packet number to be send error.
+    // 4: EOM Timeout
+    // 5: EOM Error: Total message size error.
+    // 6: responder sent abort.
+    // 7: Dut declined with abort. (answer in pgOutLastCTS)
+    // 8: Sending TP.DT error.
+    // 9: Multiple CTS or CTS within transport error.
+    tpChkRes = CT_Check_TP_AsOriginator(   toolAddr, dutAddr            //   byte originatorAddr, byte responderAddr
+                                         , pgn                          // , dword pgn
+                                         , 0                            // , byte pgnTest
+                                         , 52                           // , byte messageSize
+                                         , 255                          // , byte rtsMaxPkgs
+                                         , pgRTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                         , pgCTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                         , pgFirstDT                    // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                         , pgLastDT                     // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                         , pgEOM                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                         , 50                           // , word dtDistance
+                                         , 1                            // , useDefaultDtPrio
+                                         , errText);                    // , char errText[])
+    
+    // write("tpChkRes=%d, expectAbort=%d",tpChkRes, expectAbort);
+    
+    if (tpChkRes != 0)
+    {
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/2 Investigate TP.CM_CTS Hold during TP.
+    // ====================
+    CT_STEP_BEGIN("Investigate TP.CM_CTS Hold during TP.");
+    CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_Between(bufIndices, pgRTS.time_ns, pgEOM.time_ns, dutAddr, toolAddr, gc_TPCM_CTRL_WORD_CTS);
+    
+    // iterate through all the entries, and check if this may be a cts hold (byte 2 == 0), and investigate the payload.
+    n=0;
+    for(long i: bufIndices)
+    {
+      qword payload;
+      dword gotPgn;
+      byte res;
+      payload = CT_GetDataQWord(0, gMsgBuf[bufIndices[i]]);
+      
+      // potential CTS Hold?
+      if (CT_GetDataByte(1, gMsgBuf[bufIndices[i]]) == 0)
+      {
+        n++;
+        // Seems to be CTS Hold...investigate it
+        switch(CT_VALIDATE_CTS_HOLD(payload, pgn, gotPgn))
+        {
+          case 3: 
+            snprintf(errText, elcount(errText), "CTS hold at t=%.06f: Next Packet Number is not 0xFF in TP.CM_CTS", CT_Ns2Sec(gMsgBuf[bufIndices[i]].time_ns));
+            CT_STEP_END_FAIL(3, errText); 
+            return; // leave on fail.
+          case 4: 
+            snprintf(errText, elcount(errText), "CTS hold at t=%.06f: Reserved field is not 0xFFFF in TP.CM_CTS", CT_Ns2Sec(gMsgBuf[bufIndices[i]].time_ns));
+            CT_STEP_END_FAIL(4, errText);
+            return; // leave on fail.
+          case 5: 
+            snprintf(errText, elcount(errText), "CTS hold at t=%.06f: PGN mismatch in TP.CM_CTS. (Got: 0x%X, Expected: 0x%X)", CT_Ns2Sec(gMsgBuf[bufIndices[i]].time_ns), gotPgn, pgn );
+            CT_STEP_END_FAIL(5, errText);
+            return; // leave on fail.
+        }
+        // in this case only the "first" CTS hold shall be investigated, so leave the loop here.
+        break;
+      }
+    }
+    if ( (n==0) && noCaseFound)
+    {
+      CT_STEP_END_INCONCLUSIVE(6, "No TP.CM_CTS Hold found within TP.");
+      // do not leave, but continue main loop and advance to next pgn.
+      continue;
+    }
+    
+    CT_STEP_END_PASS(1);
+    noCaseFound = 0;
+
+  } // end CT-LOOP
+}
+
+
+// ==============================================================================================================
+// functionality of the test A8 11
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: TP error occured (FAIL)
+// 3: TP.CM_CTS Hold: Next Packet Number is not 0xFF (FAIL)
+// 4: TP.CM_CTS Hold: Reserved field is not 0xFFFF (FAIL)
+// 5: TP.CM_CTS Hold: PGN error (FAIL)
+// 6: TP.CM_CTS Hold: dt of consecutive hold is >Th (500ms) (ERROR)
+// 7: No consecutive TP.CM_CTS Hold found within TP. (INCONCLUSIVE)
+// 8: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_11_TP_Send_Consecutive_CTS_Hold(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn,gotPgn;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgAbort;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  long n;
+  long prevI;
+  byte noCaseFound;
+  
+  noCaseFound = 1;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(8, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(8, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/2 Start TP...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Start TP with DUT...");
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+    // ---------------------------------------------------------------------------------------------------------------------
+    // 0: OK
+    // 1: CTS Timeout
+    // 2: CTS Error: Number of packets that can be sent error.
+    // 3: CTS Error: Next packet number to be send error.
+    // 4: EOM Timeout
+    // 5: EOM Error: Total message size error.
+    // 6: responder sent abort.
+    // 7: Dut declined with abort. (answer in pgOutLastCTS)
+    // 8: Sending TP.DT error.
+    // 9: Multiple CTS or CTS within transport error.
+    tpChkRes = CT_Check_TP_AsOriginator(   toolAddr, dutAddr            //   byte originatorAddr, byte responderAddr
+                                         , pgn                          // , dword pgn
+                                         , 0                            // , byte pgnTest
+                                         , 52                           // , byte messageSize
+                                         , 4                            // , byte rtsMaxPkgs
+                                         , pgRTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                         , pgCTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                         , pgFirstDT                    // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                         , pgLastDT                     // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                         , pgEOM                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                         , 5                            // , word dtDistance
+                                         , 1                            // , useDefaultDtPrio
+                                         , errText);                    // , char errText[])
+    
+    // write("tpChkRes=%d, expectAbort=%d",tpChkRes, expectAbort);
+    
+    if (tpChkRes != 0)
+    {
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/2 Investigate TP.CM_CTS Hold during TP.
+    // ====================
+    CT_STEP_BEGIN("Investigate TP.CM_CTS Hold during TP.");
+    CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_Between(bufIndices, pgRTS.time_ns, pgEOM.time_ns, dutAddr, toolAddr, gc_TPCM_CTRL_WORD_CTS);
+    
+    // iterate through all the entries, and check if this may be a cts hold (byte 2 == 0), and investigate the payload.
+    n=0;
+    prevI=0;
+    for(long i: bufIndices)
+    {
+      qword payload;
+      dword gotPgn;
+      byte res;
+      dword dt;
+      int64 a,b;
+      payload = CT_GetDataQWord(0, gMsgBuf[bufIndices[i]]);
+      
+      // potential CTS Hold?
+      if (CT_GetDataByte(1, gMsgBuf[bufIndices[i]]) == 0)
+      {
+        n++;
+        // Seems to be CTS Hold...investigate it
+        switch(CT_VALIDATE_CTS_HOLD(payload, pgn, gotPgn))
+        {
+          case 3: 
+            snprintf(errText, elcount(errText), "CTS hold at t=%.06f: Next Packet Number is not 0xFF", CT_Ns2Sec(gMsgBuf[bufIndices[i]].time_ns));
+            CT_STEP_END_FAIL(3, errText); 
+            return; // leave on fail.
+          case 4: 
+            snprintf(errText, elcount(errText), "CTS hold at t=%.06f: Reserved field is not 0xFFFF", CT_Ns2Sec(gMsgBuf[bufIndices[i]].time_ns));
+            CT_STEP_END_FAIL(4, errText);
+            return; // leave on fail.
+          case 5: 
+            snprintf(errText, elcount(errText), "CTS hold at t=%.06f: PGN mismatch in TP.CM_CTS. (Got: 0x%X, Expected: 0x%X)", CT_Ns2Sec(gMsgBuf[bufIndices[i]].time_ns), gotPgn, pgn );
+            CT_STEP_END_FAIL(5, errText);
+            return; // leave on fail.
+        }
+        
+        // if it's a consecutive CTS hold, check the time-distance to the previous CTS hold.
+        if (n>1)
+        {
+          a = gMsgBuf[bufIndices[prevI]].time_ns;
+          b = gMsgBuf[bufIndices[i]].time_ns;
+          dt = CT_Ns2Ms( b - a );
+          if (dt > gc_TIMEOUT_TH)
+          {
+            snprintf(errText, elcount(errText), "TP.CM_CTS Hold at t2=%.06f: dt of consecutive hold is >Th (500ms) (t1=%.06f, dt=t2-t1=%dms)", CT_Ns2Sec(b), CT_Ns2Sec(a), dt );
+            CT_STEP_END_FAIL(6, errText);
+            return; // leave on fail.
+          }
+        }
+        prevI = i; // the next loop the previous index is needed.
+      }
+    }
+    if ( (n<=1) && noCaseFound)
+    {
+      CT_STEP_END_INCONCLUSIVE (7, "No consecutive TP.CM_CTS Hold found within TP.");
+      // do not leave, but continue main loop and advance to next pgn.
+      continue;
+    }
+    
+    CT_STEP_END_PASS(1);
+    noCaseFound = 0;
+
+  } // end CT-LOOP
+}
+
+// ==============================================================================================================
+// functionality of the test A8 12
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: TP error occured (FAIL)
+// 3: CTS Timeout
+// 4: CTS Error: Unexpected PGN detected (FAIL)
+// 5: CTS Error: Number of packets that can be sent error.
+// 6: CTS Error: Next packet number to be send error.
+// 7: No TP.CM_CTS Hold found within TP. (INCONCLUSIVE)
+// 8: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_12_TP_CTS_after_CTS_Hold(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn,gotPgn;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgAbort;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  long n;
+  int64 a,b,dt;
+  byte noCaseFound;
+  
+  noCaseFound = 1;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(8, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(8, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/1 Start TP with DUT and check TP.CM_CTS after holding the connection...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Start TP with DUT and check TP.CM_CTS after holding the connection...");
+    stepTime = CT_STEP_BEGIN(-1, reportText);
+    // ---------------------------------------------------------------------------------------------------------------------
+    // 0: OK
+    // 1: CTS Timeout
+    // 2: CTS Error: Number of packets that can be sent error.
+    // 3: CTS Error: Next packet number to be send error.
+    // 4: EOM Timeout
+    // 5: EOM Error: Total message size error.
+    // 6: responder sent abort.
+    // 7: Dut declined with abort. (answer in pgOutLastCTS)
+    // 8: Sending TP.DT error.
+    // 9: Multiple CTS or CTS within transport error.
+    tpChkRes = CT_Check_TP_AsOriginator(   toolAddr, dutAddr            //   byte originatorAddr, byte responderAddr
+                                         , pgn                          // , dword pgn
+                                         , 1                            // , byte pgnTest
+                                         , 52                           // , byte messageSize
+                                         , 4                            // , byte rtsMaxPkgs
+                                         , pgRTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                         , pgCTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                         , pgFirstDT                    // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                         , pgLastDT                     // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                         , pgEOM                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                         , 5                            // , word dtDistance
+                                         , 1                            // , useDefaultDtPrio
+                                         , errText);                    // , char errText[])
+
+    // write("tpChkRes=%d", tpChkRes);
+    // check for TP errors without the CTS errors that are checked bellow....
+    
+    // check if there are CTS-Hold within the connection...
+    CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_Between(bufIndices, pgRTS.time_ns, timeNowNS(), dutAddr, toolAddr, gc_TPCM_CTRL_WORD_CTS);
+    n=0;
+    for(long i: bufIndices)
+    {
+      // potential CTS Hold?
+      if (CT_GetDataByte(1, gMsgBuf[bufIndices[i]]) == 0)
+      {
+        // Seems to be a CTS Hold...
+        n++;
+      }
+    }
+
+    // if there are no CTS hold in the TP...
+    if ( (n==0) && noCaseFound)
+    {
+      // no CTS hold messages during TP found.
+      CT_WAIT(1);
+      CT_STEP_END_INCONCLUSIVE(7, "No TP.CM_CTS Hold found within TP.");
+      continue; // next pgn loop entry...
+    }
+
+    // check CTS after last CTS is sent within TH.
+    // time of last CTS Hold...
+    a = gMsgBuf[bufIndices[n]].time_ns;
+    b = pgCTS.time_ns;
+    dt = CT_Ns2Ms(b-a);
+    
+    if (n>0) // only errors for CTS when there are CTS holds found.
+    {
+      //write("a=%lld, b=%lld, c=%d", a,b,dt);
+      if (dt > gc_TIMEOUT_TH +1)
+      {
+        snprintf(errText, elcount(errText), "TP.CM_CTS at t=%.06f timed out after CTS-Hold at t=%.06f is > Th (500ms). (dt=%dms)", CT_Ns2Sec(b), CT_Ns2Sec(a), dt);
+        CT_STEP_END_FAIL(3, errText);
+        return; // leave on fail.
+      }
+    
+    
+      // check the CTS errors when there are CTS-Holds are contained within the TP...
+      switch(tpChkRes)
+      {
+        case 0: /* OK */ break;
+        case 1: 
+        {
+          if (pgn != pgCTS.PGNumber)
+          {
+            snprintf(errText, elcount(errText), "Unexpected PGN of TP.CM_CTS at t=%.06f after CTS-Hold at t=%.06f. (Got: 0x%.05X, Expected: 0x%.05X)", CT_Ns2Sec(b), CT_Ns2Sec(a), pgCTS.PGNumber, pgn);
+            CT_STEP_END_FAIL(4, errText);
+            return; // leave on fail.
+          }
+          CT_WAIT(gc_TIMEOUT_T3);
+          CT_STEP_END_FAIL(3, errText);
+          return; // leave on fail.
+        }
+        case 2: 
+        {
+          CT_WAIT(gc_TIMEOUT_T3);
+          CT_STEP_END_FAIL(5, errText);
+          return; // leave on fail.
+        }
+        case 3: 
+        {
+          CT_WAIT(gc_TIMEOUT_T3);
+          CT_STEP_END_FAIL(6, errText);
+          return; // leave on fail.
+        }
+        default: 
+        {
+          CT_WAIT(gc_TIMEOUT_T3);
+          CT_STEP_END_FAIL(2, errText); 
+          return; // leave on fail.
+        }
+      }
+    }
+    CT_WAIT(1);
+    CT_STEP_END_PASS(1);
+    noCaseFound = 0;
+
+  } // end CT-LOOP
+}
+
+
+
+// ==============================================================================================================
+// functionality of the test A8 13
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react on RTS (FAIL)
+// 3: DUT does neither abort, nor reorder when first TP.DT is missing (FAIL)
+// 4: DUT reorder error (FAIL)
+// 5: DUT tries to reorder by TP.CTS without awaiting the timeout end after T2 (1250ms) (FAIL)
+// 6: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_13_TP_First_DT_Timing(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn,gotPgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS1, pgCTS2;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  byte aborted;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(6, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(6, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/1 Check reaction if first TP.DT is missing.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Check reaction if first TP.DT is missing.");
+    stepTime = CT_STEP_BEGIN(-1, reportText);
+    
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 52, 255);
+    if (CT_WaitForCTS(pgCTS1, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout for RTS at %.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    // await unallowed (potential) CTS within T2 (1250ms).
+    if (!CT_WaitForCTS(pgCTS2, pgn, dutAddr, toolAddr, gc_TIMEOUT_T2))
+    {
+      // NOT ALLOWED CTS within timeout T2. DUT shall await the whole time instead of disturbing the current TP-flow!
+      dword dtMs, missingMs;
+      dtMs = CT_Ns2Ms(pgCTS2.time_ns-pgCTS1.time_ns);
+      missingMs = gc_TIMEOUT_T2 - dtMs;
+      
+      CT_SendABORT(pgn, toolAddr, dutAddr, 4);
+      CT_WAIT(gc_TIMEOUT_T2 + gc_TIMEOUT_TR); // wait before continue...
+      snprintf(errText, elcount(errText), "DUT tries to reorder by TP.CTS at t=%.06f, without awaiting the timeout end after T2 (1250ms). DUT reacts %dms too early.", CT_Ns2Sec(pgCTS2.time_ns), missingMs);
+      CT_STEP_END_FAIL(5, errText);
+      return; // leave on fail.
+    }
+    
+    aborted = 0;
+    
+    // Check for CTS (reordering) within Tr (200ms)
+    if (CT_WaitForCTS(pgCTS2, gc_PGN_ANY, dutAddr, toolAddr, gc_TIMEOUT_TR) == 1)
+    {
+      // no reorder...
+      // check for if DUT aborted... look into the msgbuffer since the cts time...
+      if (CT_CHECK_ABORTS_BY_PGN(pgn, dutAddr, toolAddr, pgCTS1.time_ns) == 0)
+      {
+        // not aborted yet.
+        CT_SendABORT(pgn, toolAddr, dutAddr, 3);
+        CT_WAIT(1);
+        snprintf(errText, elcount(errText), "DUT does not abort missing TP.DT after CTS at t=%.06f", CT_Ns2Sec(pgCTS1.time_ns));
+        CT_STEP_END_FAIL(3, errText);
+        return; // leave on fail.
+      }
+      aborted = 1;
+    }
+    
+    // if DUT did not abort the connection, up to here, it has sent an CTS (CTS2), that can be checked for it's content to be a re-ordering.
+    if (!aborted)
+    {
+      // DUT sent the CTS - check if it's a reorder
+      if (pgCTS2.NextPacketNumberToBeSent != 1)
+      {
+          snprintf(errText, elcount(errText), "DUT reorder error within CTS at t=%.06f: NextPacketNumberToBeSent is %d, but 1 is expected.", CT_Ns2Sec(pgCTS2.time_ns), pgCTS2.NextPacketNumberToBeSent);
+          CT_STEP_END_FAIL(4, errText);
+          return; // leave on fail.
+      }
+      
+      // reorder ok, but abort the connection by TOOL - (keep things easy. continue the TP would be a bit more complex for this test)
+      CT_SendABORT(pgn, toolAddr, dutAddr, 2);
+      CT_WAIT(gc_TIMEOUT_T3); // wait long enough after aborting before continuing.
+    }
+        
+    CT_WAIT(1);
+    CT_STEP_END_PASS(1);
+
+  } // end CT-LOOP
+}
+
+
+
+// ==============================================================================================================
+// functionality of the test A8 14
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react (timeout) (FAIL)
+// 3: DUT declined with abort. (FAIL)
+// 4: Consecutive CTS error: timeout (FAIL)
+// 5: Consecutive CTS error: Next packet number to be send error (FAIL)
+// 6: Consecutive CTS error: Number of packets that can be sent error (FAIL)
+// 7: Other TP error (FAIL)
+// 8: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_14_TP_Send_Consecutive_CTS(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgAbort;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  byte followUpCTS;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(8, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(8, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/1 Checking follow up CTS during TP...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Checking follow up CTS during TP...");
+    stepTime = CT_STEP_BEGIN(-1, reportText);
+    // ---------------------------------------------------------------------------------------------------------------------
+    // 0: OK
+    // 1: CTS Timeout
+    // 2: CTS Error: Number of packets that can be sent error.
+    // 3: CTS Error: Next packet number to be send error.
+    // 4: EOM Timeout
+    // 5: EOM Error: Total message size error.
+    // 6: responder sent abort.
+    // 7: Dut declined with abort. (answer in pgOutLastCTS)
+    // 8: Sending TP.DT error.
+    // 9: Multiple CTS or CTS within transport error.
+    tpChkRes = CT_Check_TP_AsOriginator(   toolAddr, dutAddr            //   byte originatorAddr, byte responderAddr
+                                         , pgn                          // , dword pgn
+                                         , 1                            // , byte pgnTest
+                                         , 52                           // , byte messageSize
+                                         , 3                            // , byte rtsMaxPkgs
+                                         , pgRTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                         , pgCTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                         , pgFirstDT                    // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                         , pgLastDT                     // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                         , pgEOM                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                         , 5                            // , word dtDistance
+                                         , 1                            // , useDefaultDtPrio
+                                         , errText);                    // , char errText[])
+    
+    followUpCTS = (pgCTS.time_ns > pgRTS.time_ns) && (pgFirstDT.byte(0)>0);
+    //write("rts time = %.06f, cts time = %.6f, pgFirstDT.byte(0)>0: %d, followUp=%d", CT_Ns2Sec(pgRTS.time_ns), CT_Ns2Sec(pgCTS.time_ns), pgFirstDT.byte(0)>0, followUpCTS);
+    //write("tpChkRes=%d",tpChkRes);
+    
+    // on any error just wait...
+    if (tpChkRes!=0) CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // wait to synchronize with trace warnings...
+
+    // react on the errors...
+    switch(tpChkRes)
+    {
+      case 0: break; // OK
+      case 1: // CTS timeout
+      {
+        CT_STEP_END_FAIL((followUpCTS ? 4 : 2), errText);
+        return; // leave on fail
+      }
+      case 2: // CTS error: number of packets that can be sent error...
+      {
+        if (followUpCTS)
+        {
+          CT_STEP_END_FAIL(6, errText);
+          return; // leave on fail.
+        }
+        break;
+      }
+      case 3: //CTS Error: Next packet number to be send error.
+      {
+        if (followUpCTS)
+        {
+          CT_STEP_END_FAIL(5, errText);
+          return; // leave on fail.
+        }
+        break;
+      }
+      case 6: // responder sent abort.
+      case 7: // DUT declined with abort. (answer in pgOutLastCTS)
+      {
+        CT_STEP_END_FAIL(3, errText);
+        return; // leave on fail.
+      }
+      default: // any other TP error.
+      {
+        CT_STEP_END_FAIL(7, errText);
+        return; // leave on fail.
+      }
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(1);
+
+  } // end CT-LOOP
+}
+
+// ==============================================================================================================
+// functionality of the test A8 15
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react on RTS (FAIL)
+// 3: DUT does neither abort, nor reorder when TP.DT is missing (FAIL)
+// 4: DUT (re)order error (FAIL)
+// 5: DUT tries to reorder by TP.CTS without awaiting the timeout end after T2 (1250ms) (FAIL)
+// 6: DUT does not abort after there is no data after the third consecutive time. (FAIL)
+// 7: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_15_TP_DT_Timing_after_CTS(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn,gotPgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS1, pgCTS2;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  byte aborted;
+  byte step;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  int64 lastValidCTSTime;
+  
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(7, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(7, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  initJ1939PGData(pgDT);
+  pgDT.sa = toolAddr;
+  pgDT.da = dutAddr;
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/1 Check reaction if second data block of TP is missing and DUT aborts after 3 consecutive missing data blocks.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Check reaction if second data block of TP is missing and DUT aborts after 3 consecutive missing data blocks.");
+    stepTime = CT_STEP_BEGIN(-1, reportText);
+    
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 52, 3);
+    if (CT_WaitForCTS(pgCTS1, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout after RTS at t=%.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    lastValidCTSTime = pgCTS1.time_ns;
+    
+    // DUT has to order 3 packets!
+    if (pgCTS1.NumberOfPacketsThatCanBeSent != 3)
+    {
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 2);
+      CT_WAIT(1);
+      
+      snprintf(errText, elcount(errText), "DUT order error within CTS at t=%.06f: NumberOfPacketsThatCanBeSent is %d, but 3 is expected.", CT_Ns2Sec(pgCTS1.time_ns), pgCTS1.NumberOfPacketsThatCanBeSent);
+      CT_STEP_END_FAIL(4, errText);
+      
+      return; // leave on fail.
+    }
+    
+    // after the first CTS is ok, send the first TP.DTs.
+    for (i=1; i<=3; i++) 
+    {
+      pgDT.SequenceNumber = i;
+      CT_SendDT(pgDT);
+    }
+    
+    // check for aborts after last TP.DT.
+    if (CT_CHECK_ABORTS_BY_PGN(pgn, dutAddr, toolAddr, pgDT.time_ns) == 1)
+    {
+      // DUT aborted.
+      CT_WAIT(1);
+      CT_STEP_END_PASS(0);
+      continue; // continue with the next entry.
+    }
+    
+    // no aborts, await the second CTS within Tr 200ms
+    if (CT_WaitForCTS(pgCTS1, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      // check abort from DUT...
+      if (CT_CHECK_ABORTS_BY_PGN(pgn, dutAddr, toolAddr, pgDT.time_ns) == 1)
+      {
+        // DUT aborted.
+        CT_WAIT(1);
+        CT_STEP_END_PASS(0);
+        continue; // continue with the next entry.
+      }
+      // no abort -> CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout after DT at t=%.06f", CT_Ns2Sec(pgDT.time_ns));
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    lastValidCTSTime = pgCTS1.time_ns;
+    
+    // CTS ok -> check if the CTS orders packet nr 4.
+    if (pgCTS1.NextPacketNumberToBeSent != 4)
+    {
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 2);
+      CT_WAIT(1);
+      
+      snprintf(errText, elcount(errText), "DUT order error within CTS at t=%.06f: NextPacketNumberToBeSent is %d, but 4 is expected.", CT_Ns2Sec(pgCTS1.time_ns), pgCTS1.NextPacketNumberToBeSent);
+      CT_STEP_END_FAIL(4, errText);
+      
+      return; // leave on fail.
+    }
+    
+    // ----------
+    // NOW TEST STOP SENDING DT'S. DUT CAN REORDER from packet 4 onwards 2 times before it has to abort.
+    // ----------
+    aborted=0;
+    for (step = 1; (!aborted) && (step <= 3); step++)
+    {
+      // await unallowed (potential) CTS within T2 (1250ms).
+      if (CT_WaitForCTS(pgCTS2, pgn, dutAddr, toolAddr, gc_TIMEOUT_T2) == 0)
+      {
+        // NOT ALLOWED CTS within timeout T2. DUT shall await the whole time instead of disturbing the current TP-flow!
+        dword dtMs, missingMs;
+        dtMs = CT_Ns2Ms(pgCTS2.time_ns-pgCTS1.time_ns);
+        missingMs = gc_TIMEOUT_T2 - dtMs;
+        
+        CT_WAIT(1);
+        CT_INFO(1, "", "Tool will abort.");
+        CT_SendABORT(pgn, toolAddr, dutAddr, 4);
+        CT_WAIT(gc_TIMEOUT_T2 + gc_TIMEOUT_TR); // wait before continue...
+        snprintf(errText, elcount(errText), "DUT tries to reorder by TP.CTS at t=%.06f, without awaiting the timeout end after T2 (1250ms). DUT reacts %dms too early.", CT_Ns2Sec(pgCTS2.time_ns), missingMs);
+        CT_STEP_END_FAIL(5, errText);
+        return; // leave on fail.
+      }
+      
+      aborted = 0;
+      // Check for CTS (reordering) within Tr (200ms)
+      if (CT_WaitForCTS(pgCTS2, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR) == 1)
+      {
+        // neither (re) order within step 1..2
+        if (step !=3)
+        {
+          if (CT_CHECK_ABORTS_BY_PGN(pgn, dutAddr, toolAddr, lastValidCTSTime) == 0)
+          {
+            // nor abort within step 1..2
+            CT_WAIT(1);
+            CT_INFO(1, "", "Tool will abort.");
+            CT_SendABORT(pgn, toolAddr, dutAddr, 3);
+            CT_WAIT(1);
+            snprintf(errText, elcount(errText), "DUT did neither reorder nor abort missing TP.DTs after TP.CM_CTS at t=%.06f", CT_Ns2Sec(lastValidCTSTime));
+            CT_STEP_END_FAIL(3, errText);
+            return; // leave on fail.
+          }
+                  
+          aborted = 1;
+        }
+      }
+      
+      // no abort from DUT...
+      if (!aborted)
+      {
+        //--------------
+        // Info about no DT's are sent after last DUT's CTS...
+        //--------------
+        if (step == 3)
+        {
+          snprintf(reportText, elcount(reportText), "DUT reordered but no data was sent the 3rd time.");
+        }
+        else
+        {
+          lastValidCTSTime = pgCTS2.time_ns;
+          snprintf(reportText, elcount(reportText), "DUT reordered but no data was sent. (step %d / 2)", step);
+        }
+        CT_WAIT(1);
+        CT_INFO(1,"", reportText);
+        
+        // within step 1..2: no abort, so DUT sent reorder...
+        if (step != 3)
+        {
+          // DUT sent the CTS - check if it's an expected reorder
+          if (pgCTS2.NextPacketNumberToBeSent != 4)
+          {
+              snprintf(errText, elcount(errText), "DUT reorder error within CTS at t=%.06f: NextPacketNumberToBeSent is %d, but 4 is expected.", CT_Ns2Sec(pgCTS2.time_ns), pgCTS2.NextPacketNumberToBeSent);
+              CT_STEP_END_FAIL(4, errText);
+              return; // leave on fail.
+          }
+        }
+
+        // in step 3 DUT shall abort not reorder but it didnt abort yet. This is an error.
+        if (step == 3) 
+        {
+          if (CT_CHECK_ABORTS_BY_PGN(pgn, dutAddr, toolAddr, lastValidCTSTime) == 0)
+          {
+            CT_WAIT(1);
+            CT_INFO(1, "", "Tool will abort, due DUT missed it.");
+            CT_SendABORT(pgn, toolAddr, dutAddr, 5);
+            CT_WAIT(1); // wait long enough after aborting before continuing.
+            snprintf(errText, elcount(errText), "DUT does not abort when there is no data sent the 3rd consecutive time after TP.CM_CTS at t=%.06f", CT_Ns2Sec(lastValidCTSTime));
+            CT_STEP_END_FAIL(6, errText);
+            return; // leave on fail.
+          }
+          else
+          {
+            CT_WAIT(1);
+            CT_INFO(1, "", "DUT properly aborted the 3rd consecutive time the DT block is missing.");
+          }
+        }
+      }
+    }
+    
+    CT_WAIT(1);
+    CT_STEP_END_PASS(1);
+
+  } // end CT-LOOP
+}
+
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A8 16
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: CTS timeout (FAIL)
+// 3: DUT (re)order error (FAIL)
+// 4: DUT sends TP.CM_CTS without awaiting the timeout end after T1 (750ms) (FAIL)
+// 5: DUT does not abort after packet resend was timed out after the 3rd consecutive time. (FAIL)
+// 6: DUT rejected or aborted the connection (INCONCLUSIVE)
+// 7: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_16_TP_Consecutive_DT_Timing(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn,gotPgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS1, pgCTS2, pgCTS3, pgCTS4, pgCTS5, pgCTS6, pgCTS7, pgCTS8;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  byte aborted;
+  byte step;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(7, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(7, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  initJ1939PGData(pgDT);
+  pgDT.sa = toolAddr;
+  pgDT.da = dutAddr;
+  
+  initJ1939PGData(pgRTS);
+  
+  initJ1939PGData(pgCTS1);
+  initJ1939PGData(pgCTS2);
+  initJ1939PGData(pgCTS3);
+  initJ1939PGData(pgCTS4);
+  initJ1939PGData(pgCTS5);
+  initJ1939PGData(pgCTS6);
+  initJ1939PGData(pgCTS7);
+  initJ1939PGData(pgCTS8);
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/11 Send TP.CM_RTS and start TP with a max packet number of 4 TP.DTs per data block.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Send TP.CM_RTS and start TP with a max packet number of 4 TP.DTs per data block.");
+    stepTime = CT_STEP_BEGIN(-11, reportText);
+    
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 52, 4);
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/11 Receive the DUT's next TPCM within T2 (1250ms). On abort the test is inconclusive. On TP.CM_CTS, check that it starts ordering 4 packets starting with packet #1.
+    // ====================
+    CT_STEP_BEGIN("Receive the DUT's next TPCM within T2 (1250ms). On abort the test is inconclusive. On TP.CM_CTS, check that it starts ordering 4 packets starting with packet #1.");    
+    if (CT_WaitForCTS(pgCTS1, pgn, dutAddr, toolAddr, gc_TIMEOUT_T2))
+    {
+      // CTS timeout.
+      // check for abort...
+      if ( (pgCTS1.ControlByte == gc_TPCM_CTRL_WORD_ABORT) && (pgCTS1.PGNumber == pgn) )
+      {
+        // DUT sends abort after RTS -> inconclusive.
+        snprintf(errText, elcount(errText), "Inconclusive, due DUT rejected the connection at t=%.06f", CT_Ns2Sec( pgCTS1.time_ns ));
+        CT_STEP_END_INCONCLUSIVE(6, errText);
+        continue; // continue with the next pgn in loop.
+      }
+      
+      // no CTS, no abort -> error.
+      snprintf(errText, elcount(errText), "CTS timeout after RTS at t=%.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+
+    // got valid CTS. (continue check the content...)
+    
+    // DUT has to order 4 packets starting with packet #1.
+    if (pgCTS1.NextPacketNumberToBeSent != 1)
+    {
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 6);
+      CT_WAIT(1);
+      
+      snprintf(errText, elcount(errText), "DUT order error within TP.CM_CTS at t=%.06f: Next packet number to be send is %d, but 1 is expected.", CT_Ns2Sec(pgCTS1.time_ns), pgCTS1.NextPacketNumberToBeSent);
+      CT_STEP_END_FAIL(3, errText);
+      
+      return; // leave on fail.
+    }
+    if (pgCTS1.NumberOfPacketsThatCanBeSent != 4)
+    {
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 6);
+      CT_WAIT(1);
+      
+      snprintf(errText, elcount(errText), "DUT order error within TP.CM_CTS at t=%.06f: NumberOfPacketsThatCanBeSent is %d, but 4 is expected.", CT_Ns2Sec(pgCTS1.time_ns), pgCTS1.NumberOfPacketsThatCanBeSent);
+      CT_STEP_END_FAIL(3, errText);
+      
+      return; // leave on fail.
+    }
+    
+    
+    // ====================
+    // step 3/11 Send the first TP.DT packet with sequence #1 within Tr (200ms) after last TP.CM_CTS.
+    // ====================
+    CT_WAIT(100);
+    CT_STEP_BEGIN("Send the first TP.DT packet with sequence #1 within Tr (200ms) after last TP.CM_CTS.");
+    pgDT.SequenceNumber = 1;
+    CT_SendDT(pgDT);
+    CT_WAIT(1); // sync output
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 4/11 Check if DUT sends a TPCM within T1 (750ms). On abort the test is inconclusive. On TP.CM_CTS test is fails, due CTS is not expected at this point.
+    // ====================
+    CT_STEP_BEGIN("Check if DUT sends a TPCM within T1 (750ms). On abort the test is inconclusive. On TP.CM_CTS test is fails, due TP.CM_CTS is not expected at this point.");
+    if (CT_WaitForCTS(pgCTS2, pgn, dutAddr, toolAddr, gc_TIMEOUT_T1-3))
+    {
+      // CTS timeout.
+      // check for abort...
+      if ( (pgCTS2.ControlByte == gc_TPCM_CTRL_WORD_ABORT) && (pgCTS2.PGNumber == pgn) )
+      {
+        // DUT sends abort after valid TP.DT -> inconclusive.
+        snprintf(errText, elcount(errText), "Inconclusive, due DUT aborted the connection at t=%.06f", CT_Ns2Sec( pgCTS2.time_ns ));
+        CT_STEP_END_INCONCLUSIVE(6, errText);
+        continue; // continue with the next pgn in loop.
+      }
+    }
+    else
+    {
+      // CTS found, but not allowed here -> test fails.
+      dword diff;
+      diff = CT_Ns2Ms(pgCTS2.time_ns - pgDT.time_ns);
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 4);
+      snprintf(errText, elcount(errText), "DUT sends TP.CM_CTS at t=%.06f, without awaiting the timeout end after T1 (750ms) after TP.DT at t=%.06f. diff=%dms, %dms too early.", CT_Ns2Sec(pgCTS2.time_ns), CT_Ns2Sec(pgDT.time_ns), diff, gc_TIMEOUT_T1 - diff);
+      CT_STEP_END_FAIL(4, errText);
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+
+    // ====================
+    // step 5/11 Send the second TP.DT packet with sequence #2. It's sent within Tr (200ms) and T1 (750ms) after the last TP.DT.
+    // ====================
+    CT_STEP_BEGIN("Send the second TP.DT packet with sequence #2. It's sent within Tr (200ms) and T1 (750ms) after the last TP.DT.");
+    pgDT.SequenceNumber = 2;
+    CT_SendDT(pgDT);
+    CT_WAIT(1); // sync output
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 6/11 Check if DUT sends a TPCM within the next T1 (750ms). On abort the test is inconclusive. On TP.CM_CTS test is fails, due CTS is not expected at this point.
+    // ====================
+    CT_STEP_BEGIN("Check if DUT sends a TPCM within the next T1 (750ms). On abort the test is inconclusive. On TP.CM_CTS test is fails, due CTS is not expected at this point.");
+    if (CT_WaitForCTS(pgCTS3, pgn, dutAddr, toolAddr, gc_TIMEOUT_T1-1))
+    {
+      // CTS timeout.
+      // check for abort...
+      if ( (pgCTS3.ControlByte == gc_TPCM_CTRL_WORD_ABORT) && (pgCTS3.PGNumber == pgn) )
+      {
+        // DUT sends abort after valid TP.DT -> inconclusive.
+        snprintf(errText, elcount(errText), "Inconclusive, due DUT aborted the connection at t=%.06f", CT_Ns2Sec( pgCTS3.time_ns ));
+        CT_STEP_END_INCONCLUSIVE(6, errText);
+        continue; // continue with the next pgn in loop.
+      }
+    }
+    else
+    {
+      // CTS found, but not allowed here -> test fails.
+      dword diff;
+      diff = CT_Ns2Ms(pgCTS3.time_ns - pgDT.time_ns);
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 4);
+      snprintf(errText, elcount(errText), "DUT sends TP.CM_CTS at t=%.06f, without awaiting the timeout end after T1 (750ms) after TP.DT at t=%.06f. diff=%dms, %dms too early.", CT_Ns2Sec(pgCTS3.time_ns), CT_Ns2Sec(pgDT.time_ns), diff, gc_TIMEOUT_T1 - diff);
+      CT_STEP_END_FAIL(4, errText);
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    
+   
+    // ====================
+    // step 7/11 Check if DUT sends a TPCM within the next Tr (200ms). On abort the test is passed. On TP.CM_CTS (resend) check that it starts with packet number <=3 and not more than 4 packets.
+    // ====================
+    CT_STEP_BEGIN("Check if DUT sends a TPCM within the next Tr (200ms). On abort the test is passed. On TP.CM_CTS (resend) check that it starts with packet number <=3 and not more than 4 packets.");
+    if (CT_WaitForCTS(pgCTS4, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      // check for abort...
+      if ( (pgCTS4.ControlByte == gc_TPCM_CTRL_WORD_ABORT) && (pgCTS4.PGNumber == pgn) )
+      {
+        // DUT sends abort after valid TP.DT -> pass.
+        CT_Info(1, "", "DUT aborts timed out TP.DT -> OK.");
+        CT_STEP_END_PASS(1);
+        continue; // continue with the next pgn in loop.
+      }
+      
+      // no CTS, no abort -> error.
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 3);
+      snprintf(errText, elcount(errText), "CTS timeout after timed out TP.DT at t=%.06f", CT_Ns2Sec(pgDT.time_ns));
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    else
+    {
+      // RE-ORDER #1
+      CT_WAIT(1); // sync output
+      // CTS found... check it to be a valid resend... up to 4 packets starting with packet number <=3 ( 4 is not allowed, due 3 was a timed out packet would be a gap )
+      if (pgCTS4.NextPacketNumberToBeSent > 3)
+      {
+        CT_WAIT(1);
+        CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+        CT_SendABORT(pgn, toolAddr, dutAddr, 6);
+        CT_WAIT(1);
+        
+        snprintf(errText, elcount(errText), "DUT reorder #1 error within TP.CM_CTS at t=%.06f: Next packet number to be send is %d, but <=3 is expected.", CT_Ns2Sec(pgCTS4.time_ns), pgCTS4.NextPacketNumberToBeSent);
+        CT_STEP_END_FAIL(3, errText);
+        
+        return; // leave on fail.
+      }
+      if (pgCTS4.NumberOfPacketsThatCanBeSent > 4)
+      {
+        CT_WAIT(1);
+        CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+        CT_SendABORT(pgn, toolAddr, dutAddr, 6);
+        CT_WAIT(1);
+        
+        snprintf(errText, elcount(errText), "DUT reorder #1 error within TP.CM_CTS at t=%.06f: NumberOfPacketsThatCanBeSent is %d, but <=4 is expected.", CT_Ns2Sec(pgCTS4.time_ns), pgCTS4.NumberOfPacketsThatCanBeSent);
+        CT_STEP_END_FAIL(3, errText);
+        
+        return; // leave on fail.
+      }
+    }
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 8/11 On reorder by TP.CM_CTS, do not send any packets but await DUT reaction within T1 (750ms). On abort the test is passed, On TP.CM_CTS the test fails, due CTS is not expected at this point.
+    // ====================
+    CT_STEP_BEGIN("On reorder #1 by TP.CM_CTS, do not send any packets but await DUT reaction within T1 (750ms). On abort the test is passed, On TP.CM_CTS the test fails, due TP.CM_CTS is not expected at this point.");
+    if (CT_WaitForCTS(pgCTS5, pgn, dutAddr, toolAddr, gc_TIMEOUT_T1))
+    {
+      // CTS timeout.
+      // check for abort...
+      if ( (pgCTS5.ControlByte == gc_TPCM_CTRL_WORD_ABORT) && (pgCTS5.PGNumber == pgn) )
+      {
+        // DUT sends abort after valid TP.DT -> pass.
+        CT_Info(1, "", "DUT aborts timed out TP.DT -> OK.");
+        CT_STEP_END_PASS(1);
+        continue; // continue with the next pgn in loop.
+      }
+    }
+    else
+    {
+      // CTS found, but not allowed here -> test fails.
+      dword diff;
+      diff = CT_Ns2Ms(pgCTS5.time_ns - pgCTS4.time_ns);
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 4);
+      snprintf(errText, elcount(errText), "DUT sends TP.CM_CTS at t=%.06f, without awaiting the timeout end T1 (750ms) after first resend TP.CM_CTS at t=%.06f. diff=%dms, %dms too early.", CT_Ns2Sec(pgCTS5.time_ns), CT_Ns2Sec(pgCTS4.time_ns), diff, gc_TIMEOUT_T1 - diff);
+      CT_STEP_END_FAIL(4, errText);
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 9/11 Check if DUT sends a TPCM within Tr (200ms) (last TP.CM_CTS timed out). On abort the test is passed. On TP.CM_CTS (resend) check that it starts with packet number <=3 and not more than 4 packets.
+    // ====================
+    CT_STEP_BEGIN("Check if DUT sends a TPCM within Tr (200ms) (last TP.CM_CTS timed out). On abort the test is passed. On TP.CM_CTS (resend) check that it starts with packet number <=3 and not more than 4 packets.");
+    if (CT_WaitForCTS(pgCTS6, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      // check for abort...
+      if ( (pgCTS6.ControlByte == gc_TPCM_CTRL_WORD_ABORT) && (pgCTS6.PGNumber == pgn) )
+      {
+        // DUT sends abort after valid TP.DT -> pass.
+        CT_Info(1, "", "DUT aborts timed out TP.DT -> OK.");
+        CT_STEP_END_PASS(1);
+        continue; // continue with the next pgn in loop.
+      }
+      
+      // no CTS, no abort -> error.
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 3);
+      snprintf(errText, elcount(errText), "CTS timeout after resending TP.CM_CTS at t=%.06f", CT_Ns2Sec(pgCTS4.time_ns));
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    else
+    {
+      // REORDER #2
+      CT_WAIT(1); // sync output
+      // CTS found... check it to be a valid resend... up to 4 packets starting with packet number <=3 ( 4 is not allowed, due 3 was a timed out packet would be a gap )
+      if (pgCTS6.NextPacketNumberToBeSent > 3)
+      {
+        CT_WAIT(1);
+        CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+        CT_SendABORT(pgn, toolAddr, dutAddr, 6);
+        CT_WAIT(1);
+        
+        snprintf(errText, elcount(errText), "DUT reorder #2 error within TP.CM_CTS at t=%.06f: Next packet number to be send is %d, but <=3 is expected.", CT_Ns2Sec(pgCTS6.time_ns), pgCTS6.NextPacketNumberToBeSent);
+        CT_STEP_END_FAIL(3, errText);
+        
+        return; // leave on fail.
+      }
+      if (pgCTS6.NumberOfPacketsThatCanBeSent > 4)
+      {
+        CT_WAIT(1);
+        CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+        CT_SendABORT(pgn, toolAddr, dutAddr, 6);
+        CT_WAIT(1);
+        
+        snprintf(errText, elcount(errText), "DUT reorder #2 error within TP.CM_CTS at t=%.06f: NumberOfPacketsThatCanBeSent is %d, but <=4 is expected.", CT_Ns2Sec(pgCTS6.time_ns), pgCTS6.NumberOfPacketsThatCanBeSent);
+        CT_STEP_END_FAIL(3, errText);
+        
+        return; // leave on fail.
+      }
+    }
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 10/11 On reorder by TP.CM_CTS, do not send any packets but await DUT reaction within T1 (750ms). On abort the test is passed, On TP.CM_CTS the test fails, due CTS is not expected at this point.
+    // ====================
+    CT_STEP_BEGIN("On reorder #2 by TP.CM_CTS, do not send any packets but await DUT reaction within T1 (750ms). On abort the test is passed, On TP.CM_CTS the test fails, due TP.CM_CTS is not expected at this point.");
+    if (CT_WaitForCTS(pgCTS7, pgn, dutAddr, toolAddr, gc_TIMEOUT_T1))
+    {
+      // CTS timeout.
+      // check for abort...
+      if ( (pgCTS7.ControlByte == gc_TPCM_CTRL_WORD_ABORT) && (pgCTS7.PGNumber == pgn) )
+      {
+        // DUT sends abort after valid TP.DT -> pass.
+        CT_Info(1, "", "DUT aborts timed out TP.DT -> OK.");
+        CT_STEP_END_PASS(1);
+        continue; // continue with the next pgn in loop.
+      }
+    }
+    else
+    {
+      // CTS found, but not allowed here -> test fails.
+      dword diff;
+      diff = CT_Ns2Ms(pgCTS7.time_ns - pgCTS6.time_ns);
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 4);
+      snprintf(errText, elcount(errText), "DUT sends TP.CM_CTS without awaiting the timeout end T1 (750ms) after second resend TP.CM_CTS at t=%.06f. diff=%dms, %dms too early. Attention: a third reordering is not allowed!", CT_Ns2Sec(pgCTS6.time_ns), diff, gc_TIMEOUT_T1 - diff);
+      CT_STEP_END_FAIL(4, errText);
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 11/11 Check if DUT sends an abort within the next Tr (200ms). On abort the test is passed. On TP.CM_CTS (resend) the test fails due resending is not allowed anymore.
+    // ====================
+    CT_STEP_BEGIN("Check if DUT sends an abort within the next Tr (200ms). On abort the test is passed. On TP.CM_CTS (resend) the test fails due resending is not allowed anymore.");
+    if (CT_WaitForCTS(pgCTS8, pgn, dutAddr, toolAddr, gc_TIMEOUT_T1 + gc_TIMEOUT_TR -1))
+    {
+      // CTS timeout.
+      // check for abort...
+      if ( (pgCTS8.ControlByte == gc_TPCM_CTRL_WORD_ABORT) && (pgCTS8.PGNumber == pgn) )
+      {
+        // DUT sends abort after valid TP.DT -> pass.
+        CT_Info(1, "", "DUT aborts timed out TP.DT -> OK.");
+        CT_STEP_END_PASS(1);
+        continue; // continue with the next pgn in loop.
+      }
+    }
+    
+    // CTS, no abort -> error due abort was expected.
+    CT_WAIT(1);
+    CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+    CT_SendABORT(pgn, toolAddr, dutAddr, 5);
+    if (pgCTS8.time_ns>0)
+    {
+      snprintf(errText, elcount(errText), "DUT does not abort on the 3rd consecutive time there are no packages sent after TP.CM_CTS at t=%.06f. Instead it continues reordering with TP.CM_CTS at t=%.06f", CT_Ns2Sec(pgCTS6.time_ns), CT_Ns2Sec(pgCTS8.time_ns));
+    }
+    else
+    {
+      snprintf(errText, elcount(errText), "DUT does not abort on the 3rd consecutive time there are no packages sent after TP.CM_CTS at t=%.06f.", CT_Ns2Sec(pgCTS6.time_ns));
+    }
+    
+    CT_STEP_END_FAIL(5, errText);
+
+  } // end CT-LOOP
+  
+}
+
+
+// ==============================================================================================================
+// functionality of the test A8 17
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: TP error occurred (FAIL)
+// 3: DUT does neither abort, nor reorder packets on wrong sequence (FAIL)
+// 4: DUT does finalize the wrong sequence data block with TP.CM_EndOfMsgAck (FAIL)
+// 5: Missing TP.CM_EndOfMsgAck after resending packets in correct order within Tr (200ms). (FAIL)
+// 6: DUT declined or aborted a TP that contains no errors.(INCONCLUSIVE)
+// 7: DUT sends invalid TP.CM_CTS for reordering packets. (FAIL)
+// 8: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_17_TP_DT_Sequential_Order(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime, resend_time;
+  byte ok;
+  dword pgn;
+  int tpChkRes;
+  word i;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS1, pgCTS2, pgCTS3;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS1, pgRTS2;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM1, pgEOM2;
+  pg J1939::J1939_CT_RT::TPCMxx pgTpcm;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  long n;
+  byte resend_startIndex;
+  byte resend_nrOfPkgs;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(8, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(8, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    initJ1939PGData(pgCTS1);
+    initJ1939PGData(pgCTS2);
+    initJ1939PGData(pgCTS3);
+    initJ1939PGData(pgFirstDT);
+    initJ1939PGData(pgLastDT);
+    initJ1939PGData(pgDT);
+    initJ1939PGData(pgEOM1);
+    initJ1939PGData(pgEOM2);
+    initJ1939PGData(pgRTS1);
+    initJ1939PGData(pgRTS2);
+    initJ1939PGData(pgTpcm);
+    
+    pgCTS1.byte(0) = 0;
+    pgCTS2.byte(0) = 0;
+    pgCTS3.byte(0) = 0;
+    pgFirstDT.byte(0) = 0;
+    pgLastDT.byte(0) = 0;
+    pgDT.byte(0) = 0;
+    pgEOM1.byte(0) = 0;
+    pgEOM2.byte(0) = 0;
+    pgRTS1.byte(0) = 0;
+    pgRTS2.byte(0) = 0;
+    pgTpcm.byte(0) = 0;
+    
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/2 Start TP and check if it's proper working...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Start TP and check if it's proper working...");
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+    // ---------------------------------------------------------------------------------------------------------------------
+    // 0: OK
+    // 1: CTS Timeout
+    // 2: CTS Error: Number of packets that can be sent error.
+    // 3: CTS Error: Next packet number to be send error.
+    // 4: EOM Timeout
+    // 5: EOM Error: Total message size error.
+    // 6: responder sent abort.
+    // 7: Dut declined with abort. (answer in pgOutLastCTS)
+    // 8: Sending TP.DT error.
+    // 9: Multiple CTS or CTS within transport error.
+    tpChkRes = CT_Check_TP_AsOriginator(   toolAddr, dutAddr            //   byte originatorAddr, byte responderAddr
+                                         , pgn                          // , dword pgn
+                                         , 0                            // , byte pgnTest
+                                         , 52                           // , byte messageSize
+                                         , 255                          // , byte rtsMaxPkgs
+                                         , pgRTS1                       // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                         , pgCTS1                       // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                         , pgFirstDT                    // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                         , pgLastDT                     // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                         , pgEOM1                       // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                         , 1                            // , word dtDistance
+                                         , 1                            // , useDefaultDtPrio
+                                         , errText);                    // , char errText[])
+    
+    // write("tpChkRes=%d, expectAbort=%d",tpChkRes, expectAbort);
+
+    switch(tpChkRes)
+    {
+      case 0: break; /* OK */
+      case 6:
+      case 7:
+      {
+        // abort during TP or declined the TP.
+        CT_WAIT(1); // sync output.
+        CT_STEP_END_INCONCLUSIVE(6, errText);
+        continue; // continue with the next pgn - maybe this one works.
+      }
+      default:
+      {
+        // any TP error is reported and test fails.
+        CT_STEP_END_FAIL(2, errText);
+        return; // leave on fail.
+      }
+    }
+
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/2 Start second TP with sequence error in data block.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    stepTime = CT_STEP_BEGIN("Start second TP with sequence error in data block.");
+
+    CT_SendRTS(pgRTS2, pgn, toolAddr, dutAddr, 52, 255);
+    if (CT_WaitForCTS(pgCTS2, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout after RTS at t=%.06f", CT_Ns2Sec(pgRTS2.time_ns));
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    // DUT has to order all packets starting from 1.
+    if (pgCTS2.NextPacketNumberToBeSent != 1)
+    {
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 2);
+      CT_WAIT(1);
+      
+      snprintf(errText, elcount(errText), "DUT order error within CTS at t=%.06f: NextPacketNumberToBeSent is %d, but 1 is expected.", CT_Ns2Sec(pgCTS2.time_ns), pgCTS2.NextPacketNumberToBeSent);
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+
+    // after the first CTS is ok, send the first TP.DT as fast as possible, with a sequence error in it.
+    pgDT.sa = toolAddr;
+    pgDT.da = dutAddr;
+    pgDT.prio = gc_PRIO_TP_DATA;
+    for (i=1; i<=pgRTS2.TotalNumberOfPackets; i++) 
+    {
+      pgDT.SequenceNumber = (i==4) ? 5 : (i==5) ? 4 : i; // if i is 4 set #5, if i is 5 set 4 -> this exchanges sequence #4 and #5 in order.
+      CT_SendDT(pgDT);
+    }
+    
+    // check for aborts within the data block...
+    if (CT_CHECK_ABORTS_BY_PGN(pgn, dutAddr, toolAddr, pgCTS2.time_ns) == 1)
+    {
+      // DUT aborted. -> ok.
+      CT_WAIT(1); // sync output.
+      CT_STEP_END_PASS(1);
+      continue; // continue with the next entry.
+    }
+    // check CTS within the data block.
+    resend_startIndex = 0;
+    if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, pgCTS2.time_ns+1, dutAddr, toolAddr, gc_TPCM_CTRL_WORD_CTS, pgn) > 0)
+    {
+      // TP.CM's within data block. Use the last (!) one, and check if it's a resend. everything else leads to an error.
+      struct MsgBufEntry entry;
+      MsgBuf_Copy(entry, gMsgBuf[bufIndices[bufIndices.size()-1]]);
+      resend_nrOfPkgs = CT_GetTPCMCTSPkgCount(entry);
+      resend_startIndex = CT_GetTPCMCTSNextPkg(entry);
+      resend_time = entry.time_ns;
+    }
+    else
+    {
+      // no CTS within data block... await next TPCM from DUT within the next Tr (200ms).
+      if (CT_WaitForTPCM(pgTpcm, pgn, dutAddr, toolAddr, gc_TPCM_CTRL_WORD_ANY, gc_TIMEOUT_TR) == 0)
+      {
+        // there is a TPCM...
+        // check for the controlbyte.
+        switch(pgTpcm.ControlByte)
+        {
+          case gc_TPCM_CTRL_WORD_ABORT:
+          {
+            // DUT aborts -> OK.
+            CT_WAIT(1); // sync output.
+            CT_STEP_END_PASS(1);
+            continue; // continue with next pgn...
+          }
+          case gc_TPCM_CTRL_WORD_CTS:
+          {
+            resend_nrOfPkgs = CT_GetTPCMCTSPkgCount(pgTpcm);
+            resend_startIndex = CT_GetTPCMCTSNextPkg(pgTpcm);
+            resend_time = pgTpcm.time_ns;
+            break;
+          }
+          case gc_TPCM_CTRL_WORD_EOM:
+          {
+            snprintf(errText, elcount(errText), "DUT does finalize the wrong sequence data block with TP.CM_EndOfMsgAck at t=%.06f", CT_Ns2Sec( pgTpcm.time_ns ));
+            CT_STEP_END_FAIL(4, errText);
+            return; // leave on fail.
+          }
+        }
+      }
+    }
+
+    // check and handle cts resend if there is any...
+    if (resend_startIndex != 0)
+    {
+      if (resend_startIndex > 4)
+      {
+        CT_WAIT(1);
+        CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+        CT_SendABORT(pgn, toolAddr, dutAddr, 6);
+        CT_WAIT(1);
+        snprintf(errText, elcount(errText), "DUT reorder error within TP.CM_CTS at t=%.06f: Next packet number to be send is %d, but <=4 is expected.", CT_Ns2Sec(resend_time), resend_startIndex);
+        CT_STEP_END_FAIL(7, errText);
+        return; // leave on fail.
+      }
+      if (resend_nrOfPkgs != pgRTS2.TotalNumberOfPackets-resend_startIndex+1)
+      {
+        CT_WAIT(1);
+        CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+        CT_SendABORT(pgn, toolAddr, dutAddr, 6);
+        CT_WAIT(1);
+        snprintf(errText, elcount(errText), "DUT reorder error within TP.CM_CTS at t=%.06f: NumberOfPacketsThatCanBeSent is %d, but %d is expected.", CT_Ns2Sec(resend_time), resend_nrOfPkgs, pgRTS2.TotalNumberOfPackets-resend_startIndex+1);
+        CT_STEP_END_FAIL(7, errText);
+        return; // leave on fail.
+      }
+      
+      // start resending...
+      CT_WAIT(1); // sync output.
+      snprintf(reportText, elcount(reportText), "DUT reordered packets with TP.CM_CTS at t=%.06f... SEND THEM...", CT_Ns2Sec(resend_time));
+      CT_INFO(1, "", reportText);
+      for (i=resend_startIndex; i<=resend_startIndex+resend_nrOfPkgs-1; i++)
+      {
+        pgDT.SequenceNumber = i;
+        CT_SendDT(pgDT);
+      }
+      // check for proper eom from DUT...
+      CT_WAIT(1); // sync output.
+      CT_INFO(1, "", "Await the DUT's TP.CM_EndOfMsgAck within Tr (200ms)");
+      if (CT_WaitForEOM(pgEOM2, pgn, dutAddr, toolAddr))
+      {
+        // EOM timeout.
+        snprintf(errText, elcount(errText), "Missing TP.CM_EndOfMsgAck when resending packets in correct order after last TP.DT at t=%.06f, within Tr (200ms).", CT_Ns2Sec(pgDT.time_ns));
+        CT_WAIT(gc_TIMEOUT_T3); // do not continue too fast
+        CT_STEP_END_FAIL(5, errText);
+        return; // leave on fail.
+      }
+      // EOM ok -> continue.
+      CT_WAIT(1); // sync output.
+      CT_STEP_END_PASS(1);
+      continue; // continue with the next pgn. Don't leave the block, due finally this function leaves with the error, that DUT didnt react as expected.
+    }
+    
+    // on fall through this point, DUT neither aborts nor reordered within or beyond data block.
+    snprintf(errText, elcount(errText), "DUT does neither abort, nor reorder packets on wrong sequence within t=%.06f and Tr (200ms) after last TP.DT at t=%.06f ", CT_Ns2Sec(pgCTS2.time_ns), CT_Ns2Sec(pgDT.time_ns));
+    CT_STEP_END_FAIL(3, errText);
+    return; // leave on fail.
+    
+  } // end CT-LOOP
+}
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A8 18
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react on RTS (FAIL)
+// 3: Sending TP.DT error (FAIL)
+// 4: DUT does not abort, reorder or finalize with TP.CM_EndOfMsgACK within Tr (200ms) after last TP.DT (FAIL)
+// 5: TP.CM_CTS error (FAIL)
+// 6: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_18_TP_Receive_DT_Data_Size(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long], byte simulateDTSendingError)
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(6, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(6, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/3 Start TP...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Start TP...");
+    stepTime = CT_STEP_BEGIN(-3, reportText);
+    
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 52, 255);
+    if (CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout for RTS at t=%.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    // DUT has to order 4 packets starting with packet #1.
+    if (pgCTS.NextPacketNumberToBeSent != 1)
+    {
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 6);
+      CT_WAIT(1);
+      
+      snprintf(errText, elcount(errText), "DUT order error within TP.CM_CTS at t=%.06f: Next packet number to be send is %d, but 1 is expected.", CT_Ns2Sec(pgCTS.time_ns), pgCTS.NextPacketNumberToBeSent);
+      CT_STEP_END_FAIL(5, errText);
+      
+      return; // leave on fail.
+    }
+    if (pgCTS.NumberOfPacketsThatCanBeSent < 8)
+    {
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 6);
+      CT_WAIT(1);
+      
+      snprintf(errText, elcount(errText), "DUT order error within TP.CM_CTS at t=%.06f: NumberOfPacketsThatCanBeSent is %d, but >=8 is expected.", CT_Ns2Sec(pgCTS.time_ns), pgCTS.NumberOfPacketsThatCanBeSent);
+      CT_STEP_END_FAIL(5, errText);
+      
+      return; // leave on fail.
+    }
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+    
+
+    // ====================
+    // step 2/3 Send TP.DTs up to one with a wrong DLC < 8.
+    // ====================
+    CT_STEP_BEGIN("Send TP.DTs up to one with a wrong DLC < 8...");
+    initJ1939PGData(pgDT);
+    pgDT.sa = toolAddr;
+    pgDT.da = dutAddr;
+    pgDT.prio = gc_PRIO_TP_DATA;
+    for (i=1; i<=8; i++)
+    {
+      pgDT.dlc = 8;
+      pgDT.SequenceNumber = i;
+      CT_WAIT(5);
+      if (i==8) pgDT.dlc = 7;
+      if (!CT_SendDT(pgDT) || simulateDTSendingError)
+      {
+        snprintf(errText, elcount(errText), "Sending TP.DT with seqNr %d at t=%.06f failed. Stopped TP with abort.", i, CT_Ns2Sec(pgDT.time_ns));
+        CT_WAIT(1);
+        CT_SendABORT(pgn, toolAddr, dutAddr, 3); // Timeout occured during running connection
+        CT_WAIT(1);
+        CT_STEP_END_FAIL(3, errText);
+        return; // leave on fail.
+      }
+    }
+    CT_STEP_END_PASS(0);
+    CT_WAIT(1);
+    
+    // ====================
+    // step 3/3 Check for next TPCM is abort or reordering within Tr (200ms)...
+    // ====================
+    CT_STEP_BEGIN("Check for next TPCM is aborting or reordering within Tr (200ms)");
+    if (CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // No CTS...
+      // if it was aborted -> OK.
+      // check for aborts after last DT up to this point...
+      if (CT_CHECK_ABORTS_BY_PGN(pgn, dutAddr, toolAddr, pgDT.time_ns) == 1)
+      {
+        // DUT aborted. -> ok.
+        CT_WAIT(1); // sync output.
+        CT_STEP_END_PASS(1);
+        continue; // continue with the next entry.
+      }
+      
+      // no CTS, no abort -> timeout.
+      snprintf(errText, elcount(errText), "DUT finalizes packets within Tr (200ms) after wrong TP.DT at t=%.06f.", CT_Ns2Sec(pgDT.time_ns));
+      if (!CT_Check_For_EOM_In_MsgBuf(bufIndices, pgDT.time_ns, dutAddr, toolAddr))
+      {
+        snprintf(errText, elcount(errText), "DUT does neither abort nor reorder packets within Tr (200ms) after wrong TP.DT at t=%.06f. Tool aborted the connection.", CT_Ns2Sec(pgDT.time_ns));
+        CT_WAIT(1);
+        CT_SendABORT(pgn, toolAddr, dutAddr, 3); // Timeout occured during running connection
+        CT_WAIT(1);
+      }
+      CT_WAIT(gc_TIMEOUT_T3); // wait for timers run out and sync with trace warnings about missing TP.DTs...
+      CT_STEP_END_FAIL(4, errText);
+      return; // leave on fail.
+    }
+    
+    // got CTS.
+    // send the reordered packets.
+    for (i=pgCTS.NextPacketNumberToBeSent; i<pgCTS.NextPacketNumberToBeSent + pgCTS.NumberOfPacketsThatCanBeSent; i++)
+    {
+      pgDT.dlc = 8;
+      pgDT.SequenceNumber = i;
+      CT_WAIT(5);
+      if (!CT_SendDT(pgDT))
+      {
+        snprintf(errText, elcount(errText), "Sending TP.DT with seqNr %d at t=%.06f failed. Stopped TP with abort.", i, CT_Ns2Sec(pgDT.time_ns));
+        CT_WAIT(1);
+        CT_SendABORT(pgn, toolAddr, dutAddr, 3); // Timeout occured during running connection
+        CT_WAIT(1);
+        CT_STEP_END_FAIL(3, errText);
+        return; // leave on fail.
+      }
+    }
+    
+    if (CT_WaitForEOM(pgEOM, pgn, dutAddr, toolAddr))
+    {
+      // NO EOM.-> ERROR.
+      snprintf(errText, elcount(errText), "DUT does not send an expected TP.CM_EndOfMsgACK within Tr (200ms) after TP.DT at t=%.06f.", CT_Ns2Sec(pgDT.time_ns));
+      // DUT abort?
+      if (!CT_CHECK_ABORTS_BY_PGN(pgn, dutAddr, toolAddr, pgDT.time_ns) == 1)
+      {
+        CT_WAIT(1);
+        CT_SendABORT(pgn, toolAddr, dutAddr, 3); // Timeout occured during running connection
+        CT_WAIT(1);
+      }
+      CT_STEP_END_FAIL(4, errText);
+      return; // leave on fail.
+    }
+        
+    CT_WAIT(1);
+    CT_STEP_END_PASS(1);
+
+  } // end CT-LOOP
+}
+
+
+
+// ==============================================================================================================
+// functionality of the test A8 19
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react (timeout) (FAIL)
+// 3: DUT seems not to accept the TP.DTs due an TP error. (FAIL)
+// 4: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_19_TP_Receive_DT_Prios(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(4, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(4, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/1 Check TP with different TP.DT prios...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Check TP with different TP.DT prios");
+    stepTime = CT_STEP_BEGIN(-1, reportText);
+    // ---------------------------------------------------------------------------------------------------------------------
+    // 0: OK
+    // 1: CTS Timeout
+    // 2: CTS Error: Number of packets that can be sent error.
+    // 3: CTS Error: Next packet number to be send error.
+    // 4: EOM Timeout
+    // 5: EOM Error: Total message size error.
+    // 6: responder sent abort.
+    // 7: DUT declined with abort. (answer in pgOutLastCTS)
+    // 8: Sending TP.DT error.
+    // 9: Multiple CTS or CTS within transport error.
+    tpChkRes = CT_Check_TP_AsOriginator(   toolAddr, dutAddr            //   byte originatorAddr, byte responderAddr
+                                         , pgn                          // , dword pgn
+                                         , 1                            // , byte pgnTest
+                                         , 52                           // , byte messageSize
+                                         , 255                          // , byte rtsMaxPkgs
+                                         , pgRTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                         , pgCTS                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                         , pgFirstDT                    // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                         , pgLastDT                     // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                         , pgEOM                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                         , 5                            // , word dtDistance
+                                         , 0                            // , useDefaultDtPrio
+                                         , errText);                    // , char errText[])
+    
+    //write("tpChkRes=%d",tpChkRes);
+    switch(tpChkRes)
+    {
+      case 0: break;
+      case 1:
+      {
+        // CTS timeout...
+        CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // wait to synchronize with trace warnings...
+        CT_STEP_END_FAIL(2, errText);
+        return; // leave on fail
+      }
+      default:
+      {
+        //write("tpChkRes = %d",tpChkRes);
+        CT_WAIT(gc_TIMEOUT_T3); // on any case not related to this case, await a T3 timeout.
+        CT_STEP_END_FAIL(3, errText);
+        return; // leave on fail.
+      }
+    }
+    
+    CT_STEP_END_PASS(1);
+    
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+
+// ==============================================================================================================
+// functionality of the test A8 20
+// FuncPath's:
+//  1: DUT reacts as expected. (PASS)
+//  2: DUT does not react on RTS (FAIL)
+//  3: CTS error. (FAIL)
+//  4: Sending TP.DT error (FAIL)
+//  5: Unexpected TP.CM after last TP.DT (FAIL)
+//  6: TP.CM_EndOfMsgACK timeout (FAIL)
+//  7: TP.CM_EndOfMsgACK wrong PGN (FAIL)
+//  8: TP.CM_EndOfMsgACK was sent before last TP.DT (FAIL)
+//  9: DUT aborts unexpectedly (FAIL)
+// 10: PGI inconsistency. (INCONCLUSIVE)
+// 11: TP.CM_EndOfMsgACK wrong TotalMessageSize (FAIL)
+// 12: TP.CM_EndOfMsgACK wrong TotalNumberOfPackets (FAIL)
+void CTF_A08_20_TP_Send_EOM(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long], byte simulateDTSendingError)
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok, noAbort;
+  dword pgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgTPCM;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  noAbort = 0;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(10, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(10, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/2 Start TP...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Start TP...");
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+    
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 52, 255);
+    if (CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout for RTS at %.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+
+    // DUT has to order 4 packets starting with packet #1.
+    if (pgCTS.NextPacketNumberToBeSent != 1)
+    {
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 6);
+      CT_WAIT(1);
+      
+      snprintf(errText, elcount(errText), "DUT order error within TP.CM_CTS at t=%.06f: Next packet number to be send is %d, but 1 is expected.", CT_Ns2Sec(pgCTS.time_ns), pgCTS.NextPacketNumberToBeSent);
+      CT_STEP_END_FAIL(3, errText);
+      
+      return; // leave on fail.
+    }
+    if (pgCTS.NumberOfPacketsThatCanBeSent < 8)
+    {
+      CT_WAIT(1);
+      CT_INFO(1, "", "Tool will abort, due DUT does not react like expected.");
+      CT_SendABORT(pgn, toolAddr, dutAddr, 6);
+      CT_WAIT(1);
+      
+      snprintf(errText, elcount(errText), "DUT order error within TP.CM_CTS at t=%.06f: NumberOfPacketsThatCanBeSent is %d, but >=8 is expected.", CT_Ns2Sec(pgCTS.time_ns), pgCTS.NumberOfPacketsThatCanBeSent);
+      CT_STEP_END_FAIL(3, errText);
+      
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    CT_WAIT(1);
+    
+    // ====================
+    // step 2/2 Send TP.DTs and check TP finalization...
+    // ====================
+    CT_STEP_BEGIN("Send TP.DTs and check TP finalization...");
+    initJ1939PGData(pgDT);
+    pgDT.sa = toolAddr;
+    pgDT.da = dutAddr;
+    pgDT.prio = gc_PRIO_TP_DATA;
+    for (i=1; i<=8; i++)
+    {
+      pgDT.SequenceNumber = i;
+      CT_WAIT(5);
+      if (!CT_SendDT(pgDT) || simulateDTSendingError)
+      {
+        snprintf(errText, elcount(errText), "Sending TP.DT with seqNr %d at t=%.06f failed. Stopped TP with abort.", i, CT_Ns2Sec(pgDT.time_ns));
+        CT_WAIT(1);
+        CT_SendABORT(pgn, toolAddr, dutAddr, 3); // Timeout occured during running connection
+        CT_WAIT(1);
+        CT_STEP_END_FAIL(4, errText);
+        return; // leave on fail.
+      }
+    }
+    
+    // check for EOM within the connection.
+    if (CT_Check_For_EOM_In_MsgBuf(bufIndices, pgCTS.time_ns, dutAddr, toolAddr))
+    {
+      int64 eomTime;
+      eomTime = gMsgBuf[bufIndices[0]].time_ns;
+      if (eomTime<pgDT.time_ns)
+      {
+        snprintf(errText, elcount(errText), "TP.CM_EndOfMsgACK at t=%.06f was sent before last TP.DT at t=%.06f", CT_Ns2Sec(eomTime), CT_Ns2Sec(pgDT.time_ns));
+        CT_WAIT(1);
+        CT_SendABORT(pgn, toolAddr, dutAddr, 6); // TP error.
+        CT_WAIT(1);
+        CT_STEP_END_FAIL(8, errText);
+        return; // leave on fail.
+      }
+    }
+    
+    // await next TPCM... 
+    if (CT_WaitForTPCM(pgTPCM, gc_PGN_ANY, dutAddr, toolAddr, gc_TPCM_CTRL_WORD_ANY, gc_TIMEOUT_TR))
+    {
+      // TPCM timeout.
+      snprintf(errText, elcount(errText), "TP.CM_EndOfMsgACK timeout after last TP.DT at t=%.06f. Tool aborted the connection.", CT_Ns2Sec(pgDT.time_ns));
+      CT_WAIT(1);
+      CT_SendABORT(pgn, toolAddr, dutAddr, 3); // Timeout occured during running connection
+      CT_WAIT(1);
+      CT_STEP_END_FAIL(6, errText);
+      return; // leave on fail.
+    };
+    
+    // got an TPCM... inspect...
+    ok = 0;
+    // an eom?
+    if (pgTPCM.ControlByte == gc_TPCM_CTRL_WORD_EOM)
+    {
+      if (pgTPCM.PGNumber != pgn)
+      {
+        snprintf(errText, elcount(errText), "TP.CM_EndOfMsgACK after last TP.DT at t=%.06f contains wrong PGN. (got: 0x%.05X, expected: 0x%.05X).  Tool aborted the connection.", CT_Ns2Sec(pgDT.time_ns), pgTPCM.PGNumber, pgn);
+        CT_WAIT(1);
+        CT_SendABORT(pgn, toolAddr, dutAddr, 6); // TP error.
+        CT_WAIT(1);
+        CT_STEP_END_FAIL(7, errText);
+        return; // leave on fail.
+      }
+      // EOM and PGN ok.
+      // check TotalMessageSize...
+      if (pgTPCM.TotalMessageSizeEoMA != pgRTS.TotalMessageSize)
+      {
+        snprintf(errText, elcount(errText), "TP.CM_EndOfMsgACK after last TP.DT at t=%.06f contains wrong TotalMessageSize. (got: %d, expected: %d).  Tool aborted the connection.", CT_Ns2Sec(pgDT.time_ns), pgTPCM.TotalMessageSizeEoMA, pgRTS.TotalMessageSize);
+        CT_WAIT(1);
+        CT_SendABORT(pgn, toolAddr, dutAddr, 6); // TP error.
+        CT_WAIT(1);
+        CT_STEP_END_FAIL(11, errText);
+        return; // leave on fail.
+      }
+      
+      // EOM and TotalMessageSize OK.
+      // check TotalNumberOfPackets
+      if (pgTPCM.TotalNumberOfPacketsEoMA != pgRTS.TotalNumberOfPackets)
+      {
+        snprintf(errText, elcount(errText), "TP.CM_EndOfMsgACK after last TP.DT at t=%.06f contains wrong TotalNumberOfPackets. (got: %d, expected: %d).  Tool aborted the connection.", CT_Ns2Sec(pgDT.time_ns), pgTPCM.TotalNumberOfPacketsEoMA, pgRTS.TotalNumberOfPackets);
+        CT_WAIT(1);
+        CT_SendABORT(pgn, toolAddr, dutAddr, 6); // TP error.
+        CT_WAIT(1);
+        CT_STEP_END_FAIL(12, errText);
+        return; // leave on fail.
+      }
+      
+      // EOM fully ok.
+      ok = 1;
+    }
+    
+    // an abort ?
+    else if (pgTPCM.ControlByte == gc_TPCM_CTRL_WORD_ABORT)
+    {
+      if (pgTPCM.PGNumber == pgn)
+      {
+        // abort PGN -> unexpectedly...fail.
+        snprintf(errText, elcount(errText), "DUT aborts unexpectedly at t=%.06f, after last TP.DT at t=%.06f.", CT_Ns2Sec(pgTPCM.time_ns), CT_Ns2Sec(pgDT.time_ns));
+        CT_STEP_END_FAIL(9, errText);
+        return; // leave on fail.
+      }
+      // abort for another PGN... this is also unexpected, but we'll ignore this one...
+      // this keeps ok to be false, but we want to avoid sending tool an abort bellow... 
+      noAbort = 1;
+      CT_WAIT(gc_TIMEOUT_T3); // leads to timeout the DUT's EOM timeout timer.
+    }
+    
+    // unexpected TPCM...
+    if (!ok)
+    {
+      write("!ok...");
+      snprintf(errText, elcount(errText), "TP.CM after last TP.DT at t=%.06f contains unexpected control byte 0x%X.", CT_Ns2Sec(pgDT.time_ns), pgTPCM.ControlByte);
+      if (!noAbort)
+      {
+        CT_WAIT(1);
+        CT_SendABORT(pgn, toolAddr, dutAddr, 6); // TP error.
+        CT_WAIT(1);
+      }
+      CT_STEP_END_FAIL(5, errText);
+      return; // leave on fail.
+    }
+    
+    CT_WAIT(350); // do not request too fast.
+    CT_STEP_END_PASS(1);
+
+  } // end CT-LOOP
+}
+
+
+// ==============================================================================================================
+// functionality of the test A8 21
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react (timeout) (FAIL)
+// 3: DUT ignores abort and continues sending TPCM messages. (FAIL)
+// 4: DUT accepts abort with wrong PGN and stops sending TPCM messages. (FAIL)
+// 5: DUT accepts abort to global address stops sending TPCM messages. (FAIL)
+// 6: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_21_TP_Receive_Abort(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;
+  pg J1939::J1939_CT_RT::TPCMxx pgABORT;
+  pg J1939::J1939_CT_RT::TPCMxx pgTPCM;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(6, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(6, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  initJ1939PGData(pgDT);
+  pgDT.sa = toolAddr;
+  pgDT.da = dutAddr;
+  pgDT.prio = gc_PRIO_TP_DATA;
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/5 Tester aborts directly before sending the last TP.DT...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Tester aborts directly after sending the last TP.DT...");
+    stepTime = CT_STEP_BEGIN(-5, reportText);
+
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 20, 255);
+    if (CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout for RTS at t=%.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    // send data...
+    for (i=1; i<=3; i++)
+    {
+      pgDT.SequenceNumber = i;
+      CT_WAIT(5);
+      if (i==3) CT_SendABORT(pgABORT, pgn, toolAddr, dutAddr, 250);
+      CT_SendDT(pgDT);
+    }
+    
+    // check DUT does NOT send TPCM within T2
+    if (!CT_WaitForTPCM(pgTPCM, pgn, dutAddr, toolAddr, gc_TPCM_CTRL_WORD_ANY, gc_TIMEOUT_T2))
+    {
+      // DUT sent tpcm -> fail.
+      snprintf(errText, elcount(errText), "DUT ignores abort and sends TPCM at t=%.06f after abort at t=%.06f within T2 (1250ms)", CT_Ns2Sec(pgTPCM.time_ns), CT_Ns2Sec(pgABORT.time_ns) );
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(3, errText);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(0);
+    CT_WAIT(1); // sync
+    
+    // ====================
+    // step 2/5 Tester sends an abort directly before sending the last TP.DT with another PGN...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Tester sends an abort directly after sending the last TP.DT with another PGN....");
+    stepTime = CT_STEP_BEGIN(reportText);
+    
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 20, 255);
+    if (CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout for RTS at t=%.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    // send data...
+    for (i=1; i<=3; i++)
+    {
+      pgDT.SequenceNumber = i;
+      CT_WAIT(5);
+      if (i==3) CT_SendABORT(pgABORT, pgn|0x30000, toolAddr, dutAddr, 250);
+      CT_SendDT(pgDT);
+    }
+    
+    // check DUT ignores the abort and sends TP.CM_EndOfMsgACK within Tr (200ms)
+    if (CT_WaitForEOM(pgEOM, pgn, dutAddr, toolAddr))
+    {
+      // EOM timeout. DUT accepted abort with wrong PGN.
+      snprintf(errText, elcount(errText), "DUT accepted abort with another PGN at t=%.06f and aborted TP instead of sending TP.CM_EndOfMsgACK within Tr (200ms).", CT_Ns2Sec(pgABORT.time_ns) );
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(4, errText);
+      return; // leave on fail.
+    }
+
+    CT_STEP_END_PASS(0);
+    CT_WAIT(1); // sync
+
+
+    // ====================
+    // step 3/5 Tester sends an abort directly before sending the last TP.DT to the global address...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Tester sends an abort directly after sending the last TP.DT to the global address...");
+    stepTime = CT_STEP_BEGIN(reportText);
+    
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 20, 255);
+    if (CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout for RTS at t=%.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    // send data...
+    for (i=1; i<=3; i++)
+    {
+      pgDT.SequenceNumber = i;
+      CT_WAIT(5);
+      if (i==3) CT_SendABORT(pgABORT, pgn, toolAddr, gc_BC_ADDR, 250);
+      CT_SendDT(pgDT);
+    }
+    
+    // check DUT ignores abort to global address and sends TP.CM_EndOfMsgACK within Tr (200ms)
+    if (CT_WaitForEOM(pgEOM, pgn, dutAddr, toolAddr))
+    {
+      // EOM timeout. DUT accepted abort with wrong PGN.
+      snprintf(errText, elcount(errText), "DUT seems to accept an (invalid) abort to global address at t=%.06f, because TP.CM_EndOfMsgACK after the last TP.DT at t=%.06f was NOT detected within Tr (200ms).", CT_Ns2Sec(pgABORT.time_ns), CT_Ns2Sec(pgDT.time_ns) );
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(5, errText);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(0);
+    CT_WAIT(1); // sync
+
+
+    // ====================
+    // step 4/5 Tester sends the first two TP.DT and aborts the connection...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Tester sends the first two TP.DT and aborts the connection...");
+    stepTime = CT_STEP_BEGIN(reportText);
+    
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 20, 255);
+    if (CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout for RTS at t=%.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    // send data...
+    for (i=1; i<=2; i++)
+    {
+      pgDT.SequenceNumber = i;
+      CT_WAIT(5);
+      CT_SendDT(pgDT);
+      if (i==2) CT_SendABORT(pgABORT, pgn, toolAddr, dutAddr, 250);
+    }
+    
+    // Check DUT accepts abort and keeps silent within T2 (750ms)...
+    if (!CT_WaitForTPCM(pgTPCM, pgn, dutAddr, toolAddr, gc_TPCM_CTRL_WORD_ANY, gc_TIMEOUT_T1))
+    {
+      // DUT sent tpcm -> fail.
+      snprintf(errText, elcount(errText), "DUT ignores abort and sends TPCM at t=%.06f after abort at t=%.06f within T1 (750ms)", CT_Ns2Sec(pgTPCM.time_ns), CT_Ns2Sec(pgABORT.time_ns) );
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(3, errText);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(0);
+    CT_WAIT(1); // sync
+
+
+    // ====================
+    // step 5/5 Tester send no data packages but aborts immediately...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Tester send no data packages but aborts immediately...");
+    stepTime = CT_STEP_BEGIN(reportText);
+    
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 20, 255);
+    if (CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout for RTS at t=%.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    // send no data but abort.
+    CT_SendABORT(pgABORT, pgn, toolAddr, dutAddr, 250);
+    
+    // Check DUT accepts abort and keeps silent within T2 (750ms)...
+    if (!CT_WaitForTPCM(pgTPCM, pgn, dutAddr, toolAddr, gc_TPCM_CTRL_WORD_ANY, gc_TIMEOUT_T2))
+    {
+      // DUT sent tpcm -> fail.
+      snprintf(errText, elcount(errText), "DUT ignores abort and sends TPCM at t=%.06f after abort at t=%.06f within T2 (1250ms)", CT_Ns2Sec(pgTPCM.time_ns), CT_Ns2Sec(pgABORT.time_ns) );
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(3, errText);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(1); // sync
+    
+  } // end CT-LOOP
+}
+
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A8 22
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react (timeout) (FAIL)
+// 3: DUT aborts with wrong abort reason. (FAIL)
+// 4: DUT aborts using the global address as DA. (FAIL)
+// 5: DUT aborts using an unexpected PGN. (FAIL)
+// 6: DUT accepts TP.DT packets after it aborts (FAIL)
+// 7: DUT sends abort within timeout range. (FAIL)
+// 8: DUT does not abort as expected. (FAIL)
+// 9: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A08_22_TP_Send_Abort(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  word bufIndicesEOM[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpChkRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;
+  pg J1939::J1939_CT_RT::TPCMxx pgABORT;
+  pg J1939::J1939_CT_RT::TPCMxx pgTPCM;
+  pg J1939::J1939_CT_RT::TPDT pgDT,pgDTWrong;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(9, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(9, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  initJ1939PGData(pgDT);
+  pgDT.sa = toolAddr;
+  pgDT.da = dutAddr;
+  pgDT.prio = gc_PRIO_TP_DATA;
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/4 Reason 3: Abort reason 3: Timeout...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Abort reason 3: Timeout...");
+    stepTime = CT_STEP_BEGIN(-4, reportText);
+    
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 20, 255);
+    if (CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout for RTS at t=%.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    // send one DT and produce timeout.
+    pgDT.SequenceNumber = 1;
+    CT_SendDT(pgDT);
+    // active wait for abort is not possible when DUT answers too quick tester can not detect it.
+    // solution: active wait + buffer.
+    // check abort within timeout range...
+    CT_WAIT(gc_TIMEOUT_T1);
+    if (CT_CHECK_ANY_ABORTS(bufIndices, dutAddr, toolAddr, gc_BC_ADDR, pgDT.time_ns) == 1)
+    {
+      dword dtMs, missingMs;
+      dtMs = CT_Ns2Ms(gMsgBuf[bufIndices[0]].time_ns-pgDT.time_ns);
+      missingMs = gc_TIMEOUT_T1 - dtMs;
+      // abort timeout after DT timeout.
+      snprintf(errText, elcount(errText), "DUT sends abort within timeout range T1 (750ms) after TP.DT at t=%.06f. (%dms too early)", CT_Ns2Sec(pgDT.time_ns), missingMs);
+      CT_STEP_END_FAIL(7, errText);
+      return; // leave on fail.
+    }
+    CT_WAIT(gc_TIMEOUT_TR);
+    if (CT_CHECK_ANY_ABORTS(bufIndices, dutAddr, toolAddr, gc_BC_ADDR, pgDT.time_ns + gc_TIMEOUT_T1) == 0)
+    {
+      // abort timeout after DT timeout.
+      snprintf(errText, elcount(errText), "DUT does not abort missing data after TP.DT at t=%.06f after T1 (750ms) within Tr (200ms).", CT_Ns2Sec(pgDT.time_ns));
+      CT_STEP_END_FAIL(8, errText);
+      return; // leave on fail.
+    }
+    // validate abort...
+    switch(CT_VALIDATE_ABORT(gMsgBuf[bufIndices[0]], pgn, 3, errText))
+    {
+      case 0: /*OK*/; break;
+      case 1: CT_STEP_END_FAIL(3, errText); return; // reason
+      case 2: CT_STEP_END_FAIL(4, errText); return; // global
+      case 3: CT_STEP_END_FAIL(5, errText); return; // pgn.
+    }
+    
+    // after DUT aborted, send the rest of the TP.DTs...
+    for (i=2; i<=3; i++)
+    {
+      pgDT.SequenceNumber = i;
+      CT_SendDT(pgDT);
+    }
+    
+    // now await for a EOM within T3 (1250ms) after the last TP.DT to check if the DUT accepted the TP.DT's after its abort.
+    CT_WAIT(gc_TIMEOUT_T3);
+    if (CT_Check_For_EOM_In_MsgBuf(bufIndicesEOM, gMsgBuf[bufIndices[0]].time_ns, dutAddr, toolAddr) != 0)
+    {
+      // DUT sent EOM -> it seems to accept the TP.DT's after aborting the connection.
+      snprintf(errText, elcount(errText), "DUT accepts TP.DT packets after it aborts at t=%.06f.", CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+      CT_STEP_END_FAIL(6, errText);
+      return; // leave on fail.
+    }
+   
+    CT_STEP_END_PASS(0);
+    CT_WAIT(1); // sync
+    
+    // ====================
+    // step 2/4 Abort reason 7: Bad sequence...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Abort reason 7: Bad sequence...");
+    stepTime = CT_STEP_BEGIN(reportText);
+    
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 20, 255);
+    if (CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout for RTS at t=%.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    // send two TP.DTs, an TP.CM_CTS and the final TP.DT.
+    pgDT.SequenceNumber = 1;
+    CT_SendDT(pgDT);
+    pgDT.SequenceNumber = 3;
+    CT_SendDT(pgDT);
+    pgDTWrong = pgDT;
+    pgDT.SequenceNumber = 2;
+    CT_SendDT(pgDT);
+    
+    // active wait for abort is not possible when DUT answers too quick tester can not detect it.
+    // solution: active wait + buffer.
+    CT_WAIT(gc_TIMEOUT_TR);
+    // check abort.
+    if (CT_CHECK_ANY_ABORTS(bufIndices, dutAddr, toolAddr, gc_BC_ADDR, pgDTWrong.time_ns) == 0)
+    {
+      // abort timeout after DT timeout.
+      snprintf(errText, elcount(errText), "DUT does not abort a bad sequence of TP.DT at t=%.06f within Tr (200ms).", CT_Ns2Sec(pgDTWrong.time_ns));
+      CT_STEP_END_FAIL(8, errText);
+      return; // leave on fail.
+    }
+    // validate abort...
+    switch(CT_VALIDATE_ABORT(gMsgBuf[bufIndices[0]], pgn, 7, errText))
+    {
+      case 0: /*OK*/; break;
+      case 1: CT_STEP_END_FAIL(3, errText); return; // reason
+      case 2: CT_STEP_END_FAIL(4, errText); return; // global
+      case 3: CT_STEP_END_FAIL(5, errText); return; // pgn.
+    }
+    
+    // now await for a EOM within T3 (1250ms) after the last TP.DT to check if the DUT accepted the TP.DT's after its abort.
+    CT_WAIT(gc_TIMEOUT_T3);
+    if (CT_Check_For_EOM_In_MsgBuf(bufIndicesEOM, gMsgBuf[bufIndices[0]].time_ns, dutAddr, toolAddr) != 0)
+    {
+      // DUT sent EOM -> it seems to accept the TP.DT's after aborting the connection.
+      snprintf(errText, elcount(errText), "DUT accepts TP.DT packets after it aborts at t=%.06f.", CT_Ns2Sec(gMsgBuf[bufIndicesEOM[0]].time_ns));
+      CT_STEP_END_FAIL(6, errText);
+      return; // leave on fail.
+    }
+
+    CT_STEP_END_PASS(0);
+    CT_WAIT(1); // sync
+
+    // ====================
+    // step 3/4 Abort reason 8: Duplicate sequence...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Abort reason 8: Duplicate sequence...");
+    stepTime = CT_STEP_BEGIN(reportText);
+
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, 20, 255);
+    if (CT_WaitForCTS(pgCTS, pgn, dutAddr, toolAddr, gc_TIMEOUT_TR))
+    {
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "CTS timeout for RTS at t=%.06f", CT_Ns2Sec(pgRTS.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3 + gc_TIMEOUT_TR); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    // send two TP.DTs, an TP.CM_CTS and the final TP.DT.
+    pgDT.SequenceNumber = 1;
+    CT_SendDT(pgDT);
+    pgDT.SequenceNumber = 2;
+    CT_SendDT(pgDT);
+    pgDT.SequenceNumber = 2;
+    CT_SendDT(pgDT);
+    pgDTWrong = pgDT;
+    pgDT.SequenceNumber = 3;
+    CT_SendDT(pgDT);
+
+    // check abort...
+    // active wait for abort is not possible when DUT answers too quick tester can not detect it.
+    // solution: active wait + buffer.
+    CT_WAIT(gc_TIMEOUT_TR); // await TR...
+    if (CT_CHECK_ANY_ABORTS(bufIndices, dutAddr, toolAddr, gc_BC_ADDR, pgDTWrong.time_ns) == 0)
+    {
+      // abort timeout after DT timeout.
+      snprintf(errText, elcount(errText), "DUT does not abort a duplicate sequence of TP.DT at t=%.06f within Tr (200ms).", CT_Ns2Sec(pgDTWrong.time_ns));
+      CT_STEP_END_FAIL(8, errText);
+      return; // leave on fail.
+    }
+    
+    // validate abort...
+    switch(CT_VALIDATE_ABORT(gMsgBuf[bufIndices[0]], pgn, 8, errText))
+    {
+      case 0: /*OK*/; break;
+      case 1: CT_STEP_END_FAIL(3, errText); return; // reason
+      case 2: CT_STEP_END_FAIL(4, errText); return; // global
+      case 3: CT_STEP_END_FAIL(5, errText); return; // pgn.
+    }
+    
+    // now check for EOM within T3 (1250ms) after the last TP.DT to check if the DUT accepted the TP.DT's after its abort.
+    CT_WAIT(gc_TIMEOUT_T3);
+    if (CT_Check_For_EOM_In_MsgBuf(bufIndicesEOM, gMsgBuf[bufIndices[0]].time_ns, dutAddr, toolAddr) != 0)
+    {
+      // DUT sent EOM -> it seems to accept the TP.DT's after aborting the connection.
+      snprintf(errText, elcount(errText), "DUT accepts TP.DT packets after it aborts at t=%.06f.", CT_Ns2Sec(gMsgBuf[bufIndicesEOM[0]].time_ns));
+      CT_STEP_END_FAIL(6, errText);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(0);
+    CT_WAIT(1); // sync
+
+    // ====================
+    // step 4/4 Abort reason 9: Total msg size > 1785...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Abort reason 9: Total msg size > 1785...");
+    stepTime = CT_STEP_BEGIN(reportText);
+
+    CT_SendRTS(pgRTS, pgn, toolAddr, dutAddr, gc_J1939_PG_DLC_MAX+1, 255);
+    
+    // now DUT shall abort within TR.
+    if (CT_AWAIT_ABORT(pgABORT, gc_PGN_ANY, dutAddr, gc_ANY_ADDR, gc_TIMEOUT_TR))
+    {
+      // abort timeout after DT timeout.
+      snprintf(errText, elcount(errText), "DUT does not abort TP.CM at t=%.06f with a total message size > 1758 within Tr (200ms).", CT_Ns2Sec(pgRTS.time_ns));
+      CT_STEP_END_FAIL(8, errText);
+      return; // leave on fail.
+    }
+    
+    // validate abort...
+    switch(CT_VALIDATE_ABORT(pgABORT, pgn, 9, errText))
+    {
+      case 0: /*OK*/; break;
+      case 1: CT_STEP_END_FAIL(3, errText); return; // reason
+      case 2: CT_STEP_END_FAIL(4, errText); return; // global
+      case 3: CT_STEP_END_FAIL(5, errText); return; // pgn.
+    }
+
+    CT_STEP_END_PASS(1);
+    CT_WAIT(1); // sync
+    
+  } // end CT-LOOP
+}
+
+
+// ==============================================================================================================
+// functionality of the test A8 23
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: TP1 or TP2 not completed(FAIL)
+// 3: CTS timeout for TP1 or TP2 (FAIL)
+// 4: PGI inconsistency. (INCONCLUSIVE)
+// 5: Inconclusive, due test needs at least 2 RTSCTS PGI's. (INCONCLUSIVE)
+// 6: DUT rejects TP. (FAIL)
+void CTF_A08_23_TP_Simultaneous_Different_Originators(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime, lastDT1Time, lastDT2Time;
+  byte ok;
+  dword pgn,pgn2;
+  word i;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS1;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS1;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS2;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS2;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM1;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  pg * pgSomething;
+  int tpChkRes;
+  byte thirdNodeAddr;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(4, pgis)) return;
+  
+  // at least 2 PGI's are needed...
+  if (pgis.size()<2)
+  {
+    snprintf(reportText, elcount(reportText), "Inconclusive, due test needs at least 2 PGIs of type RTS->CTS.");
+    CT_STEP_PRECOND_INCONCLUSIVE(5, reportText);
+    return; //leave on fail.
+  }
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(4, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  thirdNodeAddr = CT_Get_Third_Node_Adr(toolAddr, dutAddr);
+  initJ1939PGData(pgDT);
+  pgDT.prio = gc_PRIO_TP_DATA;
+  
+  // enable the IL to have the tool's node handle TP 1 (auto deactivates again after the test method is done.)
+  CT_ENABLE_TESTNODE_IL();
+  
+  // configure the IL's transport behaviour - send as slowly as possible with one packet per CTS. ( reset at the end of the function again - so do no early returns!) 
+  TestILSetNodeProperty(TOOL, "Packets_Per_CTS", 1);
+  TestILSetNodeProperty(TOOL, "CTSLatency", 50);
+  TestILSetNodeProperty(TOOL, "TPDTLatency", 50);
+  TestILSetNodeProperty(TOOL, "EoMALatency", 50);  
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    pgn2 = pgis[(k>0) ? 0 : 1].PGN; // take first known PGI as second PGN for following runs and the second for the first run. If there is only one PGI, the precondition at the beginning will fail.
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X) and PGN %d (0x%.05X)...", pgn, pgn, pgn2, pgn2 );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/2 Start TPs with DUT and a third node simultaneously...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Start TPs with DUT and a third node simultaneously...");
+    stepTime = CT_STEP_BEGIN(-1, reportText);
+    
+    CT_SendRTS(pgRTS1, pgn, toolAddr, dutAddr, 52, 255);
+    if (CT_WaitForCTS(pgCTS1, pgRTS1.PGNumber, pgRTS1.da, pgRTS1.sa, gc_TIMEOUT_TR))
+    {
+      // check abort from DUT...
+      if (CT_CHECK_ABORTS_BY_PGN(bufIndices, pgRTS1.PGNumber, pgRTS1.da, pgRTS1.sa, pgRTS1.time_ns) == 1)
+      {
+        CT_WAIT(gc_TIMEOUT_T3); // has to wait before visible in buffer.
+        // DUT aborted.
+        snprintf(errText, elcount(errText), "TP1: DUT rejected RTS at t=%.06f with abort at t=%.06f.", CT_Ns2Sec(pgRTS1.time_ns), CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+        CT_WAIT(gc_TIMEOUT_T3); // sync output.
+        CT_STEP_END_FAIL(6, errText);
+        return; // leave on fail.
+      }
+      // no abort -> CTS timeout.
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "TP1: CTS timeout for RTS at t=%.06f", CT_Ns2Sec(pgRTS1.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3); // sync output.
+      CT_STEP_END_FAIL(3, errText);
+      return; // leave on fail.
+    }
+    CT_SendRTS(pgRTS2, pgn2, thirdNodeAddr, dutAddr, 52, 255);
+    if (CT_WaitForCTS(pgCTS2, pgRTS2.PGNumber, pgRTS2.da, pgRTS2.sa, gc_TIMEOUT_TR))
+    {
+      CT_WAIT(gc_TIMEOUT_T3); // has to wait before visible in buffer.
+      // check abort from DUT...
+      if (CT_CHECK_ABORTS_BY_PGN(bufIndices, pgRTS2.PGNumber, pgRTS2.da, pgRTS2.sa, pgRTS2.time_ns) == 1)
+      {
+        // DUT aborted.
+        snprintf(errText, elcount(errText), "TP2: DUT rejected RTS at t=%.06f with abort at t=%.06f.", CT_Ns2Sec(pgRTS2.time_ns), CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+        CT_WAIT(gc_TIMEOUT_T3); // sync output.
+        CT_STEP_END_FAIL(6, errText);
+        return; // leave on fail.
+      }
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "TP2: CTS timeout for RTS at t=%.06f", CT_Ns2Sec(pgRTS2.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3); // sync output.
+      CT_STEP_END_FAIL(3, errText);
+      return; // leave on fail.
+    }
+
+    // configure some information that is sent between the tester and the third node.
+    // Attention. DA has to be set BEFORE pgn, due in type2 messages the da overwrites the lower byte of the PGN. Alternatively da_tp selector could be used, but this does not work for DLC<=8 messages (due da keeps its initial value).
+    initJ1939PGData(pgSomething);
+    pgSomething.da = toolAddr; 
+    pgSomething.pgn = pgn;
+    pgSomething.sa = thirdNodeAddr;
+    pgSomething.dlc = 18;
+    pgSomething.prio = gc_PRIO_DEFAULT;
+    
+    // send DTs... (alternating)
+    // additionally try to disturb the DUT's communication by starting a TP between tester and third node somewhere in the middle of the data-block transfers.
+    for (i=1; i<=pgRTS1.TotalNumberOfPackets; i++)
+    {
+      pgDT.SequenceNumber = i;
+      pgDT.sa = pgRTS1.sa;
+      pgDT.da = pgRTS1.da;
+      CT_WAIT(50);
+      CT_SendDT(pgDT);
+      lastDT1Time = pgDT.time_ns;
+      if (i==(byte)(pgRTS1.TotalNumberOfPackets/2))  output(pgSomething);
+      
+      pgDT.sa = pgRTS2.sa;
+      pgDT.da = pgRTS2.da;
+      CT_WAIT(50);
+      CT_SendDT(pgDT);
+      lastDT2Time = pgDT.time_ns;
+    }
+    
+    // look for eom within Tr (200ms) after last DT.
+    CT_WAIT(3*gc_TIMEOUT_TR);
+    if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn_Between(bufIndices, lastDT1Time, lastDT1Time + CT_Ms2Ns(gc_TIMEOUT_TR), pgRTS1.da, pgRTS1.sa, gc_TPCM_CTRL_WORD_EOM, pgRTS1.PGNumber) == 0)
+    {
+      snprintf(errText, elcount(errText), "TP1 accepted by DUT with TP.CM_CTS at t=%.06f not finalized within Tr (200ms) after last TP.DT at t=%.06f.", CT_Ns2Sec(pgCTS1.time_ns), CT_Ns2Sec(lastDT1Time));
+      CT_WAIT(gc_TIMEOUT_T3); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn_Between(bufIndices, lastDT2Time, lastDT2Time + CT_Ms2Ns(gc_TIMEOUT_TR), pgRTS2.da, pgRTS2.sa, gc_TPCM_CTRL_WORD_EOM, pgRTS2.PGNumber) == 0)
+    {
+      snprintf(errText, elcount(errText), "TP2 accepted by DUT with TP.CM_CTS at t=%.06f not finalized within Tr (200ms) after last TP.DT at t=%.06f.", CT_Ns2Sec(pgCTS2.time_ns), CT_Ns2Sec(lastDT2Time));
+      CT_WAIT(gc_TIMEOUT_T3); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(1);
+
+  } // end CT-LOOP
+ 
+}
+
+// ==============================================================================================================
+// functionality of the test A8 24
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: TP1 not completed. (FAIL)
+// 3: CTS timeout TP1 (FAIL)
+// 4: PGI inconsistency. (INCONCLUSIVE)
+// 5: DUT rejects TP. (FAIL)
+void CTF_A08_24_TP_Simultaneous_RTSCTS_BAM(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn,pgn2;
+  word i;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS1;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS1;
+  pg J1939::J1939_CT_RT::TPCMxx pgBAM;
+  pg J1939::J1939_CT_RT::TPCMxx pgBAMInit;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM1;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  int tpChkRes;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(4, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(4, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  initJ1939PGData(pgDT);
+  pgDT.prio = gc_PRIO_TP_DATA;
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    pgn2 = (pgn & 0xFFFFF0FF) | ( (~pgn) & 0x00000F00);
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X) and PGN %d (0x%.05X)...", pgn, pgn, pgn2, pgn2 );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/2 Start RTSCTS and BAM with DUT and a third node simultaneously...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Start RTSCTS and BAM with DUT and a third node simultaneously...");
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+    
+    CT_SendRTS(pgRTS1, pgn, toolAddr, dutAddr, 52, 255);
+    if (CT_WaitForCTS(pgCTS1, pgRTS1.PGNumber, pgRTS1.da, pgRTS1.sa, gc_TIMEOUT_TR))
+    {
+      CT_WAIT(gc_TIMEOUT_T3); // has to wait before visible in buffer.
+      // check abort from DUT...
+      if (CT_CHECK_ABORTS_BY_PGN(bufIndices, pgRTS1.PGNumber, pgRTS1.da, pgRTS1.sa, pgRTS1.time_ns) == 1)
+      {
+        // DUT aborted.
+        snprintf(errText, elcount(errText), "TP1: DUT rejected RTS at t=%.06f with abort at t=%.06f.", CT_Ns2Sec(pgRTS1.time_ns), CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+        CT_WAIT(gc_TIMEOUT_T3); // sync output.
+        CT_STEP_END_FAIL(5, errText);
+        return; // leave on fail.
+      }
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "TP1: CTS timeout for RTS at t=%.06f", CT_Ns2Sec(pgRTS1.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3); // sync output.
+      CT_STEP_END_FAIL(3, errText);
+      return; // leave on fail.
+    }
+    
+    initJ1939PGData(pgBAM);
+    pgBAM.sa = pgRTS1.sa;
+    pgBAM.da = gc_BC_ADDR;
+    pgBAM.dlc = 52;
+    pgBAM.TotalNumberOfPacketsBAM = 8;
+    pgBAM.TotalMessageSizeBAM = 52;
+    pgBAM.pgn = pgn2;
+    
+    output(pgBAM);
+    if (CT_WaitForTPCM(pgBAMInit, pgBAM.pgn, pgBAM.sa, gc_BC_ADDR, gc_TPCM_CTRL_WORD_BAM, gc_TIMEOUT_TR))
+    {
+      // BAM-Init-Timeout.
+      snprintf(errText, elcount(errText), "TP2: TP.CM_BAM timeout.");
+      CT_WAIT(1); // sync output.
+      CT_STEP_END_FAIL(3, errText);
+      return; // leave on fail.
+    }
+    
+    // send DTs...
+    for (i=1; i<=pgRTS1.TotalNumberOfPackets; i++)
+    {
+      pgDT.SequenceNumber = i;
+      pgDT.sa = pgRTS1.sa;
+      pgDT.da = pgRTS1.da;
+      CT_WAIT(50);
+      CT_SendDT(pgDT);
+    }
+    
+    // look for eom within Tr
+    CT_WAIT(gc_TIMEOUT_TR);
+    if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, pgRTS1.da, pgRTS1.sa, gc_TPCM_CTRL_WORD_EOM, pgRTS1.PGNumber) == 0)
+    {
+      snprintf(errText, elcount(errText), "TP1 accepted by DUT with TP.CM_CTS at t=%.06f not finalized after last TP.DT at t=%.06f within Tr (200ms).", CT_Ns2Sec(pgCTS1.time_ns), CT_Ns2Sec(pgDT.time_ns));
+      CT_WAIT(1); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(0);
+    CT_WAIT(1);
+    
+    // ====================
+    // step 2/2 Start BAM and RTSCTS with DUT and a third node simultaneously...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Start BAM and RTSCTS with DUT and a third node simultaneously...");
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+    
+    initJ1939PGData(pgBAM);
+    pgBAM.sa = pgRTS1.sa;
+    pgBAM.da = gc_BC_ADDR;
+    pgBAM.dlc = 52;
+    pgBAM.TotalNumberOfPacketsBAM = 8;
+    pgBAM.TotalMessageSizeBAM = 52;
+    pgBAM.pgn = pgn2;
+    
+    output(pgBAM);
+    if (CT_WaitForTPCM(pgBAMInit, pgBAM.pgn, pgBAM.sa, gc_BC_ADDR, gc_TPCM_CTRL_WORD_BAM, gc_TIMEOUT_TR))
+    {
+      // BAM-Init-Timeout.
+      snprintf(errText, elcount(errText), "TP2: TP.CM_BAM timeout.");
+      CT_WAIT(1); // sync output.
+      CT_STEP_END_FAIL(3, errText);
+      return; // leave on fail.
+    }
+
+    CT_SendRTS(pgRTS1, pgn, toolAddr, dutAddr, 52, 255);
+    if (CT_WaitForCTS(pgCTS1, pgRTS1.PGNumber, pgRTS1.da, pgRTS1.sa, gc_TIMEOUT_TR))
+    {
+      CT_WAIT(gc_TIMEOUT_T3); // has to wait before visible in buffer.
+      // check abort from DUT...
+      if (CT_CHECK_ABORTS_BY_PGN(bufIndices, pgRTS1.PGNumber, pgRTS1.da, pgRTS1.sa, pgRTS1.time_ns) == 1)
+      {
+        // DUT aborted.
+        snprintf(errText, elcount(errText), "TP1: DUT rejected RTS at t=%.06f with abort at t=%.06f.", CT_Ns2Sec(pgRTS1.time_ns), CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+        CT_WAIT(gc_TIMEOUT_T3); // sync output.
+        CT_STEP_END_FAIL(5, errText);
+        return; // leave on fail.
+      }
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "TP1: CTS timeout for RTS at t=%.06f", CT_Ns2Sec(pgRTS1.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3); // sync output.
+      CT_STEP_END_FAIL(3, errText);
+      return; // leave on fail.
+    }
+    
+    // send DTs...
+    for (i=1; i<=pgRTS1.TotalNumberOfPackets; i++)
+    {
+      pgDT.SequenceNumber = i;
+      pgDT.sa = pgRTS1.sa;
+      pgDT.da = pgRTS1.da;
+      CT_WAIT(50);
+      CT_SendDT(pgDT);
+    }
+    
+    // look for eom within Tr
+    CT_WAIT(gc_TIMEOUT_TR);
+    if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn_Between(bufIndices, pgDT.time_ns, pgDT.time_ns + CT_Ms2Ns(gc_TIMEOUT_TR), pgRTS1.da, pgRTS1.sa, gc_TPCM_CTRL_WORD_EOM, pgRTS1.PGNumber) == 0)
+    {
+      snprintf(errText, elcount(errText), "TP1 accepted by DUT with TP.CM_CTS at t=%.06f not finalized after last TP.DT at t=%.06f within Tr (200ms).", CT_Ns2Sec(pgCTS1.time_ns), CT_Ns2Sec(pgDT.time_ns));
+      CT_WAIT(1); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(1);
+    
+  } // end CT-LOOP
+ 
+}
+
+// ==============================================================================================================
+// functionality of the test A8 25
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: TP1 not completed. (FAIL)
+// 3: TP2 not aborted or finalized (FAIL)
+// 4: CTS timeout TP1 (FAIL)
+// 5: PGI inconsistency. (INCONCLUSIVE)
+// 6: Inconclusive, due test needs at least 2 RTSCTS PGI's. (INCONCLUSIVE)
+// 7: DUT rejected TP1 (FAIL)
+void CTF_A08_25_TP_Simultaneous_Same_Originator(byte toolAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte ok;
+  dword pgn,pgn2;
+  word i;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS1;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS1;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS2;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM1;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  int tpChkRes;
+  
+  // RTS->CTS pgis...
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  
+  // at least 2 PGI's are needed...
+  if (pgis.size()<2)
+  {
+    snprintf(reportText, elcount(reportText), "Inconclusive, due test needs at least 2 PGIs of type RTS->CTS.");
+    CT_STEP_PRECOND_INCONCLUSIVE(6, reportText);
+    return; //leave on fail.
+  }
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if ( !CT_IsRTSCTS(pgis[k]) ) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(5, pgis[k], "RTS->CTS");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  initJ1939PGData(pgDT);
+  pgDT.prio = gc_PRIO_TP_DATA;
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    pgn2 = pgis[(k>0) ? 0 : 1].PGN; // take first known PGI as second PGN for following runs and the second for the first run. If there is only one PGI, the precondition at the beginning will fail.
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X) and PGN %d (0x%.05X)...", pgn, pgn, pgn2, pgn2 );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/1 Start TPs...
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Start TPs...");
+    stepTime = CT_STEP_BEGIN(-1, reportText);
+    
+    CT_SendRTS(pgRTS1, pgn, toolAddr, dutAddr, 52, 255);
+    if (CT_WaitForCTS(pgCTS1, pgRTS1.PGNumber, pgRTS1.da, pgRTS1.sa, gc_TIMEOUT_TR))
+    {
+      CT_WAIT(gc_TIMEOUT_T3); // has to wait before visible in buffer.
+      // check abort from DUT...
+      if (CT_CHECK_ABORTS_BY_PGN(bufIndices, pgRTS1.PGNumber, pgRTS1.da, pgRTS1.sa, pgRTS1.time_ns) == 1)
+      {
+        // DUT aborted.
+        snprintf(errText, elcount(errText), "TP1: DUT rejected RTS at t=%.06f with abort at t=%.06f.", CT_Ns2Sec(pgRTS1.time_ns), CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+        CT_WAIT(gc_TIMEOUT_T3); // sync output.
+        CT_STEP_END_FAIL(7, errText);
+        return; // leave on fail.
+      }
+      // CTS timeout.
+      snprintf(errText, elcount(errText), "TP1: CTS timeout for RTS at t=%.06f", CT_Ns2Sec(pgRTS1.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3); // sync output.
+      CT_STEP_END_FAIL(4, errText);
+      return; // leave on fail.
+    }
+    CT_SendRTS(pgRTS2, pgn2, toolAddr, dutAddr, 52, 255);
+    CT_WAIT(gc_TIMEOUT_TR);
+    if (CT_CHECK_ABORTS_BY_PGN(bufIndices, pgRTS2.PGNumber, pgRTS2.da, pgRTS2.sa, pgRTS2.time_ns) != 1)
+    {
+      // abort timeout for TP2.
+      snprintf(errText, elcount(errText), "TP2: DUT does not abort TP2 started at t=%.06f within Tr (200ms)", CT_Ns2Sec(pgRTS2.time_ns));
+      CT_WAIT(gc_TIMEOUT_T3); // sync output.
+      CT_STEP_END_FAIL(3, errText);
+      return; // leave on fail.
+    }
+
+    // send DTs...
+    for (i=1; i<=pgRTS1.TotalNumberOfPackets; i++)
+    {
+      pgDT.SequenceNumber = i;
+      pgDT.sa = pgRTS1.sa;
+      pgDT.da = pgRTS1.da;
+      CT_WAIT(50);
+      CT_SendDT(pgDT);
+    }
+    
+    // look for eom
+    CT_WAIT(3*gc_TIMEOUT_TR);
+    if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn_Between(bufIndices, pgDT.time_ns, pgDT.time_ns + CT_Ms2Ns(gc_TIMEOUT_TR), pgRTS1.da, pgRTS1.sa, gc_TPCM_CTRL_WORD_EOM, pgRTS1.PGNumber) == 0)
+    {
+      snprintf(errText, elcount(errText), "TP1 accepted by DUT with TP.CM_CTS at t=%.06f not finalized within Tr (200ms) after last TP.DT at t=%.06f.", CT_Ns2Sec(pgCTS1.time_ns), CT_Ns2Sec(pgDT.time_ns));
+      CT_WAIT(1); // sync output.
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, pgRTS2.da, pgRTS2.sa, gc_TPCM_CTRL_WORD_EOM, pgRTS2.PGNumber) != 0)
+    {
+      snprintf(errText, elcount(errText), "TP2 (BAM) finalized by DUT at t=%.06f", CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+      CT_WAIT(1); // sync output.
+      CT_STEP_END_FAIL(3, errText);
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(1);
+
+  } // end CT-LOOP
+}
+
+// ==============================================================================================================
+// functionality of the test A8 26
+// FuncPath's:
+// 1: active testing not possible
+void CTF_A08_26_TP_Connection_Limit(byte funcPath)
+{
+  CT_STEP_END_INCONCLUSIVE_ActiveTestingNotPossible(funcPath);
+}

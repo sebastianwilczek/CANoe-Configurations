@@ -1,0 +1,245 @@
+/*@!Encoding:1252*/
+
+// -----------------------------------------------
+// Simple diagnostic simulation node acting as a
+// diagnostic tester, sending and receiving
+// requests and responses via CAPL when pressing
+// the respective keys
+//
+// CANoe 10.0 and higher
+// -----------------------------------------------
+
+includes
+{
+  // As this node is acting as a tester, neither including the CAPL callback interface nor adding
+  // the corresponding transport protocol node layer DLL is necessary, because in this case,
+  // the "built-in" diagnostic channel of CANoe can be used.
+}
+
+variables
+{
+  const cAccessModeNumerical=0;
+  const cAccessModePhysical=1;
+  const cAccessModeCoded=2;
+}
+
+void SendRequestAndCheckReturnvalue(diagRequest * req)
+{
+  long ret;
+
+  ret=req.SendRequest();
+  if(ret>=0) {
+    write("Request was successfully added to the send queue.");
+  }
+  else {
+    write("ERROR: Could not start sending the request");
+  }
+}
+
+void show_menu()
+{
+  write(" ");
+  write("Diagnostics Example");
+  write("-------------------");
+  write("Press one of the following keys:");
+  write("1 for writing a parameter (physical & symbolical representation)");
+  write("2 for writing a raw/large parameter");
+  write("3 for reading a parameter (physical, numerical, coded and symbolical representation)");
+  write("4 for reading a raw/large parameter");
+  write("5 for executing a service which gets a negative response");
+  write(" ");  
+  write("or press the 'Start' button of the Test Module.");
+  write(" ");  
+}
+
+on start
+{
+  show_menu();
+}
+
+on key *
+{
+  show_menu();
+}
+
+on key '1'
+{
+  DiagRequest Door.Variant_Coding_Write  req;
+  long ret1;
+  long ret2;
+
+  write("------ Setting the physical and symbolic representation of a parameter ------");
+  // Note that the diagnostics description encodes this value - intendedly for this example - in a quite complicated way
+  // using a formula and using a 4 byte float to show the difference between numerical, physical and coded representation.
+  
+  // set a physical value, here 20.0 km/h
+  ret1=req.SetParameter(cAccessModePhysical, "Codingstring.VehicleSpeedToLockDoor", 20.0);  
+  
+  // set a parameter symbolically, that means a text (here "Coupe") represents the number
+  ret2=req.SetParameter("Codingstring.VehicleType", "Coupe");  
+
+  if(ret1>=0 && ret2>=0) {
+    SendRequestAndCheckReturnvalue(req);
+  }
+  else {
+    write("ERROR: Could not set parameter");
+  }
+}
+
+on key '2'
+{
+  DiagRequest Door.EcuIdentification_Write reqRaw;
+  byte PartNum[13]={0x65,0x66,0x65,0x66,0x65,0x66,0x65,0x66,0x65,0x66,0x65,0x66,0x65};  // raw data to be written to the ECU
+  long ret;
+
+  write("------ Setting of a raw or large parameter ------");
+  
+  // copy the raw data into the parameter (which is larger than 4 bytes)
+  ret=reqRaw.SetParameterRaw("Part_Number", PartNum, elcount(PartNum));  
+  
+  if(ret>=0) {
+    SendRequestAndCheckReturnvalue(reqRaw);
+  }
+  else {
+    write("ERROR: Could not set parameter");
+  }
+}
+
+on key '3'
+{
+  DiagRequest Door.Variant_Coding_Read req;
+
+  write("------ Reading a parameter in physical, numerical, coded and symbolical representation ------");
+  SendRequestAndCheckReturnvalue(req);
+}
+
+on key '4'
+{
+  DiagRequest Door.EcuIdentification_Read req;
+
+  write("------ Reading a raw/large parameter ------");
+  SendRequestAndCheckReturnvalue(req);
+}
+
+on key '5'
+{
+  DiagRequest Door.SeedLevel_0x01_Request req;
+
+  write("------ Executing a service which gets a negative response ------");
+  SendRequestAndCheckReturnvalue(req);
+}
+  
+on diagResponse Door.Variant_Coding_Write
+{
+  if(this.IsPositiveResponse()) {
+    write("Coding string and VehicleSpeedToLockDoor successfully written");
+  }
+  else {
+    write("ERROR: Could not write Codingstring or VehicleSpeedToLockDoor, neg. response code: 0x%02X", this.GetResponseCode());
+  }
+}
+
+on diagResponse Door.EcuIdentification_Write
+{
+  if(this.IsPositiveResponse()) {
+    write("ECU identification values successfully written");
+  }
+  else {
+    write("ERROR: Could not write ECU identification values, neg. response code: 0x%02X", this.GetResponseCode());
+  }
+}
+
+on diagResponse Door.Variant_Coding_Read
+{
+  char str[200];
+  long ret;
+  
+  if(this.IsPositiveResponse()) {
+
+    // read a symbolical parameter into a string variable so that you will get the symbolical text
+    ret=this.GetParameter("Codingstring.VehicleType", str, elcount(str)); 
+    
+    if(ret>=0) {
+      write("Vehicle Type is %s", str);
+    }
+    else {
+      write("ERROR: Could not retrieve parameter (symbolical)"); 
+    }
+
+    // get the numerical representation of the parameter, write it into the "ret" variable
+    // Note: The return value of some forms of GetParameter() have the type "double" and therefore should be casted explicitly!
+    ret=(long)this.GetParameter(cAccessModeNumerical, "VehicleSpeedToLockDoor"); 
+    if(ret>=0) {
+      write("VehicleSpeedToLockDoor (numerical) is %d (0x%04X)", ret, ret);
+    }
+    else {
+      write("ERROR: Could not retrieve parameter (numerical)");
+    }
+
+    // get the physical representation of the parameter, write it into the "ret" variable
+    ret=(long)this.GetParameter(cAccessModePhysical, "VehicleSpeedToLockDoor"); 
+    if(ret>=0) {
+      write("VehicleSpeedToLockDoor (physical) is %d km/h", ret);
+    }
+    else {
+      write("ERROR: Could not retrieve parameter (physical)");
+    }
+
+    // get the coded representation of the parameter, write it into the "ret" variable
+    ret=(long)this.GetParameter(cAccessModeCoded, "VehicleSpeedToLockDoor"); 
+    if(ret>=0) {
+      write("VehicleSpeedToLockDoor (coded) is 0x%04X", ret);
+    }
+    else {
+      write("ERROR: Could not retrieve parameter (coded)");
+    }
+  }
+  else {
+    // output negative response code
+    write("ERROR: Variant_Coding_Read returned with neg. response code: 0x%02X", this.GetResponseCode()); 
+  }
+}
+
+on diagresponse Door.EcuIdentification_Read
+{
+  byte pn_array[13];
+  long ret;
+  
+  if(this.IsPositiveResponse()) {
+    // read a raw parameter, this is required for parameters greater than 4 bytes, copy the parameter into a byte array 
+    ret=this.GetParameterRaw("Part_Number", pn_array, elcount(pn_array)); 
+    
+    if(ret>=0) {
+      // output first 4 bytes of this array
+      write("Part number is (hex) %02X %02X %02X %02X etc.", pn_array[0], pn_array[1], pn_array[2], pn_array[3]); 
+    }
+    else {
+      write("ERROR: Could not retrieve parameter"); 
+    }
+  }
+  else {
+    write("ERROR: Could not read ECU identification data, neg. response code: 0x%02X", this.GetResponseCode());  
+  }
+} 
+
+on diagresponse Door.SeedLevel_0x01_Request
+{
+  word seed;
+  long ret;
+  
+  if(this.IsPositiveResponse()) {
+    // get the numerical parameter
+    ret=(long)this.GetParameter("SecuritySeed");  
+    
+    if(ret>=0) {
+      write("Seed is (hex) %X", ret);
+    }
+    else {
+      write("ERROR: Could not retrieve parameter");
+    }
+  }
+  else {
+    // output negative response (in this example the simulated ECU will always return a negative response)
+    write("Could not request seed, neg. response code: 0x%02X", this.GetResponseCode()); 
+  }
+} 

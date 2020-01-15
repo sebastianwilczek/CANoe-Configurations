@@ -1,0 +1,97 @@
+/*@!Encoding:1252*/
+// -------------------------------------------------------------------------
+// Module: EchoNode.can
+// Interfaces: -
+// -------------------------------------------------------------------------
+// example echo node for ICMP requests
+// -------------------------------------------------------------------------
+// Copyright (c) Vector Informatik GmbH. All rights reserved.
+// -------------------------------------------------------------------------
+includes
+{
+  #include "AFDX/utils.cin" 
+}
+
+/************************************************************************************************** 
+  Description   : CAPL-Handler for receiving ICMP-frames and send out ICMP-response, if response 
+                  is active. 
+**************************************************************************************************/
+on a664Frame msgChannel2.ICMP
+{
+  int result;
+  a664Frame *fr;
+  word checksum;
+  
+  if (@ICMPDemo::IsEchoNodeActive == 0)
+  {
+    return;
+  }
+  
+  //filter out tx messages
+  if (this.DIR == tx)
+  {
+    return;
+  }
+  
+  // check the frame for echo reply (ICMP type 8, code 0
+  result = a664IsICMP (this, IOM_APP1);
+  if (result != 0x800)
+  {
+    switch (result)
+    {
+      default:
+        writeex (-3,3, "AFDX%d: Frame received is not ICMP! : %d", this.msgChannel, result);
+        break;
+      case -1:
+        writeex (-3,3, "AFDX%d: IP protocol on received frame is not IP!", this.msgChannel);
+        break;
+      case -2:
+        writeex (-3,3, "AFDX%d: Invalid IP address received for ICMP frame!", this.msgChannel);
+        break;
+      case -3:
+        writeex (-3,3, "AFDX%d: IP protocol on received frame is not IP!", this.msgChannel);
+        break;
+      case -4:
+        writeex (-3,3, "AFDX%d: Unsupported ICMP type received!", this.msgChannel);
+        break;
+      case -6:
+        writeex (-3,3, "AFDX%d: Invalid VL ID value received for ICMP frame!", this.msgChannel);
+        break;
+    }
+    return;
+  }
+  
+  // check the protocol for protocol icmp
+  if (this.IpProtocol != 1)
+  {
+    writeex (-3,3, "AFDX%d: Frame received with protocol not ICMP:%d!", this.msgChannel, this.IpProtocol);
+    return;
+  }
+
+  writeex (-3,1, "AFDX%d: *.ICMP EchoReqest received.", this.msgChannel);
+
+  fr = this;
+  fr.msgChannel = 2;
+  result = a664InitICMP (fr, 0x100, SWAP_ADR, IOM_APP1);
+  if (result != 0) {
+    writeEx (-3,2, "a664InitICMPEchoReply failed: %d", result);
+  } 
+  else 
+  {  
+    // if ModifyPayload is active, modify first random number by one
+    if (@ICMPDemo::ModifyEchoPayload == 1)
+    {
+      fr.AfdxPayload[9]++;
+      a664SetChecksum (fr, 2);
+    }
+    
+    // Virtual Link configuration for ICMP-frame
+    // RxFlags = 3: Integrity Checking ON (bit 0), Redundancy Management ON (bit 1)
+    // TxFlags = 3: Line Select AB (bit 0,1), IP fragmentation allowed OFF (bit 3)
+    result = A664VLConfig (fr, 3, 3, IOM_APP1.ICMP_outVLbag, IOM_APP1.ICMP_outVLmaxFrame, IOM_APP1.ICMP_inVLskewmax);
+    writeEx (-3,0, "VL:%d vs %d", fr.EthVlId, IOM_APP1.ICMP_outVLid);
+    if (result != 0) writeEx (-3,2, "A664VLConfig failed: %d", result);  
+    result = a664TriggerFrame (fr, 1);
+    if (result != 0) writeEx (-3,2, "a664TriggerFrameReply failed: %d", result);  
+  }
+}

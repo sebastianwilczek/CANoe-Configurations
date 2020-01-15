@@ -1,0 +1,163 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "GAIN.cin"
+}
+
+/*
+ * TrashCompactor - Galley Insert Trash Compactor System  Version 1.0
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Pr) Created 
+ */
+variables
+{
+  char gTrashCompactor_NodeName[32] = "Trash Compactor";   // Name of the node, is used for output to write window
+
+  // process handling
+  const int kTrashCompactor_LoopCycleMs = 1000;
+  mstimer gTrashCompactor_Loop;
+
+  const byte kTrashCompactor_StateCount = 5;
+}
+
+on preStart
+{
+  strncpy(gNode_FuncRO         , TrashCompactor.CFG2_0_0_GAIN_REMOTE_FUNCTION, 32);
+  strncpy(gNode_FuncPC_CENTR   , TrashCompactor.CFG2_1_0_CENTRALIZED_POWER_CONTR, 32);
+  strncpy(gNode_FuncPC_DECENTR , TrashCompactor.CFG2_2_0_DECENTRALIZED_POWER_CON, 32);
+  strncpy(gNode_FuncDIAG       , TrashCompactor.CFG2_3_0_DIAGNOSIS_FUNCTION, 32);
+
+  gNode_LevelId                = TrashCompactor.GAINCFG5_1_0_FEEDER_NUMBER;
+  gNode_DeviceId               = TrashCompactor.GAINCFG5_2_0_DEVICE_NUMBER;
+
+  gNode_NM_STA_CycleTimeMs     = TrashCompactor.GAINCFG9_9_0_TIMER_STA_GAIN;
+  gNode_NM_STA_TimeoutTimeMs   = TrashCompactor.GAINCFG9_9_1_TIMER_STA_TIMEOUT_G;
+
+  gNode_CounterDeltaInc        = TrashCompactor.GAINCFG12_1_0_GAIN_COUNTER_DELTA;
+  gNode_CounterDeltaDec        = TrashCompactor.GAINCFG12_1_1_GAIN_COUNTER_DELTA;
+  gNode_CounterThreshold       = TrashCompactor.GAINCFG12_1_2_GAIN_COUNTER_THRES;
+
+  gNode_SequenceTimeoutMs      = TrashCompactor.GAINCFG9_2_0_SEQUENCE_TIMEOUT_TI;
+  gGAIN_MaxPowerBudget         = TrashCompactor.GAINCFG3_0_0_MAXIMUM_POWER_BUDGE;
+  gGAIN_StandbyPowerBudget     = TrashCompactor.GAINCFG3_3_0_STANDBY_POWER_THRES;
+
+  gGAIN_UsedPowerBudget        = gGAIN_StandbyPowerBudget;
+}
+
+on start
+{
+  @TrashCompactor_Feeder = gNode_LevelId;
+  @TrashCompactor_Device = gNode_DeviceId;
+}
+
+on envVar TrashCompactor_Power
+{
+  if (getValue(this) > 0) {
+    GAIN_PowerUp();
+  }
+  else {
+    GAIN_PowerDown();
+  }
+}
+
+on timer gTrashCompactor_Loop
+{
+  gGAIN_PBRemainingTime10ms = _max(0, gGAIN_PBRemainingTime10ms - kTrashCompactor_LoopCycleMs / 10);
+
+  @TrashCompactor_Trash = (@TrashCompactor_Trash + 1) % kTrashCompactor_StateCount;
+
+  if (@TrashCompactor_Trash == 0) {
+    gGAIN_UsedPowerBudget = gGAIN_StandbyPowerBudget;
+    gGAIN_PBRemainingTime10ms = 0;
+
+    GAIN_ChangeState(kGAINStateStandbyOn);
+  }
+}
+
+on envVar TrashCompactor_Trash
+{
+  TrashCompactor_Process();
+}
+
+on envVar TrashCompactor_Insert
+{
+  if (@this == 0 && gGAIN_State != kGAINStateOn) {
+    @TrashCompactor_Trash = (@TrashCompactor_Trash == 0 ? 1 : 0);
+  }
+}
+
+void TrashCompactor_Process ()
+{
+  word timeS;
+
+  if (gGAIN_State == kGAINStateStandbyOn && @TrashCompactor_Trash == 1) {
+    timeS = (kTrashCompactor_LoopCycleMs * (kTrashCompactor_StateCount - 1)) / 1000;
+    GAIN_PBR_Send(PBTypeNotInterruptable, gGAIN_MaxPowerBudget, timeS, gGAIN_MaxPowerBudget, timeS);
+  }
+
+  if ( (gGAIN_State == kGAINStateOn)
+    && (@TrashCompactor_Trash > 0)
+    && (@TrashCompactor_Trash < kTrashCompactor_StateCount)) {
+    setTimer(gTrashCompactor_Loop, kTrashCompactor_LoopCycleMs);
+  }
+}
+
+void OnNode_NMAvailabilityChanged(BYTE levelId, BYTE deviceId, int newAvailability)
+{
+}
+
+void OnGAIN_ChangeState (int oldState, int newState)
+{
+  switch (oldState) {
+    case kGAINStateOn:
+      @TrashCompactor_On = 0;
+      break;
+    case kGAINStateError:
+      @TrashCompactor_Fault = 0;
+      break;
+    case kGAINStateInterrupted:
+    case kGAINStateMaintenance:
+      @TrashCompactor_Warning = 0;
+      break;
+  }
+
+  switch (newState) {
+    case kGAINStateStandbyOn:
+      TrashCompactor_Process();
+      break;
+    case kGAINStateOn:
+      @TrashCompactor_On = 1;
+      setTimer(gTrashCompactor_Loop, kTrashCompactor_LoopCycleMs);
+      break;
+    case kGAINStateError:
+      @TrashCompactor_Fault = 1;
+      break;
+    case kGAINStateInterrupted:
+    case kGAINStateMaintenance:
+      @TrashCompactor_Warning = 1;
+      break;
+    case kGAINStateStandbyOff:
+      @TrashCompactor_On      = 0;
+      @TrashCompactor_Warning = 0;
+      @TrashCompactor_Fault   = 0;
+      break;
+  }
+}
+
+void OnGAIN_PBM(word power, word time)
+{
+	if (abs(gGAIN_MaxPowerBudget - power) <= kPBResolution) {
+	  // we got the power
+		gGAIN_UsedPowerBudget = power;
+    gGAIN_PBRemainingTime10ms = time * 100;
+    GAIN_ChangeState(kGAINStateOn);
+  }
+  else {
+    gGAIN_UsedPowerBudget = gGAIN_StandbyPowerBudget;
+    gGAIN_PBRemainingTime10ms = 0;
+  }
+}
+

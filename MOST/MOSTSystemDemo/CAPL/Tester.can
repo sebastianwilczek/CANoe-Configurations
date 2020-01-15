@@ -1,0 +1,333 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  // MOST node address of CDC
+  int gCDCInstance;
+}
+/*@@end*/
+
+/*@@mainTest:MainTest():*/
+void MainTest()
+{ 
+  // Set test module title and detailed infos for test report.
+  TestModuleTitle ("MOST Tester - Testing of basic AudioDiskPlayer functionality");
+  SetReportInfos ();
+
+  gCDCInstance = GetCDCInstance(); // get the first available instance of the CDC
+  // Write("CDC instance is %d", gCDCInstance);
+
+  TC_GetMediaInfo();       // example of TestWaitForMostAMSMessage usage
+  TestWaitForTimeout(100);
+  TC_TrackPosition();      // example of TestWaitForMostAMSReport usage
+  TestWaitForTimeout(100);
+  TC_Notification();       // example of TestJoinMostAMSMessageEvent
+  TestWaitForTimeout(100);
+  TC_ChannelAlloc();       // example of TestWaitForMostAMSResponse
+}
+/*@@end*/
+
+/*@@caplFunc:SetReportInfos():*/
+// Determine info about test engineer, test setup etc.
+// and write info into report. A text that describes the
+// test module is written into the report, too.
+
+void SetReportInfos ()
+{
+  TestModuleDescription ("This test module contains several test cases to check");
+  TestModuleDescription ("the functionality on the application level of a MOST");
+  TestModuleDescription ("CDC, which contains essential functions of the standard");
+  TestModuleDescription ("AudioDiskPlayer specified in the Function Catalogue V.2.3.");
+
+  TestReportAddEngineerInfo ("Name", "not available");
+  TestReportAddEngineerInfo ("Company", "not available");
+
+  TestReportAddSetupInfo ("CANoe Configuration", "MOSTTester");
+  TestReportAddSetupInfo ("Creator", "Vector Informatik GmbH, Stuttgart");
+  TestReportAddSetupInfo ("Version and Date", "2.0 from 2004-09-22");
+
+  TestReportAddSUTInfo ("Device Name", "MOST CDC (subset of AudioDiskPlayer)");
+}
+/*@@end*/
+
+/*@@caplFunc:GetCDCInstance():*///function
+// returns a instance number of the CDC (0x31)
+int GetCDCInstance ()
+{
+  int i; 
+  gCDCInstance = 1 ; // default value
+  for(i = 0; i < MostAsRgGetSize(kBusRegistry); i++)
+  {
+    if(MostAsRgGetFBlockID(kBusRegistry,i) == 0x31) 
+    {
+      return MostAsrgGetInstID(kBusRegistry,i) ;
+    }
+  }
+  return 0;
+}
+/*@@end*/
+
+/*@@testcase:TC_GetMediaInfo():*/
+// This test case demonstrates a simple usage of the TFS functions
+//   - TestWaitForMostAMSMessage()
+//   - TestSendMostAMSMessage()
+// The CDC is expected to either deliver a MediaInfo status message that 
+// contains track number information or a error message in case no CD 
+// is currently loaded. 
+//------------------------------------------------------------------------
+
+testcase TC_GetMediaInfo ()
+{
+  mostAMSMessage * statusMsg;   // variable to store received message
+  char strStep[100];
+  char strSymMsg[100];
+  int lastTrack;
+  int activeDisk;
+
+  TestCaseTitle ("MediaInfo", "Get media information about currently loaded CD");
+  TestCaseDescription ("To get the number of tracks on a CD, a MediaInfo status message must be reported by the AudioDiskPlayer.");
+
+  TestStep ("1", "Check DeckStatus.");
+
+  TestSendMostAMSMessage("AudioDiskPlayer.DeckStatus.Get", gCDCInstance);
+
+  if(TestWaitForMostAMSMessage("AudioDiskPlayer.DeckStatus.Status", gCDCInstance, ktProperty) > 0)
+  {
+    testGetWaitEventMostAMSMsgData(statusMsg);
+    if (mostParamGet(statusMsg,"DeckStatus")!=4 /* Unload*/)
+      TestStepPass("2", "Ok. CD successfully loaded.");
+    else
+      TestStepFail("2", "No CD available.");
+  }
+  else
+  {
+    TestStepFail("2", "Timeout. No status message received.");
+  }
+
+  TestStep ("3", "Send request for ActiveDisk to AudioDiskPlayer.");
+  activeDisk = 0;
+  TestSendMostAMSMessage("AudioDiskPlayer.ActiveDisk.Get", gCDCInstance);  
+  if(TestWaitForMostAMSMessage("AudioDiskPlayer.ActiveDisk.Status", gCDCInstance, ktProperty) > 0)
+  {
+    testGetWaitEventMostAMSMsgData(statusMsg);         
+    activeDisk = mostParamGet(statusMsg,"MagazinPos"); 
+    snprintf(strStep, 100, "Ok, status message with MagazinPos = %d received", activeDisk );
+    TestStepPass ("4", strStep);
+  }
+  else
+  {
+    TestStepFail("4", "Timeout. No status message received.");
+  }
+
+  if(activeDisk == 0)
+  {
+    TestStepFail("5", "No disc active. Test step skipped.");
+  }
+  else
+  {
+    TestStep ("5", "Send request for LastTrack parameter in MediaInfo to AudioDiskPlayer.");
+
+    // 0x0105: Selector for 'LastTrack' record field
+    snprintf(strSymMsg, elcount(strSymMsg), "AudioDiskPlayer.MediaInfo.Get(0x%02X05)", activeDisk);
+    TestSendMostAMSMessage(strSymMsg, gCDCInstance);  
+
+    if(TestWaitForMostAMSMessage("AudioDiskPlayer.MediaInfo.Status", gCDCInstance, ktProperty) > 0)
+    {
+      testGetWaitEventMostAMSMsgData(statusMsg);   // store received message data
+
+      if(mostParamIsAvailable(statusMsg, "Data.Record[].LastTrack", activeDisk))
+      {
+        lastTrack = mostParamGet(statusMsg,"Data.Record[].LastTrack", activeDisk); // store number of tracks
+        snprintf(strStep, 100, "Ok, status message with LastTrack = %d received", lastTrack);
+        TestStepPass ("6", strStep);
+      }
+      else
+      {
+        TestStepPass ("6", "Value of parameter LastTrack was not reported in MediaInfo.Status message");
+      }
+    }
+    else
+    {
+      TestStepFail("6", "Timeout. No status message received.");
+    }
+  }
+}
+/*@@end*/
+
+/*@@testcase:TC_TrackPosition():*/
+// This test case demonstrates a simple usage of the TFS functions
+//   - TestWaitForMostAMSReport()
+//   - TestSendMostAMSMessage()
+// The number of tracks of the CD, determined by querying the MediaInfo
+// function, is used as an input for testing direct track selection. 
+//------------------------------------------------------------------------
+testcase TC_TrackPosition ()
+{
+  int lastTrack;
+  int activeDisk;
+  int i;
+  char strTestStep[10];
+  char strTestStepNote[100];
+  char strTrackPositionMsg[100];  // symbolic message string for TrackPosition
+  char strSymMsg[100];
+
+  mostAMSMessage * statusMsg;  // container for received status message 
+  
+  TestCaseTitle ("TrackPosition", "Set track position within and outside allowed range");
+  TestCaseDescription ("Select the last but one track position, the last track position and the position after the last track and wait for corresponding status messages");
+
+  activeDisk = 0;
+  TestSendMostAMSMessage("AudioDiskPlayer.DeckStatus.Get", gCDCInstance);
+  if(TestWaitForMostAMSMessage("AudioDiskPlayer.DeckStatus.Status", gCDCInstance, ktProperty) > 0)
+  {
+    testGetWaitEventMostAMSMsgData(statusMsg);
+    if (mostParamGet(statusMsg,"DeckStatus")!=4 /* Unload*/)
+      TestStepPass("1", "Ok. CD successfully loaded.");
+    else
+      TestStepFail("1", "No CD available.");
+  }
+
+  if(TestWaitForMostAMSResponse("AudioDiskPlayer.ActiveDisk.Get", gCDCInstance, ktProperty) > 0)
+  {
+    testGetWaitEventMostAMSMsgData(statusMsg);
+    activeDisk = mostParamGet(statusMsg,"MagazinPos");
+  }
+  
+  TestStep ("2", "Send request for LastTrack parameter in MediaInfo to AudioDiskPlayer.");
+  lastTrack = 0;
+  TestSendMostAMSMessage("AudioDiskPlayer.MediaInfo.Get(0x0005)", gCDCInstance);  // get parameters LastTrack only
+  if(TestWaitForMostAMSMessage("AudioDiskPlayer.MediaInfo.Status", gCDCInstance, ktProperty) > 0)
+  {
+    testGetWaitEventMostAMSMsgData(statusMsg);  // store received message data
+    if(mostParamIsAvailable(statusMsg, "Data.Record[].LastTrack",activeDisk))
+    {
+      lastTrack = mostParamGet(statusMsg,"Data.Record[].LastTrack",activeDisk); // store number of tracks
+      snprintf(strTestStepNote, 100, "Ok, status message with LastTrack = %d received", lastTrack );
+      TestStepPass ("3", strTestStepNote);
+    }
+    else
+    {
+      TestStepFail ("3", "Value of parameter LastTrack was not reported in MediaInfo.Status message");
+    }
+  }
+  
+
+  if(lastTrack < 1)
+  {
+    TestStepFail("4", "Further test step skipped due to error while getting LastTrack info");
+  }
+  else
+  {
+    // test track position before and behind LastTrack
+    for(i = -1; i < 2; i++)
+    {
+      // prepare strings for report output
+      snprintf(strTestStep, 10, "%d", (i*2)+4);
+      snprintf(strTestStepNote, 100, "Set track position to %d", lastTrack + i); 
+    
+      snprintf(strSymMsg, 100, "AudioDiskPlayer.TrackPosition.SetGet(%d)", lastTrack + i);
+      TestSendMostAMSMessage(strSymMsg, gCDCInstance);
+
+      TestStep (strTestStep, strTestStepNote);
+    
+      snprintf(strTestStep, 10, "%d", (i*2)+4+1);
+    
+      if(TestWaitForMostAMSReport("AudioDiskPlayer.TrackPosition", gCDCInstance, 2000) > 0)
+      {
+        testGetWaitEventMostAMSMsgData(statusMsg);
+        if((statusMsg.OpType == 0xC) && (i<1))
+          TestStepPass (strTestStep, "Valid track position: Expected status message received.");
+        else if((statusMsg.OpType == 0xF) && (i==1))
+          TestStepPass (strTestStep, "Invalid track position: Expected error message received.");
+        else
+        {
+          snprintf(strTestStepNote, 100, "Message with unexpected OPType %X received.", statusMsg.OpType); 
+          TestStepFail (strTestStep, strTestStepNote);
+        }
+      }
+      else
+        TestStepFail (strTestStep, "Expected message did not occur. Timeout.");
+
+    }
+  }
+  TestWaitForTimeout(200);
+}
+/*@@end*/
+
+/*@@testcase:TC_Notification():*/
+// This test case demonstrates a simple usage of the TFS functions
+//   - TestJoinMostAMSMessageEvent()
+//   - TestWaitForAllJoinedEvents()
+//   - TestSendMostAMSMessage()
+// The CDC fullfills the requirements of the test, if it sends notifications
+// for the TimePostion, TrackPosition and the correct DeckStatus.
+//--------------------------------------------------------------------------
+
+testcase TC_Notification()
+{
+  char strSymMsg[100]; 
+  word destAdrForNotif;
+
+  TestCaseTitle ("Notification", "Set Notifications for essential CDC functions");
+  TestCaseDescription ("The CDC sends notifications for all relevant events ocurring during playback of a CD.");
+
+  TestStep ("1", "Send message for notification on all functions.");
+
+  destAdrForNotif = mostGetNodeAdr(mostGetChannel());
+
+  // send a Notification.Set(SetFunction..) command for functions TrackPosition, TimePosition, ActiveDisk
+  snprintf(strSymMsg, 100, "AudioDiskPlayer.Notification.Set(SetFunction, %d, 0x201, 0x202, 0x412)", destAdrForNotif);
+  TestSendMostAMSMessage(strSymMsg, gCDCInstance);
+
+  TestStep ("3", "Wait for status messages of notified functions.");
+  // each of the following message events must occur for a positive test result
+  TestJoinMostAMSMessageEvent("AudioDiskPlayer.TrackPosition.Status", gCDCInstance); 
+  TestJoinMostAMSMessageEvent("AudioDiskPlayer.TimePosition.Status", gCDCInstance);
+  TestJoinMostAMSMessageEvent("AudioDiskPlayer.ActiveDisk.Status", gCDCInstance);
+  if(testWaitForAllJoinedEvents(2000) > 0)
+  {
+    TestStepPass ("4", "All expected notifications have been received.");
+  }
+  else
+  {
+    TestStepFail ("4", "Some or all expected notifications did not occur. Timeout.");
+  }
+
+  // wait till all properties are reported
+  TestWaitForTimeout(1000);
+}
+/*@@end*/
+
+/*@@testcase:TC_ChannelAlloc():*/
+// This test case demonstrates a simple usage of the TFS function
+//   - TestWaitForMostAMSResponse()
+// The CDC allocates a synchronous channel in the MOST ring and tries to 
+// load the CD. 
+//------------------------------------------------------------------------
+
+testcase TC_ChannelAlloc ()
+{
+  mostAMSMessage * msg;
+  // set test case title
+  TestCaseTitle ("ChannelAlloc", "Synchronous channel allocation");
+  TestCaseDescription ("The CDC allocates a synchronous channel in the MOST ring.");
+ 
+  TestStep ("1", "Send allocation message to CDC and wait for any response.");
+
+  if(TestWaitForMostAMSResponse("AudioDiskPlayer.Allocate.StartResult(1)", gCDCInstance, 500) > 0)
+  {
+    TestStepPass("2", "Ok. Received a report message.");
+  }
+  else
+  {
+    TestStepFail("2", "No AudioDiskPlayer.Allocate.Result() message on Allocate.StartResult() received. Channels may already be allocated.");
+  }
+}
+/*@@end*/
+

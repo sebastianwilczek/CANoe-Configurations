@@ -1,0 +1,313 @@
+/*@!Encoding:1252*/
+////////////////////////////////////////////////////////////////////////////////
+//
+// Vehicle behavior
+//
+// Send CAMs and handle received messages
+//
+// DUT also updates GUI system variables
+//
+////////////////////////////////////////////////////////////////////////////////
+includes
+{
+  #include "Car2xAPI.cin"
+  #include "TrackLoader.cin"
+  #include "Position.cin"
+  #include "..\DataSources_Templates\ASNV_Template_BaseDatatypes.cin"
+  #include "..\DataSources_Templates\ASNV_Template_CAM.cin"
+  #include "..\DataSources_Templates\ASNV_Template_DENM.cin"
+}
+
+variables
+{
+  char gErrorString[1024];
+
+  struct Vehicle // vehicle information
+  {
+    int64  timestampTai;    // posistion update milli seconds tai 2004
+    double latitude;
+    double longitude;
+    double elevation;
+    double speed;
+    double heading;
+    int    causeCode;
+    int    subCauseCode;
+    int    mobileOrStationaryFlag;
+    long   stationId;
+  };
+  struct Vehicle gVehicle =
+    { 0, 0.0, 0.0, 355.90, 0, 0, 0, 0, 128, 0 };
+
+  struct Gps
+  {
+    char   name[256];
+    long   handle;
+  };
+  struct Gps gGps =
+    { "", 0 };
+
+  int animationState;
+  msTimer timerAnimation;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Start / init packet, track info
+////////////////////////////////////////////////////////////////////////////////
+on start
+{
+  LONG errCode;
+
+  VehicleSetup() ;
+
+  C2xRegisterCallback(kRxIndication   , "OnRx");
+  C2xRegisterCallback(kPreTxIndication, "OnTxCAM" , "CAM" ) ;
+  C2xRegisterCallback(kPreTxIndication, "OnTxDENM", "DENM") ;
+  
+  // open gps route file
+  gGps.handle = API_SetFilePathLogFile(gGps.name, 0); // GPS file
+  UpdatePosition() ;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// update DUT position data
+////////////////////////////////////////////////////////////////////////////////
+void UpdatePosition()
+{
+  struct PositionData gpsPos;
+
+  API_GetTrackData(gGps.Handle, gpsPos) ;
+
+  gVehicle.timestampTai = C2xConvertTimeToMSSinceUTC(C2xGetITSTimestamp(), 0);
+  gVehicle.latitude   = gpsPos.latitude;
+  gVehicle.longitude  = gpsPos.longitude;
+  //gVehicle.elevation  = gpsPos.altitude;
+  gVehicle.speed      = gpsPos.speed;
+  gVehicle.heading    = gpsPos.heading;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//  Callback called before CAM is transmitted
+////////////////////////////////////////////////////////////////////////////////
+void OnTxCAM(LONG packet)
+{
+  struct CAM camPdu;
+  byte first = 1;
+  long errCode;
+
+  UpdatePosition() ;
+  
+  // Update common header data
+  C2xSetTokenInt64(packet, "geo_ch", "flags", gVehicle.mobileOrStationaryFlag);
+  
+  // Update extended header data
+  C2xSetTokenInt64(packet, "geo_eh", "lpvTimeStamp", gVehicle.timestampTai & 0xffffffff) ;
+  C2xSetTokenInt64(packet, "geo_eh", "lpvLatitude" , gVehicle.latitude  * 1e7    ) ;
+  C2xSetTokenInt64(packet, "geo_eh", "lpvLongitude", gVehicle.longitude * 1e7    ) ;
+  C2xSetTokenInt64(packet, "geo_eh", "lpvSpeed"    , gVehicle.speed     * 100/3.6) ;
+  C2xSetTokenInt64(packet, "geo_eh", "lpvHeading"  , gVehicle.heading   * 10     ) ;
+
+  // Update CAM data
+  if (first)
+  {
+    InitCamData(camPdu);
+    first = 0;
+  }
+  else
+  {
+    API_GetCAMParams(packet, camPdu);
+  }
+  
+  camPdu.cam.generationDeltaTime = gVehicle.timestampTai % 0xffff;
+  camPdu.cam.camParameters.basicContainer.referencePosition.latitude = gVehicle.latitude  * 1e7;
+  camPdu.cam.camParameters.basicContainer.referencePosition.longitude = gVehicle.longitude * 1e7;
+  camPdu.cam.camParameters.basicContainer.referencePosition.positionConfidenceEllipse.semiMajorOrientation = gVehicle.heading * 10;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.heading.headingValue = gVehicle.heading * 10;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.speed.speedValue = gVehicle.speed * 100/3.6;
+  
+  // If it is the Emergency Vehicle and the Emergency DENM is on, there are also some CAM Parameters which have to be updated
+  if(gVehicle.causeCode == 95)
+  { 
+    camPdu.cam.camParameters.basicContainer.stationType = 10;
+    
+    if(@sysvar::Usecases::SendEVADenm == 1)
+    {
+      camPdu.cam.camParameters.specialVehicleContainer.isValidFlag = 1;
+      camPdu.cam.camParameters.specialVehicleContainer.choice = 5;
+    
+      camPdu.cam.camParameters.specialVehicleContainer.emergencyContainer.lightBarSirenInUse.stringLength = 2;
+      memcpy(camPdu.cam.camParameters.specialVehicleContainer.emergencyContainer.lightBarSirenInUse.string, "11", camPdu.cam.camParameters.specialVehicleContainer.emergencyContainer.lightBarSirenInUse.stringLength);
+      camPdu.cam.camParameters.specialVehicleContainer.emergencyContainer.incidentIndication.causeCode = 0;
+      camPdu.cam.camParameters.specialVehicleContainer.emergencyContainer.incidentIndication.subCauseCode = 0;
+      camPdu.cam.camParameters.specialVehicleContainer.emergencyContainer.emergencyPriority.isValidFlag = 1;
+      camPdu.cam.camParameters.specialVehicleContainer.emergencyContainer.emergencyPriority.stringLength = 1;
+      memcpy(camPdu.cam.camParameters.specialVehicleContainer.emergencyContainer.emergencyPriority.string, "1", camPdu.cam.camParameters.specialVehicleContainer.emergencyContainer.emergencyPriority.stringLength);
+    }
+    else
+    {
+      camPdu.cam.camParameters.specialVehicleContainer.isValidFlag = 0;
+    }
+  }
+  
+  API_SetCAMParams(packet, camPdu);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//  Callback called before CAM is transmitted
+////////////////////////////////////////////////////////////////////////////////
+void OnTxDENM(LONG packet)
+{
+  struct DENM denmPdu;
+  byte first = 1 ;
+  long errCode;
+
+  UpdatePosition();
+  
+  // Update common header data
+  C2xSetTokenInt64(packet, "geo_ch", "flags", gVehicle.mobileOrStationaryFlag);
+  
+  // Update extended header data
+  C2xSetTokenInt64(packet, "geo_eh", "lpvTimeStamp", gVehicle.timestampTai & 0xffffffff) ;
+  C2xSetTokenInt64(packet, "geo_eh", "lpvLatitude" , gVehicle.latitude  * 1e7    ) ;
+  C2xSetTokenInt64(packet, "geo_eh", "lpvLongitude", gVehicle.longitude * 1e7    ) ;
+  C2xSetTokenInt64(packet, "geo_eh", "lpvSpeed"    , gVehicle.speed     * 100/3.6) ;
+  C2xSetTokenInt64(packet, "geo_eh", "lpvHeading"  , gVehicle.heading   * 10     ) ;
+
+  // Update DENM data
+  if (first)
+  {
+    first = 0 ;
+    denmPdu.header.stationID = gVehicle.stationId;
+    denmPdu.denm.management.actionID.originatingStationID = gVehicle.stationId ;
+   
+    denmPdu.denm.management.actionID.sequenceNumber = gVehicle.stationId ;
+  }
+  else
+  {
+    API_GetDENMParams(packet, denmPdu);
+  }
+
+  denmPdu.denm.management.eventPosition.latitude  = gVehicle.latitude  * 1e7;
+  denmPdu.denm.management.eventPosition.longitude = gVehicle.longitude * 1e7;
+  denmPdu.denm.situation.isValidFlag = 1;
+  denmPdu.denm.situation.eventType.causeCode = gVehicle.causeCode;
+  denmPdu.denm.situation.eventType.subCauseCode = gVehicle.subCauseCode;
+  API_SetDENMParams(packet, denmPdu);
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+//  set CAM
+////////////////////////////////////////////////////////////////////////////////
+void InitCamData(struct CAM camPdu)
+{
+  camPdu.header.protocolVersion = 1;
+  camPdu.header.messageID = 2;
+  camPdu.header.stationID = gVehicle.stationId ;
+
+  camPdu.cam.camParameters.basicContainer.stationType = 5;
+
+  camPdu.cam.camParameters.basicContainer.referencePosition.positionConfidenceEllipse.semiMajorConfidence = 1;
+  camPdu.cam.camParameters.basicContainer.referencePosition.positionConfidenceEllipse.semiMinorConfidence = 1;
+  camPdu.cam.camParameters.basicContainer.referencePosition.altitude.altitudeValue = 32000;
+  camPdu.cam.camParameters.basicContainer.referencePosition.altitude.altitudeConfidence = 1;
+
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.heading.headingConfidence = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.speed.speedConfidence = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.driveDirection = 0;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.vehicleLength.vehicleLengthValue = 40;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.vehicleLength.vehicleLengthConfidenceIndication = 0;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.vehicleWidth = 20;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.longitudinalAcceleration.longitudinalAccelerationValue = 0;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.longitudinalAcceleration.longitudinalAccelerationConfidence = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.curvature.curvatureValue = 0;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.curvature.curvatureConfidence = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.curvatureCalculationMode = 1;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//  function is called when a packet is received for SimCars like EEBL or EVA
+////////////////////////////////////////////////////////////////////////////////
+void OnRx(LONG channel, LONG dir, LONG radioChannel, LONG signalStrength, LONG sigQuality, LONG packet)
+{
+  struct Pos2D pos2d;
+  int    btpPort;
+  word   distance;
+
+  // station info
+  long stationHdl ;
+  char stationName[128] ;
+
+  stationHdl = C2xGetStationHandle(packet) ;
+  C2xGetStationName(stationHdl, elcount(stationName), stationName) ;
+
+  if ((dir == RX) &&
+      !strncmp(stationName, "DUT", elcount(stationName))) // received from DUT
+  {   
+    pos2d.latitude  = gVehicle.latitude;
+    pos2d.longitude = gVehicle.longitude;
+
+    // check if I'm near DUT
+    if (API_PosCalcDistance(packet, pos2d) <= @sysVar::DUT::Horizont)
+    {
+      API_StartReadingPositions(gGps.handle); // activate GPS position
+      C2xEnableMsg("CAM") ; // DUT is near -> enable CAM
+      
+      if (IsDenmEnabled())
+      {
+        C2xEnableMsg("DENM"); // DUT is near and Checkbox for DENM sending is set -> enable DENM
+        AnimationStart();
+      }
+      else
+      {
+        C2xDisableMsg("DENM"); // Checkbox for DENM sending is not set -> disable DENM
+        AnimationStop();
+      }
+    }
+    else
+    {
+      API_StopReadingPositions(gGps.handle); // deactivate GPS position
+      API_GPS_FileReset(gGps.handle);
+      UpdatePosition();
+
+      C2xDisableMsg("CAM") ; // DUT too far away -> disable CAM
+      C2xDisableMsg("DENM"); // DUT too far away -> disable DENM
+      AnimationStop();
+    }
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Animation
+////////////////////////////////////////////////////////////////////////////////
+
+void AnimationStart()
+{
+  if (animationState == 0)
+  {
+    animationState = 1 ;
+    SetAnimationState(animationState) ;
+    timerAnimation.SetCyclic(400) ;
+  }
+}
+on timer timerAnimation
+{
+  if (animationState < 3)
+    animationState += 1 ;
+  else
+    animationState = 1 ;
+  
+  SetAnimationState(animationState) ;
+}
+void AnimationStop()
+{
+  if (animationState != 0)
+  {
+    animationState = 0 ;
+    SetAnimationState(animationState) ;
+    timerAnimation.Cancel() ;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// EOF
+////////////////////////////////////////////////////////////////////////////////

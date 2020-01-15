@@ -1,0 +1,230 @@
+/*@!Encoding:1252*/
+
+variables
+{   
+  char strRunId[32];
+  char strSourceMac[32];
+  char strDestMac[32];
+}
+
+
+
+// Returns the Rx timestamp of a message in seconds, with 3 decimal figures
+float GetRxTimestamp()
+{
+  qword time;
+  
+  time = SCC_GetMessageRxTime();
+  
+  // convert to milliseconds
+  time = (time - (time % 1000000)) / 1000000;
+  return (float)time/1000.0; 
+}
+
+int GetTestConfigNumber()
+{
+  if (@sysVar::Test::SysTestSchema == 2)    // ISO IS
+    return 0;
+  else
+    return 1;
+}
+
+void CheckFaultNotification()
+{
+  char strBuffer1[100], strBuffer2[100];
+  
+  if (SCC_GetFaultNotification(strBuffer1, strBuffer2))
+  {
+    Write("!! Fault Code received: %s", strBuffer1);
+    
+    if (strlen(strBuffer2) > 0)
+      Write("!! Fault Message: %s", strBuffer2);
+  }
+}
+
+void ApplyLinkStatusMode()
+{  
+  if (@sysVar::Common::SysLinkStatusSimulation)
+    SCC_SLAC_SetLinkStatusPollingInterval(0);    // polling off
+  else
+    SCC_SLAC_SetLinkStatusPollingInterval(500);  
+}
+
+void ApplyMessageDelay()
+{
+  long lTemp;
+  dword dTemp;
+  
+  dTemp = @sysvar::Common::SysMessageDelay;
+  lTemp = @sysvar::Common::SysMessageDelayJitter;
+  
+  if (lTemp == 0)
+    SCC_SetMessageDelay(dTemp);  // jitter off
+  else
+    SCC_SetMessageDelay(dTemp, 10.0);  // jitter on with 10%
+}
+
+void GetRunIdAndMacIds(byte RunID[], byte SourceMacAddress[])
+{    
+  byte bBuffer[32];  
+  
+  SCC_SLAC_GetDestinationAddress(bBuffer);
+  
+  WriteHex(strRunId, RunID);
+  WriteHexMacId(strSourceMac, SourceMacAddress);
+  WriteHexMacId(strDestMac, bBuffer);
+}
+
+void PrintMeterInfo()
+{
+  SCC_GetMeterInfoData(strBuffer1, fTemp1, bbuffer2, lTemp1, lTemp2);
+  
+  if (strlen(strBuffer1) > 0)   // MeterInfo exists
+  {
+    WriteLineEx(writeTab, 0, "  MeterID = %s, MeterReading = %.2f, MeterStatus = %i, TMeter = %i",
+      strBuffer1, fTemp1, lTemp1, lTemp2);
+    
+    WriteLineEx(writeTab, 0, "  SigMeterReading = %lX%lX%lX%lX...%lX%lX%lX%lX",
+      bbuffer1[0], bbuffer1[1], bbuffer1[2], bbuffer1[3],
+      bbuffer1[60], bbuffer1[61], bbuffer1[62], bbuffer1[63]);
+  }
+}
+
+void PrintCertificateChain(int nr, int isIsoSchema)
+{
+  int i;
+  
+  SCC_GetCertificateChainData(nr, strBuffer1, lTemp1);
+  
+  if (isIsoSchema)
+    WriteLineEx(writeTab, 0, "   Certificate Chain: ID = %s", strBuffer1);
+  
+  // Get main certificate (mandatory)
+  SCC_GetCertificateChainCertificate(nr, 0, certBuffer);
+  PrintCertificate("Certificate Chain: Root Cert"); 
+  
+  for (i = 0; i < lTemp1; ++i)
+  {
+    SCC_GetCertificateChainCertificate(nr, i+1, certBuffer);
+    PrintCertificate("Certificate Chain:  Sub-Cert");
+  }
+}
+
+void PrintCertificate(char certName[])
+{
+  long len;
+  len = strlen(certBuffer);
+  
+  if (len < 8)
+  {
+    WriteLineEx(writeTab, 0, "   Cannot print %s (length %i), certificate is too short!", certName, len);
+  }
+  else  
+  {
+    WriteLineEx(writeTab, 0, "   %s (length %i): %c%c%c%c...%c%c%c%c", certName, len,
+      certBuffer[0], certBuffer[1], certBuffer[2], certBuffer[3],
+      certBuffer[len-5], certBuffer[len-4], certBuffer[len-3], certBuffer[len-2]);
+  }
+}
+
+void PrintEthernetSettings(char nodeName[])
+{
+  char str1[18], str2[16], str3[64];
+    
+  byte mac[6], ipv4[4], ipv6[16];
+  dword ipv4Available, ipv6Available;
+  dword tcpPort, udpPort;
+  
+  SCC_GetEthernetSettings(mac, ipv4, ipv4Available, ipv6, ipv6Available, udpPort, tcpPort);
+  
+  WriteHexMacId(str1, mac);
+  WriteHex(str2, ipv4);
+  WriteHex(str3, ipv6);
+  
+  if (ipv4Available)
+    Write("%s: MAC = %s, IP = %s, UDP port = %i, TCP port = %i", nodeName, str1, str2, udpPort, tcpPort);
+  if (ipv6Available)
+    Write("%s: MAC = %s, IP = %s, UDP port = %i, TCP port = %i", nodeName, str1, str3, udpPort, tcpPort);
+}
+
+int ShallWrite()
+{
+  return @sysVar::Common::SysWriteMessageData > 0;
+}
+
+void WriteHex(char outText[], byte data[])
+{
+  WriteHex(outText, data, elcount(data), "", 0);
+}
+
+void WriteHex(char outText[], byte data[], int length)
+{
+  WriteHex(outText, data, length, "", length);
+}
+
+void WriteHexMacId(char outText[], byte data[])
+{
+  if (elcount(data) < 6)
+    return;
+  
+  WriteHex(outText, data, 6, ":", 1);
+}
+
+void WriteHexIPv6(char outText[], byte data[])
+{
+  if (elcount(data) < 16) return;
+  
+  WriteHex(outText, data, 16, ":", 2);
+}
+
+void WriteHex(char outText[], byte data[], int dataLength, char sep[], int sepEveryXChars)
+{
+  int i, sepCnt;
+  
+  if (dataLength <= 0) return;
+  if (elcount(outText) <= 0) return;
+  
+  sepCnt = (sepEveryXChars < 1 ? 1 : sepEveryXChars);
+    
+  // Clear string
+  snprintf(outText, 1, "", 1);
+  
+  for (i=0; i< dataLength; i++)
+  {
+    // Append Byte as Hex
+    snprintf(outText, elcount(outText), "%s%02X", outText, data[i]); 
+    
+    // Append Separator
+    if (i < dataLength-1)
+    {
+      if (((i+1)%sepCnt) == 0)
+      {
+        snprintf(outText, elcount(outText), "%s%s", outText, sep);
+      }
+    }
+  }       
+}
+
+void DisplayVerificationStatus(char controlName[], dword status)
+{    
+  char controlNameOK[32];
+  char controlNameNOK[32];
+  
+  snprintf(controlNameOK, 32, "%sOK", controlName);
+  snprintf(controlNameNOK, 32, "%sNOK", controlName);  
+  
+  if (2 == status)   // not verified
+  {
+    setControlVisibility(gProtocolPanelName, controlNameNOK, 0);
+    setControlVisibility(gProtocolPanelName, controlNameOK, 0);
+  }
+  else if (1  == status)   // verification OK
+  {
+    setControlVisibility(gProtocolPanelName, controlNameOK, 1);
+  }
+  else    // verification NOK
+  {
+    setControlVisibility(gProtocolPanelName, controlNameNOK, 1);
+    setControlVisibility(gProtocolPanelName, controlNameOK, 0);
+  }
+}

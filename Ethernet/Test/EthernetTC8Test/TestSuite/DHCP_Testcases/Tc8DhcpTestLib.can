@@ -1,0 +1,2032 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "..\ShareableFolders\CaplLibrary\Tc8TestLib\BasicFunctionsTestLib.cin"
+  #include "..\ShareableFolders\CaplLibrary\StubFunctionLib\DhcpStubFunctions.cin"
+  #include "..\ShareableFolders\CaplLibrary\StubFunctionLib\Ipv4StubFunctions.cin"
+}
+
+variables
+{
+ enum DhcpMessageType
+  {
+    kDhcpDiscover = 1,
+    kDhcpOffer = 2,
+    kDhcpRequest = 3,
+    kDhcpDecline = 4,
+    kDhcpAck = 5,
+    kDhcpNak = 6,
+    kDhcpRelease = 7,
+    kDhcpInform = 8
+  };
+  
+  enum DhcpOptions
+  {
+    kPadOption = 0,
+    kSubnetMask = 1,
+    kRouterOption = 3,
+    kRequestedIpAddress = 50,
+    kIpAddressLeaseTime = 51,
+    kOptionOverload = 52,
+    kMessageType = 53,
+    kServerIdentifier = 54,
+    kParameterRequestList = 55,
+    kMaximumMessageSize = 57,
+    ClientIdentifier = 61,
+    kEndOption = 255
+  };
+  
+  enum DhcpOverloadType
+  {
+    kFile = 1,
+    kSname = 2,
+    kBothFields = 3
+  };
+  
+  enum OpCode
+  {
+    kBootRequest = 1,
+    kBootReply = 2
+  };
+  
+  
+  int64 transactionId;
+  int64 gTransactionId;
+  int64 gExtractedSeconds;
+  int64 gExtractedHwAddress;
+  byte gExtractedClientId[1024];
+  int gExtractedClientIdLength;
+  int gShouldClientIdBeExtracted = 0;
+  
+  
+}
+
+/**
+ * This function should be called in the preparation of the test fixture
+ */
+export InitTestFixture()
+ {
+  gDhcpv4Server1IpAddress = ConvertIpAddressStringToInt64(syspar::Server1IpAddress);
+  gDhcpv4Server2IpAddress = ConvertIpAddressStringToInt64(syspar::Server2IpAddress);
+  
+  Internal_InitTestFixture(kDhcpv4,"OnEthPacketDhcp");
+ }
+
+/**
+ * This function should be called in the preparation of each test case
+ */
+export InitTestCase(char testCaseName[],int testCaseNumber,enum Bool stubFunctionRequired)
+ {
+  Internal_InitTestCase(testCaseName,kDhcpv4,"DHCPv4",testCaseNumber,stubFunctionRequired);
+ }
+
+/**
+ * This function should be called in the preparation of each test case
+ * @param testCaseName The name of the testcase
+ * @param testCaseNumber The Number of the testcase
+ */
+export InitTestCase(char testCaseName[],int testCaseNumber)
+ {
+  Internal_InitTestCase(testCaseName, kDhcpv4, "DHCPv4", testCaseNumber, kTrue);
+ }
+
+/**
+ * This function should be called in the completion of each testcase
+ * @param testCaseName The name of the testcase (will be ignored)
+ * @param testCaseNumber The Number of the testcase (will be ignored)
+ */
+export EndTestCase(char testCaseName[],int testCaseNumber)
+ {
+  Internal_Stub_InterfaceDown(syspar::DIface0Name);
+  Internal_Stub_StopDhcpClient(syspar::DIface0Name);
+
+  Internal_EndTestCase();
+ }
+
+/**
+ * This function should be called in the completion of the test fixture
+ */
+export EndTestFixture()
+ {
+  Internal_EndTestFixture();
+ }
+
+/**
+ * This function is called when an ethernet packet is received.
+ * If it is sent from the DuT (checked via ShouldIncomingPacketBeProcessed),
+ * and observing of packets is active, the incoming packet will
+ * be processed
+ */
+OnEthPacketDhcp(long channel, long dir,long packetHandle)
+{
+  enum Bool match;
+
+  if(ShouldIncomingPacketBeProcessed(channel, dir, packetHandle) == kFalse)
+  {
+    return;
+  }
+  if(AnswerArpRequestForHost1(packetHandle) == kTrue)
+  {
+    return;
+  }
+  match = CompareParameters(packetHandle, channel, gReportOnFailure);
+  if(match == kTrue)
+  {
+   if(IsDhcpMessage(packetHandle) == kTrue)
+    {
+    gTransactionId = EthGetTokenInt64(packetHandle, "dhcpv4", "xid");
+    gExtractedSeconds = EthGetTokenInt64(packetHandle, "dhcpv4", "time");
+    gExtractedHwAddress = EthGetTokenInt64(packetHandle, "dhcpv4", "clientHwAddr");
+    }
+   EthernetPacketReceived(channel);
+  } 
+}
+
+
+
+/**
+ * Sends a DHCPOFFER message
+ * @param serverMacAddress MAC address of the server
+ * @param serverIpAddress IP Address of the server
+ * @param offsetTransactionId this will be added to the last received transaction id
+ * @param assigendIpAddress IP Address offered to the client
+ * @param fillOptionWithPadding If this is non-zero, options will be filled with paddings until size of options equals this param
+ * @param leaseTimeSeconds The lease time in seconds
+ */
+
+export testfunction SendDhcpOffer(
+  char serverMacAddress[],
+  char serverIpAddress[],
+  int offsetTransactionId,
+  char assigendIpAddress[],
+  int fillOptionWithPadding,
+  int leaseTimeSeconds)
+{
+  long packetHandle,result,totalOptionsLength;
+  
+  setBusContext(getBusNameContext("Ethernet_1"));
+  
+  packetHandle = EthInitPacket("dhcpv4");
+  
+  result = EthSetTokenInt64(packetHandle, "eth", "source", ConvertMacAddressStringToInt64(serverMacAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src %d", result);
+  
+  result = EthSetTokenInt64(packetHandle, "eth", "destination", ConvertMacAddressStringToInt64(syspar::MacAddressBroadcast));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d", result);
+  
+  result = EthSetTokenInt64(packetHandle, "ipv4", "source", ConvertIpAddressStringToInt64(serverIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src %d", result);
+  
+  result = EthSetTokenInt64(packetHandle,"ipv4","destination",ConvertIpAddressStringToInt64(syspar::IpAddressBroadcast));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest %d",result);
+  
+  result = EthSetTokenInt64(packetHandle, "dhcpv4", "operation", (byte) kBootReply);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp operation %d", result);
+  
+  result = EthSetTokenInt64(packetHandle, "dhcpv4", "xid", gTransactionId+offsetTransactionId);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp xid %d", result);
+  
+  result = EthSetTokenInt64(packetHandle, "dhcpv4", "yourAddr", ConvertIpAddressStringToInt64(assigendIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp youraddr %d", result);
+  
+  result = EthSetTokenInt64(packetHandle, "dhcpv4", "serverAddr", ConvertIpAddressStringToInt64(serverIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp serveraddr %d", result);
+  
+  result = EthSetTokenInt64(packetHandle, "dhcpv4", "clientHwAddr", ConvertMacAddressStringToInt64(syspar::DIface0MacAddr));
+  if(result != 0) write("Error @ EthSetTokenInt64 clienthwaddr %d", result);
+  
+  EthAddToken(packetHandle, "dhcpv4", "magicCookie");
+  totalOptionsLength = 4; // size of magic cookie
+  
+  totalOptionsLength += AddMessageTypeOption(packetHandle, kDhcpOffer);
+  totalOptionsLength += AddLeaseTimeOption(packetHandle, leaseTimeSeconds);
+  totalOptionsLength += AddServerIdentificationOption(packetHandle, ConvertIpAddressStringToInt64(serverIpAddress));
+  
+  totalOptionsLength++; //end option. will be added after the paddings
+  
+  while(fillOptionWithPadding > totalOptionsLength)
+  {
+    EthAddToken(packetHandle, "dhcpv4", "option0");
+    fillOptionWithPadding--;
+  }
+  
+  EthAddToken(packetHandle, "dhcpv4", "option255");
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(packetHandle, "eth", "vlanId");
+    EthSetTokenInt(packetHandle, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d", result);
+  
+  result = EthOutputPacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d", result);
+  
+  result = EthReleasePacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d", result);
+}
+
+/**
+ * Sends a DHCPOFFER message with router option set to IP address of the server either in file or in sname field
+ * @param serverMacAddress MAC address of the server
+ * @param serverIpAddress IP Address of the server
+ * @param assigendIpAddress IP Address offered to the client
+ * @param fillOptionWithPadding If this is non-zero, options will be filled with paddings until size of options equals this param
+ * @param leaseTimeSeconds The lease time in seconds
+ * @param routerOptionField Token in which the router option should be placed: either "serverName" or "file"
+ * @param endOptionInRouterOptionField if kTrue an end option will be added to the field given in routerOptionField
+ * @param overloadType The type of the overload option in the normal options field. If zero, no overload option is added
+ */
+
+export testfunction SendDhcpOfferWithRouterOption(
+  char serverMacAddress[],
+  char serverIpAddress[],
+  char assigendIpAddress[],
+  int fillOptionWithPadding,
+  int leaseTimeSeconds,
+  char routerOptionField[],
+  enum Bool endOptionInRouterOptionField,
+  enum Bool secondEndOptionInRouterOptionField,
+  enum Bool paddingOptionInRouterOptionField,
+  enum DhcpOverloadType overloadType
+  )
+{
+  long packetHandle,result,totalOptionsLength,offset;
+  byte data[10];
+  int i;
+  
+  //clear data array
+  for(i = 0; i < elcount(data); i++)
+  {
+    data[i] = 0;
+  }
+  
+  packetHandle = EthInitPacket("dhcpv4");
+  
+  result = EthSetTokenInt64(packetHandle, "eth", "source", ConvertMacAddressStringToInt64(serverMacAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src %d",result);
+  
+  result = EthSetTokenInt64(packetHandle, "eth", "destination", ConvertMacAddressStringToInt64(syspar::MacAddressBroadcast));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d",result);
+  
+  result = EthSetTokenInt64(packetHandle, "ipv4", "source", ConvertIpAddressStringToInt64(serverIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src %d",result);
+  
+  result = EthSetTokenInt64(packetHandle, "ipv4", "destination", ConvertIpAddressStringToInt64(syspar::IpAddressBroadcast));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest %d",result);
+  
+  result = EthSetTokenInt64(packetHandle, "dhcpv4", "operation", (byte) kBootReply);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp operation %d",result);
+  
+  result = EthSetTokenInt64(packetHandle, "dhcpv4", "xid", gTransactionId);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp xid %d",result);
+  
+  result = EthSetTokenInt64(packetHandle, "dhcpv4", "yourAddr", ConvertIpAddressStringToInt64(assigendIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp youraddr %d",result);
+  
+  result = EthSetTokenInt64(packetHandle, "dhcpv4", "serverAddr", ConvertIpAddressStringToInt64(serverIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp serveraddr %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4", "clientHwAddr", ConvertMacAddressStringToInt64(syspar::DIface0MacAddr));
+  if(result != 0) write("Error @ EthSetTokenInt64 clienthwaddr %d",result);
+  
+  //create padding, overload and end option and add them to either file or serverName field
+  offset = 0;
+  if(paddingOptionInRouterOptionField == kTrue)
+  {
+    data[0] = (byte) kPadOption;
+    offset = 1;
+  }
+  data[offset] = (byte) kRouterOption;
+  data[offset+1] = 4; //Length of Router Option
+  data.Dword(offset+2) = ipGetAddressAsNumber(serverIpAddress);
+  if(endOptionInRouterOptionField == kTrue)
+  {
+   data[offset+6] = (byte) kEndOption;
+  }
+  if(secondEndOptionInRouterOptionField == kTrue)
+  {
+   data[offset+8] = (byte) kEndOption;
+  }
+  result = EthAddToken(packetHandle, "dhcpv4", routerOptionField);
+  if(result != 0) write("Error @ EthAddToken %s %d", routerOptionField, result);
+  result = EthSetTokenData(packetHandle, "dhcpv4", routerOptionField, elcount(data), data);
+  if(result != 0) write("Error @ EthSetTokenData %s %d", routerOptionField, result);
+  
+  EthAddToken(packetHandle,"dhcpv4","magicCookie");
+  totalOptionsLength = 4; // size of magic cookie
+  
+  totalOptionsLength += AddMessageTypeOption(packetHandle, kDhcpOffer);
+  totalOptionsLength += AddLeaseTimeOption(packetHandle, leaseTimeSeconds);
+  totalOptionsLength += AddServerIdentificationOption(packetHandle, ConvertIpAddressStringToInt64(serverIpAddress));
+  if(overloadType != 0)
+  {
+   totalOptionsLength += AddOverloadOption(packetHandle, overloadType);
+  }
+  
+  totalOptionsLength++; //end option. will be added after the paddings
+  
+  while(fillOptionWithPadding > totalOptionsLength)
+  {
+    EthAddToken(packetHandle, "dhcpv4", "option0");
+    fillOptionWithPadding--;
+  }
+  
+  EthAddToken(packetHandle,"dhcpv4","option255");
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(packetHandle, "eth", "vlanId");
+    EthSetTokenInt(packetHandle, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthOutputPacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthReleasePacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+}
+
+/**
+ * Sends a DHCPACK message
+ * @param serverMacAddress MAC address of the server
+ * @param serverIpAddress IP Address of the server
+ * @param assigendIpAddress IP Address offered to the client
+ * @param leaseTimeSeconds The lease time in seconds
+ */
+export testfunction SendDhcpAck(char serverMacAddress[], char serverIpAddress[], char assigendIpAddress[], dword leaseTimeSeconds)
+{
+  long packetHandle,result;
+  
+  packetHandle = EthInitPacket("dhcpv4");
+  
+  result = EthSetTokenInt64(packetHandle,"eth","source",ConvertMacAddressStringToInt64(serverMacAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"eth","destination", ConvertMacAddressStringToInt64(syspar::DIface0MacAddr));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"ipv4","source",ConvertIpAddressStringToInt64(serverIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"ipv4","destination",ConvertIpAddressStringToInt64(assigendIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","operation",(byte) kBootReply);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp operation %d",result);
+
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","xid",gTransactionId);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp xid %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","yourAddr",ConvertIpAddressStringToInt64(assigendIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp youraddr %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","clientAddr", 0);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp clientAddr %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","serverAddr",ConvertIpAddressStringToInt64(serverIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp serveraddr %d",result);  
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","clientHwAddr", ConvertMacAddressStringToInt64(syspar::DIface0MacAddr));
+  if(result != 0) write("Error @ EthSetTokenInt64 clienthwaddr %d",result);
+  
+  EthAddToken(packetHandle,"dhcpv4","magicCookie");
+  
+  AddMessageTypeOption(packetHandle,kDhcpAck);
+  AddLeaseTimeOption(packetHandle,leaseTimeSeconds);
+  AddSubnetMaskOption(packetHandle);
+  EthAddToken(packetHandle,"dhcpv4","option255");
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(packetHandle, "eth", "vlanId");
+    EthSetTokenInt(packetHandle, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthOutputPacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthReleasePacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+}
+
+/**
+ * Sends a DHCPACK message with router option set to IP address of the server either in file or in sname field
+ * @param serverMacAddress MAC address of the server
+ * @param serverIpAddress IP Address of the server
+ * @param assigendIpAddress IP Address offered to the client
+ * @param fillOptionWithPadding If this is non-zero, options will be filled with paddings until size of options equals this param
+ * @param leaseTimeSeconds The lease time in seconds
+ * @param routerOptionField Token in which the router option should be placed: either "serverName" or "file"
+ * @param endOptionInRouterOptionField if kTrue an end option will be added to the field given in routerOptionField
+ * @param overloadType The type of the overload option in the normal options field
+ */
+
+
+export testfunction SendDhcpAckWithRouterOption(
+  char serverMacAddress[],
+  char serverIpAddress[],
+  char assigendIpAddress[],
+  int fillOptionWithPadding,
+  int leaseTimeSeconds,
+  char routerOptionField[],
+  enum Bool endOptionInRouterOptionField,
+  enum Bool secondEndOptionInRouterOptionField,
+  enum Bool paddingOptionInRouterOptionField,
+  enum DhcpOverloadType overloadType
+  )
+{
+  long packetHandle, result, totalOptionsLength, offset;
+  int i;
+  byte data[10];
+  
+  //clear data array
+  for(i = 0; i < elcount(data); i++)
+  {
+    data[i] = 0;
+  }
+  
+  packetHandle = EthInitPacket("dhcpv4");
+  
+  result = EthSetTokenInt64(packetHandle,"eth","source",ConvertMacAddressStringToInt64(serverMacAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"eth","destination",ConvertMacAddressStringToInt64(syspar::DIface0MacAddr));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"ipv4","source",ConvertIpAddressStringToInt64(serverIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"ipv4","destination",ConvertIpAddressStringToInt64(assigendIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","operation",(byte) kBootReply);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp operation %d",result);
+
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","xid",gTransactionId);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp xid %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","yourAddr",ConvertIpAddressStringToInt64(assigendIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp youraddr %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","clientAddr",0);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp clientAddr %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","serverAddr",ConvertIpAddressStringToInt64(serverIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp serveraddr %d",result);  
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","clientHwAddr", ConvertMacAddressStringToInt64(syspar::DIface0MacAddr));
+  if(result != 0) write("Error @ EthSetTokenInt64 clienthwaddr %d",result);
+  
+  //create padding, overload and end option and add them to either file or serverName field
+  offset = 0;
+  if(paddingOptionInRouterOptionField == kTrue)
+  {
+    data[0] = (byte) kPadOption;
+    offset = 1;
+  }
+  data[offset] = (byte) kRouterOption;
+  data[offset+1] = 4; //Length of Router Option
+  data.Dword(offset+2) = ipGetAddressAsNumber(serverIpAddress);
+  if(endOptionInRouterOptionField == kTrue)
+  {
+   data[offset+6] = (byte) kEndOption;
+  }
+  if(secondEndOptionInRouterOptionField == kTrue)
+  {
+   data[offset+8] = (byte) kEndOption;
+  }
+  result = EthAddToken(packetHandle, "dhcpv4", routerOptionField);
+  if(result != 0) write("Error @ EthAddToken %s %d", routerOptionField, result);
+  result = EthSetTokenData(packetHandle, "dhcpv4", routerOptionField, elcount(data), data);
+  if(result != 0) write("Error @ EthSetTokenData %s %d", routerOptionField, result);
+  
+  EthAddToken(packetHandle,"dhcpv4","magicCookie");
+  totalOptionsLength = 4; //Magic cookie
+  
+  totalOptionsLength += AddMessageTypeOption(packetHandle,kDhcpAck);
+  totalOptionsLength += AddLeaseTimeOption(packetHandle,leaseTimeSeconds);
+  totalOptionsLength += AddSubnetMaskOption(packetHandle);
+  if(overloadType != 0)
+  {
+   totalOptionsLength += AddOverloadOption(packetHandle, overloadType);
+  }
+  totalOptionsLength++; //end option. will be added after the paddings
+  
+  while(fillOptionWithPadding > totalOptionsLength)
+  {
+     EthAddToken(packetHandle, "dhcpv4", "option0");
+     fillOptionWithPadding--;
+  }
+  EthAddToken(packetHandle,"dhcpv4","option255");
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(packetHandle, "eth", "vlanId");
+    EthSetTokenInt(packetHandle, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthOutputPacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthReleasePacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+}
+
+/**
+ * Sends a DHCPNAK message
+ * @param serverMacAddress MAC address of the server
+ * @param serverIpAddress IP Address of the server
+ * @param assigendIpAddress IP Address offered to the client
+ * @param leaseTimeSeconds The lease time in seconds
+ */
+
+
+export testfunction SendDhcpNak(char serverMacAddress[], char serverIpAddress[], char assigendIpAddress[])
+{
+  long packetHandle,result;
+  
+  packetHandle = EthInitPacket("dhcpv4");
+  
+  result = EthSetTokenInt64(packetHandle,"eth","source",ConvertMacAddressStringToInt64(serverMacAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"eth","destination",ConvertMacAddressStringToInt64(syspar::MacAddressBroadcast));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"ipv4","source",ConvertIpAddressStringToInt64(serverIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"ipv4","destination",ConvertIpAddressStringToInt64(syspar::IpAddressBroadcast));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","operation",(byte) kBootReply);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp operation %d",result);
+
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","xid",gTransactionId);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp xid %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","yourAddr",ConvertIpAddressStringToInt64(assigendIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp youraddr %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","clientAddr",ConvertIpAddressStringToInt64(assigendIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp clientAddr %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","serverAddr",ConvertIpAddressStringToInt64(serverIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp serveraddr %d",result);
+  
+  result = EthSetTokenInt64(packetHandle,"dhcpv4","clientHwAddr", ConvertMacAddressStringToInt64(syspar::DIface0MacAddr));
+  if(result != 0) write("Error @ EthSetTokenInt64 clienthwaddr %d",result);
+  
+  EthAddToken(packetHandle,"dhcpv4","magicCookie");
+  
+  AddMessageTypeOption(packetHandle,kDhcpNak);
+  EthAddToken(packetHandle,"dhcpv4","option255");
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(packetHandle, "eth", "vlanId");
+    EthSetTokenInt(packetHandle, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthOutputPacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthReleasePacket(packetHandle);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+}
+
+/**
+ * Adds the message type dhcp option to an ethernet packet
+ * @param packetHandle handle of the ethernet packet
+ * @param type the type of dhcp packet
+ * @returns size of the option in bytes
+ */
+
+long AddMessageTypeOption(long packetHandle,enum DhcpMessageType type)
+{
+  byte data[1];
+  data[0] = (byte) type;
+  AddOption(packetHandle, kMessageType, data, elcount(data));
+  return 3;
+}
+
+/**
+ * Adds the lease time dhcp option to an ethernet packet
+ * @param packetHandle handle of the ethernet packet
+ * @param leaseTimeSeconds the lease time
+ * @returns size of the option in bytes
+ */
+long AddLeaseTimeOption(long packetHandle, dword leaseTimeSeconds)
+{
+  byte data[4];
+  data.Dword(0) = swapDWord(leaseTimeSeconds);
+  AddOption(packetHandle, kIpAddressLeaseTime, data, elcount(data));
+  return 6;
+}
+
+/**
+ * Adds the server identification dhcp option to an ethernet packet
+ * @param packetHandle handle of the ethernet packet
+ * @param serverIdentification the server identification
+ * @returns size of the option in bytes
+ */
+long AddServerIdentificationOption(long packetHandle, int64 serverIdentification)
+{
+  byte data[4];
+  data.Dword(0) = swapDWord(serverIdentification);
+  AddOption(packetHandle, kServerIdentifier, data, elcount(data));
+  return 6;
+}
+
+/**
+ * Adds the subnet mask dhcp option to an ethernet packet
+ * @param packetHandle handle of the ethernet packet
+ * @param serverIdentification the server identification
+ * @returns size of the option in bytes
+ */
+long AddSubnetMaskOption(long packetHandle)
+{
+  byte data[4] = {255, 255, 255, 0};
+  AddOption(packetHandle, kSubnetMask, data, elcount(data));
+  return 6;
+}
+
+/**
+ * Adds the overload dhcp option to an ethernet packet
+ * @param packetHandle handle of the ethernet packet
+ * @param leaseTimeSeconds the lease time
+ * @returns size of the option in bytes
+ */
+long AddOverloadOption(long packetHandle, enum DhcpOverloadType type)
+{
+  byte data[1];
+  data[0] = (byte) type;
+  AddOption(packetHandle, kOptionOverload, data, elcount(data));
+  return 3;
+}
+
+/* Adds a dhcp option to an ethernet packet
+ * @param packetHandle handle of the ethernet packet
+ * @param option the option that should be added
+ * @param data the data of the option
+ * @param dataLength size of the data array
+ */
+  
+void AddOption(long packetHandle, enum DhcpOptions option, byte data[], int dataLength)
+{
+  long result;
+  char tempstr[128];
+  
+  snprintf(tempstr, elcount(tempstr), "option%d", (byte) option);
+  result = EthAddToken(packetHandle, "dhcpv4", tempstr);
+  if (result != 0) write("Error @ EthAddToken %d", result);
+  
+  snprintf(tempstr, elcount(tempstr), "option%d.data", (byte) option);
+  // Do not use EthResizeToken! Otherwise, adding the option won't work
+  result = EthSetTokenData(packetHandle, "dhcpv4", tempstr, dataLength, data);
+  if (result != 0) write("Error @ EthSetTokenData %d", result);
+}
+
+/**
+ * Sends an ARP reply.
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param hardwareType The Type of the hardware address.
+ * @param protocolType The Type of the protocol address.
+ * @param hardwareAddressLength The length of the hardware address.
+ * @param protocolAddressLength The length of the protocol address.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ */
+export testfunction SendArpReply(
+  char destMac[],
+  char srcMac[],
+  char hardwareType[],
+  char protocolType[],
+  char hardwareAddressLength[],
+  char protocolAddressLength[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  long p;
+
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+
+  p = EthInitPacket("arp");
+
+  EthSetTokenInt64(p, "eth", "destination", ConvertMacAddressStringToInt64(destMac));
+  EthSetTokenInt64(p, "eth", "source", ConvertMacAddressStringToInt64(srcMac));
+
+  if (IsWildcard(hardwareType)) 
+    EthSetTokenInt64(p, "arp", "hwType", 1);
+  else 
+    EthSetTokenInt64(p, "arp", "hwType", atol(hardwareType));
+  
+  if (IsWildcard(protocolType)) 
+    EthSetTokenInt64(p, "arp", "protType", 0x0800);
+  else 
+    EthSetTokenInt64(p, "arp", "protType", atol(protocolType));
+  
+  if (IsWildcard(hardwareAddressLength)) 
+    EthSetTokenInt64(p, "arp", "hwSize", 6);
+  else 
+    EthSetTokenInt64(p, "arp", "hwSize", atol(hardwareAddressLength));
+  
+  if (IsWildcard(protocolAddressLength)) 
+    EthSetTokenInt64(p, "arp", "protSize", 4);
+  else 
+    EthSetTokenInt64(p, "arp", "protSize", atol(protocolAddressLength));
+  
+  EthSetTokenInt64(p, "arp", "operation", 2);
+  EthSetTokenInt64(p, "arp", "hwSourceAddr", ConvertMacAddressStringToInt64(senderHardwareAddress));
+  EthSetTokenInt64(p, "arp", "protSourceAddr", ConvertIpAddressStringToInt64(senderProtocolAddress));
+  EthSetTokenInt64(p, "arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(targetHardwareAddress));
+  EthSetTokenInt64(p, "arp", "protDestinationAddr", ConvertIpAddressStringToInt64(targetProtocolAddress));
+
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  EthCompletePacket(p);
+
+  /* send and release package */
+  EthOutputPacket(p);
+  EthReleasePacket(p);
+}
+
+/**
+ * Sends an ICMP echo request
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param destIp The destination IP address.
+ * @param srcIp The source IP address.
+ */
+export testfunction SendIcmpEchoRequest(
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[]
+  )
+{
+  long p;
+  long result;
+
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+
+  p = EthInitPacket("icmpv4","echo");
+
+  result = EthSetTokenInt64(p, "eth", "destination", ConvertMacAddressStringToInt64(destMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d",result);
+  
+  result = EthSetTokenInt64(p, "eth", "source", ConvertMacAddressStringToInt64(srcMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src %d",result);
+
+  result = EthSetTokenInt64(p, "ipv4", "destination", ConvertIpAddressStringToInt64(destIp));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest %d",result);
+  
+  result = EthSetTokenInt64(p, "ipv4", "source", ConvertIpAddressStringToInt64(srcIp));
+  if(result != 0) write("Error @ EthSetTokenInt64 ip src %d",result);
+
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+
+  result = EthOutputPacket(p);
+  if(result != 0) write("Error @ EthOutputPacket %d",result);
+  
+  result = EthReleasePacket(p);
+  if(result != 0) write("Error @ EthOutputPacket %d",result);
+}
+
+/**
+ * Goes from Init to Requesting state by waiting for DHCPDISCOVER and sending DHCPOFFER. 
+ */
+export CauseDutTransitToRequestingState()
+ {
+  CauseDutTransitToRequestingState(syspar::Server1IpAddress, syspar::Server1IpPool00);
+ }
+
+/**
+ * Goes from Init to Requesting state by waiting for DHCPDISCOVER and sending DHCPOFFER. 
+ * @param ipAddressServer The IP address of the DHCP server.
+ * @param assignedIpAddress The IP address offered to the DHCP client.
+ */
+export CauseDutTransitToRequestingState(char ipAddressServer[], char assignedIpAddress[])
+ {
+  WaitForDhcpDiscover(syspar::ParamListenTimeMilliseconds, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard);
+  SendDhcpOffer(syspar::Host1Mac, ipAddressServer, 0, assignedIpAddress, 0, syspar::ParamLeaseTimeSeconds);
+ }
+
+/**
+ * Goes from Init to Requesting state by waiting for DHCPDISCOVER and sending DHCPOFFER.
+ * Also extracts the data from the Client Identifier Option in DHCPDISCOVER
+ */
+export CauseDutTransitToRequestingStateExtractClientIdentifierOption()
+ {
+  InternalSetExtractedParameter("dhcpv4","option61.data",kExtractData);
+  CauseDutTransitToRequestingState();
+ }
+
+/**
+ * Goes from Init to Bound state by waiting for DHCPDISCOVER, sending DHCPOFFER,
+ * waiting for DHCPREQUEST and sending DHCPACK
+ */ 
+export CauseDutTransitToBoundState()
+ {
+  CauseDutTransitToBoundState(syspar::ParamLeaseTimeSeconds);
+ }
+
+/**
+ * Goes from Init to Bound state by waiting for DHCPDISCOVER, sending DHCPOFFER,
+ * waiting for DHCPREQUEST and sending DHCPACK
+ * @param leaseTimeSeconds The lease time
+ */ 
+export CauseDutTransitToBoundState(dword leaseTimeSeconds)
+ {
+  WaitForDhcpDiscover(syspar::ParamListenTimeMilliseconds, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard);
+  SendDhcpOffer(syspar::Host1Mac, syspar::Server1IpAddress, 0, syspar::Server1IpPool00, 0, leaseTimeSeconds);
+  WaitForDhcpRequest(syspar::ParamListenTimeMilliseconds, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard);
+  SendDhcpAck(syspar::Host1Mac, syspar::Server1IpAddress, syspar::Server1IpPool00, leaseTimeSeconds);
+ }
+
+/**
+ * Goes from Init to Requesting state by waiting for DHCPDISCOVER and sending DHCPOFFER,
+ * waiting for DHCPREQUEST and sending DHCPACK
+ * Also extracts the data from the Client Identifier Option in DHCPDISCOVER
+ */
+export CauseDutTransitToBoundStateExtractClientIdentifierOption()
+ {
+  InternalSetExtractedParameter("dhcpv4","option61.data",kExtractData);
+  CauseDutTransitToBoundState();
+ }
+
+/**
+ * Goes from Init to Requesting state by waiting for DHCPDISCOVER and sending DHCPOFFER,
+ * waiting for DHCPREQUEST and sending DHCPACK
+ * Also extracts the xid field in DHCPDISCOVER
+ */
+export CauseDutTransitToBoundStateExtractXid()
+ {
+  InternalSetExtractedParameter("dhcpv4", "xid" ,kExtractInt64);
+  CauseDutTransitToBoundState();
+ }
+
+
+/**
+ * Goes from Requesting to Bound state by waiting for DHCPREQUEST and sending DHCPACK
+ */ 
+export CauseDutTransitFromRequestingToBoundState()
+ {
+  WaitForDhcpRequest(syspar::ParamListenTimeMilliseconds, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard);
+  SendDhcpAck(syspar::Host1Mac, syspar::Server1IpAddress, syspar::Server1IpPool00, syspar::ParamLeaseTimeSeconds);
+ }
+
+/**
+ * Goes from Init to Renewing state by waiting for DHCPDISCOVER, sending DHCPOFFER,
+ * waiting for DHCPREQUEST, sending DHCPACK and waiting T1 = 0.5 * Lease Time
+ */
+export CauseDutTransitToRenewingState(dword leaseTimeSeconds)
+ {
+  WaitForDhcpDiscover(syspar::ParamListenTimeMilliseconds, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard);
+  SendDhcpOffer(syspar::Host1Mac, syspar::Server1IpAddress, 0, syspar::Server1IpPool00, 0, leaseTimeSeconds);
+  WaitForDhcpRequest(syspar::ParamListenTimeMilliseconds, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard);
+  SendDhcpAck(syspar::Host1Mac, syspar::Server1IpAddress, syspar::Server1IpPool00, leaseTimeSeconds);
+  CauseDutTransitFromBoundToRenewingState(leaseTimeSeconds);
+ }
+
+/**
+ * Goes from Bound to Renewing state by waiting T1 = 0.5 * Lease Time
+ */
+export CauseDutTransitFromBoundToRenewingState(dword leaseTimeSeconds)
+ {
+  testWaitForTimeout(0.5 * 1000 * leaseTimeSeconds);
+ }
+
+/**
+ * Goes from Init to Rebinding state by waiting for DHCPDISCOVER, sending DHCPOFFER,
+ * waiting for DHCPREQUEST, sending DHCPACK and waiting T2 = 0.875 * Lease Time
+ */
+export CauseDutTransitToRebindingState(dword leaseTimeSeconds)
+ {
+  WaitForDhcpDiscover(syspar::ParamListenTimeMilliseconds, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard);
+  SendDhcpOffer(syspar::Host1Mac, syspar::Server1IpAddress, 0, syspar::Server1IpPool00, 0, leaseTimeSeconds);
+  WaitForDhcpRequest(syspar::ParamListenTimeMilliseconds, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard, syspar::Wildcard);
+  SendDhcpAck(syspar::Host1Mac, syspar::Server1IpAddress, syspar::Server1IpPool00, leaseTimeSeconds);
+  CauseDutTransitFromBoundToRebindingState(leaseTimeSeconds);
+ }
+
+/**
+ * Goes from Bound to Rebinding state by waiting T1 = 0.875 * Lease Time
+ */
+export CauseDutTransitFromBoundToRebindingState(dword leaseTimeSeconds)
+ {
+  testWaitForTimeout(0.875 * 1000 * leaseTimeSeconds);
+ }
+
+/**
+ * Waits for an incoming ARP request.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param senderHardwareAddress The source hardware address
+ * @param senderProtocolAddress The source protocol address
+ * @param targetHardwareAddress The destination hardware address
+ * @param targetProtocolAddress The destination protocol address
+ */
+
+export testfunction WaitForArpRequest(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	senderHardwareAddress[],
+  char	senderProtocolAddress[],
+  char	targetHardwareAddress[],
+  char	targetProtocolAddress[])
+{
+  PrepareWaitForArp(
+    destMac,
+    srcMac,
+    kRequest,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForArpRequest", "DUT sent an ARP request.");
+  else
+    testStepFail("WaitForArpRequest", "DUT didn't send an ARP request.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an incoming ARP reply.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param senderHardwareAddress The source hardware address
+ * @param senderProtocolAddress The source protocol address
+ * @param targetHardwareAddress The destination hardware address
+ * @param targetProtocolAddress The destination protocol address
+ */
+
+export testfunction WaitForArpReply(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	senderHardwareAddress[],
+  char	senderProtocolAddress[],
+  char	targetHardwareAddress[],
+  char	targetProtocolAddress[])
+{
+  PrepareWaitForArp(
+    destMac,
+    srcMac,
+    kResponse,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForArpRequest", "DUT sent an ARP reply.");
+  else
+    testStepFail("WaitForArpRequest", "DUT didn't send an ARP reply.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an incoming DHCPDISCOVER.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export testfunction WaitForDhcpDiscover(long timeout, char destMac[], char srcMac[], char destIp[], char srcIp[])
+{
+  InternalWaitForDhcpDiscover(timeout, 1, destMac, srcMac, destIp, srcIp, syspar::Wildcard, syspar::Wildcard, kEquals);
+}
+
+/**
+ * Waits for an incoming DHCPDISCOVER where two fields (which can be specified) have the same value
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param protocol1 The protocol of the first feild
+ * @param token1 The token of the first field
+ * @param protocol2 The protocol of the second feild
+ * @param token2 The token of the second field
+ */
+
+export testfunction WaitForDhcpDiscover(long timeout, char destMac[], char srcMac[], char destIp[], char srcIp[], char protocol1[], char token1[], char protocol2[], char token2[])
+{
+  Internal_AddExpectedParameterCompareTwoParameters(protocol1, token1, protocol2, token2, kEquals);
+  InternalWaitForDhcpDiscover(timeout, 1, destMac, srcMac, destIp, srcIp, syspar::Wildcard, syspar::Wildcard, kEquals);
+}
+
+/**
+ * Waits for an incoming DHCPDISCOVER and extracts Paramter request option
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export testfunction WaitForDhcpDiscoverExtractParameterRequestOption(long timeout, char destMac[], char srcMac[], char destIp[], char srcIp[])
+{
+  InternalSetExtractedParameter("dhcpv4","option55.data",kExtractData);
+  InternalWaitForDhcpDiscover(timeout, 1, destMac, srcMac, destIp, srcIp, syspar::Wildcard, syspar::Wildcard, kEquals);
+}
+
+/**
+ * Waits for an incoming DHCPDISCOVER and checks that the client hardware address is different from
+ * the one received in the last DHCP message
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export testfunction WaitForDhcpDiscoverOnDIface1DifferentClientHardwareAddress(long timeout, char destMac[], char srcMac[], char destIp[], char srcIp[])
+{
+  InternalAddExpectedParameter("dhcpv4", "clientHwAddr", gExtractedHwAddress, kNotEquals);
+  InternalWaitForDhcpDiscover(timeout, 2, destMac, srcMac, destIp, srcIp, syspar::Wildcard, syspar::Wildcard, kEquals);
+}
+
+
+/**
+ * Waits for an incoming DHCPDISCOVER.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param additionalToken an additional dhcp token which is checked
+ * @param additionalTokenValue value of the additional token
+ * @param additionalTokenCheckType checktype of the additional token
+ */
+
+export testfunction WaitForDhcpDiscover(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[],
+  char additionalToken[],
+  char additionalTokenValue[],
+  enum CheckType additionalTokenCheckType)
+{
+  InternalWaitForDhcpDiscover(timeout, 1, destMac, srcMac, destIp, srcIp, additionalToken, additionalTokenValue, additionalTokenCheckType);
+}
+
+/**
+ * Waits for an incoming DHCPDISCOVER and checks that the xid field is different to the extracted xid.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export testfunction WaitForDhcpDiscoverXidDifferentToExtractedXid(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[])
+{
+  InternalAddExpectedParameter("dhcpv4", "xid", gExtractingParameters[0].Value, kNotEquals);
+  InternalWaitForDhcpDiscover(timeout, 1, destMac, srcMac, destIp, srcIp, syspar::Wildcard, syspar::Wildcard, kEquals);
+}
+
+
+/**
+ * Waits for an incoming DHCPDISCOVER.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param minimumTime The expected packet may not arrive before this time in milliseconds
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export testfunction WaitForDhcpDiscover(
+  long timeout,
+  long minimumTime,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[])
+{
+  byte data[4];
+  int64 value;
+
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x11);          /* Udp Protocol Type */
+  PrepareWaitForUdp(syspar::UdpPortOfDhcpServer, syspar::UdpPortOfDhcpClient);
+  
+  data[0] = (byte) kDhcpDiscover;
+  InternalAddExpectedDataParameter("dhcpv4", "option53.data", data, 1);
+  
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+  if (WaitForIncomingPacket(kNoAnswerExpected, _max(1, minimumTime)) == -1) //we have to use at least 1 millisecond, because otherwise this will always be -1
+  {
+    testStepFail("WaitForDhcpDiscover", "DUT sent DHCPDISCOVER too early.");
+    return;
+  }
+  
+  StartObservationOfIncomingPackets(kAnswerExpected);
+  if (WaitForIncomingPacket(kAnswerExpected, timeout - minimumTime) == 0)
+    testStepPass("WaitForDhcpDiscover", "DUT sent DHCPDISCOVER.");
+  else
+    testStepFail("WaitForDhcpDiscover", "DUT didn't send DHCPDISCOVER.");
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for several incoming DHCPDISCOVERs and checks that the time intervals between the last three message is inside a given range
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param minimumTime The expected packet may not arrive before this time in milliseconds
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param lastTimeIntervalMinimum The minimum of the time interval of between the last and the second last message in milliseconds
+ * @param lastTimeIntervalMaximum The maximum of the time interval of between the last and the second last message in milliseconds
+ * @param secondLastTimeIntervalMinimum The minimum of the time interval of between the last and the second last message in milliseconds
+ * @param secondLastTimeIntervalMaximum The maximum of the time interval of between the last and the second last message in milliseconds
+ */
+export testfunction WaitForSeveralDhcpDiscovers(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[],
+  long lastTimeIntervalMinimum,
+  long lastTimeIntervalMaximum,
+  long secondLastTimeIntervalMinimum,
+  long secondLastTimeIntervalMaximum
+  )
+{
+  dword timediff;
+  int64 index;
+  byte data[1];
+  char output[1024];
+  char tempstr[512];
+  enum Bool success;
+  
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x11);          /* Udp Protocol Type */
+  PrepareWaitForUdp(syspar::UdpPortOfDhcpServer, syspar::UdpPortOfDhcpClient);
+  
+  data[0] = (byte) kDhcpDiscover;
+  InternalAddExpectedDataParameter("dhcpv4", "option53.data", data, 1);
+  
+  WaitForSeveralMessages(timeout, lastTimeIntervalMinimum, lastTimeIntervalMaximum, secondLastTimeIntervalMinimum, secondLastTimeIntervalMaximum, "DHCPDISCOVER");
+  
+  
+}
+
+/**
+ * Waits for an incoming DHCPDISCOVER with Lease Time Option
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param leaseTimeSeconds The lease time of the lease time option
+ */
+
+export testfunction WaitForDhcpDiscoverLeaseTimeOption(long timeout, char destMac[], char srcMac[], char destIp[], char srcIp[], dword leaseTimeSeconds)
+{
+  byte data[4];
+
+  data.Dword(0) = swapDWord(leaseTimeSeconds);
+  InternalAddExpectedDataParameter("dhcpv4", "option51.data", data, 4);
+  InternalWaitForDhcpDiscover(timeout, 1, destMac, srcMac, destIp, srcIp, syspar::Wildcard, syspar::Wildcard, kEquals);
+  }
+
+/**
+ * Waits for an incoming DHCPDISCOVER with Lease Time Option
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param maximumSize the value of the maximum size option
+ */
+
+export testfunction WaitForDhcpDiscoverMaximumSizeOption(long timeout, char destMac[], char srcMac[], char destIp[], char srcIp[], dword maximumSize)
+{
+  byte data[2];
+  
+  data.Word(0) = swapWord(maximumSize);
+  InternalAddExpectedDataParameter("dhcpv4", "option57.data", data, 2);
+  InternalWaitForDhcpDiscover(timeout, 1, destMac, srcMac, destIp, srcIp, syspar::Wildcard, syspar::Wildcard, kEquals);
+}
+
+/**
+ * Waits for an incoming DHCPDISCOVER with last option being the end option
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export testfunction WaitForDhcpDiscoverEndOptionLast(long timeout, char destMac[], char srcMac[], char destIp[], char srcIp[])
+{
+  InternalAddExpectedParameterLastByte("udp", "data", 255, kEquals);
+  InternalWaitForDhcpDiscover(timeout, 1, destMac, srcMac, destIp, srcIp, syspar::Wildcard, syspar::Wildcard, kEquals);
+}
+
+/**
+ * Waits for an incoming DHCPDISCOVER.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param expectedChannel The channel on which the answer is expected (either eth1Ctx or eth2Ctx)
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param additionalToken an additional dhcp token which is checked
+ * @param additionalTokenValue value of the additional token
+ * @param additionalTokenCheckType checktype of the additional token
+ */
+
+void InternalWaitForDhcpDiscover(
+  long timeout,
+  dword expectedChannel,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[],
+  char additionalToken[],
+  char additionalTokenValue[],
+  enum CheckType additionalTokenCheckType)
+{
+  byte data[4];
+  int64 value;
+  
+
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x11);          /* Udp Protocol Type */
+  PrepareWaitForUdp(syspar::UdpPortOfDhcpServer, syspar::UdpPortOfDhcpClient);
+  
+  data[0] = (byte) kDhcpDiscover;
+  InternalAddExpectedDataParameter("dhcpv4", "option53.data", data, 1);
+  
+  if(!IsWildcard(additionalTokenValue) && !IsWildcard(additionalToken))
+  {
+   if(IsIpAddressToken(additionalToken) == kTrue)
+   {
+    value = ConvertIpAddressStringToInt64(additionalTokenValue);
+   }
+   else
+   {
+    value = atol(additionalTokenValue);
+   }
+   InternalAddExpectedParameter("dhcpv4",additionalToken,value,additionalTokenCheckType);
+  }
+  
+  StartObservationOfIncomingPackets(expectedChannel, kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForDhcpDiscover", "DUT sent DHCPDISCOVER.");
+  else
+    testStepFail("WaitForDhcpDiscover", "DUT didn't send DHCPDISCOVER.");
+  
+  InternalClearAllParameters();
+}
+
+
+/**
+ * Waits for an incoming DHCPREQUEST.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export WaitForDhcpRequest(long timeout, char destMac[],char srcMac[],char destIp[],char srcIp[])
+{
+  WaitForDhcpRequest(timeout, destMac, srcMac, destIp, srcIp, syspar::Wildcard, syspar::Wildcard, kEquals);
+}
+
+/**
+ * Waits for an incoming DHCPREQUEST.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param minimumTime The expected packet may not arrive before this time in milliseconds
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export testfunction WaitForDhcpRequest(
+  long timeout,
+  long minimumTime,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[])
+{
+  byte data[4];
+  int64 value;
+
+  PrepareWaitForEthernet(destMac, srcMac); 
+  PrepareWaitForIpv4(destIp, srcIp, 0x11);          /* Udp Protocol Type */
+  PrepareWaitForUdp(syspar::UdpPortOfDhcpServer, syspar::UdpPortOfDhcpClient);
+  
+  data[0] = (byte) kDhcpRequest;
+  InternalAddExpectedDataParameter("dhcpv4", "option53.data", data, 1);
+  
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+  if (WaitForIncomingPacket(kNoAnswerExpected, _max(1, minimumTime)) == -1) //we have to use at least 1 millisecond, because otherwise this will always be -1
+  {
+    testStepFail("WaitForDhcpRequest", "DUT sent DHCPREQUEST too early.");
+    return;
+  }
+  
+  StartObservationOfIncomingPackets(kAnswerExpected);
+  if (WaitForIncomingPacket(kAnswerExpected, timeout - minimumTime) == 0)
+    testStepPass("WaitForDhcpRequest", "DUT sent DHCPREQUEST.");
+  else
+    testStepFail("WaitForDhcpRequest", "DUT didn't send DHCPREQUEST.");
+  
+  InternalClearAllParameters();
+}
+
+
+/**
+ * Waits for an incoming DHCPREQUEST which has the same value in the secs field as the dhcp message received before.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export WaitForDhcpRequestExtractedSeconds(long timeout, char destMac[],char srcMac[],char destIp[],char srcIp[])
+{
+  InternalAddExpectedParameter("dhcpv4", "time", gExtractedSeconds, kEquals);
+  WaitForDhcpRequest(timeout, destMac, srcMac, destIp, srcIp);
+}
+
+/**
+ * Waits for an incoming DHCPREQUEST which has the same value in the xid field as the dhcp message received before.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export WaitForDhcpRequestExtractedXid(long timeout, char destMac[],char srcMac[],char destIp[],char srcIp[])
+{
+  InternalAddExpectedParameter("dhcpv4", "xid", gTransactionId, kEquals);
+  WaitForDhcpRequest(timeout, destMac, srcMac, destIp, srcIp);
+}
+
+/**
+ * Waits for an incoming DHCPREQUEST where a specific option is not given
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param option The option which should not be included in the request message
+ */
+
+export WaitForDhcpRequestWithoutSpecificOption(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[],
+  enum DhcpOptions option)
+{
+  char tempstr[64];
+  byte data[1];
+  snprintf(tempstr,elcount(tempstr),"option%d.code",(int) option);
+  InternalAddExpectedDataParameter("dhcpv4",tempstr,data,-1);
+  WaitForDhcpRequest(timeout, destMac, srcMac, destIp, srcIp);
+}
+
+/**
+ * Waits for an incoming DHCPREQUEST with server identifier option
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param ipAddressServerIdentifierOption The IP address of the server identifier option
+ */
+
+export WaitForDhcpRequestServerIdentifierOption(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[],
+  char ipAddressServerIdentifierOption[])
+{
+  byte data[4];
+  
+  data.Dword(0) = ipGetAddressAsNumber(ipAddressServerIdentifierOption);
+  InternalAddExpectedDataParameter("dhcpv4", "option54.data", data, 4);
+  WaitForDhcpRequest(timeout, destMac, srcMac, destIp, srcIp);
+}
+
+/**
+ * Waits for an incoming DHCPREQUEST with requested ip option
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param ipAddressRequestedIpAddressOption The IP address of the requested ip address option
+ */
+
+export WaitForDhcpRequestRequestedIpAddressOption(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[],
+  char ipAddressRequestedIpAddressOption[])
+{
+  byte data[4];
+  
+  data.Dword(0) = ipGetAddressAsNumber(ipAddressRequestedIpAddressOption);
+  InternalAddExpectedDataParameter("dhcpv4", "option50.data", data, 4);
+  WaitForDhcpRequest(timeout, destMac, srcMac, destIp, srcIp);
+}
+
+/**
+ * Waits for an incoming DHCPREQUEST with lease time option
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param leaseTimeSeconds The lease time of the lease time option
+ */
+
+export WaitForDhcpRequestLeaseTimeOption(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[],
+  dword leaseTimeSeconds)
+{
+  byte data[4];
+  
+  data.Dword(0) = swapDword(leaseTimeSeconds);
+  InternalAddExpectedDataParameter("dhcpv4", "option51.data", data, 4);
+  WaitForDhcpRequest(timeout, destMac, srcMac, destIp, srcIp);
+}
+
+/**
+ * Waits for an incoming DHCPREQUEST with parameter list option that is equal to the one from the last dhcpdiscover.
+ * Works only when 
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export WaitForDhcpRequestExtractedParameterList(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[])
+{
+  InternalAddExpectedDataParameter("dhcpv4","option55.data", gExtractingParameters[0].DataValue, gExtractingParameters[0].DataValueLength);
+  WaitForDhcpRequest(timeout, destMac, srcMac, destIp, srcIp);
+}
+
+
+
+/**
+ * Waits for an incoming DHCPREQUEST.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param additionalToken an additional dhcp token which is checked
+ * @param additionalTokenValue value of the additional token
+ * @param additionalTokenCheckType checktype of the additional token
+ */
+
+export testfunction WaitForDhcpRequest(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[],
+  char additionalToken[],
+  char additionalTokenValue[],
+  enum CheckType additionalTokenCheckType)
+{
+  byte data[4];
+  int64 value;
+
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x11);          /* Udp Protocol Type */
+  PrepareWaitForUdp(syspar::UdpPortOfDhcpServer, syspar::UdpPortOfDhcpClient);
+  
+  data[0] = (byte) kDhcpRequest;
+  InternalAddExpectedDataParameter("dhcpv4", "option53.data", data, 1);
+  
+  if(!IsWildcard(additionalTokenValue) && !IsWildcard(additionalToken))
+  {
+    if(IsIpAddressToken(additionalToken))
+    {
+      value = ConvertIpAddressStringToInt64(additionalTokenValue);
+    }
+    else
+    {
+      value = atol(additionalTokenValue);
+    }
+   InternalAddExpectedParameter("dhcpv4", additionalToken, value, additionalTokenCheckType);
+  }
+  
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForDhcpRequest", "DUT sent an DHCPREQUEST.");
+  else
+    testStepFail("WaitForDhcpRequest", "DUT didn't send an DHCPREQUEST.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an incoming DHCPREQUEST and check that client identifier option is set to the same value as in the last
+ * received DHCPDISCOVER message. Only works when CauseDutTransitTo(Requesting or Bound)StateExtractClientIdentifierOption was
+ * called before!
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export WaitForDhcpRequestExtractedClientIdentifier(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[])
+{
+  InternalAddExpectedDataParameter("dhcpv4", "option61.data", gExtractingParameters[0].DataValue, gExtractingParameters[0].DataValueLength);
+  WaitForDhcpRequest(timeout, destMac, srcMac, destIp, srcIp);
+}
+
+/**
+ * Waits for an incoming DHCPREQUEST.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param additionalToken an additional dhcp token which is checked
+ * @param additionalTokenValue value of the additional token
+ * @param additionalTokenCheckType checktype of the additional token
+ */
+
+export testfunction WaitForTwoDhcpRequests(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[])
+{
+  byte data[4];
+
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x11);          /* Udp Protocol Type */
+  PrepareWaitForUdp(syspar::UdpPortOfDhcpServer, syspar::UdpPortOfDhcpClient);
+  
+  data[0] = (byte) kDhcpRequest;
+  InternalAddExpectedDataParameter("dhcpv4", "option53.data", data, 1);
+  
+  StartObservationOfIncomingPackets(kTwoAnswersExpected);
+
+  if (WaitForIncomingPacket(kTwoAnswersExpected, timeout) == 0)
+    testStepPass("WaitForDhcpRequest", "DUT sent two DHCPREQUESTs.");
+  else
+    testStepFail("WaitForDhcpRequest", "DUT didn't send two DHCPREQUESTs.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for several incoming DHCPREQUESTs and checks that the time intervals between the last three message is inside a given range
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param minimumTime The expected packet may not arrive before this time in milliseconds
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param lastTimeIntervalMinimum The minimum of the time interval of between the last and the second last message in milliseconds
+ * @param lastTimeIntervalMaximum The maximum of the time interval of between the last and the second last message in milliseconds
+ * @param secondLastTimeIntervalMinimum The minimum of the time interval of between the last and the second last message in milliseconds
+ * @param secondLastTimeIntervalMaximum The maximum of the time interval of between the last and the second last message in milliseconds
+ */
+export testfunction WaitForSeveralDhcpRequests(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[],
+  long lastTimeIntervalMinimum,
+  long lastTimeIntervalMaximum,
+  long secondLastTimeIntervalMinimum,
+  long secondLastTimeIntervalMaximum
+  )
+{
+  dword timediff;
+  int64 index;
+  byte data[1];
+  char output[1024];
+  char tempstr[512];
+  enum Bool success;
+  
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x11);          /* Udp Protocol Type */
+  PrepareWaitForUdp(syspar::UdpPortOfDhcpServer, syspar::UdpPortOfDhcpClient);
+  
+  data[0] = (byte) kDhcpRequest;
+  InternalAddExpectedDataParameter("dhcpv4", "option53.data", data, 1);
+  
+  WaitForSeveralMessages(timeout, lastTimeIntervalMinimum, lastTimeIntervalMaximum, secondLastTimeIntervalMinimum, secondLastTimeIntervalMaximum, "DHCPREQUEST");
+  
+  
+}
+
+/**
+ * Waits a specific amount of time for an unexpected DHCPREQUEST
+ * @param timeout The amount of time in milliseconds to wait
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+export testfunction WaitForUnexpectedDhcpRequest(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[])
+{
+
+  byte data[4];
+
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x11);          /* Udp Protocol Type */
+  PrepareWaitForUdp(syspar::UdpPortOfDhcpServer, syspar::UdpPortOfDhcpClient);
+  
+  data[0] = (byte) kDhcpRequest;
+  InternalAddExpectedDataParameter("dhcpv4", "option53.data", data, 1);
+  
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+
+  if (WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+    testStepPass("WaitForUnexpectedDhcpRequest", "DUT didn't send DHCPREQUEST.");
+  else
+    testStepFail("WaitForUnexpectedDhcpRequest", "DUT sent DHCPREQUEST.");
+  InternalClearAllParameters();
+}
+
+
+/**
+ * Waits for an incoming DHCPRELEASE.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export testfunction WaitForDhcpRelease(long timeout, char destMac[],char srcMac[],char destIp[],char srcIp[])
+{
+  byte data[1];
+
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x11);          /* Udp Protocol Type */
+  PrepareWaitForUdp(syspar::UdpPortOfDhcpServer, syspar::UdpPortOfDhcpClient);
+  
+  data[0] = (byte) kDhcpRelease;
+  InternalAddExpectedDataParameter("dhcpv4", "option53.data", data, 0);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForDhcpRelease", "DUT sent an DHCPRELEASE.");
+  else
+    testStepFail("WaitForDhcpRelease", "DUT didn't send an DHCPRELEASE.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an incoming DHCPRELEASE and check that client hardware address is set to the same value as in the
+ * last received dhcp message.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export WaitForDhcpReleaseExtractedClientHardwareAddress(long timeout, char destMac[],char srcMac[],char destIp[],char srcIp[])
+{
+  InternalAddExpectedParameter("dhcpv4", "clientHwAddr", gExtractedHwAddress, kEquals);
+  WaitForDhcpRelease(timeout, destMac, srcMac, destIp, srcIp);
+}
+
+/**
+ * Waits for an incoming DHCPRELEASE and check that client identifier option is set to the same value as in the last
+ * received DHCPDISCOVER message. Only works when CauseDutTransitToRequestingStateExtractClientIdentifierOption was
+ * called before!
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export WaitForDhcpReleaseExtractedClientIdentifierOption(long timeout, char destMac[],char srcMac[],char destIp[],char srcIp[])
+{
+  InternalAddExpectedDataParameter("dhcpv4", "option61.data", gExtractingParameters[0].DataValue, gExtractingParameters[0].DataValueLength);
+  WaitForDhcpRelease(timeout, destMac, srcMac, destIp, srcIp);
+}
+
+
+
+/**
+ * Waits for an incoming DHCPDECLINE.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export testfunction WaitForDhcpDecline(long timeout, char destMac[],char srcMac[],char destIp[],char srcIp[])
+{
+  byte data[1];
+
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x11);          /* Udp Protocol Type */
+  PrepareWaitForUdp(syspar::UdpPortOfDhcpServer, syspar::UdpPortOfDhcpClient);
+  
+  data[0] = (byte) kDhcpDecline;
+  InternalAddExpectedDataParameter("dhcpv4", "option53.data", data, 0);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForDhcpRelease", "DUT sent an DHCPRELEASE.");
+  else
+    testStepFail("WaitForDhcpRelease", "DUT didn't send an DHCPRELEASE.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an incoming DHCPINFROM.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+
+export testfunction WaitForDhcpInform(long timeout, char destMac[],char srcMac[],char destIp[],char srcIp[])
+{
+  byte data[1];
+
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x11);          /* Udp Protocol Type */
+  PrepareWaitForUdp(syspar::UdpPortOfDhcpServer, syspar::UdpPortOfDhcpClient);
+  
+  data[0] = (byte) kDhcpInform;
+  InternalAddExpectedDataParameter("dhcpv4", "option53.data", data, 0);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForDhcpInform", "DUT sent an DHCPINFORM.");
+  else
+    testStepFail("WaitForDhcpInform", "DUT didn't send an DHCPINFORM.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an incoming DHCPINFORM where a specific option is not given
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param option The option which should not be included in the inform message
+ */
+
+export WaitForDhcpInformWithoutSpecificOption(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[],
+  enum DhcpOptions option)
+{
+  char tempstr[64];
+  byte data[1];
+  snprintf(tempstr, elcount(tempstr), "option%d.code", (int) option);
+  InternalAddExpectedDataParameter("dhcpv4", tempstr, data, -1);
+  WaitForDhcpInform(timeout, destMac, srcMac, destIp, srcIp);
+}
+
+
+/**
+ * Waits a specific amount of time for an ICMP echo reply
+ * @param timeout The amount of time in milliseconds to wait
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+export WaitForIcmpEchoReply(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[])
+{
+  WaitForIcmpEchoReply(timeout, destMac, srcMac, destIp, srcIp, syspar::Wildcard, syspar::Wildcard, kEquals);
+}
+
+/**
+ * Waits a specific amount of time for an ICMP echo reply
+ * @param timeout The amount of time in milliseconds to wait
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param additionalToken An additional IPv4 token that should be checked
+ * @param additionalTokenValue The value of the additional token
+ * @param additionalTokenCheckType The checktype of the additional token
+ */
+export testfunction WaitForIcmpEchoReply(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[],
+  char additionalToken[],
+  char additionalTokenValue[],
+  enum CheckType additionalTokenCheckType)
+{
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmp("0");
+  
+  if(!IsWildcard(additionalToken) && !IsWildcard(additionalTokenValue))
+  {
+    InternalAddExpectedParameter("ipv4", additionalToken, atol(additionalTokenValue), additionalTokenCheckType);
+  }
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForUnexpectedIcmpMessage", "DUT sent an ICMP echo reply.");
+  else
+    testStepFail("WaitForUnexpectedIcmpMessage", "DUT didn't send an ICMP echo reply.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits a specific amount of time for an ICMP echo request
+ * @param timeout The amount of time in milliseconds to wait
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param additionalToken An additional IPv4 token that should be checked
+ * @param additionalTokenValue The value of the additional token
+ * @param additionalTokenCheckType The checktype of the additional token
+ */
+export testfunction WaitForIcmpEchoRequest(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[])
+{
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmp("8");
+  
+  
+  StartObservationOfIncomingPackets(kAnswerExpected);
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForUnexpectedIcmpMessage", "DUT sent an ICMP echo reply.");
+  else
+    testStepFail("WaitForUnexpectedIcmpMessage", "DUT didn't send an ICMP echo reply.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits a specific amount of time for an unexpected ICMP message
+ * @param timeout The amount of time in milliseconds to wait
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param icmpType The type of the imcp message. Wildcard if no icmp message of any type is expected
+ */
+export testfunction WaitForUnexpectedIcmpMessage(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[],
+  char icmpType[])
+{
+
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmp(icmpType); 
+
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+
+  if (WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+    testStepPass("WaitForUnexpectedIcmpMessage", "DUT didn't send an ICMP message.");
+  else
+    testStepFail("WaitForUnexpectedIcmpMessage", "DUT sent an ICMP message.");
+  InternalClearAllParameters();
+}

@@ -1,0 +1,580 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "..\Include Files\J1939.cin"
+  #include "..\Include Files\J1939DTC.cin"
+}
+
+/*
+ * EMS - Engine Management System                  Version 1.2
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Jr) Created 
+ * 1.1 (Jr) Use J1939 Interaction Layer now
+ * 1.2 (Jr) Send DM1 always
+ */
+variables
+{
+  // Constants
+  const int  kCtrlModePedal  = 0;   // Engine is controller by Accelerator Pedal
+  const int  kCtrlModeSpeed  = 1;   // Engine is controlled by speed from another ECU
+  const int  kCtrlModeTorque = 2;   // Eninge is controlled by torque from another ECU
+
+  const int  kStateIgnitionOff = 0;  // Ignition is off
+  const int  kStateIgnitionOn  = 1;  // Ignition is on
+  const int  kStateStarting    = 2;  // Engine is starting, starter active
+  const int  kStateRunning     = 3;  // Engine is running
+
+  char gNodeName[32]     = "EMS";   // Name of the node, is used for output to write window
+  char gECUID[40]        = "V-EMS06-04*PON0607001*POWERTRAIN*EMS*";
+  char gSOFT[32]         = "\003V1.0*REV-A-CAPL*2006-04-28*";
+  char gVI[32]           = "VECTOR2006-07-11X*";
+
+  // communication variables
+  pg TSC1  RX_TSC1;                       // RX Buffer: Torque Speed Control
+
+  // simulation constants
+  const float kPI             = 3.1415;
+  const float kMaxSpeed       = 2400.0; // Max. engine speed [rpm]
+  const float kMaxTorqueSpeed = 1800.0; // Max. torque at this speed [rpm]
+  const float kIdleSpeed      =  250.0; // Idle speed [rpm]
+  const float kMaxTorque      = 1650.0; // Max. engine torque [Nm]
+
+  // simulation variables
+  int   gState            = kStateIgnitionOff; // Engine state
+  float gActualCoolantTemp= 0.0;       // Coolang Temperature in [°C]
+  BYTE  gCalcSpeed        = 1;         // 1 = calc speed, 0 = speed is set by transmission
+  BYTE  gABSActive        = 0;
+
+  int   gControlMode      = kCtrlModePedal;
+  float gSpeedLimit       = kIdleSpeed; // Speed limit in mode kCtrlModeSpeed
+  float gTorqueLimit      = 0;          // Torque limit in mode kCtrlModeTorque
+
+  // 
+  const int   kSystemTime    = 100;                  // System time in [ms]
+  const float kSystemTimeSec = kSystemTime / 1000.0; // System time in [sec]
+  msTimer     SystemTimer;                           // System timer
+}
+
+/*
+ * Start up EMS
+ *
+ * Begin address claiming. After successfully claiming
+ * an address, start sending cyclic messages.
+ */
+void EMSStartUp()
+{
+  @sysvar::Powertrain::EMS::ILEnable = 1;
+
+  gState = kStateIgnitionOn;
+
+  J1939ILControlStart();
+
+  J1939ILSetMsgRawData( ECUID , strlen(gECUID), gECUID );
+  J1939ILSetMsgRawData( SOFT  , strlen(gSOFT) , gSOFT );
+  J1939ILSetMsgRawData( VI_EMS, strlen(gVI)   , gVI );
+
+  dtcActivate( 1 );
+
+  UpdateControls();
+
+  setTimer( SystemTimer, kSystemTime );
+}
+
+on start
+{
+  if ((@sysvar::Powertrain::EMS::ILEnable == 1) && (getValue(EnvIgnitionSwitch) >= 1)) {
+    EMSStartUp();
+  }
+}
+
+/*
+ * Shut down EMS
+ *
+ * Send cannot claim address and stop sending messages
+ */
+void EMSShutDown()
+{
+  J1939ILControlStop(1);
+
+  cancelTimer( SystemTimer );
+
+  gState = kStateIgnitionOff;
+  @sysvar::Powertrain::EMS::ILEnable = 0;
+}
+
+on SysVar sysvar::Powertrain::EMS::ILEnable
+{
+  if (@this == 1) {
+    EMSStartUp();
+  }
+  else {
+    EMSShutDown();
+  }
+}
+
+on timer SystemTimer
+{
+    float targetSpeed;
+    float actualSpeed = 0.0;       // Actual engine speed in [rpm]
+    float actualTorque = 0.0;       // Actual engine torque [Nm]
+    float pedalPosition = 0.0;       // Accelerator pedal position in [%]
+    float torqueTakeOff = 0.0;
+    float h1, accel;
+    int starter = 0;
+
+    if(getValue(EnvEMS_SimulationMode) == EnvEMS_SimulationMode::SimulateValues)
+    {
+        switch(gState) 
+        {
+            case kStateIgnitionOn:
+            {/* Engine is not running */
+
+                actualSpeed = 0.0;      // Actual engine speed in [rpm]
+                actualTorque = 0.0;     // Actual engine torque [Nm]
+                starter = 0;
+                
+                setSignal( EEC1_EMS::EngStarterMode, 0 );   // start not requested
+
+                if (getValue(EnvIgnitionSwitch) == 2) 
+                {
+                    setSignal( EEC1_EMS::EngStarterMode, 1 ); // start active, gear not engaged
+                    gState = kStateStarting;
+                }
+            }
+            break;
+            
+            case kStateStarting:
+            {/* Starter active */
+                
+                actualSpeed = kIdleSpeed;   // Actual engine speed in [rpm]
+                actualTorque = 0.0;         // Actual engine torque [Nm]
+                starter++;
+                
+                if (starter > 15) 
+                {   
+                    gState = kStateRunning;
+                    putValue( EnvIgnitionSwitch, 1 );
+                    setSignal( EEC1_EMS::EngStarterMode, 3 ); // start finished
+                } 
+            }
+            break;
+            
+            case kStateRunning:
+            {
+                if (starter > 0) 
+                {
+                    starter = 0;
+                    setSignal( EEC1_EMS::EngStarterMode, 0 ); // start not requested
+                }
+            }
+
+            /* Process received TSC message */
+            if ((gControlMode != kCtrlModePedal) && (RX_TSC1.time + 20000 < timeNow())) 
+            {//TSC1 message not recieved within 200ms -> switch back to kCtrlModePedal
+                gControlMode = kCtrlModePedal;
+                RX_TSC1.SA   = kNullAddr;
+            }
+            else if (RX_TSC1.SA != kNullAddr) 
+            {
+                if(RX_TSC1.EngOverrideCtrlMode == 2) 
+                {//torque control
+                    gControlMode = kCtrlModeTorque;
+                    gTorqueLimit = RX_TSC1.EngRqedTorque_TorqueLimit.phys;
+                }
+                else if (RX_TSC1.EngOverrideCtrlMode == 1) 
+                {//speed control
+                    gControlMode = kCtrlModeSpeed;
+                    gSpeedLimit  = RX_TSC1.EngRqedSpeed_SpeedLimit.phys;
+                }
+                else 
+                {
+                    gControlMode = kCtrlModePedal;
+                    RX_TSC1.SA   = kNullAddr;
+                }
+            }
+
+            //get input values
+            actualSpeed   = getValue( EnvEMS_EngineSpeed );
+            pedalPosition = getValue( EnvEMS_Accelerator ) * 10;
+            torqueTakeOff = getValue( EnvEMS_TorqueTakeoff );
+
+            switch(gControlMode) 
+            {/* calculate speed and torque */
+                
+                case kCtrlModePedal:
+                {/* Pedal controlled */
+                    accel = pedalPosition;
+                }
+                break;
+          
+                case kCtrlModeSpeed:
+                {/* Speed controlled */
+                    
+                    if (actualSpeed > gSpeedLimit) 
+                    {
+                        accel = 0;
+                    }
+                    else 
+                    {
+                        accel = 1.0;
+                    }
+                }
+                break;
+
+                case kCtrlModeTorque:
+                {/* Torque controlled */
+                    
+                    if (actualTorque > gTorqueLimit) 
+                    {
+                        accel = 0;
+                    }
+                    else
+                    {
+                        accel = 1.0;
+                    }
+                }
+                break;
+            }
+
+            //calculate new torque values
+            actualTorque  = calcTorque( actualSpeed, accel );
+            actualTorque -= (1 + sin( (actualSpeed / kMaxSpeed) * (kPI/2.0) - (kPI/2.0))) * kMaxTorque * 3.0 * (1.0 - (accel / 100.0));
+            actualTorque = utilRange( actualTorque, -kMaxTorque, kMaxTorque);
+
+            //calculate new speed
+            h1 = (actualTorque - torqueTakeOff) / kMaxTorque;
+            actualSpeed = utilRange( actualSpeed + h1 * kMaxSpeed * 0.05, kIdleSpeed, kMaxSpeed );
+
+            break;
+        }
+
+        //calculate ECU Temperature
+        gActualCoolantTemp = utilRange( gActualCoolantTemp + (actualSpeed - kIdleSpeed * 3 / 2) * 0.0001, 20, 120 );
+
+        //update envVars
+        putValue( EnvEMS_Torque, actualTorque );
+        putValue( EnvEMS_EngineSpeed, actualSpeed );
+        putValue( EnvEMS_EngineCoolantTemp, gActualCoolantTemp );
+
+        //update TX signals
+        setSignal( EEC1_EMS::EngSpeed                , actualSpeed);
+        setSignal( EEC1_EMS::ActualEngPercentTorque  , actualTorque / kMaxTorque * 100.0);
+        setSignal( EEC2_EMS::AccelPedalPos1          , pedalPosition);
+        setSignal( EEC2_EMS::AccelPedal1LowIdleSwitch, (pedalPosition <  5.0) ? 1 : 0);
+        setSignal( EEC2_EMS::AccelPedalKickdownSwitch, (pedalPosition > 95.0) ? 1 : 0);
+        setSignal( ET1_EMS::EngCoolantTemp           , gActualCoolantTemp);
+        setSignal( CCVS_EMS::WheelBasedVehicleSpeed  , getValue( EnvVehicleSpeed ) );
+    }
+
+    setTimer( SystemTimer, kSystemTime );
+}
+
+/*
+ * Handle TSC1 message
+ */
+on pg TSC1
+{
+  pg ACKM  TX_ACKM;                       // TX Buffer: Acknowledge
+  TX_ACKM.DWORD(0) = TX_ACKM.DWORD(4) = 0xFFFFFFFF; //init datafield
+  if (!J1939ILAcceptRxPG(this)) return;
+
+  if ((RX_TSC1.SA == kNullAddr) || (RX_TSC1.SA == this.SA)) {
+    // copy data to RX buffer
+    RX_TSC1.SA   = this.SA;
+    RX_TSC1.DA   = this.DA;
+    RX_TSC1.time = this.time;
+    RX_TSC1.DWORD(0) = this.DWORD(0);
+    RX_TSC1.DWORD(4) = this.DWORD(4);
+  }
+  else {
+    // send negative ACK, because EMS is already controlled
+    // by another ECU.
+    TX_ACKM.DA          = kGlobalAddr;
+    TX_ACKM.ControlByte = 1;
+    TX_ACKM.AddressNegativeAcknowledgement = this.SA;
+    TX_ACKM.ParameterGroupNumber           = this.PGN;
+    output( TX_ACKM );
+  }
+}
+
+/*
+ * Clip the value to the range of min and max
+ */
+float utilRange( float value, float min, float max )
+{
+  if (value < min) return min;
+  if (value > max) return max;
+
+  return value;
+}
+
+/*
+ *
+ */
+float calcSpeedFromTargetSpeed( float targetSpeed, float actualSpeed )
+{
+  float diff;
+
+  if (targetSpeed > actualSpeed) {
+    diff = targetSpeed - actualSpeed;
+    if (diff < 300) {
+      actualSpeed += (diff * 0.33);
+    }
+    else {
+      actualSpeed += 100.0;
+    }
+  }
+  else {
+    diff = actualSpeed - targetSpeed;
+    if (diff < 300) {
+      actualSpeed -= (diff * 0.17);
+    }
+    else {
+      actualSpeed -= 50.0;
+    }
+  }
+
+  return actualSpeed;
+}
+
+/*
+ * Calculate the torque at a given speed.
+ *
+ * Note: This is not a physically correct calcluation of an
+ *       Engine. It just calculates some realistic looking values.
+ */
+float calcTorque( float speed, float accel )
+{
+  float h;
+
+  if ((speed >= kIdleSpeed) && (speed <= kMaxTorqueSpeed)) {
+    h = ((speed - kIdleSpeed) / (kMaxTorqueSpeed - kIdleSpeed));
+    h = (1 - sin( kPI/2.0 + h * kPI )) / 2.0 * kMaxTorque;
+    return ((kMaxTorque * 0.2) + (h * 0.8)) * (accel / 100.0);
+  }
+  else if ((speed > kMaxTorqueSpeed) && (speed < kMaxSpeed)) {
+    h = 1 - ((speed - kMaxTorqueSpeed) / (kMaxSpeed - kMaxTorqueSpeed));
+    h = (1 - sin( kPI/2.0 + h * kPI )) / 2.0 * kMaxTorque * (accel / 100.0);
+    return h;
+  }
+  else {
+    return 0.0;
+  }
+}
+
+/*
+ * IL will send a message
+ *
+ * Use this callback to update the data of the message
+ */
+LONG J1939ILOnTxPrepare( pg CAPL_MSG txPG )
+{
+  long i, pos;
+
+  switch( txPG.PF ) {
+    //
+    // XFER - Transfer
+    //
+    case 0xCA:
+      switch(((pg XFER)txPG).PGNofRequstedInformation) {
+        case 0xFEEC: // VI
+          pos = 3;
+          txPG.BYTE(pos++) = 4 + strlen(gVI);
+          txPG.DWORD(pos)  = utilECUIdentity();
+          pos += 4;
+          for( i = 0; i < strlen(gVI); i++ ) {
+            txPG.BYTE(pos++) = gVI[i];
+          }
+          txPG.DLC = pos;
+          break;
+        case 0xFDC5: // ECUID
+          pos = 3;
+          txPG.BYTE(pos++) = 4 + strlen(gECUID);
+          txPG.DWORD(pos)  = utilECUIdentity();
+          pos += 4;
+          for( i = 0; i < strlen(gECUID); i++ ) {
+            txPG.BYTE(pos++) = gECUID[i];
+          }
+          txPG.DLC = pos;
+          break;
+        case 0xFEDA: // SOFT
+          pos = 3;
+          txPG.BYTE(pos++) = 4 + strlen(gSOFT);
+          txPG.DWORD(pos)  = utilECUIdentity();
+          pos += 4;
+          for( i = 0; i < strlen(gSOFT); i++ ) {
+            txPG.BYTE(pos++) = gSOFT[i];
+          }
+          txPG.DLC = pos;
+          break;
+      }
+      break;
+    default:
+      dtcCopyToPgBuffer( txPG );
+      break;
+  }
+
+  return 1; // 1=send message, 0=suppress message
+}
+
+/*
+ * IL has sent a message
+ */
+void J1939ILOnTxMessage( pg * txPG )
+{
+  switch( txPG.PGN ) {
+  }
+}
+
+/*
+ * IL has sent received a request
+ *
+ * return 0 - not not respond
+ *        1 - answer the request
+ *        2 - ansert with a NACK
+ *
+ *     _pgn - requested PGN
+ *     _sa  - sender address of the request
+ */
+LONG J1939ILOnRequest( LONG _pgn, LONG _sa )
+{
+  switch(_pgn) {
+    //
+    // DM3 - Diagnostic data clear/reset of previously active DTCs.
+    //
+    case 0xfecc:
+      dtcClear( gDTCPreviousTable );
+      return 3; // send positive ACK
+    //
+    // DM11 - Diagnostic data clear/Reset for active DTCs
+    //
+    case 0xfed3:
+      dtcClear( gDTCActiveTable );
+      return 3; // send positive ACK
+  }
+
+  return 1; // send response
+}
+
+/*
+ * IL has sent a message
+ */
+void J1939ILOnError( LONG errorCode, LONG additionalParam )
+{
+  write( "<%s> Error %d, additional %d", gNodeName, errorCode, additionalParam );
+}
+
+/*
+ * IL has changed its state
+ *
+ * state - 0 = Initialized
+ *         1 = Claiming
+ *         2 = Active
+ *         3 = Stopped
+ *         4 = Suspended
+ */
+void J1939ILOnChangedState( LONG state )
+{
+  switch( state ) {
+    case 1: // Claiming
+//      write( "<%s> Claiming", gNodeName );
+      break;
+    case 2: // Active
+//      write( "<%s> Active", gNodeName );
+      break;
+    case 3: // Stopped
+//      write( "<%s> Stopped", gNodeName );
+      break;
+    case 4: // Suspended
+//      write( "<%s> Suspended", gNodeName );
+      break;
+  }
+}
+
+/*
+ * Returns the identity for XFER
+ */
+DWORD utilECUIdentity()
+{
+  DWORD identity;
+
+  identity  = (EMS.NmJ1939ECUInstance & 0x07);
+  identity |= (EMS.NmJ1939FunctionInstance & 0x31) << 3;
+  identity |= EMS.NmJ1939Function << 8;
+  identity |= (EMS.NmJ1939System & 0x7f) << 17;
+  identity |= (EMS.NmJ1939SystemInstance & 0x0f) << 24;
+  identity |= (EMS.NmJ1939IndustryGroup & 0x0f) << 28;
+  identity |= (EMS.NmJ1939AAC & 0x01) << 31;
+
+  return identity;
+}
+
+void UpdateControls()
+{
+  int enable;
+  long bkColor;
+
+  enable  = (getValue(EnvEMS_SimulationMode) != EnvEMS_SimulationMode::SimulateValues) ? 1 : 0;
+  bkColor = (enable == 1) ? MakeRGB(255,255,255) : MakeRGB(229,229,229);
+
+  enableControl      ( "EMS", "EngineSpeedSlider" , enable );
+  enableControl      ( "EMS", "EngineSpeedEdit"   , enable );
+  setControlBackColor( "EMS", "EngineSpeedEdit"   , bkColor);
+  enableControl      ( "EMS", "EngineTorqueSlider", enable );
+  enableControl      ( "EMS", "EngineTorqueEdit"  , enable );
+  setControlBackColor( "EMS", "EngineTorqueEdit"  , bkColor);
+  enableControl      ( "EMS", "EngineTempSlider"  , enable );
+  enableControl      ( "EMS", "EngineTempEdit"    , enable );
+  setControlBackColor( "EMS", "EngineTempEdit"    , bkColor);
+  
+}
+
+on envVar EnvEMS_SimulationMode
+{
+  UpdateControls();
+}
+
+on envVar EnvIgnitionSwitch
+{
+  if ((getValue(this) == 1) && (gState == kStateIgnitionOff)) {
+    EMSStartUp(); 
+  }
+  else if (getValue(this) == 2) {
+    if (gState == kStateIgnitionOff) {
+      EMSStartUp(); 
+    }
+    gState = kStateStarting;
+  }
+  else if ((getValue(this) == 0) && (gState > kStateIgnitionOff)) {
+    EMSShutDown();
+  }
+}
+
+on preStart
+{
+  J1939ILControlInit();  
+}
+
+on envVar EnvEMS_FaultTemperature
+{
+  if (getValue(this) == 1) {
+    dtcActivate( 110 /*EngineCoolantTemp*/, kFMI_CauseUnknown );
+  }
+  else {
+    dtcDeactivate( 110 /*EngineCoolantTemp*/, kFMI_CauseUnknown );
+  }
+}
+
+on envVar EnvEMS_FaultOxygen
+{
+  if (getValue(this) == 1) {
+    dtcActivate( 1119 /*Engine Actual Exhaust Oxygen*/, kFMI_CauseUnknown );
+  }
+  else {
+    dtcDeactivate( 1119 /*Engine Actual Exhaust Oxygen*/, kFMI_CauseUnknown );
+  }
+}
+

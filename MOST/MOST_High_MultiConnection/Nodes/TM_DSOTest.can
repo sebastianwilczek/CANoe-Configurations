@@ -1,0 +1,199 @@
+/*@@includes:*/
+includes
+{
+#include "MOST_MHP.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  char gECU[32] = "TM_DSOTest";
+  const long cBufferSize = 65536;
+
+  // accepted request address
+  dword gDSI_FBlockID   = 0x52;
+  dword gDSI_InstanceID = 0x01;
+  dword gDSI_FunctionID = 0xE03;
+  dword gDSI_OpTypeID   = 0xC; 
+  
+  dword gDUTAdr = 0x171; 
+
+  dword gDSI_PortHandle;
+  byte  gDSI_Buffer[cBufferSize];
+
+  long  gExpectedTransDuration = 10000;
+  long  gExpectedPacketSize = 65536;
+  long  gReceivedPacketSize;
+
+  // Text events for fault detection
+  char cTEvPacketFinish[32] = "PktFinished";
+  char cTEvConnClosed[32]   = "ConnClosed";
+  char cTEvTransStarted[32] = "TransStarted";
+
+}
+/*@@end*/
+
+/*@@mainTest:MainTest():*/
+void MainTest()
+{
+  //////////////////////////////////////////////////////////////////////////////
+  // This CAPL node demonstrates the usage of the High Protocol Nodelayer DLL 
+  // within a test module. The test sequence sends a get command to the function
+  // implemented in the node "DSO3" and tests, if the expected MHP status answer 
+  // occurs within the specified time. 
+  //////////////////////////////////////////////////////////////////////////////
+
+  // Create Rx port 
+  TC_Preparation(); 
+
+  // Test of MHP transmission
+  TC_MHP_Nav_Image();
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRequestConnection(dword,dword,dword,dword,dword,dword,dword):*///callback
+MH_IndRequestConnection(dword dsoDevice, dword funcBlockID, dword instID, dword fktID, dword opTypeID, dword prio, dword  frameSize)
+{
+  if((funcBlockID == gDSI_FBlockID) && 
+     (instID      == gDSI_InstanceID) &&
+     (fktID       == gDSI_FunctionID) &&
+     (opTypeID    == gDSI_OpTypeID))
+  {
+    /////////////////////////////////////////////////
+    // accept connection by assigning it to the port 
+    MH_AcceptConnection(gDSI_PortHandle);
+    TestSupplyTextEvent(cTEvTransStarted); 
+  }
+}
+/*@@end*/
+
+/*@@testcase:TC_Preparation():*/
+testcase TC_Preparation ()
+{
+  TestCaseTitle ("Preparation", "Prepare test of MHP transmission");
+  TestCaseDescription ("Initialisation of rx port.");
+
+  gDSI_PortHandle = MH_CreateRxPort("");
+  if(gDSI_PortHandle > 0)
+  {
+    // increase priortiy for fault injection
+    MH_SetRxPriority(gDSI_PortHandle, 10);  
+    TestStepPass("1", "Rx port created and initialized");
+  }
+  else
+    TestStepFail("1", "Failed to create rx port.");
+       
+}
+/*@@end*/
+
+/*@@testcase:TC_MHP_Nav_Image():*/
+testcase TC_MHP_Nav_Image() 
+{
+  int result;
+
+  TestCaseTitle ("MHP_Nav_Image", "Test of MHP transmission");
+  TestCaseDescription ("Test of MHP transmission on Navigation.Image.Status.");
+
+  if(TestSendMostAMSMessage(gDUTAdr, "Navigation.Image.Get", 1) > 0)
+    TestStepPass("1", "'Get' request successfully sent.");
+  else
+    TestStepFail("1", "Failed to send 'Get' request.");
+
+  
+  TestStep("2", "Wait for incoming MHP transmission.");
+
+  if(testWaitForTextEvent(cTEvTransStarted, 500) > 0)
+    TestStepPass("3", "Transmission of packet started");
+  else
+  {
+    TestStepFail("3", "DSO function doesn't respond.");
+    TestSetVerdictModule (1);
+    return;
+  }
+
+  TestStep("4", "Wait for complete transmission of packet or end of connection.");  
+
+  testJoinTextEvent(cTEvPacketFinish); // callback MH_IndRxBufferFinished with packet finished indication
+  testJoinTextEvent(cTEvConnClosed);   // callback MH_IndRxConnectionClosed
+  result = TestWaitForAnyJoinedEvent(gExpectedTransDuration); 
+
+  switch(result)
+  {
+    case 0:
+      TestStepFail("5", "Timeout. Transmission of packet wasn't completed within expected time.");
+      break;
+    
+    case 1:
+      // packet was received => check size
+      if(gExpectedPacketSize == gReceivedPacketSize)
+        TestStepPass("5", "Ok. Expected packet data was received in time.");
+      else
+        TestStepFail("5", "Received packet size differs from expected size.");  
+      break;
+      
+    case 2:
+      TestStepFail("5", "Connection was closed without transmission of packet.");
+      break;
+
+    default:
+      TestStepFail("5", "Unexpected error occurred");
+      break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ReportErrorsToWrite(long):*///function
+ReportErrorsToWrite (long res)
+{
+  switch (res)
+  {
+    case 0:     writeDbgLevel(0, "CAPL: %s: %s Result (%d): OK", gECU, res);     break;
+    case 1:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Send retries exceeded", gECU, res);          break;
+    case 2:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Trans retries exceeded", gECU, res);         break;
+    case 3:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of End retries exceeded", gECU, res);           break;
+    case 4:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Ready retries exceeded", gECU, res);         break;
+    case 5:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Frame Retries exceeded", gECU, res);         break;
+    case 6:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Receive retries execeeded", gECU, res);      break;
+    case 10:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Receive buffer could not be provided", gECU, res);     break;
+    case 11:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Connection rejected via higher priority", gECU, res);  break;
+    case 13:    writeDbgLevel(0, "CAPL: %s: %s Result (%d): Transmission terminated by receiver", gECU, res);     break;
+    case 14:    writeDbgLevel(0, "CAPL: %s: %s Result (%d): Transmission terminated by sender", gECU, res);       break;
+    case 15:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Transmission killed by sender", gECU, res);            break;
+    case 16:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Parameter out of range", gECU, res);                   break;
+    default:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Unknown error", gECU, res);                            break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRxBufferRequested(dword,long):*///callback
+MH_IndRxBufferRequested (dword handle, long isPacketBegin)
+{
+  // Set byte buffer to store packet data ...
+  MH_SetRxBuffer(handle, gDSI_Buffer, cBufferSize);
+  // reset total packet size on beginning of packet
+  if(isPacketBegin == 1)
+    gReceivedPacketSize = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRxConnectionClosed(dword,long):*///callback
+MH_IndRxConnectionClosed(dword handle, long res)
+{
+  ////////////////////////////////////////////////////////////////////////
+  // Signal end of connection and store result for evalutation in test case 
+  TestSupplyTextEvent(cTEvConnClosed); 
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRxBufferFinished(dword,long,long):*///callback
+MH_IndRxBufferFinished (dword handle, long filledSize, long reason)
+{
+  // add received bytes to total packet size
+  gReceivedPacketSize += filledSize; 
+  // Signal complete reception of packet
+  if(reason == cReasonRxBuff_Packet)
+    TestSupplyTextEvent(cTEvPacketFinish);
+}
+/*@@end*/
+

@@ -1,0 +1,214 @@
+/*@!Encoding:1252*/
+/*----------------------------------------------------------------------------
+The test module sends diagnostics requests for the MOST device 'CD Changer1'
+to the gateway and analyzes the corresponding response messages.
+---------------------------------------------------------------------------- */
+
+StartDefaultSession ()
+{
+  // This service is used by the client to enable the default 
+  // session (OBDII) in the server(s). A diagnostic session 
+  // enables a specific set of diagnostic services in the server(s).
+
+  diagRequest CDC1.DefaultSession_Start req;
+
+  DiagSendRequest(req); /* Sends the request object to the ECU. */
+}
+
+void MainTest()
+{
+  setWriteDbgLevel(0); // Set to 1 to get additional debugging messages
+
+  DiagTestCase();
+}
+
+testcase DiagTestCase ()
+{
+  int number;
+  int status;
+  long pauseInterval = 1;
+  char buffer[14];
+  char strPartNumber[14];
+  long ret;
+
+  diagRequest CDC1.EcuIdentification_Read idReq;
+  diagRequest CDC1.FaultMemory_ReadAllIdentified fmReq;
+  diagResponse CDC1.FaultMemory_ReadAllIdentified fmResp;
+  diagRequest CDC1.FaultMemory_Clear FaultMemReq;
+
+  TestCaseTitle("Automatic test", "Diagnostic-Request test steps");
+  TestCaseDescription("This test case guarantees that no faults are stored in the Fault-Memory afterwards.");
+
+  // -----------------------------------------------------------------
+  TestStep("Start", "Start of default diagnostic session");  
+
+  StartDefaultSession();
+
+  // Wait 500ms for a response from the ECU
+  TestWaitForDiagResponse(500);
+
+  if(DiagGetLastResponseCode() == -1)  //* A positive response was received
+  {
+    TestStepPass("Start", "Positive response received!");
+  } 
+  else if(DiagGetLastResponseCode() == 0)  //* Timeout
+  {
+    TestStepFail("Start", "Timeout during start of default session!");
+  } 
+  else if(DiagGetLastResponseCode() > 0) //* A negative response was received 
+  {
+    TestStepFail("Start", "Negative response received!");
+  }
+
+  // To make observation of the test easier, pause here.
+  TestWaitForTimeout(pauseInterval);
+
+  TestStep("Read ID", "Read ECU identification");  
+
+  // Send the request and wait 200ms
+  DiagSendRequest(idReq);
+
+  if(1 != TestWaitForDiagResponse(idReq,200))  // There was an error or timeout
+  {
+    write("No answer from ECU!");
+    TestStepFail("Read ID", "No answer from ECU!");
+  } 
+  else if(DiagGetLastResponseCode(idReq) == -1) // A positive response was received 
+  {
+    ret=DiagGetRespParameter(idReq,"Part_Number",buffer, elcount(buffer));
+    if (ret>0) {
+      memcpy(strPartNumber,buffer, elcount(buffer));
+      write("ECU Diagnostics Identification return: %s", strPartNumber);
+    }
+    TestReportWriteDiagResponse(idReq);
+    TestStepPass("Read ID", "Positive response received!");
+  }
+  else if(DiagGetLastResponseCode(idReq) > 0) // A negative response was received 
+  {
+    write( "ECU Diagnostics Identification failed: 0x%x", DiagGetLastResponseCode( idReq));
+    TestReportWriteDiagResponse(idReq);
+    TestStepFail("Read ID", "Negative response received");
+  } 
+
+  // To make observation of the test easier, pause here.
+  TestWaitForTimeout(pauseInterval);
+
+  TestStep("Read", "Read the stored data of the ECU Fault-Memory");  
+
+  // Send the request and wait 500ms
+  diagSetParameter(fmReq,"DtcStatusbyte",9);
+  DiagSendRequest(fmReq);
+
+  if(1 != TestWaitForDiagResponse(fmReq, 500)) /* There was an error or timeout */
+  {
+    write("No answer from ECU!");
+    TestStepFail("Read", "No answer from ECU!");
+  }
+  else if(DiagGetLastResponseCode(fmReq) == -1) /* A positive response was received */
+  {
+    // get number of DTCs
+    fmResp.GetLastResponse();
+
+    write("DiagGetPrimitiveSize: %d",DiagGetPrimitiveSize(fmResp));
+
+    number = 0;
+
+    if(DiagGetPrimitiveSize(fmResp)>3)
+    {
+      number = (DiagGetPrimitiveSize(fmResp) - 3)/4;
+    }
+
+    write("Number of DTCs: %d", number);
+
+    TestReportWriteDiagResponse(fmReq);
+    TestStepPass("Read", "Positiv response received!");
+  }
+  else if(DiagGetLastResponseCode(fmReq) > 0) /* A negative response was received */
+  {
+    write( "Reading identified DTCs failed: 0x%x", DiagGetLastResponseCode( fmReq));
+    TestReportWriteDiagResponse(fmReq);
+    TestStepFail("Read ID", "Negative response received");
+  }
+
+  // To make observation of the test easier, pause here.
+  TestWaitForTimeout( pauseInterval);
+
+  // -----------------------------------------------------------------
+  // Clear ECU DTC Fault-Memory if DTCs exist
+
+  if(number != 0) 
+  {
+    TestStep("Clear", "Send clear request of the ECU DTC table");  
+
+    DiagSetParameter(FaultMemReq, "GroupOfDtc", 0x0000);
+    DiagSendRequest (FaultMemReq);
+
+    status = 0;
+
+    if(1 != TestWaitForDiagResponse(FaultMemReq,500))  // There was an error or timeout
+    {
+      write("No answer from ECU!");
+      TestStepFail("Clear", "No answer from ECU!");
+    }
+    else if(DiagGetLastResponseCode(FaultMemReq) == -1) // A positive response was received
+    {
+      TestReportWriteDiagResponse(FaultMemReq);
+      TestStepPass("Clear", "Positive response received!");
+      status = 1;
+    }
+    else if(DiagGetLastResponseCode(FaultMemReq) > 0) // A negative response was received
+    {
+      TestReportWriteDiagResponse(FaultMemReq);
+      TestStepFail("Clear", "Negative response received");
+    } 
+  }  
+
+
+  // To make observation of the test easier, pause here.
+  TestWaitForTimeout( pauseInterval);
+
+  // -----------------------------------------------------------------
+  // Check whether clearing the fault memory succeeded
+
+  if(status == 1) // Is check necessary at all?
+  {
+    DiagSendRequest(fmReq);
+
+    if(1 != TestWaitForDiagResponse(fmReq,500))  // There was an error or timeout 
+    {
+      write("No answer from ECU!");
+      TestStepFail("Read again", "No answer from ECU!");
+    }
+    else if(DiagGetLastResponseCode(fmReq) == -1) // A positive response was received 
+    {
+      // get number of DTCs
+      fmResp.GetLastResponse();
+
+      write("DiagGetPrimitiveSize: %d",DiagGetPrimitiveSize(fmResp));
+
+      number = 0;
+
+      if(DiagGetPrimitiveSize(fmResp)>3)
+      {
+        number = (DiagGetPrimitiveSize(fmResp) - 3)/4;
+      }
+
+      if(number == 0) 
+      {
+        TestReportWriteDiagResponse(fmReq);
+        TestStepPass("Read again", "Clear process of ECU Fault-Memory was successful.");
+      }
+      else
+      {
+        TestStepFail("Read again", "Clear process of ECU Fault-Memory was NOT successful.");
+      }
+      TestStepPass("Read again", "Positiv response received!");
+    }
+    else if(DiagGetLastResponseCode(fmReq) > 0) // A negative response was received
+    {
+      TestReportWriteDiagResponse(fmReq);
+      TestStepFail("Read again", "Negative response received");
+    }
+  }
+}
+

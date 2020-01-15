@@ -1,0 +1,949 @@
+/*@@var:*/
+/*
+ * TECU - Transmission Electronic Control Unit     Version 1.1
+ *
+ * Copyright 2005, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Jr) Created 
+ * 1.1 (Pr) Added diagnostics & send txt messages capabilities
+ */
+variables
+{
+  // Constants
+  const int  kNullAddr    = 0xfe;   // Null address
+  const int  kGlobalAddr  = 0xff;   // Global address
+  const int  kSuccess     = 0;      // Nodelayer function returns 0 on success
+
+  const int  kInitialized = 0;      // 
+  const int  kOnline      = 1;      // 
+  const int  kOffline     = 2;      // 
+
+  const int  kMaxDiagCodes = 100;   // Max. no. of DC's
+
+  // Shift states
+  const BYTE kShiftComplete      = 0;
+  const BYTE kClutchDisengaging  = 1;
+  const BYTE kShifting           = 2;
+  const BYTE kClutchEngaging     = 3;
+
+  float      kMaxEngineSpeed     = 2400; // Max. engine speed
+  const int  kMaxGear            = 5;
+  float      kGearRation[6]      = { 0.0, 0.001, 0.003, 0.005, 0.006, 0.007 };
+
+  // Display states
+  const BYTE  kDisplayed       = 0;
+  const BYTE  kTimeout         = 1;
+  const BYTE  kWaitForResponse = 2;
+
+  char gNodeName[32] = "TECU"; // Name of the node, is used for output to write window
+  char gMake[6]      = "VECTR";
+
+  // Communication variables
+  BYTE  gECU_MID  = kNullAddr;    // Address of this ECU
+  BYTE  gECUState = kInitialized; // Communication state of the ECU
+  
+  BYTE 	gEDDPresent     = 0;
+  BYTE  gDisplayColumns = 0;
+  BYTE	gDisplayRows    = 0;
+  BYTE	gDisplayState   = kWaitForResponse;
+
+  // Diagnostics variables
+  DWORD gtimeActiveInact[kMaxDiagCodes]; // Time to last Active->Inactive Transition of a specific DC
+  DWORD gtimeInactActive[kMaxDiagCodes]; // Time to last Inactive->Active Transition of a specific DC
+  DWORD gtimeLastDiag15s[kMaxDiagCodes]; // Time to last show-up of a DC corresponding to an on-request PID
+
+  BYTE gDiagCodesCount = 0; // Number of DC's in the table
+  BYTE  gDCTimerActive  = 0; 
+  
+  // DC table storage
+  BYTE gDiagnosticCodeSIDPID[kMaxDiagCodes];  
+  BYTE gOccurrenceCountIncluded[kMaxDiagCodes];
+  BYTE gCurrentStatusOfFault[kMaxDiagCodes];
+  BYTE gTypeOfDiagnosticCode[kMaxDiagCodes];
+  BYTE gLowCharacterIDForAStdDiagCode[kMaxDiagCodes];
+  BYTE gFailureModeIdentifierFMI[kMaxDiagCodes];
+  BYTE gOccurrenceCount[kMaxDiagCodes];
+  BYTE gDLC[kMaxDiagCodes];
+  BYTE gCycleTime[kMaxDiagCodes]; // Cycle time of the corresponding PID
+
+  J1587Param ShiftFingerGearPosition          TX_GearPos; // TX Buffer: Gear Position
+  
+  J1587Param RequestP2                        TX_RequestP2;
+  J1587Param TextMessageToDisplay             TX_Display;
+
+  J1587Param TrmitterSysDiagCodeOccCntTable   TX_DiagCodeTable;
+  J1587Param TrmitterSysDiagCodeOccCntTable   TX_ActiveDiagCodeTable;
+  J1587Param TrmitterSysDiagCodeOccCntTable   TX_SingleDiagCodeTable;
+  J1587Param DiagnosticDataCountClearResponse TX_DiagCodeResponse;
+
+  // Simulation variables
+  int   gShiftState = kShiftComplete;
+  int   gActualGear = 0;              // Actual selected gear;
+  float gClutchSlip = 1.0;            // Clutch slip in [%]
+
+  // System timer
+  const int   kSystemTime     = 100;                     // System time in [ms]
+  const float kSystemTimeSec  = kSystemTime / 1000.0;    // System time in [sec]
+  const float kDisplayTimeSec = 1.;                      // Display time of a msg in [sec]
+  const float kTimeoutTimeSec = 10.;                     // Display msg acknowledge timeout [s]
+  const float kTimeoutTime    =	kTimeoutTimeSec * 1000.; // Display msg acknowledge timeout [ms]
+
+  msTimer  SystemTimer;  // System timer
+  msTimer  DisplayTimer; // Display timeout timer
+  msTimer  DCTimer;
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel = kDbgWarning; // Set debug level for output to write window
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  if (getValue( EvTECU_Enable ) == 1) {
+    TECUInit();
+    TECUStartUp();
+  }
+}
+/*@@end*/
+
+/*@@timer:SystemTimer:*/
+/*
+ * This system timer calulates the simualted values.
+ */
+on timer SystemTimer
+{
+  float ratio;
+  float outputSpeed;
+  float inputSpeed;
+  int   setGear;
+  int   resetCounter;
+
+  // get EnvVar values
+  setGear     = getValue( EvTECU_Gear );
+  outputSpeed = getValue( EvTECU_OutputShaftSpeed );
+  inputSpeed  = getValue( EvTECU_InputShaftSpeed );
+
+  // calculate simulated values
+  resetCounter++;
+  switch(gShiftState) {
+    case kShiftComplete:
+      ratio = kGearRation[gActualGear];
+
+      if (gActualGear != setGear) {
+        gShiftState = kClutchDisengaging;
+        resetCounter = 0;
+      }
+      break;
+    case kClutchDisengaging:
+      gClutchSlip -= 0.2;
+      if (gClutchSlip < 0.2) {
+        gShiftState = kShifting;
+      }
+
+      if (gClutchSlip > 0.5) {
+        ratio = kGearRation[gActualGear];
+      }
+      else {
+        ratio = 0;
+      }
+      break;
+    case kShifting:
+      gActualGear = setGear;
+      TX_GearPos.ShiftFingerGearPosition.phys = gActualGear;
+      output( TX_GearPos );
+
+      gShiftState = kClutchEngaging;
+
+      break;
+    case kClutchEngaging:
+      gClutchSlip += 0.2;
+      if (gClutchSlip > 0.8) {
+        gShiftState = kShiftComplete;
+      }
+
+      if (gClutchSlip > 0.5) {
+        ratio = kGearRation[gActualGear];
+      }
+      else {
+        ratio = 0;
+      }
+      break;
+  }
+
+  // if automatic shifting does not set the gear after 2 sec. reset states.
+  if ((resetCounter > 20) && (gShiftState != kShiftComplete)) {
+    gShiftState = kShiftComplete;
+    gActualGear = setGear;
+    ratio       = kGearRation[gActualGear];
+  }
+
+  // update EnvVars
+  putValue( EvTECU_GearRatio, ratio );
+  putValue( EvTECU_GearBitmap, (gShiftState == kShiftComplete) ? gActualGear+1 : 0 );
+
+  // update TX signals
+/*
+  TX_ETC1.TransInputShaftSpeed.phys       = inputSpeed;
+  TX_ETC1.SrcAddrssOfCtrllngDvcFrTrnsCtrl = RX_TC1.SA;
+  TX_ETC1.PercentClutchSlip.phys          = gClutchSlip * 100.0;
+  TX_ETC1.TransDrivelineEngaged           = (ratio > 0) ? 1 : 0;
+  TX_ETC1.TransOutputShaftSpeed.phys      = outputSpeed;
+  TX_ETC1.TransShiftInProcess             = (gShiftState != kShiftComplete) ? 1 : 0;
+  TX_ETC2.TransCurrentGear.phys           = gActualGear;
+  TX_ETC2.TransSelectedGear.phys          = setGear;
+  TX_ETC2.TransActualGearRatio.phys       = ratio;
+*/
+
+  setTimer( SystemTimer, kSystemTime );
+}
+/*@@end*/
+
+/*@@caplFunc:TECUInit():*///function
+/*
+ * Initialize the TECU
+ */
+void TECUInit()
+{
+  gECU_MID = TECU.NmStationAddress;
+  gEDDPresent = 0;
+
+  TX_GearPos.J1587_MID = gECU_MID;
+
+  TX_Display.J1587_MID                        = kNullAddr;
+  TX_Display.AbortMessage                     = 0;
+  TX_Display.LanguageSelection                = 0;
+  TX_Display.PredefinedMessage                = 0;
+  TX_Display.MessageDisplayTime               = kDisplayTimeSec;
+  TX_Display.MessagePriority                  = 1;
+  TX_Display.SendAcknowldgUponDisplayOfMsg    = 1;
+  TX_Display.SendOperatorAckOfReceiptOfMsg    = 0;
+  TX_Display.SendReceivedAckForEachNetworkMsg = 1;
+  TX_Display.SoundBeeperOnDisplay = 1;
+
+  TX_DiagCodeTable.J1587_MID       = kNullAddr;
+  TX_ActiveDiagCodeTable.J1587_MID = kNullAddr;
+  TX_SingleDiagCodeTable.J1587_MID = kNullAddr;
+  TX_DiagCodeResponse.J1587_MID    = kNullAddr;
+
+}
+/*@@end*/
+
+/*@@caplFunc:TECUShutDown():*///function
+/*
+ * Shut down TECU
+ *
+ * Send cannot claim address and stop sending messages
+ */
+void TECUShutDown()
+{
+  cancelTimer( SystemTimer );
+
+  TECUChangeState( kOffline );
+  putValue( EvTECU_Enable, 0 );
+
+  putValue( EvTECU_GearRatio, 0 );
+  putValue( EvTECU_GearBitmap, 0 );
+}
+/*@@end*/
+
+/*@@caplFunc:TECUStartUp():*///function
+/*
+ * Start up TECU
+ *
+ * Begin address claiming. After successfully claiming
+ * an address, start sending cyclic messages.
+ */
+void TECUStartUp()
+{
+  putValue( EvTECU_Enable, 1 );
+
+  setTimer( SystemTimer, kSystemTime );
+
+  TECUChangeState( kOnline );
+}
+/*@@end*/
+
+/*@@caplFunc:utilMax(float,float):*///function
+/*
+ * Clip the value to the range of min and max
+ */
+float utilMax( float a, float b)
+{
+  if (a > b) {
+    return a;
+  }
+  else {
+    return b;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:utilMin(float,float):*///function
+/*
+ * Clip the value to the range of min and max
+ */
+float utilMin( float a, float b)
+{
+  if (a > b) {
+    return b;
+  }
+  else {
+    return a;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:utilRange(float,float,float):*///function
+/*
+ * Clip the value to the range of min and max
+ */
+float utilRange( float value, float min, float max )
+{
+  if (value < min) return min;
+  if (value > max) return max;
+
+  return value;
+}
+/*@@end*/
+
+/*@@caplFunc:TECUChangeState(byte):*///function
+/*
+ * Change the state of the ECU
+ */
+void TECUChangeState( BYTE newState )
+{
+  if (newState == kInitialized) {
+    // stop everthng immediately
+    gECUState = kInitialized;
+    return;
+  }
+
+  switch( gECUState ) {
+    case kInitialized:
+    case kOffline:
+      if (newState == kOnline) {
+        EnterOnline();
+        gECUState = newState;
+      }
+      break;
+    case kOnline:
+      if (newState == kOffline) {
+        EnterOffline();
+        gECUState = newState;
+      }
+      break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:EnterOnline():*///function
+/*
+ * Enter online state
+ */
+void EnterOnline()
+{
+  // set source addresses of TX messages
+  TX_GearPos.J1587_MID = gECU_MID;
+  TX_Display.J1587_MID = gECU_MID;
+
+  TX_DiagCodeTable.J1587_MID       = gECU_MID;
+  TX_ActiveDiagCodeTable.J1587_MID = gECU_MID;
+  TX_SingleDiagCodeTable.J1587_MID = gECU_MID;
+  TX_DiagCodeResponse.J1587_MID    = gECU_MID;
+  TX_RequestP2.J1587_MID           = gECU_MID;
+  
+  // start timer for cyclic messages
+
+  gDCTimerActive = 0;
+
+  putValue( EvTECU_MID, gECU_MID );
+ 
+  writeDbgLevel( kDbgInfo, "<%s> online with MID %d", gNodeName, gECU_MID );
+  
+  // look out for an Electronic Dash Display on the bus
+  TX_RequestP2.RequestedPID = 227;
+  output(TX_RequestP2);
+}
+/*@@end*/
+
+/*@@caplFunc:EnterOffline():*///function
+/*
+ * Enter offline state
+ */
+void EnterOffline()
+{
+  if (gEDDPresent == 1) {
+    cancelTimer(DisplayTimer);
+    gEDDPresent = 0;
+  }	
+
+  if (gDCTimerActive) {
+    cancelTimer( DCTimer );
+    gDCTimerActive = 0;
+  }
+
+  putValue( EvTECU_MID, gECU_MID );
+
+  writeDbgLevel( kDbgInfo, "<%s> offline", gNodeName );
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  setWriteDbgLevel( gDbgLevel );
+}
+/*@@end*/
+
+/*@@envVar:EvTECU_Enable:*/
+on envVar EvTECU_Enable
+{
+  if (getValue( this )) {
+    TECUInit();
+    TECUStartUp();
+  }
+  else {
+    TECUShutDown();
+  }
+}
+/*@@end*/
+
+/*@@envVar:EvTECU_ShiftUp:*/
+/*
+ * Shfit one gear up
+ */
+on envVar EvTECU_ShiftUp
+{
+  if (getValue(this) == 1) {
+    ShiftUp();
+    if (gDisplayState != kWaitForResponse && gECUState == kOnline) {
+      SendDisplayMsg();
+    }
+  }
+}
+/*@@end*/
+
+/*@@envVar:EvTECU_ShiftDown:*/
+/*
+ * Shfit one gear down
+ */
+on envVar EvTECU_ShiftDown
+{
+  if (getValue(this) == 1) {
+    ShiftDown();
+    if (gDisplayState != kWaitForResponse && gECUState == kOnline) {
+      SendDisplayMsg();
+    }
+  }
+}
+/*@@end*/
+
+/*@@key:PageUp:*/
+/*
+ * Shift up with Page Up
+ */
+on key PageUp
+{
+  ShiftUp();
+}
+/*@@end*/
+
+/*@@key:PageDown:*/
+/*
+ * Shift Down with Page Down
+ */
+on key PageDown
+{
+  ShiftDown();
+}
+/*@@end*/
+
+/*@@caplFunc:ShiftUp():*///function
+void ShiftUp()
+{
+  int gear;
+
+  gear = getValue( EvTECU_Gear );
+  if (gear < kMaxGear) {
+    putValue( EvTECU_Gear, gear + 1 );
+    putValue( EvTECU_GearBitmap, 0 );
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ShiftDown():*///function
+void ShiftDown()
+{
+  int gear;
+
+  gear = getValue( EvTECU_Gear );
+  if (gear > 0) {
+    putValue( EvTECU_Gear, gear - 1 );
+    putValue( EvTECU_GearBitmap, 0 );
+  }
+}
+/*@@end*/
+
+/*@@j1587Param:J1587::TextMessageDisplayType (0xE3):*/
+on J1587Param TextMessageDisplayType
+{
+  if (gEDDPresent == 0) {
+    gEDDPresent = 1;
+    gDisplayRows = this.NumberOfRowsInTheDisplay;
+    gDisplayColumns = this.NumberOfColumnsInTheDisplay;
+    gDisplayState = kDisplayed;
+  }
+}
+/*@@end*/
+
+/*@@timer:DisplayTimer:*/
+on timer DisplayTimer
+{
+  gDisplayState = kTimeout;
+}
+/*@@end*/
+
+/*@@caplFunc:SendDisplayMsg():*///function
+void SendDisplayMsg()
+{
+  int i, row_pos, column_pos;
+  char text[32];
+  strncpy(text, "Gear: ", elCount(text));
+
+  for (i = 0; i < strlen(text); i++) {
+    TX_Display.byte(4+i) = text[i];
+  }
+
+  row_pos = (float)gDisplayRows/2.;
+  column_pos = (float)gDisplayColumns/2. - (float)strlen(text)/2. + 1;
+
+  TX_Display.DisplayCompleteMessage = 0;
+  TX_Display.MessageRowLineNumber = row_pos;
+  TX_Display.MessageColumnNumber = column_pos;
+  TX_Display.DLC = 4 + i;
+
+  output(TX_Display);
+
+  text[0] = 0;
+
+  ltoa(getValue(EvTECU_Gear), text, 10);
+
+  for (i = 0; i < strlen(text); i++) {
+    TX_Display.byte(4+i) = text[i];
+  }
+
+  row_pos = (float)gDisplayRows/2. + 1;
+  column_pos = (float)gDisplayColumns/2. - (float)strlen(text)/2. + 1;
+
+  TX_Display.DisplayCompleteMessage = 1;
+  TX_Display.MessageRowLineNumber = row_pos;
+  TX_Display.MessageColumnNumber = column_pos >= 1? column_pos : 1;
+  TX_Display.DLC = 4 + i;
+
+  output(TX_Display);
+  gDisplayState = kWaitForResponse;
+  cancelTimer(DisplayTimer);
+  setTimer(DisplayTimer, kTimeoutTime);
+}
+/*@@end*/
+
+/*@@j1587Param:J1587::TextMessageAcknowledged (0xE1):*/
+on J1587Param TextMessageAcknowledged
+{
+  if (this.MID == gECU_MID) {
+    if (this.MessageDisplayed == 1) {
+      gDisplayState = kDisplayed;
+    }
+    else {
+      gDisplayState = kTimeout;
+    }
+  }
+}
+/*@@end*/
+
+/*@@timer:DCTimer:*/
+/*
+ * Send diagnostic table (Transmitter System Diagnostic Code and Occurrence Count Table)
+ */
+on timer DCTimer
+{
+  dcUpdateTable(0);
+
+  if (dcIsAnyActive() && gECUState == kOnline) {
+    output(TX_ActiveDiagCodeTable);
+  }
+
+  setTimer(DCTimer, 1000);
+}
+/*@@end*/
+
+/*@@j1587Param:J1587::RequestP1 (0x0):*/
+on J1587Param RequestP1
+{
+  if (this.RequestedPID == TX_DiagCodeTable.J1587_PID) {
+    dcUpdateTable(1);
+    output(TX_DiagCodeTable);
+  }
+}
+/*@@end*/
+
+/*@@j1587Param:J1587::DiagnosticDataRequest_ClearCount (0xC3):*/
+on J1587Param DiagnosticDataRequest_ClearCount
+{
+  int SIDPID;
+  char descMsg[32];
+
+  if (this.TargetMID == gECU_MID) {
+    SIDPID = this.TypeOfDiagnosticCode == 1 ? this.SIDorPID : this.SIDorPID + 256;
+    if (SIDPID == TX_GearPos.J1587_PID || SIDPID == 161 || SIDPID == 191) {
+      if (dcIsCodePresent(this.SIDorPID, this.TypeOfDiagnosticCode, this.LowCharacterIDForAStdDiagCode, this.FailureModeIdentifierFMI)) {
+        strncpy(descMsg, "consult OEM", elCount(descMsg));
+        dcSendDataResponse(this.SIDorPID, this.DiagnosticCodeBits, this.TypeOfDiagnosticCode, this.LowCharacterIDForAStdDiagCode, this.FailureModeIdentifierFMI, descMsg);
+      }
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:dcClearOC(int,byte,byte,byte):*///function
+/*
+ *  Clear Occurrence Count(s)
+ */
+void dcClearOC(int SIDPID, BYTE TypeOfDiagCode, BYTE LowCharId, BYTE FMI)
+{
+  int i, clearAll;
+  if (SIDPID == -1) { // clear all 
+    clearAll = 1;
+  }
+  for (i = 0; i < gDiagCodesCount; i++) {
+    if ((gDiagnosticCodeSIDPID[i]            == (BYTE)SIDPID 
+        && gTypeOfDiagnosticCode[i]          == TypeOfDiagCode
+        && gLowCharacterIDForAStdDiagCode[i] == LowCharId
+        && gFailureModeIdentifierFMI[i]      == FMI)
+     || clearAll) {
+      gOccurrenceCount[i] = 0;
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:dcIsAnyActive():*///function
+/*
+ * Determine if any active diag code is present
+ */
+int dcIsAnyActive()
+{
+  int i;
+  for (i = 0; i < gDiagCodesCount; i++) {
+    if (gCurrentStatusOfFault[i] == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:dcIsCodePresent(byte,byte,byte,byte):*///function
+/*
+ *  Determine if a specific DC is present
+ */
+int dcIsCodePresent(BYTE SIDPID, BYTE TypeOfDiagCode, BYTE LowCharId, BYTE FMI)
+{
+  int i;
+  for (i = 0; i < gDiagCodesCount; i++) {
+    if (gDiagnosticCodeSIDPID[i]          == SIDPID 
+     && gTypeOfDiagnosticCode[i]          == TypeOfDiagCode
+     && gLowCharacterIDForAStdDiagCode[i] == LowCharId
+     && gFailureModeIdentifierFMI[i]      == FMI) {
+      return 1;
+    }
+  }
+  return 0;      
+}
+/*@@end*/
+
+/*@@caplFunc:dcSendDataResponse(byte,byte,byte,byte,byte,char[]):*///function
+/*
+ * Send diagnostic data response (Diagnostic Data/Count Clear Response)
+ */
+void dcSendDataResponse (BYTE SIDPID, BYTE DiagCodeChar, BYTE TypeOfDiagCode, BYTE LowCharId, BYTE FMI, char Data[])
+{
+  int i;
+
+  TX_DiagCodeResponse.DiagnosticCodeSIDPID          = SIDPID;
+  TX_DiagCodeResponse.DiagnosticCodeBits            = DiagCodeChar;
+  TX_DiagCodeResponse.LowCharacterIDForAStdDiagCode = LowCharId;
+  TX_DiagCodeResponse.FailureModeIdentifierFMI      = FMI;
+  TX_DiagCodeResponse.TypeOfDiagnosticCode          = TypeOfDiagCode;
+  TX_DiagCodeResponse.J1587_ReceiverMID             = 0x7F;
+  
+  switch (DiagCodeChar) {
+    case 0x00:
+      TX_DiagCodeResponse.DLC = 2 + strlen(Data);
+      for (i = 0; i < strlen(Data); i++) {
+        TX_DiagCodeResponse.byte(2+i) = Data[i];
+      }
+      break;
+    case 0x03:
+      TX_DiagCodeResponse.DLC = 7 + strlen(Data);
+      for (i = 0; i < 5; i++) {
+        TX_DiagCodeResponse.byte(2+i) = gMake[i];
+      }
+      for (i = 0; i < strlen(Data); i++) {
+        TX_DiagCodeResponse.byte(7+i) = Data[i];
+      }
+      break;
+    case 0x01:
+      dcClearOC(SIDPID, TypeOfDiagCode, LowCharId, FMI);
+      break;
+    case 0x02:
+      dcClearOC(-1, 0, 0, 0); // clear all OC's
+      break;
+  }
+
+  if (gECUState == kOnline) {
+    output(TX_DiagCodeResponse);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:dcSetActive(byte,byte,byte,byte,byte,byte):*///function
+/*
+ * Activate a DC
+ */
+void dcSetActive (BYTE DiagnosticCodeSIDPID, BYTE OccurrenceCountIncluded, BYTE TypeOfDiagnosticCode, BYTE LowCharacterIDForAStdDiagCode, BYTE FailureModeIdentifierFMI, BYTE CycleTime)
+{
+  int i = 0;
+  dword cur_time;
+  BYTE status_changed = 0;
+  BYTE new_code = 1;
+
+  status_changed = 0;
+  new_code = 1;
+
+  for (i = 0; i < gDiagCodesCount; i++) {
+    if (gDiagnosticCodeSIDPID[i] == DiagnosticCodeSIDPID && gTypeOfDiagnosticCode[i] == TypeOfDiagnosticCode && gLowCharacterIDForAStdDiagCode[i] == LowCharacterIDForAStdDiagCode && gFailureModeIdentifierFMI[i] == FailureModeIdentifierFMI) {
+      new_code = 0;
+      break;  
+    }
+  }
+
+  gDiagnosticCodeSIDPID[i] = DiagnosticCodeSIDPID;
+  gOccurrenceCountIncluded[i] = OccurrenceCountIncluded;
+  if (gCurrentStatusOfFault[i] == 1) {
+    gCurrentStatusOfFault[i] = 0;
+    status_changed = 1;
+  }
+  else {
+    status_changed = 0;
+  }
+
+  gTypeOfDiagnosticCode[i] = TypeOfDiagnosticCode;
+  gLowCharacterIDForAStdDiagCode[i] = LowCharacterIDForAStdDiagCode;
+  gFailureModeIdentifierFMI[i] = FailureModeIdentifierFMI;
+
+  gDLC[i] = OccurrenceCountIncluded == 0 ? 2 : 3;
+  gCycleTime[i] = CycleTime;
+  gOccurrenceCount[i]++;
+  
+  TX_SingleDiagCodeTable.CurrentStatusOfFault          = 0; // active
+  TX_SingleDiagCodeTable.DiagnosticCodeSIDPID          = DiagnosticCodeSIDPID;
+  TX_SingleDiagCodeTable.FailureModeIdentifierFMI      = FailureModeIdentifierFMI;
+  TX_SingleDiagCodeTable.LowCharacterIDForAStdDiagCode = LowCharacterIDForAStdDiagCode;
+  TX_SingleDiagCodeTable.OccurrenceCountIncluded       = OccurrenceCountIncluded;
+  TX_SingleDiagCodeTable.TypeOfDiagnosticCode          = TypeOfDiagnosticCode;
+  TX_SingleDiagCodeTable.DLC                           = 2;
+
+  if (OccurrenceCountIncluded == 1) {
+    TX_SingleDiagCodeTable.byte(2) = gOccurrenceCount[i];
+    TX_SingleDiagCodeTable.DLC = 3;
+  }
+
+  if (new_code == 1) {
+    gDiagCodesCount++;
+    
+    if (gECUState == kOnline) {
+      output(TX_SingleDiagCodeTable);
+      if (!gDCTimerActive) {
+        setTimer(DCTimer, 1);
+        gDCTimerActive = 1;
+      }
+    }
+    gtimeInactActive[i] = timeNOW();
+  }
+  else {
+    if (status_changed == 1) {
+      cur_time = timeNOW();
+      if (cur_time > gtimeInactActive[i] + 100000) {
+        if (gECUState == kOnline) {
+          output(TX_SingleDiagCodeTable);
+        }
+        gtimeInactActive[i] = timeNOW();
+      }
+    }
+  } 
+}
+/*@@end*/
+
+/*@@caplFunc:dcSetInactive(byte,byte,byte,byte):*///function
+/*
+ * Set a DC inactive
+ */
+void dcSetInactive (BYTE DiagnosticCodeSIDPID, BYTE TypeOfDiagnosticCode, BYTE LowCharacterIDForAStdDiagCode, BYTE FailureModeIdentifierFMI)
+{
+  int i;
+  dword cur_time;
+  BYTE status_changed = 0;
+
+  // Determine if PID/SID of DC is present and if status is active
+  for (i = 0; i < gDiagCodesCount; i++) {
+    if (gCurrentStatusOfFault[i] == 0 && gDiagnosticCodeSIDPID[i] == DiagnosticCodeSIDPID && gTypeOfDiagnosticCode[i] == TypeOfDiagnosticCode && gLowCharacterIDForAStdDiagCode[i] == LowCharacterIDForAStdDiagCode  && gFailureModeIdentifierFMI[i] == FailureModeIdentifierFMI) {
+      break;
+    }
+  }
+  
+  if (i != gDiagCodesCount) {
+    // current status inactive
+    gCurrentStatusOfFault[i] = 1;
+    status_changed = 1;
+  }
+  else {
+    status_changed = 0;
+  }
+  
+  cur_time = timeNOW();
+  
+  // time to last active->inactive transition >= 1 second?
+  if (cur_time > gtimeActiveInact[i] + 100000 && status_changed) {
+    
+    TX_SingleDiagCodeTable.CurrentStatusOfFault          = 1; // inactive
+    TX_SingleDiagCodeTable.DiagnosticCodeSIDPID          = gDiagnosticCodeSIDPID[i];
+    TX_SingleDiagCodeTable.FailureModeIdentifierFMI      = gFailureModeIdentifierFMI[i];
+    TX_SingleDiagCodeTable.LowCharacterIDForAStdDiagCode = gLowCharacterIDForAStdDiagCode[i];
+    TX_SingleDiagCodeTable.OccurrenceCountIncluded       = gOccurrenceCountIncluded[i];
+    TX_SingleDiagCodeTable.TypeOfDiagnosticCode          = gTypeOfDiagnosticCode[i];
+    TX_SingleDiagCodeTable.DLC                           = 2;
+
+    if (gOccurrenceCountIncluded[i] == 1) {
+      TX_SingleDiagCodeTable.byte(2) = gOccurrenceCount[i];
+      TX_SingleDiagCodeTable.DLC = 3;
+    }
+
+    if (gECUState == kOnline) {
+      output(TX_SingleDiagCodeTable);
+    }
+
+    gtimeActiveInact[i] = timeNOW();
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:dcUpdateTable(byte):*///function
+/*
+ * Update the DC table
+ */
+void dcUpdateTable (BYTE on_request)
+{
+  int i;
+  DWORD cur_time;
+  TX_DiagCodeTable.DLC = 0;
+  cur_time = timeNOW();
+
+  // Update whole table (active & inactive DC's)
+  for (i = 0; i < gDiagCodesCount; i++) {
+    if (gCycleTime[i] != 0 || (gCycleTime[i] == 0 && cur_time >= gtimeLastDiag15s[i]+1500000) || on_request == 1) {
+      if (gCycleTime[i] == 0 && cur_time >= gtimeLastDiag15s[i]+1500000 && on_request == 0) {
+        gtimeLastDiag15s[i] = timeNOW();
+      }
+      TX_DiagCodeTable.byte(TX_DiagCodeTable.DLC) = gDiagnosticCodeSIDPID[i];
+      TX_DiagCodeTable.byte(TX_DiagCodeTable.DLC + 1) = gFailureModeIdentifierFMI[i] + 16*gLowCharacterIDForAStdDiagCode[i] + 32*gTypeOfDiagnosticCode[i] + 64*gCurrentStatusOfFault[i] + 128*gOccurrenceCountIncluded[i];
+      if (gOccurrenceCountIncluded[i] == 1) {
+        TX_DiagCodeTable.byte(TX_DiagCodeTable.DLC + 2) = gOccurrenceCount[i];
+        TX_DiagCodeTable.DLC += 3;
+      }
+      else {
+        TX_DiagCodeTable.DLC += 2;
+      }
+    }
+  }
+
+  // Update only active DC's
+  TX_ActiveDiagCodeTable.DLC = 0;
+  for (i = 0; i < gDiagCodesCount; i++) {
+    if ((gCycleTime[i] != 0 || (gCycleTime[i] == 0 && cur_time >= gtimeLastDiag15s[i]+1500000) || on_request == 1) && gCurrentStatusOfFault[i] == 0) {
+      if (gCycleTime[i] == 0 && cur_time >= gtimeLastDiag15s[i]+1500000 && on_request == 0)
+        gtimeLastDiag15s[i] = timeNOW();
+        TX_ActiveDiagCodeTable.byte(TX_ActiveDiagCodeTable.DLC) = gDiagnosticCodeSIDPID[i];
+        TX_ActiveDiagCodeTable.byte(TX_ActiveDiagCodeTable.DLC + 1) = gFailureModeIdentifierFMI[i] + 16*gLowCharacterIDForAStdDiagCode[i] + 32*gTypeOfDiagnosticCode[i] + 64*gCurrentStatusOfFault[i] + 128*gOccurrenceCountIncluded[i];
+        if (gOccurrenceCountIncluded[i] == 1) {
+          TX_ActiveDiagCodeTable.byte(TX_ActiveDiagCodeTable.DLC + 2) = gOccurrenceCount[i];
+          TX_ActiveDiagCodeTable.DLC += 3;
+        }
+      else {
+        TX_ActiveDiagCodeTable.DLC += 2;
+      }
+    }
+  }
+}
+/*@@end*/
+
+/*@@envVar:EvTECU_GearError:*/
+on envVar EvTECU_GearError
+{
+  BYTE FMI = 2;
+
+  if (getValue(this) == 1) {
+    dcSetActive(TX_GearPos.J1587_PID, 1, 1, 0, FMI, 1);
+  }
+  else {
+    dcSetInactive(TX_GearPos.J1587_PID, 1, 0, FMI);
+  }
+}
+/*@@end*/
+
+/*@@envVar:EvTECU_InputShaftSpeedError:*/
+on envVar EvTECU_InputShaftSpeedError
+{
+  BYTE FMI = 0;
+
+  if (getValue(this) == 1) {
+    dcSetActive(161, 1, 1, 0, FMI, 1);
+  }
+  else {
+    dcSetInactive(161, 1, 0, FMI);
+  }
+}
+/*@@end*/
+
+/*@@envVar:EvTECU_OutputShaftSpeedError:*/
+on envVar EvTECU_OutputShaftSpeedError
+{
+  BYTE FMI = 1;
+
+  if (getValue(this) == 1) {
+    dcSetActive(191, 1, 1, 0, FMI, 1);
+  }
+  else {
+    dcSetInactive(191, 1, 0, FMI);
+  }
+}
+/*@@end*/
+
+/*@@j1587Param:J1587::ComponentSpecificParamRequest (0x80):*/
+on J1587Param ComponentSpecificParamRequest
+{
+  if (this.ParameterNumber == TX_DiagCodeTable.J1587_PID && this.MID == gECU_MID) {
+    dcUpdateTable(1);
+    output(TX_DiagCodeTable);
+  }
+}
+/*@@end*/
+

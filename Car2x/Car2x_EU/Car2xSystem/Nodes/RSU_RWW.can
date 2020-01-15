@@ -1,0 +1,241 @@
+/*@!Encoding:1252*/
+// *************************************************************************************
+//
+//  Builds, configures and sends a DENM with the CauseCode of a Roadworks Warning
+//
+// *************************************************************************************
+
+includes
+{
+  #include "Car2xAPI.cin"
+  #include "Position.cin"
+  #include "..\DataSources_Templates\ASNV_Template_BaseDatatypes.cin"
+  #include "..\DataSources_Templates\ASNV_Template_DENM.cin"
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Variables
+////////////////////////////////////////////////////////////////////////////////
+variables
+{
+  // Position of the RSU sending the Roadworks warning
+  /*const*/ struct Pos3D gRsuPos = { 48.8241792467563, 9.10062789916992, 302.6 };
+  /*const*/ struct Pos2D gRwwPos[6] =
+    {
+      { 48.8235435219704, 9.09994661808014 }, // rww position
+      { 48.8238101741819, 9.10043478012085 }, // waypoint 0
+      { 48.8241298017844, 9.10087466239929 },
+      { 48.8243964508766, 9.10133600234985 },
+      { 48.8245836341599, 9.10194218158722 },
+      { 48.8247090112512, 9.10270392894745 }  // waypoint 4
+    };
+
+  long gDutIsInTransmissionRange = 0; // only transmit when DUT is near
+
+  msTimer timerAnimation;          // panel animation timer
+    
+  int gStationId = 4 ;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Start / init packet
+////////////////////////////////////////////////////////////////////////////////
+on start
+{
+  long errCode;
+
+  C2xRegisterCallback(kRxIndication   , "OnRx");
+  C2xRegisterCallback(kPreTxIndication, "OnTxDENM", "DENM") ;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// On Rx
+////////////////////////////////////////////////////////////////////////////////
+void OnRx(LONG channel, LONG dir, LONG radioChannel, LONG signalStrength, LONG sigQuality, LONG packet)
+{
+  // station info
+  long stationHdl ;
+  char stationName[128] ;
+
+  stationHdl = C2xGetStationHandle(packet) ;
+  C2xGetStationName(stationHdl, elcount(stationName), stationName) ;
+
+  if ((dir == RX) &&
+      !strncmp(stationName, "DUT", elcount(stationName))) // received from DUT
+  {
+    gDutIsInTransmissionRange = API_PosCalcDistance(packet, gRsuPos) <= @sysVar::DUT::Horizont;
+    UpdateTransmissionState();
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// GUI switch
+////////////////////////////////////////////////////////////////////////////////
+on sysvar sysvar::RSU_RoadWorksWarning::Active
+{
+  UpdateTransmissionState();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Activate / Deactivate
+////////////////////////////////////////////////////////////////////////////////
+void UpdateTransmissionState()
+{
+  int transmissionState = 0;
+
+  if (@RSU_RoadWorksWarning::Active && gDutIsInTransmissionRange)
+  {
+    if (!transmissionState)
+    {
+      C2xEnableMsg("DENM") ;
+      setTimerCyclic(timerAnimation, 400); // start panel animation
+      @sysvar::RSU_RoadWorksWarning::AnimationState = 1;
+      transmissionState = 1;
+    }
+  }
+  else
+  {
+    if (transmissionState)
+    {
+      C2xDisableMsg("DENM") ;
+      cancelTimer(timerAnimation); // stop panel animation
+      @sysvar::RSU_RoadWorksWarning::AnimationState = 0;
+      transmissionState = 0;
+    }
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// RWW Panel Animation
+////////////////////////////////////////////////////////////////////////////////
+on timer timerAnimation
+{
+  dword state;
+
+  state = @sysvar::RSU_RoadWorksWarning::AnimationState;
+
+  if (++state > 5)
+    state = 0;
+
+  @sysvar::RSU_RoadWorksWarning::AnimationState = state;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//  Creates and sends a RWW DENM
+////////////////////////////////////////////////////////////////////////////////
+void OnTxDENM(long packet)
+{
+  struct DENM denmPdu;
+  byte first = 1;
+  long errCode;
+  byte hashedId8[8];
+  dword stationId;
+  int64 nowUtc; // utc milliseconds since 1970
+  int64 nowTai; // tai milliseconds since 2004
+  int distanceA;
+
+  nowUtc = C2xGetITSTimestamp();
+  nowTai = C2xConvertTimeToMSSinceUTC(nowUtc, 0);
+
+  // update extended header data
+  C2xSetTokenInt64(packet, "geo_eh", "lpvTimeStamp", nowTai & 0xffffffff) ;
+  C2xSetTokenInt64(packet, "geo_eh", "lpvLatitude" , gRsuPos.latitude  * 1e7) ;
+  C2xSetTokenInt64(packet, "geo_eh", "lpvLongitude", gRsuPos.longitude * 1e7) ;
+
+  C2xSetTokenInt64(packet, "geo_eh", "areaPosLatitude" , gRwwPos[0].latitude  * 1e7);
+  C2xSetTokenInt64(packet, "geo_eh", "areaPosLongitude", gRwwPos[0].longitude * 1e7);
+
+  switch (@sysvar::RSU_RoadWorksWarning::RelevanceDistance)
+  {
+    case 0: distanceA = 50;    break;
+    case 1: distanceA = 100;   break;
+    case 2: distanceA = 200;   break;
+    case 3: distanceA = 500;   break;
+    case 4: distanceA = 1000;  break;
+    case 5: distanceA = 5000;  break;
+    case 6: distanceA = 10000; break;
+    default:distanceA = 10000;
+  }
+  C2xSetTokenInt(packet, "geo_eh", "distanceA", distanceA) ;
+
+  // Update DENM data
+  if (first)
+  {
+    InitDenmData(denmPdu);
+    first = 0;
+  }
+  else
+  {
+    API_GetDENMParams(packet, denmPdu);
+  }
+
+  C2xSecPacketGetSignerHashedId8(packet, hashedId8) ;
+  
+  denmPdu.header.stationID = gStationId ;
+  denmPdu.denm.management.actionID.originatingStationID = gStationId ;
+  
+  denmPdu.denm.situation.eventType.subCauseCode = @sysvar::RSU_RoadWorksWarning::SubCauseCode;
+  denmPdu.denm.management.referenceTime = nowTai;
+  denmPdu.denm.management.detectionTime = nowTai;
+  // lessThan50m(0), lessThan100m(1), lessThan200m(2), lessThan500m(3), lessThan1000m(4), lessThan5km(5), lessThan10km(6), over10km(7)
+  denmPdu.denm.management.relevanceDistance.isValidFlag = 1;
+  denmPdu.denm.management.relevanceDistance.value = @sysvar::RSU_RoadWorksWarning::RelevanceDistance;
+
+  // allTrafficDirection(0), upstreamTraffic(1), downstreamTraffic(2), oppositeTraffic(3)
+  denmPdu.denm.management.relevanceTrafficDirection.isValidFlag = 1;
+  denmPdu.denm.management.relevanceTrafficDirection.value = @sysvar::RSU_RoadWorksWarning::RelevanceDirection;
+  API_SetDENMParams(packet, denmPdu);
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+//  set DENM as Road Works Warning
+////////////////////////////////////////////////////////////////////////////////
+void InitDenmData(struct DENM denmPdu)
+{
+  int iPt;
+
+  // *** ITS PDU header ***
+  denmPdu.header.protocolVersion = 1;
+  denmPdu.header.messageID       = 1;
+
+  // *** Location container ***
+  denmPdu.denm.location.isValidFlag = 1 ;
+
+  // PathPoints
+
+  denmPdu.denm.location.traces.length = 1 ;
+  denmPdu.denm.location.traces.arrayValue[0].length = elcount(gRwwPos) - 1 ;
+  for (iPt = 1 ; iPt < elcount(gRwwPos) ; ++iPt)
+  {
+    denmPdu.denm.location.traces.arrayValue[0].arrayValue[iPt-1].pathPosition.deltaLatitude  = (gRwwPos[iPt].Latitude  - gRwwPos[iPt-1].Latitude ) * 1e7;
+    denmPdu.denm.location.traces.arrayValue[0].arrayValue[iPt-1].pathPosition.deltaLongitude = (gRwwPos[iPt].Longitude - gRwwPos[iPt-1].Longitude) * 1e7;
+  }
+
+  denmPdu.denm.location.eventPositionHeading.isValidFlag = 1;
+  denmPdu.denm.location.eventPositionHeading.headingValue = 2700;
+  denmPdu.denm.location.eventPositionHeading.headingConfidence = 1;
+
+  // *** Situation Container: OPTIONAL ***
+
+  denmPdu.denm.situation.isValidFlag = 1 ;
+
+  // lowest (1) to highest (7)
+  denmPdu.denm.situation.informationQuality = 6;
+
+  // RWW = 3
+  denmPdu.denm.situation.eventType.causeCode = 3;
+
+  // *** Management Container ***
+  denmPdu.denm.management.actionID.sequenceNumber = gStationId;
+  denmPdu.denm.management.eventPosition.latitude = gRwwPos[0].latitude * 1e7;
+  denmPdu.denm.management.eventPosition.longitude = gRwwPos[0].longitude * 1e7;
+
+  denmPdu.denm.management.eventPosition.positionConfidenceEllipse.semiMajorOrientation = 2700;
+  denmPdu.denm.management.eventPosition.altitude.altitudeValue = 32000;
+  denmPdu.denm.management.eventPosition.altitude.altitudeConfidence = 1;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// EOF
+////////////////////////////////////////////////////////////////////////////////

@@ -1,0 +1,1051 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+variables
+{
+  //const word  DEFAULT_NUMBER_OF_INSTANCE = 1;
+  const dword kSERVICE1_UDP_PORT_BASE = 30501;
+  const dword kSERIVCE1_PROTOCOL_NUMBER = 17;
+  const dword kSERVICE1_SERVICE_ID = 2000;
+  const dword kSERVICE1_METHOD1_ID = 22;
+  const dword kSERVICE1_FIRE_AND_FORGET1_ID = 22;
+  const dword kSERVICE1_GETTER1_ID = 23;
+  const dword kSERVICE1_SETTER1_ID = 24;
+  const dword kSERVICE1_EVENT1_ID = 0x8001;
+  const dword kSERVICE1_EVENT2_ID = 0x8002;
+  const dword kSERVICE1_EG1_ID = 2;
+  
+  
+  const dword kSERVICE2_UDP_PORT_BASE = 30501;
+  const dword kSERIVCE2_PROTOCOL_NUMBER = 6;
+  const dword kSERVICE2_SERVICE_ID = 3000;
+  const dword kSERVICE2_METHOD1_ID = 23;
+  const dword kSERVICE2_EVENT2_ID = 0x8005;
+  const dword kSERVICE2_EG1_ID = 5;
+  
+  
+  const int64 kSD_INI_DELAY_MIN = 100;
+  const int64 kSD_INI_DELAY_MAX = 100;
+  
+  const dword kSD_MSG_TYPE_NOTIFICATION = 0x02;
+  const dword kSD_MESSAGE_ID = 0xFFFF8100;
+  
+  const dword kSD_TP = 17;
+  const dword kSD_PORT = 30490;
+  
+  const dword kSOMEIP_SD_HEADER_LEN = 16;
+  const dword kSOMEIP_SD_HEADER_LEN_SIZE_OFFSET = 8;
+  const dword kSOMEIP_SD_ETYPE1_LEN = 16; //type 1 entry length
+  const dword kSOMEIP_SD_IPv4_OPTION_LEN = 12; //
+  const word  kSOMEIP_SD_INI_OWN_SESSION_ID = 6;
+  
+  const dword kSOMEIP_SD_DEFAULT_TTL = 300;
+  const dword kSOMEIP_SD_CYCLIC_OFFER_DELAY = 2000;
+  const byte  kSOMEIP_MSG_TYPE_REQ_ACK = 0x40;
+
+  const long MAX_SOMEIP_AEP_NUM = 10;
+  const long MAX_SOMEIP_SERVICE_PARAM_NUM = 2;
+  const long MAX_SOMEIP_MSG_BUFF_SIZE = 1500;
+
+  
+  const int MAX_FIELD_NUM = 1;
+  const int MAX_METHODO_NUM = 2;
+  const int MAX_EVENT_NUM = 2;
+  const int FIELD_ID_NUM = 3;
+  
+  struct _SOMEIP_SERVICE_INFO
+  {
+    dword dwAep;
+    dword dwPsi;
+    dword dwPeg;
+    dword dwPMethod[MAX_METHODO_NUM];
+    dword dwPEvent[MAX_EVENT_NUM];
+    dword dwPField[MAX_FIELD_NUM];
+    word wServiceID;
+    word wInstanceID;
+    dword dwEventGroupID;
+    dword dwEventID[MAX_EVENT_NUM];
+    dword dwEventCycle[MAX_EVENT_NUM];
+  };
+  
+  //only for parameters
+  struct _SOMEIP_SERVICE_PARAMS
+  {
+    dword dwServiceNumber; //1 or 2 (Servie1 or Service2)
+    dword dwTPNumber;
+    dword dwBasePortNumber;
+    word  wServiceID;
+    dword dwMethodNum;
+    dword dwMethodID[MAX_METHODO_NUM];
+    dword dwMethodType[MAX_METHODO_NUM];
+    dword dwFieldNum;
+    long  lFiled[MAX_FIELD_NUM][FIELD_ID_NUM]; //Field Notitication ID, GetterID, SetterID
+    dword dwEventGroupID; //only one event group, currently
+    dword dwEventNum;
+    dword dwEventID[MAX_EVENT_NUM];
+    dword dwEventCycle[MAX_EVENT_NUM];
+  };
+  
+  // SOME/IP control
+  struct _SOMEIP_SERVICE_INFO gSOMEIP_ControlInfo[MAX_SOMEIP_AEP_NUM];
+  dword gdwSOMEIP_NumOfAEP = 0;
+  
+  // SOME/IP parameters
+  struct _SOMEIP_SERVICE_PARAMS gSOMEIP_Parames[MAX_SOMEIP_SERVICE_PARAM_NUM] =
+  {
+    //No., TP No., Port,  SID,  num, MID[2], , Mtype,  num, FID[1][3],      EGID, num, EID[2],           Cycle Time
+    {1 ,   17,     30501, 2000, 2,   {21, 22}, {0, 1}, 1,   {{-1, 23, 24}}, 2,    2,   {0x8001, 0x8002}, {0, 300} },
+    {2 ,    6,     30501, 3000, 1,   {31,  0}, {0, 0}, 0,   {{0,   0,  0}}, 5,    1,   {0x8005, 0x0000}, {0, 0} }
+  };
+  // AEP for SD
+  dword gdwSD_AEP = 0;
+  word gwSD_Own_SessinID = 0;
+  
+  // Status of SOME/IP IL
+  dword gdwSOMEIP_IL_status = 0;
+  
+}
+
+
+on preStart
+{
+  SomeIpILControlInit();
+}
+
+on start
+{
+  initSomeIpControlInfo();
+}
+
+/// <Server/Helper>
+//Initialize SomeIP management information
+void initSomeIpControlInfo(void)
+{
+  long lIdx;
+  long lNum;
+  
+  gdwSOMEIP_NumOfAEP = 0;
+  gdwSD_AEP = 0;
+
+  for(lIdx = 0; lIdx < MAX_SOMEIP_AEP_NUM; lIdx++)
+  {
+      gSOMEIP_ControlInfo[lIdx].dwAep = 0;
+      gSOMEIP_ControlInfo[lIdx].dwPsi = 0;
+      gSOMEIP_ControlInfo[lIdx].dwPeg = 0;
+      for(lNum = 0; lNum < elcount(gSOMEIP_ControlInfo[lIdx].dwPMethod); lNum++)
+        gSOMEIP_ControlInfo[lIdx].dwPMethod[lNum] = 0;
+      for(lNum = 0; lNum < elcount(gSOMEIP_ControlInfo[lIdx].dwPEvent); lNum++)
+        gSOMEIP_ControlInfo[lIdx].dwPEvent[lNum] = 0;
+      for(lNum = 0; lNum < elcount(gSOMEIP_ControlInfo[lIdx].dwPField); lNum++)
+        gSOMEIP_ControlInfo[lIdx].dwPField[lNum] = 0;
+      gSOMEIP_ControlInfo[lIdx].wServiceID = 0;
+      gSOMEIP_ControlInfo[lIdx].wInstanceID = 0;
+  }
+}
+
+/// <Helper>
+long getSOMEIPParamsIndex(word wServiceID)
+{
+  long lIdx;
+  
+  for(lIdx = 0; lIdx < elcount(gSOMEIP_Parames); lIdx++)
+  {
+    if(gSOMEIP_Parames[lIdx].wServiceID == wServiceID)
+    {
+      return lIdx;
+    }
+  }
+  Write("getSOMEIPParamsIndex() specified service ID[%d] is not found", wServiceID);
+  return -1;
+}
+
+/// <Helper>
+long getNumberofInstance(word wServiceID, word wInstID, word wIDArray[long])
+{
+  long lNofInst;
+  long lIdx;
+  byte bFound;
+  
+  lNofInst = 0;
+  
+  for(lIdx = 0; lIdx < gdwSOMEIP_NumOfAEP; lIdx++)
+  {
+    bFound = 0;
+    if(gSOMEIP_ControlInfo[lIdx].wServiceID == wServiceID)
+    {
+      //chec if instance id match
+      if(wInstID == 0xFFFF)
+      {
+        bFound = 1;
+      }
+      else if(gSOMEIP_ControlInfo[lIdx].wInstanceID == wInstID)
+      {
+        bFound = 1;
+      }
+      // add to map and increment found nubmer of isntance
+      if(bFound == 1)
+      {
+        wIDArray[lNofInst] = gSOMEIP_ControlInfo[lIdx].wInstanceID;
+        lNofInst++;        
+      }
+    }
+  }
+  return lNofInst;
+}
+
+/// <Helper>
+long getControlInfoIndex(word wServiceID, word wInstID)
+{
+  long lIdx;
+  
+  for(lIdx = 0; lIdx < gdwSOMEIP_NumOfAEP; lIdx++)
+  {
+    if(gSOMEIP_ControlInfo[lIdx].wServiceID == wServiceID
+      && gSOMEIP_ControlInfo[lIdx].wInstanceID == wInstID)
+    {
+      return lIdx;
+    }
+  }
+  return -1;
+}
+
+
+/// <Server>
+// Enable SOME IP Service w/o symbol access
+// 1 : success, 0: fail
+// wSericeID : SOME/IP service ID, wNumbers: Number of Service Instance
+long startService(word wServiceID, word wNumber, dword dwSDCycle, dword dwTTL)
+{
+  long lIdx;
+  long lParamIdx;
+  long lRet;
+  
+  word wInstanceID;
+  dword dwAEP; // Application Endpoint handle
+  dword dwPSI; // provided service handle
+  long lInfoIdx;
+  
+  //
+  // get appropriate service parameters 
+  //
+  if( (lParamIdx = getSOMEIPParamsIndex(wServiceID)) == -1)
+  {
+    //write("StartService failed because requested service ID is not supported ID=[%d]", wServiceID);
+    return 0;    
+  }
+  
+  //
+  // Open AEP for SD
+  //
+  if(gdwSD_AEP == 0)
+  {
+    gdwSD_AEP = SomeIpOpenLocalApplicationEndpoint(kSD_TP, kSD_PORT);
+  }
+  gwSD_Own_SessinID = kSOMEIP_SD_INI_OWN_SESSION_ID; // will be DEPRECATE
+  
+  if(gdwSD_AEP == 0)
+  {
+    OutputSOMEIPErrorMsg("StartService - SomeIpOpenLocalApplicationEndpoint");
+    return 0;
+  }
+  
+    
+  //
+  // open local endpoint and create service instance 
+  //
+  for(lIdx = 0; lIdx < wNumber; lIdx++)
+  {
+    //
+    // Open local endpoint
+    //
+    dwAEP =  SomeIpOpenLocalApplicationEndpoint(gSOMEIP_Parames[lParamIdx].dwTPNumber, 
+                                                gSOMEIP_Parames[lParamIdx].dwBasePortNumber+lIdx);
+    if(dwAEP == 0)
+    {
+      OutputSOMEIPErrorMsg("StartService - SomeIpOpenLocalApplicationEndpoint");
+      return 0;
+    }
+    //
+    // Create service instance, not started yet
+    //
+    wInstanceID = lIdx + 1;
+    dwPSI = SomeIpCreateProvidedServiceInstance(dwAEP, wServiceID, wInstanceID);
+    //write("### DUT SomeIpCreateProvidedServiceInstance() %lf", TimeNowNS());
+    if(dwPSI == 0)
+    {
+      OutputSOMEIPErrorMsg("StartService - SomeIpCreateProvidedServiceInstance");
+      return 0;
+    }
+    SomeIpSDSetServiceStatus(dwPSI, 0);
+    //
+    // Save AEP, PSI, serviceID and instanceID into gSOMEIP_ControlInfo
+    //
+    lInfoIdx = gdwSOMEIP_NumOfAEP;
+    gSOMEIP_ControlInfo[lInfoIdx].dwAep = dwAEP;
+    gSOMEIP_ControlInfo[lInfoIdx].dwPsi = dwPSI;
+    gSOMEIP_ControlInfo[lInfoIdx].wServiceID = wServiceID;
+    gSOMEIP_ControlInfo[lInfoIdx].wInstanceID = wInstanceID;
+    gdwSOMEIP_NumOfAEP++;
+    //
+    // Add Method
+    //
+    lRet = addSOMEIPMethod(gSOMEIP_ControlInfo[lInfoIdx], gSOMEIP_Parames[lParamIdx]);
+    if(lRet == 0)
+    {
+      return 0; //Error
+    }
+    //
+    // Add Event group
+    //
+    lRet = addSOMEIPEventGroup(gSOMEIP_ControlInfo[lInfoIdx], gSOMEIP_Parames[lParamIdx]);
+    if(lRet == 0)
+    {
+      return 0; //Error
+    }
+    //
+    // Add Event
+    //
+    lRet = addSOMEIPEvent(gSOMEIP_ControlInfo[lInfoIdx], gSOMEIP_Parames[lParamIdx]);
+    if(lRet == 0)
+    {
+      return 0; //Error
+    }
+    //
+    // addSOMEIPField
+    //
+    lRet = addSOMEIPField(gSOMEIP_ControlInfo[lInfoIdx], gSOMEIP_Parames[lParamIdx]);
+    if(lRet == 0)
+    {
+      return 0;
+    }
+  
+    
+    //
+    //configure SD property
+    //
+    setSDProperty(dwPSI, dwSDCycle, dwTTL);
+    lRet = SomeIpSDSetServiceStatus(dwPSI, 1);  
+  }
+  
+  startSOMEIPIL();
+  
+  
+  return 1;
+}
+
+/// <Server>
+// Disable services
+long stopService(word wServiceID)
+{
+  long lRet;
+  long lIdx;
+  DWORD dwPSI; // provided service handle
+
+  
+  for(lIdx = 0; lIdx < MAX_SOMEIP_AEP_NUM ; lIdx++)
+  {
+    if(wServiceID == gSOMEIP_ControlInfo[lIdx].wServiceID)
+    {
+      SomeIpReleaseProvidedServiceInstance(gSOMEIP_ControlInfo[lIdx].dwPsi);
+      SomeIpCloseLocalApplicationEndpoint(gSOMEIP_ControlInfo[lIdx].dwAep);
+      gSOMEIP_ControlInfo[lIdx].dwPsi = 0;
+      gSOMEIP_ControlInfo[lIdx].dwAep = 0;
+      gSOMEIP_ControlInfo[lIdx].wServiceID = 0;
+      gdwSOMEIP_NumOfAEP--;  
+    }
+  }
+  if(gdwSOMEIP_NumOfAEP == 0)
+  {
+    if(gdwSD_AEP != 0)
+    {
+      SomeIpCloseLocalApplicationEndpoint(gdwSD_AEP);
+      gdwSD_AEP = 0;
+    }
+    stopSOMEIPIL();
+  }
+  
+  return 1;
+}
+
+/// <Server>
+long triggerEvent(word wServiceID, word wEventGID, word wEventID)
+{
+  long lIdx;
+  long lAEPIdx;
+  long lRetVal;
+  long lError;
+  
+  lError = 0;
+  
+  for(lAEPIdx = 0; lAEPIdx < gdwSOMEIP_NumOfAEP; lAEPIdx++)
+  {
+    //check if specified event exsit
+    if( (gSOMEIP_ControlInfo[lAEPIdx].wServiceID == wServiceID) &&
+       gSOMEIP_ControlInfo[lAEPIdx].dwEventGroupID == wEventGID )
+    {
+      for(lIdx = 0; lIdx < MAX_EVENT_NUM; lIdx++)
+      {
+        if(gSOMEIP_ControlInfo[lAEPIdx].dwEventID[lIdx] == wEventID)
+        {
+          lRetVal = SomeIpTriggerEvent(gSOMEIP_ControlInfo[lAEPIdx].dwPEvent[lIdx]);
+          SomeIpSetProperty(gSOMEIP_ControlInfo[lAEPIdx].dwPEvent[lIdx], "CycleTimeMs", 
+                            gSOMEIP_ControlInfo[lAEPIdx].dwEventCycle[lIdx]);
+          if(lRetVal != 0)
+          {
+            OutputSOMEIPErrorMsg("triggerEvent()-SomeIpTriggerEvent()", lRetVal);
+            lError |= (0x01 << lIdx); //Error flag
+          }
+        }
+      }
+    }
+  }
+  if(lError != 0)
+  {
+    Write("triggerEvent() Error flag[%x]", lError);
+    return 0; //Error
+  }
+  else
+  {
+    return 1; //all event triggered
+  }
+}
+
+/// <Server/Helper>
+// stop SOME IP IL
+void stopSOMEIPIL(void)
+{
+  long lRet;
+  
+  if(gdwSOMEIP_IL_status == 1)
+  {
+    lRet = SomeIpILControlStop();
+    if(lRet !=0)
+    {
+      Write("ERROR in stopSOMEIPIL()- SomeIpILControlStop() Error-Code[%d]", lRet);
+    }
+    gdwSOMEIP_IL_status = 0;
+  }
+}
+
+/// <Server/Helper>
+// start SOME IP IL
+void startSOMEIPIL(void)
+{
+  long lRet;
+  if(gdwSOMEIP_IL_status == 0)
+  {
+    lRet = SomeIpILControlStart();
+    if(lRet !=0)
+    {
+      OutputSOMEIPErrorMsg("ERROR in startSOMEIPIL()- SomeIpILControlStart()", lRet);
+    }
+    gdwSOMEIP_IL_status = 1;
+  }
+}
+
+
+/// <Method>
+//
+// Add SOME/IP method
+//
+dword addSOMEIPMethod(struct _SOMEIP_SERVICE_INFO ctrlInfo, struct _SOMEIP_SERVICE_PARAMS params)
+{
+  long lIdx;
+  char  cStrCallBackName[50];
+  dword dwPM;
+  
+  
+  for(lIdx = 0; lIdx < params.dwMethodNum; lIdx++)
+  {
+    //Generate call back function name
+   //"OnService{X}Inst{X}Method{X}Request" ex OnService1Inst1Method1Request
+   //"OnService{X}Inst{X}Method{X}FireAndForget" ex OnService1Inst1Method1Request
+    snprintf(cStrCallBackName, elcount(cStrCallBackName), "OnService%dInst%dMethod%d", 
+             params.dwServiceNumber, ctrlInfo.wInstanceID, lIdx+1);
+  
+    //Method or Fire and Forget
+    //gSOMEIP_Parames[lParamIdx].dwMethodType[lIdx] : 0 Request/Response, 1 Fire and Forget
+    if(params.dwMethodType[lIdx] == 0)
+    {
+      strncat(cStrCallBackName, "Request", elcount(cStrCallBackName) );
+    }
+    //Fire and Forget
+    else if(params.dwMethodType[lIdx] == 1)
+    {
+      strncat(cStrCallBackName, "FireAndForget", elcount(cStrCallBackName));    
+    }
+    
+    //Add SOME/IP Method
+    dwPM = SomeIpAddMethod(ctrlInfo.dwPsi ,params.dwMethodID[lIdx], cStrCallBackName, params.dwMethodType[lIdx]);
+    if(dwPM == 0)
+    {
+      Write("Error in addSOMEIPMethod() - SomeIpAddMethod() callback name[%s], idx[%d]", cStrCallBackName, lIdx+1);
+      OutputSOMEIPErrorMsg("Error in addSOMEIPMethod()");
+      return 0;
+    }
+    ctrlInfo.dwPMethod[lIdx] = dwPM;
+  }
+  return dwPM;
+}
+
+/// <FireAndForget>
+void OnService1Inst1Method2FireAndForget(dword dwMethodH, dword dwReqMsgH)
+{
+
+}
+
+/// <FireAndForget>
+void OnService1Inst2Method2FireAndForget(dword dwMethodH, dword dwReqMsgH)
+{
+  
+}
+
+/// <Method>
+void OnService1Inst1Method1Request(dword dwMethodH, dword dwReqMsgH,dword dwResMsgH)
+{
+  
+  if(@sysvar::TC8_DUT_Config::SomeIpRequestACK == 1)
+  {
+    sendRequestAckMessage(gSOMEIP_ControlInfo[0].dwAep, dwReqMsgH);
+  }
+}
+
+/// <Method>
+void OnService1Inst2Method1Request(dword dwMethodH, dword dwReqMsgH,dword dwResMsgH)
+{
+
+}
+
+/// <Method>
+void OnService2Inst1Method1Request(dword dwMethodH, dword dwReqMsgH,dword dwResMsgH)
+{
+}
+
+/// <Method>
+void OnService2Inst2Method1Request(dword dwMethodH, dword dwReqMsgH,dword dwResMsgH)
+{
+}
+
+
+/// <Method>
+void OnService1Inst1Method23Getter(dword dwMethodH, dword dwReqMsgH,dword dwResMsgH)
+{
+  //write("OnService1Inst1Method23Getter()");
+}
+
+/// <Method>
+void OnService1Inst1Method24Setter(dword dwMethodH, dword dwReqMsgH,dword dwResMsgH)
+{
+  
+}
+
+
+/// <Event>
+//
+// Add SOME/IP Event group
+//
+dword addSOMEIPEventGroup(struct _SOMEIP_SERVICE_INFO ctrlInfo, struct _SOMEIP_SERVICE_PARAMS params)
+{
+  dword dwPEG;
+  
+  //
+  // add event group
+  //
+  dwPEG = SomeIpAddProvidedEventGroup(ctrlInfo.dwPsi, params.dwEventGroupID);
+  if(dwPEG == 0)
+  {
+    OutputSOMEIPErrorMsg("ERROR in AddSOMEIPEventGroup() - SomeIpAddProvidedEventGroup()");
+    return 0;
+  }
+  ctrlInfo.dwPeg = dwPEG;
+  ctrlInfo.dwEventGroupID = params.dwEventGroupID;
+  SomeIpSetProperty(dwPEG, "MulticastIp", IpGetAddressAsNumber(kstrIPv4Multicast_IP));
+  SomeIpSetProperty(dwPEG, "MulticastPort", params.dwBasePortNumber + (ctrlInfo.wInstanceID-1));
+  return dwPEG;
+}
+
+
+/// <Event>
+//
+// Add SOME/IP Event
+//
+dword addSOMEIPEvent(struct _SOMEIP_SERVICE_INFO ctrlInfo, struct _SOMEIP_SERVICE_PARAMS params)
+{
+  long lIdx;
+  char  cStrCallBackName[50];
+  dword dwPEV;
+  long lRet;
+  
+  for(lIdx = 0; lIdx < params.dwEventNum; lIdx++)
+  {
+    //Generate call back function name
+   //"OnService{X}Inst{X}PrepareEvent{X}" ex OnService1Inst1PrepareEvent1
+    snprintf(cStrCallBackName, elcount(cStrCallBackName), "OnService%dInst%dPrepareEvent%d", 
+             params.dwServiceNumber, ctrlInfo.wInstanceID, lIdx+1);
+  
+    
+    //Add SOME/IP Event
+    dwPEV = SomeIpAddEvent(ctrlInfo.dwPsi, params.dwEventID[lIdx], cStrCallBackName);
+    if(dwPEV == 0)
+    {
+      Write("ERROR in addSOMEIPEvent() - SomeIpAddEvent() callback name[%s], idx[%d]", cStrCallBackName, lIdx+1);
+      OutputSOMEIPErrorMsg("Error in addSOMEIPEvent()");
+      return 0;
+    }
+    ctrlInfo.dwPEvent[lIdx] = dwPEV;
+    ctrlInfo.dwEventID[lIdx] = params.dwEventID[lIdx];
+    ctrlInfo.dwEventCycle[lIdx] = params.dwEventCycle[lIdx];
+
+    if( (lRet = SomeIpAddEventToEventgroup(ctrlInfo.dwPeg, dwPEV)) != 0)
+    {
+      OutputSOMEIPErrorMsg("ERROR in addSOMEIPEvent() - SomeIpAddEventToEventgroup()", lRet);
+      return 0;
+    }
+  }  
+  return 1;
+}
+
+/// <Field>
+//
+// Add SOME/IP Field
+//
+dword addSOMEIPField(struct _SOMEIP_SERVICE_INFO ctrlInfo, struct _SOMEIP_SERVICE_PARAMS params)
+{
+  long lIdx;
+  char  cStrCallBackName[50];
+  dword dwPFLD;
+  dword dwPM;
+  
+  for(lIdx = 0; lIdx < params.dwFieldNum; lIdx++)
+  {
+    //Add SOME/IP Event
+    dwPFLD = SomeIpAddField(ctrlInfo.dwPsi, params.lFiled[lIdx][0],  params.lFiled[lIdx][1],  params.lFiled[lIdx][2]);
+    if(dwPFLD == 0)
+    {
+      OutputSOMEIPErrorMsg("Error in SomeIpAddField()");
+      return 0;
+    }
+    ctrlInfo.dwPField[lIdx] = dwPFLD;
+  }  
+  return 1;
+}
+
+/// <ErrorHandleing>
+void OutputSOMEIPErrorMsg(char cMsg[])
+{
+  long retVal;
+  char cBuffer[1024];
+
+  Write("ERROR in %s", cMsg);
+  // check if last function was executed correct
+  if((retVal = SomeIpGetLastError()) != 0)
+  {
+    write("%s SOME/IP IL error occured: Error code: %d", cMsg, retVal);
+    if( (SomeIpGetLastErrorText(elCount(cBuffer), cBuffer) != 0))
+    {
+      write("SOME/IP IL error text: %s", cBuffer);
+    }
+  }
+}
+
+/// <ErrorHandleing>
+void OutputSOMEIPErrorMsg(char cMsg[], long lRetVal)
+{
+  long retVal;
+  char cBuffer[1024];
+
+  Write("ERROR in %s : return value [%d]", cMsg, lRetVal);
+  // check if last function was executed correct
+  if((retVal = SomeIpGetLastError()) != 0)
+  {
+    write("%s SOME/IP IL error occured: Error code: %d", cMsg, retVal);
+    if( (SomeIpGetLastErrorText(elCount(cBuffer), cBuffer) != 0))
+    {
+      write("SOME/IP IL error text: %s", cBuffer);
+    }
+  }
+}
+
+
+/// <Event/Callback>
+void OnService1Inst1PrepareEvent1(dword dwEventH, dword dwMsgH)
+{
+
+}
+
+/// <Event/Callback>
+void OnService1Inst1PrepareEvent2(dword dwEventH, dword dwMsgH)
+{
+  
+}
+
+/// <Event/Callback>
+void OnService1Inst2PrepareEvent1(dword dwEventH, dword dwMsgH)
+{
+  
+}
+
+/// <Event/Callback>
+void OnService1Inst2PrepareEvent2(dword dwEventH, dword dwMsgH)
+{
+  
+}
+
+/// <Event/Callback>
+void OnService2Inst1PrepareEvent1(dword dwEventH, dword dwMsgH)
+{
+  
+}
+
+/// <Event/Callback>
+void OnService2Inst2PrepareEvent1(dword dwEventH, dword dwMsgH)
+{
+  
+}
+
+
+/// <Event/Callback>
+void OnService2Inst1PrepareEvent2(dword dwEventH, dword dwMsgH)
+{
+  
+}
+
+/// <Helper>
+dword getInstanceIDFromSDEntry(dword dwMsgH, char cPrefix[])
+{
+  return getEntryKeyMember(dwMsgH, cPrefix, "InstanceID");
+}
+
+/// <Helper>
+dword getMajorVersionFromSDEntry(dword dwMsgH, char cPrefix[])
+{
+  return getEntryKeyMember(dwMsgH, cPrefix, "MajorVersion");
+}
+
+/// <Helper>
+dword getMinorVersionFromSDEntry(dword dwMsgH, char cPrefix[])
+{
+  return getEntryKeyMember(dwMsgH, cPrefix, "MinorVersion");
+}
+
+/// <Helper>
+dword getEntryKeyMember(dword dwMsgH, char cPrefixType[], char cMember[])
+{
+  char cValuePath[255];
+  
+  snprintf(cValuePath, elCount(cValuePath), "%s.%s", cPrefixType, cMember);
+  return SomeIpGetValueDWord(dwMsgH, cValuePath);
+  
+}
+
+
+/// <Configuration>
+void setSDProperty(dword dwPSI, dword dwSDCycle, dword dwTTL)
+{
+  SomeIpSetProperty(dwPSI, "SDMinInitialDelay", kSD_INI_DELAY_MIN);
+  SomeIpSetProperty(dwPSI, "SDMaxInitialDelay", kSD_INI_DELAY_MAX);
+  
+  SomeIpSetProperty(dwPSI, "SDTTL", dwTTL);
+  SomeIpSetProperty(dwPSI, "SDCyclicOfferDelay", dwSDCycle);
+}
+
+/// <SD>
+void sendOfferService(dword dwAEP, dword dwDstAddr, word wDstPort, word wServiceID, word wInstID)
+{
+  dword dwMsbBufferLen;
+  dword dwMsgLen;
+  byte bMsgBuffer[MAX_SOMEIP_MSG_BUFF_SIZE];
+  word wIDArray[long];
+  
+  long lIdx;
+  long lNofInst;
+  long lRet;
+
+  //Set SOME/IP Header Info
+  dwMsgLen = SetMessageHeaderForOfferService(bMsgBuffer);
+  
+  //Set flags and Reserved data
+  dwMsgLen += SetMessageHeaderFlag(bMsgBuffer, dwMsgLen, 0xC0);
+  
+  //
+  //Get number of isntance and 
+  //
+  lNofInst = getNumberofInstance(wServiceID, wInstID, wIDArray);
+  if(lNofInst <= 0)
+  {
+    Write("No service and instance not found");
+    return;
+  }
+  
+  //
+  // set Offer Service length and entry
+  //
+  dwMsgLen += SetMessageEntryLength(bMsgBuffer, dwMsgLen, lNofInst);
+  for(lIdx = 0; lIdx < lNofInst; lIdx++)
+  {
+    lRet = setOfferServiceEntry(bMsgBuffer, dwMsgLen, wServiceID, wIDArray[lIdx], (byte)(lIdx & 0xFF));
+    dwMsgLen += lRet;
+  }
+  
+  //
+  //Set IPv4 option length and entry
+  //
+  dwMsgLen += SetMessageIpv4OptionLength(bMsgBuffer, dwMsgLen, lNofInst);
+  for(lIdx = 0; lIdx < lNofInst; lIdx++)
+  {
+    lRet = setOfferServiceIPv4OptionEtnry(bMsgBuffer, dwMsgLen, wServiceID, wIDArray[lIdx]);
+    if(lRet < 0)
+    {
+      return; //could not find approprieate parameters(port /protocol number)
+    }
+    else 
+    {
+      dwMsgLen += lRet;      
+    }
+  }
+  
+  //set header lengh;
+  SetMessageHeaderLength(bMsgBuffer,dwMsgLen);
+  
+  //Send message
+  sendSOMEIPMessageLowLevel(dwAEP, dwDstAddr, wDstPort, dwMsgLen, bMsgBuffer);
+
+}
+
+/// <SD>
+void sendRequestAckMessage(dword dwAEP, dword dwMsgH)
+{
+  dword dwMsbBufferLen;
+  dword dwMsgLen;
+  byte bMsgBuffer[MAX_SOMEIP_MSG_BUFF_SIZE];
+    
+  word wServiceID;
+  word wMethodID;
+  dword dwLen = 16;
+  word wClientID;
+  word wSessionID;
+  byte bProtoVer;
+  byte bIfVer;
+  dword dwDstAddr;
+  word wDstPort;
+   
+  // get received SOME/IP header information
+  wServiceID =(SomeIpGetMessageId(dwMsgH) >> 16);
+  wMethodID = (SomeIpGetMessageId(dwMsgH) & 0xFFFF);
+  wClientID = (SomeIpGetRequestId(dwMsgH) >> 16);
+  wSessionID = (SomeIpGetRequestId(dwMsgH) & 0xFFFF);
+  bProtoVer = (byte)SomeIpGetProtocolVersion(dwMsgH);
+  bIfVer = (byte)SomeIpGetInterfaceVersion(dwMsgH);
+  dwDstAddr = SomeIpGetSourceAddress(dwMsgH);
+  wDstPort = (word)SomeIpGetSourcePort(dwMsgH);
+  
+  //Set SOME/IP Header Info
+  dwMsgLen = SetMessageHeader(bMsgBuffer, wServiceID, wMethodID, dwLen, wClientID, 
+                                wSessionID, bProtoVer, bIfVer, kSOMEIP_MSG_TYPE_REQ_ACK, 0);
+  
+  
+  //set header lengh;
+  SetMessageHeaderLength(bMsgBuffer,dwMsgLen);
+  
+  //Send message  
+  sendSOMEIPMessageLowLevel(dwAEP, dwDstAddr, wDstPort, dwMsgLen, bMsgBuffer);
+
+}
+
+
+/// <SD>
+long setOfferServiceEntry(byte bMsgBuffer[], word wOffset, word wServiceID, word wInstanceID, byte bOptIdx)
+{
+  bMsgBuffer.byte(wOffset++) = 0x01; //Type
+  bMsgBuffer.byte(wOffset++) = bOptIdx; //Index 1st option run
+  bMsgBuffer.byte(wOffset++) = 0x00; //Index 2nd option run
+  bMsgBuffer.byte(wOffset++) = 0x10; //# of 1st options(4bit) - # of 2nd options(4bit)
+  bMsgBuffer.word(wOffset) = swapWord(wServiceID);
+  wOffset += 2;
+  bMsgBuffer.word(wOffset) = swapWord(wInstanceID);
+  wOffset += 2;
+  bMsgBuffer.dword(wOffset) = swapDWord((0x01 << 24) | 300); //Major version(8bit) and TTL(24bit)
+  wOffset += 4;
+  bMsgBuffer.dword(wOffset) = swapDWord(0); //Minor version
+  wOffset += 4;
+  
+  return kSOMEIP_SD_ETYPE1_LEN;
+}
+
+/// <SD>
+long setOfferServiceIPv4OptionEtnry(byte bMsgBuffer[], word wOffset, word wServiceID, word wInstanceID)
+{
+  long lRet;
+  long lParamIdx;
+  
+  lRet = -1;
+  
+  bMsgBuffer.word(wOffset) = swapword(0x09); //Length
+  wOffset += 2;
+  bMsgBuffer.byte(wOffset++) = 0x04; //Type, 04: IPv4 Endpoint
+  bMsgBuffer.byte(wOffset++) = 0x00; //Reserved
+  bMsgBuffer.dword(wOffset)  = GetDutIpAsNummer(); // IP address 
+  wOffset += 4;
+  bMsgBuffer.byte(wOffset++) = 0x00; //Reserved
+  
+  //appropriate service parameters 
+  if( (lParamIdx = getSOMEIPParamsIndex(wServiceID)) == -1)
+  {
+    //write("StartService failed because requested service ID is not supported ID=[%d]", wServiceID);
+    return lRet;
+  }
+
+  bMsgBuffer.byte(wOffset++) = (byte)(gSOMEIP_Parames[lParamIdx].dwTPNumber & 0xFF);  //Protocol Number(UDP/TCP)
+  bMsgBuffer.word(wOffset) = swapWord(gSOMEIP_Parames[lParamIdx].dwBasePortNumber+(wInstanceID-1)); //Port Number
+  wOffset += 2;
+  
+  return kSOMEIP_SD_IPv4_OPTION_LEN;
+}
+
+/// <Helper>
+long sendSOMEIPMessageLowLevel(dword dwAEP, dword dwDstAddr, word wDstPort, dword dwMsgLen, byte bMsgBuffer[])
+{
+  dword dwMsgH;
+  long lResult;
+  
+  lResult = -1;
+  //Create Message
+  dwMsgH = SomeIpCreateMessage(dwMsgLen, bMsgBuffer);
+  if(dwMsgH == 0)
+  {
+    OutputSOMEIPErrorMsg("ERROR in SendOfferService() - SomeIpCreateMessage()");
+    return lResult;
+  }
+  // send the SOME/IP message
+  lResult = SomeIpOutputMessage(dwAEP, dwDstAddr, wDstPort, dwMsgH);
+  if(lResult != 0)
+  {
+    OutputSOMEIPErrorMsg("SendFindServiceMessage() - SomeIpOutputMessage", lResult);
+    return lResult;
+  }
+  // release the some IP message
+  lResult = SomeIpReleaseMessage(dwMsgH);
+  if(lResult != 0)
+  {
+    OutputSOMEIPErrorMsg("SendFindServiceMessage() - SomeIpOutputMessage", lResult);
+    return lResult;    
+  }
+  
+  return 1;
+}
+
+/// <SD/Helper>
+dword SetMessageHeaderForOfferService(byte bMsgBuffer[])
+{
+  bMsgBuffer.dword(0) = swapDWord(0xFFFF8100) ; //ServiceID, MethodID
+  bMsgBuffer.word(8)  = swapWord(0) ; //Client ID
+  bMsgBuffer.word(10) = swapWord(gwSD_Own_SessinID++) ; //Session ID
+  bMsgBuffer.byte(12) = 1; //Protocol Version
+  bMsgBuffer.byte(13) = 1; //Interface Version
+  bMsgBuffer.byte(14) = 2; //Message Type, 0x02 : Notification
+  bMsgBuffer.byte(15) = 0; //Return Code
+  
+  return kSOMEIP_SD_HEADER_LEN;
+}
+
+/// <SD/Helper>
+dword SetMessageHeader(byte bMsgBuffer[], word wServiceID, word wMethodId, dword dwLen, word wClientID, word wSessionID, byte bProtoVer, byte bIfVer, byte bMsgType, byte bRetCode)
+{
+  bMsgBuffer.word(0) = swapWord(wServiceID) ; //ServiceID
+  bMsgBuffer.word(2) = swapWord(wMethodId);
+  bMsgBuffer.dword(4) = swapDword(dwLen);
+  bMsgBuffer.word(8)  = swapWord(wClientID); //Client ID
+  bMsgBuffer.word(10) = swapWord(wSessionID); //Session ID
+  bMsgBuffer.byte(12) = bProtoVer; //Protocol Version
+  bMsgBuffer.byte(13) = bIfVer; //Interface Version
+  bMsgBuffer.byte(14) = bMsgType; //Message Type, 0x00 : REQUEST
+  bMsgBuffer.byte(15) = bRetCode; //Return Code
+  
+  return 16;
+}
+
+/// <SD/Helper>
+void SetMessageHeaderLength(byte bMsgBuffer[], dword dwLen)
+{
+  bMsgBuffer.dword(4) = swapDWord(dwLen - kSOMEIP_SD_HEADER_LEN_SIZE_OFFSET);
+}
+
+/// <SD/Helper>
+dword SetMessageHeaderFlag(byte bMsgBuffer[], dword dwOffset, byte bFlag)
+{
+  bMsgBuffer.dword(dwOffset) = swapDWord((dword)(bFlag << 24)); //reboot :1, unicast :1
+  return 4;
+}
+
+/// <SD/Helper>
+dword SetMessageEntryLength(byte bMsgBuffer[], dword dwOffset, long lNofInst)
+{
+  bMsgBuffer.dword(dwOffset) = swapDWord(kSOMEIP_SD_ETYPE1_LEN * lNofInst);
+  return 4;
+}
+
+/// <SD/Helper>
+dword SetMessageIpv4OptionLength(byte bMsgBuffer[], dword dwOffset, long lNofInst)
+{
+  bMsgBuffer.dword(dwOffset) = swapDWord(kSOMEIP_SD_IPv4_OPTION_LEN * lNofInst);
+  return 4;
+}
+
+long OnSomeIpProcessTxMessage(dword messageHandle, long rxChannel)
+{
+  char  buf[50];
+  byte  msgType;
+  word  sessionId; 
+  dword nbrOfEntries;
+  dword entryType;
+  
+  // SOMEIPSRV_SD_MESSAGE_02 workaround  
+  sysGetVariableString(sysvar::TC8_DUT_Config::CurrentTestcaseName, buf, elcount(buf));
+  if(strncmp(buf, "SOMEIPSRV_SD_MESSAGE_02", strlen(buf)) == 0)
+  {
+    if(SomeIpGetMessageId(messageHandle) == 0xFFFF8100)
+    {
+      sessionId = SomeIpGetRequestId(messageHandle) & 0xFF;      
+      if(sessionId == 3)
+      {
+        entryType    = SomeIpGetValueDWord(messageHandle, "Entry[0]");
+        if(entryType == 0x01 /*OfferService*/)
+        {
+          SomeIpSetValueDWord(messageHandle, "Entry", 1);          
+        }
+      }
+    }
+  }
+  
+  // SOMEIPSRV_SD_MESSAGE_07 workaround  
+  sysGetVariableString(sysvar::TC8_DUT_Config::CurrentTestcaseName, buf, elcount(buf));
+  if(strncmp(buf, "SOMEIPSRV_SD_MESSAGE_07", strlen(buf)) == 0)
+  {
+    msgType = SomeIpGetMessageType(messageHandle);
+    if(msgType == 0x80 || msgType == 0x40) // Block response or Request ACK      
+      return 0;    
+  }
+  
+  return 1;
+}

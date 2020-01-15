@@ -1,0 +1,166 @@
+/*@@var:*/
+variables
+{
+  // speed modification direction
+  // 0 = decreasing, 1 = increasing;
+  int speedChange = 0;
+
+  // timer for cyclic update of speed
+  mstimer tSpeed;
+
+  // time in ms between speed update
+  const int speedTimerDur = 300;
+
+  int gEngineStatus = 0 ;
+}
+/*@@end*/
+
+/*@@sysvarChange:ES::ManualSpeed:*/
+// set speed manually
+on sysvar ES::ManualSpeed
+{
+  message SpeedNotify msg;
+
+  if(!gEngineStatus) Return;
+
+  // do nothing if manual switch not set
+  if (@sysvar::ES::ManualSwitch == 0)
+  {
+    return;
+  }
+
+  // send speed notification
+  msg.Speed = @this;
+  output(msg);
+}
+/*@@end*/
+
+/*@@sysvarChange:ES::Restart:*/
+// restart speed profile
+on sysvar ES::Restart
+{
+  message SpeedNotify msg;
+
+  // switch manual speed control off
+  if(@sysvar::ES::ManualSwitch == 0)
+  {
+    // cancel speed profile calculation
+    cancelTimer(tSpeed);
+  }
+  else
+  {
+    // switch to automatich speed profile
+    @sysvar::ES::ManualSwitch = 0;
+  }
+
+  // set speed and modification direction
+  @sysvar::ES::ManualSpeed = 0;
+  speedChange = 0;
+
+  // send speed notification
+  msg.Speed = @sysvar::ES::ManualSpeed;
+  output(msg);
+
+  // restart timer
+  if (gEngineStatus == 1 ) setTimer(tSpeed, speedTimerDur);
+}
+/*@@end*/
+
+/*@@sysvarChange:ES::ManualSwitch:*/
+// switch of automatic speed profile
+on sysvar ES::ManualSwitch
+{
+  message SpeedNotify msg;
+
+  if(!gEngineStatus) Return;
+
+
+  if (@sysvar::ES::ManualSwitch == 0)
+  {
+    // switch is off, restart speed profile
+    if (gEngineStatus == 1 ) setTimer(tSpeed, speedTimerDur);
+  }
+  else
+  {
+    // switch is on, cancel speed profile calculation
+    cancelTimer(tSpeed);
+
+    // send speed notification
+    msg.Speed = @sysvar::ES::ManualSpeed;
+    output(msg);
+  }
+}
+/*@@end*/
+
+/*@@timer:tSpeed:*/
+// calculates next step of speed profile
+on timer tSpeed
+{
+  message SpeedNotify msg;
+  int newSpeed;
+  int oldSpeed;
+
+  // read actual speed
+  oldSpeed = @sysvar::ES::ManualSpeed;
+
+  // reverse modification direction if maximum or
+  // minimum speed reached
+  if (oldSpeed >= 150)
+  {
+    speedChange = 0;
+  }
+  if (oldSpeed <= 0)
+  {
+    speedChange = 1;
+  }
+
+  // modify speed
+  if (speedChange == 0)
+  {
+    newSpeed = oldSpeed - 1;
+  }
+  else
+  {
+    newSpeed = oldSpeed + 1;
+  }
+
+  // set speed to new value	
+  @sysvar::ES::ManualSpeed = newSpeed;
+
+  // send speed notification
+  msg.Speed = newSpeed;
+  output(msg);
+
+  // restart timer
+  if (gEngineStatus) 
+    setTimer(tSpeed, speedTimerDur);
+  else 
+    cancelTimer(tSpeed);
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::IgnitionKeyStatus (0x111):*/
+on message IgnitionKeyStatus
+{
+  message SpeedNotify msg;
+
+  if(this.EngineIsRunning == 1  && gEngineStatus == 0)
+  {
+    cancelTimer(tSpeed);
+    gEngineStatus = 1; 
+    setTimer(tSpeed,speedTimerDur); 
+    @sysvar::ES::ManualSpeed = 0;
+    msg.Speed = 0x00;
+    output(msg);
+  }
+  if(this.EngineIsRunning == 0 && gEngineStatus == 1)
+  {
+    cancelTimer(tSpeed);
+    gEngineStatus = 0;
+    @sysvar::ES::ManualSpeed = 0;
+    msg.Speed = 0x00;
+    output(msg);
+  }
+}
+/*@@end*/
+

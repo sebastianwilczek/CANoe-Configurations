@@ -1,0 +1,246 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "General.cin"
+  #include "Avb.cin"
+  #include "Media.cin"
+}
+
+variables
+{
+  const dword kRecorder_MaxBufferSize = 1024 * 32;
+  
+  dword gRecorder_ListenerWildcardHandle,
+        gRecorder_ListenerHandle,
+        gRecorder_SinkWriterHandle,
+        gRecorder_MediaTypeHandle;
+  
+  byte gRecorder_Buffer[kRecorder_MaxBufferSize];
+}
+
+on sysvar Recorder::FilePath
+{
+  long ret;
+  char filePath[1024];
+
+  ret = SysGetVariableString("Recorder", "FilePath", filePath, elCount(filePath));
+
+  if (Avb_StopIfError(ret, "SysGetVariableString") != 0)
+  {
+    return;
+  }
+  
+  ret = MediaReleaseSinkWriter(gRecorder_SinkWriterHandle);
+    
+  if (Media_StopIfError(ret, "MediaReleaseSinkWriter") != 0)
+  {
+    return;
+  }
+  
+  gRecorder_MediaTypeHandle = kMedia_InvalidHandle;
+  
+  gRecorder_SinkWriterHandle = MediaCreateSinkWriterFromUrl(filePath);
+    
+  if (Media_CheckHandleAndStopIfError(gRecorder_SinkWriterHandle, "MediaCreateSinkWriterFromUrl") != 0)
+  {
+    return;
+  }
+}
+
+on preStop
+{
+  long ret;
+    
+  if (gRecorder_ListenerHandle != kAvb_InvalidHandle)
+  {
+    ret = AvbCloseListener(gRecorder_ListenerHandle);
+    
+    if (Avb_StopIfError(ret, "AvbCloseTalker") != 0)
+    {
+      return;
+    }
+  
+    gRecorder_ListenerHandle = kAvb_InvalidHandle;
+  }
+     
+  if (gRecorder_ListenerWildcardHandle != kAvb_InvalidHandle)
+  {
+    ret = AvbCloseListener(gRecorder_ListenerWildcardHandle);
+    
+    if (Avb_StopIfError(ret, "AvbCloseTalker") != 0)
+    {
+      return;
+    }
+  
+    gRecorder_ListenerWildcardHandle = kAvb_InvalidHandle;
+  }
+  
+  if (gRecorder_SinkWriterHandle != kMedia_InvalidHandle)
+  {
+    ret = MediaReleaseSinkWriter(gRecorder_SinkWriterHandle);
+    
+    if (Media_StopIfError(ret, "MediaReleaseSinkWriter") != 0)
+    {
+      return;
+    }
+  }
+}
+
+on start
+{
+  long ret;
+  char filePath[1024];
+
+  ret = SysGetVariableString("Recorder", "FilePath", filePath, elCount(filePath));
+
+  if (Avb_StopIfError(ret, "SysGetVariableString") != 0)
+  {
+    return;
+  }
+    
+  gRecorder_SinkWriterHandle = MediaCreateSinkWriterFromUrl(filePath);
+    
+  if (Media_CheckHandleAndStopIfError(gRecorder_SinkWriterHandle, "MediaCreateSinkWriterFromUrl") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbSetVerbosity(kAvb_VerbosityWarning);
+  
+  if (Avb_StopIfError(ret, "AvbSetVerbosity") != 0)
+  {
+    return;
+  }
+    
+  ret = AvbSetProperty("StreamReservation", 0);
+    
+  if (Avb_StopIfError(ret, "AvbSetProperty") != 0)
+  {
+    return;
+  }
+  
+  gRecorder_ListenerWildcardHandle = AvbOpenListener();
+    
+  if (Avb_CheckHandleAndStopIfError(gRecorder_ListenerWildcardHandle, "AvbOpenListener") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbListen(gRecorder_ListenerWildcardHandle, "OnAvbListen");
+  
+  if (Avb_StopIfError(ret, "AvbListen") != 0)
+  {
+    return;
+  }
+}
+
+void OnAvbListen(dword listenerHandle, dword result)
+{
+  long ret;
+  dword handle, streamUniqueId;
+  
+  if (result != kAvb_OK)
+  {
+    Avb_WriteErrorAndStop(result, "OnAvbListen");
+    return;
+  }
+  
+  handle = AvbAccept(listenerHandle);
+  
+  if (Avb_CheckHandleAndStopIfError(handle, "AvbAccept") != 0)
+  {
+    return;
+  }
+    
+  ret = AvbGetStreamUniqueId(handle, streamUniqueId);
+  
+  if (Avb_StopIfError(ret, "AvbGetStreamUniqueId") != 0)
+  {
+    return;
+  }
+    
+  if (streamUniqueId != 0xFF)
+  {
+    ret = AvbCloseListener(handle);
+    
+    if (Avb_StopIfError(ret, "AvbCloseListener") != 0)
+    {
+      return;
+    }
+    
+    return;
+  }
+  
+  gRecorder_ListenerHandle = handle; 
+  
+  Recorder_Receive();
+}
+
+void OnAvbReceive(dword listenerHandle, dword result, byte buffer[], dword length)
+{
+  long ret;
+  int64 startTimeNs;
+  byte i;
+  
+  if (result == kAvb_InsufficientBuffer)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: insufficient buffer, data truncated...", result);
+  }
+  else if (result == kAvb_PresentationTimeLessThanPacketTime)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: presentation time is less than global PTP time at packet reception...", result);
+  }
+  else if (result != 0)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: result is %d", result);
+    Stop();
+    return;
+  }
+  
+  if (gRecorder_MediaTypeHandle == kMedia_InvalidHandle)
+  {
+    gRecorder_MediaTypeHandle = AvbGetMediaType(listenerHandle);
+    
+    if (Avb_CheckHandleAndStopIfError(gRecorder_MediaTypeHandle, "AvbGetMediaType") != 0)
+    {
+      return;
+    }
+    
+    ret = MediaSetMediaType(gRecorder_SinkWriterHandle, 0, gRecorder_MediaTypeHandle);
+     
+    if (Media_StopIfError(ret, "MediaSetMediaType") != 0)
+    {
+      return;
+    }
+    
+    startTimeNs = timeNowNs();
+  }
+    
+  ret = MediaWrite(gRecorder_SinkWriterHandle, 0, timeNowNs() - startTimeNs, buffer, length);
+    
+  if (Media_StopIfError(ret, "MediaWrite") != 0)
+  {
+    return;
+  }
+  
+  Recorder_Receive();
+}
+
+void Recorder_Receive()
+{
+  dword ret, length;
+  
+  length = elCount(gRecorder_Buffer);
+  
+  ret = AvbReceive(gRecorder_ListenerHandle, gRecorder_Buffer, length, "OnAvbReceive");
+  
+  if (Avb_StopIfError(ret, "AvbReceive") != kAvb_OK)
+  {
+    return;
+  }
+  
+  if (ret != kAvb_IoPending)
+  {
+    OnAvbReceive(gRecorder_ListenerHandle, ret, gRecorder_Buffer, length);
+  }
+}

@@ -1,0 +1,70 @@
+/*@!Encoding:1252*/
+variables
+{
+  long gTPHandle;
+  int  gEcuNumber;
+}  
+
+
+on start
+{
+  // Init OSEK TP
+  gTPHandle = CanTpCreateConnection(1); // extended mode
+  
+  if( gECU[0] == 'C')
+    gEcuNumber = 0; // Console
+  else
+    gEcuNumber = 1; // Dashboard
+  
+  CanTpSetEcuAddress( gTPHandle, 0x04 + gEcuNumber);
+  CanTpSetTargetAddress( gTPHandle, 0x05 - gEcuNumber);
+}
+
+CanTp_SendCon(long connHandle, dword count)
+{
+  writeDbgLevel(2,"%NODE_NAME%: Send confirmation for %d byte (Network '%NETWORK_NAME%', Channel %CHANNEL%)", count);
+}
+
+void CanTp_ReceptionInd( long connHandle, byte data[])
+{
+  int i;
+
+  // Print message to write window 
+  writeDbgLevel(2,"%NODE_NAME%: data indication called, RxCount = %d  (Network '%NETWORK_NAME%', Channel %CHANNEL%)", elcount(data));
+  
+  // Get received data 
+  if( gEcuNumber == 0)
+    SysSetVariableData(sysvar::ComfortBus::TPConsoleMessage, data, elcount(data));
+  else
+  {
+    char rxString[200];
+    dword length;
+    length = _min( elcount(data), elcount( rxString) - 1);
+    memcpy( rxString, data, length);
+    rxString[length] = '\0'; 
+    SysSetVariableString(sysvar::ComfortBus::TPDashboardMessageDisplay, rxString);
+  }
+}
+
+void CanTp_ErrorInd( long connHandle, long error)
+{
+  writeDbgLevel(1,"%NODE_NAME%: error indication error number= %d  (Network '%NETWORK_NAME%', Channel %CHANNEL%)", error);
+}
+
+SendTPMessage()
+{
+  long size;
+  BYTE buffer[4096];
+       
+  // Get the data and fill the buffer
+  if( gEcuNumber == 0)
+    SysGetVariableData(sysvar::ComfortBus::TPConsoleMessage, buffer, size);
+  else
+    SysGetVariableData(sysvar::ComfortBus::TPDashboardMessageDisplay, buffer, size);
+ 
+   // Transmit the data
+  writeDbgLevel(2,"%s: CanTpSendData %d Bytes", gECU, size);
+  
+  CanTpSendData(gTPHandle, buffer, size);
+}
+

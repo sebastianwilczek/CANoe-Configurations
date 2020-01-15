@@ -1,0 +1,782 @@
+/*@!Encoding:1252*/
+/**************************************************************************************************
+ Description: This file contains an example how to use the serial bit mask analysis together with a 
+              duty cycle measurement for the Option.Scope.
+ -------------------------------------------------------------------------------------------------
+      C O P Y R I G H T
+ -------------------------------------------------------------------------------------------------
+  Copyright (c) 2018 by Vector Informatik GmbH. All rights reserved.
+
+  This software is copyright protected and proprietary to Vector Informatik GmbH.
+  Vector Informatik GmbH grants to you only those rights as set out in the license conditions.
+  All other rights remain with Vector Informatik GmbH.
+
+  REMOVAL OF THESE COMMENTS IS A VIOLATION OF THE COPYRIGHT AGREEMENT.
+ *************************************************************************************************/
+  
+
+includes
+{
+  #include "scope\ScopeBitAnalyse.cin"
+  #include "..\Nodes\ScopeUtils.cin"
+  #include "..\CAPL\DisturbanceHelper.cin"
+}
+
+variables
+{
+  linFrame * msg;
+  
+  ScopeBitMaskPolygon          polygonMask;
+  ScopeAnalyseHandle           intHandle;
+  
+  
+  char testStepName[255];
+  
+  long  fileSuffix = 0;
+  int   violationsCount;
+  
+  struct LINBit
+  {
+    int64 BitTime;
+    int   Offset;
+    int   FieldType;
+  };
+  
+  int64  ByteBitLengths[10];
+  
+}
+
+void GetFieldName(int field, char name[])
+{
+  switch(field)
+  {
+  	case eCAPLScopeDataField_LIN_Header_SyncBreak:
+    {
+      snprintf(name, elCount(name), "Header Sync Break");
+      break;
+    }
+    case eCAPLScopeDataField_LIN_Header_SyncBreakDelimiter:
+    {
+      snprintf(name, elCount(name), "Header Sync Break Delimiter");
+      break;
+    }
+    case eCAPLScopeDataField_LIN_Header_SyncFieldByte:
+    {
+      snprintf(name, elCount(name), "Header Sync Field Byte");
+      break;
+    }
+    case eCAPLScopeDataField_LIN_Header_HeaderInterbyte:
+    {
+      snprintf(name, elCount(name), "Header Interbyte");
+      break;
+    }
+    case eCAPLScopeDataField_LIN_Header_ProtectedIDByte:
+    {
+      snprintf(name, elCount(name), "Header Protected ID Byte");
+      break;
+    }
+    case eCAPLScopeDataField_LIN_Response_Space:
+    {
+      snprintf(name, elCount(name), "Response Space");
+      break;
+    }
+    case eCAPLScopeDataField_LIN_Response_DataByte_1:
+    {
+      snprintf(name, elCount(name), "Response Data Byte 1");
+      break;
+    }
+    case eCAPLScopeDataField_LIN_Response_DataByte_2:
+    {
+      snprintf(name, elCount(name), "Response Data Byte 2");
+      break;
+    }
+    case eCAPLScopeDataField_LIN_Response_DataByte_3:
+    {
+      snprintf(name, elCount(name), "Response Data Byte 3");
+      break;
+    }
+    case eCAPLScopeDataField_LIN_Response_DataByte_4:
+    {
+      snprintf(name, elCount(name), "Response Data Byte 4");
+      break;
+    }
+    case eCAPLScopeDataField_LIN_Response_DataByte_5:
+    {
+      snprintf(name, elCount(name), "Response Data Byte 5");
+      break;
+    }
+    case eCAPLScopeDataField_LIN_Response_DataByte_6:
+    {
+      snprintf(name, elCount(name), "Response Data Byte 6");
+      break;
+    }
+    case eCAPLScopeDataField_LIN_Response_DataByte_7:
+    {
+      snprintf(name, elCount(name), "Response Data Byte 7");
+      break;
+    }
+    case eCAPLScopeDataField_LIN_Response_DataByte_8:
+    {
+      snprintf(name, elCount(name), "Response Data Byte 8");
+      break;
+    }
+    case eCAPLScopeDataField_LIN_Response_CheckSumByte:
+    {
+      snprintf(name, elCount(name), "Response Check Sum Byte");
+      break;
+    }
+  }
+}
+
+//*************************************************************************************************
+//  Function name : WriteViolationDataToToTestReport
+//  ------------------------------------------------------------------------------------------------
+//  Description   : This function write the violation Data to the test report.
+//  ------------------------------------------------------------------------------------------------
+//  Parameter     : violationData  the violation data of the duty cycle measurement
+//                  result         1 - teststep passed because violation data was expected, 0 otherwise  
+//  ------------------------------------------------------------------------------------------------
+//  Returncode    : none
+//**************************************************************************************************
+void WriteViolationDataToToTestReport(ScopeSerialBitAnalysisViolationData violationData, int result)
+{
+  char resultText[2048];
+  char fieldName[128];
+  
+  
+  GetFieldName(violationData.BitField, fieldName);
+  
+  snprintf(resultText, elCount(resultText),  
+                      "--------------------------\n"
+                      "Scope Tolerances:\n"
+                      "--------------------------\n"
+                      "SampleTolerance: +- %.3f ns\n"
+                      "VoltageTolerance: +- %.3f mV\n"
+                      "--------------------------\n"
+                      "--------------------------\n"
+                      "Bit-Info:\n"
+                      "--------------------------\n"
+                      "BitField = %s (%d)\n"
+                      "BitNo.   = %d\n"
+                      "BitLevel = %d\n"
+                      "SamplePointValue = %d mV\n"
+                      "--------------------------\n"
+                      "Disturbance Info:\n"
+                      "--------------------------\n"
+                      "DisturbanceStart = %d ns\n"
+                      "DisturbanceStart Voltage = %d mV\n"
+                      "DisturbanceEnd   = %d ns\n"
+                      "DisturbanceEnd Voltage = %d mV\n", violationData.ScopeSamplePeriod, 
+                                                     violationData.ScopeVoltageTolerance, 
+                                                     fieldName, violationData.BitField, 
+                                                     violationData.BitNo, 
+                                                     violationData.BitLevel,
+                                                     violationData.SamplePointVoltage, 
+                                                     violationData.DisturbanceTimeStart, 
+                                                     violationData.DisturbanceStartVoltage, 
+                                                     violationData.DisturbanceTimeEnd,
+                                                     violationData.DisturbanceEndVoltage);
+  if(result == 1)
+  {
+    testStepPass("Bit Mask Violation", resultText);
+  }
+  else
+  {
+    testStepFail("Bit Mask Violation", resultText);
+  }
+}
+
+
+//*************************************************************************************************
+//  Function name : WriteDutyCycleParamsToTestReport
+//  ------------------------------------------------------------------------------------------------
+//  Description   : This function write the duty cycle data to the tesr report.
+//  ------------------------------------------------------------------------------------------------
+//  Parameter     : dutyCycleData     - the data of the duty cycle measurement
+//                  defDutyCycle      - the definition of the duty cycle 
+//                  testStepName      - the name of the test step
+//                  dutyCycleName     - the name of the duty cycle test
+//                  parameterName     - the name of the parameter measured
+//                  dutyCycleResult   - the measured duty cycle
+//                  deltaToLimitValue - the delta to the limit value
+//                  bitTime           - the bit time of the bit
+//                  limitValue        - the limit values (min, typ, max)
+//                  useMinValues      - 0 - measurement was for max values , otherwise measurement was for min values
+//                  result            - the reuslt of the measurement
+//                  expResult         - the expected result
+//  ------------------------------------------------------------------------------------------------
+//  Returncode    : none
+//**************************************************************************************************
+void WriteDutyCycleParamsToTestReport(ScopeBitDataDutyCycle dutyCycleData, 
+                                      ScopeDutyCycleDefinition defDutyCycle,
+                                      char   testStepName[], char dutyCycleName[], char parameterName[],
+                                      double dutyCycleResult,
+                                      double deltaToLimitValue,
+                                      double bitTime,
+                                      double limitValue[],
+                                      int    useMinValues,
+                                      long   TBusValue,
+                                      int    result,
+                                      int    expResult)
+{
+  char resultText[1024];
+  char minTypMaxValues[1024];
+  char valueString[64];
+  char minMaxThresholdString[4];
+  char minMaxTimeString[4];  
+  char fieldName[128];
+  if(useMinValues == 1)
+  {
+    strncpy(minMaxThresholdString, "min", elCount(minMaxThresholdString));
+    if(dutyCycleData.BitLevel ==sysvar::Scope::BitAnalysis::DutyCycleResult::BitLevel::Recessive)
+    {
+      strncpy(minMaxTimeString, "max", elCount(minMaxTimeString));
+    }
+    else
+    {
+      strncpy(minMaxTimeString, "min", elCount(minMaxTimeString));
+    }
+    
+  }
+  else
+  {
+    strncpy(minMaxThresholdString, "max", elCount(minMaxThresholdString));
+    if(dutyCycleData.BitLevel ==sysvar::Scope::BitAnalysis::DutyCycleResult::BitLevel::Recessive)
+    {
+      strncpy(minMaxTimeString, "min", elCount(minMaxTimeString));
+    }
+    else
+    {
+      strncpy(minMaxTimeString, "max", elCount(minMaxTimeString));
+    }
+  }
+  
+  if(limitValue[0] > 0)
+  {
+    snprintf(minTypMaxValues, elCount(minTypMaxValues), "min. = %.3f \n", limitValue[0]);
+  }
+  else
+  {
+    snprintf(minTypMaxValues, elCount(minTypMaxValues), "%s", "min. = - \n");
+  }
+  
+  if(limitValue[1] > 0)
+  {
+    snprintf(valueString, elCount(valueString), "typ. = %.3f \n", limitValue[1]);
+    strncat(minTypMaxValues, valueString, elCount(valueString));
+  }
+  else
+  {
+    strncat(minTypMaxValues, "typ. = - \n", elCount(minTypMaxValues));
+  }
+  
+  if(limitValue[2] > 0.0)
+  {
+    snprintf(valueString, elCount(valueString), "max. = %.3f \n", limitValue[2]);
+    strncat(minTypMaxValues, valueString, elCount(valueString));
+  }
+  else
+  {
+    strncat(minTypMaxValues, "max. = - \n", elCount(minTypMaxValues));
+  }
+  
+    
+  
+  
+  GetFieldName(dutyCycleData.BitField, fieldName);
+  
+  snprintf(resultText, elCount(resultText), "%s\n" 
+                      "--------------------------\n"
+                      "Scope Tolerances:\n"
+                      "--------------------------\n"
+                      "SampleTolerance: +- %.3f ns\n"
+                      "VoltageTolerance: +- %.3f mV\n"
+                      "--------------------------\n"
+                      "--------------------------\n"
+                      "Bit-Info:\n"
+                      "--------------------------\n"
+                      "BitField = %s (%d)\n"
+                      "BitNo.   = %d\n"
+                      "BitLevel = %d\n"
+                      "SamplePointValue = %d mV\n"
+                      "--------------------------\n"
+                      "%s"
+                      "tBit = %.2fµs;\n"
+                      "THRec(%s) = 0.744 x VSUP = %d mV\n"
+                      "THDom(%s) = 0.581 x VSUP = %d mV\n"
+                      "VSUP = %d mV (7.0V...18V)\n" 
+                      "%s = %s(%s) / (2 x tBit)"
+                      " = %d ns / ( 2 * %.2f ns) = %.3f\n" 
+                      "deltaToLimitValue = %.3f", dutyCycleName, 
+                                                dutyCycleData.ScopeSamplePeriod, 
+                                                dutyCycleData.ScopeVoltageTolerance,  
+                                                fieldName, dutyCycleData.BitField, 
+                                                dutyCycleData.BitNo, 
+                                                dutyCycleData.BitLevel, 
+                                                dutyCycleData.SamplePointVoltage, 
+                                                minTypMaxValues,
+                                                bitTime / 1e3, 
+                                                minMaxThresholdString, 
+                                                useMinValues ? defDutyCycle.THRecMin : defDutyCycle.THRecMax, 
+                                                minMaxThresholdString,
+                                                useMinValues ? defDutyCycle.THDomMin : defDutyCycle.THDomMax, 
+                                                @sysvar::Scope::BitAnalysis::VSupplier, 
+                                                dutyCycleName,
+                                                parameterName,
+                                                minMaxTimeString,
+                                                TBusValue, 
+                                                bitTime, 
+                                                dutyCycleResult, 
+                                                deltaToLimitValue);
+  
+  
+  if(expResult == result)
+  {
+    testStepPass(testStepName, resultText);
+  }
+  else
+  {
+    testStepFail(testStepName, resultText);
+  }
+}
+
+
+//*************************************************************************************************
+//  Function name : CheckAndWriteResultToTestReport
+//  ------------------------------------------------------------------------------------------------
+//  Description   : This function check the duty cycle results and write the data to the report. 
+//  ------------------------------------------------------------------------------------------------
+//  Parameter     : dutyCycleData     - the data of the duty cycle measurement
+//                  defDutyCycle      - the definition of the duty cycle 
+//                  violationData     - the violation data, if violation data was found
+//                  minValue          - the minimum value for the duty cycle
+//                  maxValue          - the maximum value for the duty cycle
+//  ------------------------------------------------------------------------------------------------
+//  Returncode    : none
+//**************************************************************************************************
+void CheckAndWriteResultToTestReport(ScopeBitDataDutyCycle dutyCycleData, ScopeDutyCycleDefinition defDutyCycle, ScopeSerialBitAnalysisViolationData violationData, double minValue, double maxValue)
+{
+  double d1Result;
+  double d2Result;
+  double bitTime;
+  char parameterName[32];
+  double limitValues[3];
+  bitTime = 1e9 / msg.HeaderBaudrate;
+  d1Result = dutyCycleData.TBusMin / ( 2* bitTime);
+        
+  if(dutyCycleData.BitLevel == 1)
+  {
+    snprintf(parameterName, 32, "tBus_rec");
+  }
+  else
+  {
+    snprintf(parameterName, 32, "tBus_dom");
+  }
+  
+
+  if((violationsCount > 0 && (violationData.DisturbanceTimeStart != 0 || violationData.DisturbanceTimeEnd != 0)))
+  {
+    WriteViolationDataToToTestReport(violationData, 0);
+  }
+  
+
+  limitValues[0] = minValue;
+  limitValues[1] = 0;
+  limitValues[2] = 0;
+ 
+  
+  
+  WriteDutyCycleParamsToTestReport(dutyCycleData, 
+                                   defDutyCycle, 
+                                   "Param27", "D1 (Duty Cycle 1)", parameterName,
+                                   d1Result,
+                                   abs(d1Result - minValue), 
+                                   bitTime,
+                                   limitValues, 
+                                   dutyCycleData.BitLevel == sysvar::Scope::BitAnalysis::DutyCycleResult::BitLevel::Recessive ? 0 : 1, 
+                                   dutyCycleData.TBusMin,
+                                   (d1Result >= minValue ? 1 : 0),
+                                   1); 
+   
+  limitValues[0] = 0;
+  limitValues[1] = 0;
+  limitValues[2] = maxValue;
+  
+ 
+ 
+  
+  d2Result = dutyCycleData.TBusMax / ( 2* bitTime);
+  
+  
+  WriteDutyCycleParamsToTestReport(dutyCycleData, 
+                                   defDutyCycle, 
+                                   "Param28", "D2 (Duty Cycle 2)", parameterName,
+                                   d2Result,
+                                   abs(d2Result - maxValue), 
+                                   bitTime,
+                                   limitValues, 
+                                   dutyCycleData.BitLevel == sysvar::Scope::BitAnalysis::DutyCycleResult::BitLevel::Recessive ? 1 : 0, 
+                                   dutyCycleData.TBusMax,
+                                   (d2Result <= maxValue ? 1 : 0),
+                                   1); 
+  
+  if(dutyCycleData.BitLevel == @sysvar::Scope::BitAnalysis::DutyCycleResult::BitLevel::Recessive)
+  {
+    @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::MaxDutyCycleRecMeasured = d2Result;
+    @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::MinDutyCycleRecMeasured = d1Result;
+    @sysvar::Scope::BitAnalysis::DutyCycleResult::TBusMax = dutyCycleData.TBusMax;
+    @sysvar::Scope::BitAnalysis::DutyCycleResult::TBusMin = dutyCycleData.TBusMin;
+  }
+  else
+  {
+    @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::MaxDutyCycleDomMeasured = d2Result;
+    @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::MinDutyCycleDomMeasured = d1Result;
+    @sysvar::Scope::BitAnalysis::DutyCycleResult::TBusMaxDom = dutyCycleData.TBusMax;
+    @sysvar::Scope::BitAnalysis::DutyCycleResult::TBusMinDom = dutyCycleData.TBusMin;
+  }
+}
+
+//*************************************************************************************************
+//  Function name : ConfigureBitMask
+//  ------------------------------------------------------------------------------------------------
+//  Description   : This function create a duty cycle bit mask, which is used for analysis.
+//  ------------------------------------------------------------------------------------------------
+//  Parameter     : voltageTolerance  - tolerance of the scope probe
+//  ------------------------------------------------------------------------------------------------
+//  Returncode    : none
+//**************************************************************************************************
+void ConfigureBitMask(int voltageTolerance)
+{
+     //-----------------------------------------
+    //dominant bit mask
+    //-----------------------------------------
+    polygonMask.data_0_Mask[0] = (@sysvar::Scope::BitAnalysis::VSupplier + voltageTolerance) * @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::THDomMinFactor;
+    polygonMask.data_0_Mask[1] = ((@sysvar::Scope::BitAnalysis::VSupplier + voltageTolerance) * @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::ThDomMaxFactor + (@sysvar::Scope::BitAnalysis::VSupplier + voltageTolerance) * @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::THDomMinFactor) / 2;
+    polygonMask.data_0_Mask[2] = (@sysvar::Scope::BitAnalysis::VSupplier  + voltageTolerance) * @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::ThDomMaxFactor;
+    //-----------------------------------------
+    
+    //-----------------------------------------
+    //recessive bit mask
+    //-----------------------------------------
+    polygonMask.data_1_Mask[0] = (@sysvar::Scope::BitAnalysis::VSupplier - voltageTolerance) * @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::ThRecMaxFactor;
+    polygonMask.data_1_Mask[1] = (@sysvar::Scope::BitAnalysis::VSupplier + voltageTolerance) * @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::ThDomMaxFactor;
+    polygonMask.data_1_Mask[2] = 0;
+    //-----------------------------------------
+    
+    polygonMask.timeOffset[0]  = 0;
+    polygonMask.timeOffset[1]  = @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::MinDutyCycleValue / 0.5 * 100;
+    polygonMask.timeOffset[2]  = (1 - @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::MaxDutyCycleValue) / 0.5 * 100;
+    
+    polygonMask.maskPointCount = 3;
+}
+
+//*************************************************************************************************
+//  Function name : AddToTestReport
+//  ------------------------------------------------------------------------------------------------
+//  Description   : This function add duty cycle measurments to report, if a analysis was executed. 
+//  ------------------------------------------------------------------------------------------------
+//  Parameter     : field        - field should be added to the report
+//                  bitNumber    - the bit within the field
+//                  defDutyCycle - the definition of the duty cycle 
+//  ------------------------------------------------------------------------------------------------
+//  Returncode    : none
+//**************************************************************************************************
+void AddToTestReport(int field, int bitNumber, ScopeDutyCycleDefinition  defDutyCycle)
+{
+  ScopeBitDataDutyCycle               dutyCycleData;
+  ScopeSerialBitAnalysisViolationData violationDutyCycles;
+  
+  testWaitScopeGetSerialBitAnalysisData(intHandle, field, bitNumber, defDutyCycle, dutyCycleData);
+        
+  //Show bit mask 
+  CheckStatusInternal(testWaitScopeShowMask(intHandle, dutyCycleData.BitField, dutyCycleData.BitNo, 3), "testWaitScopeShowMask");
+        
+  //Add picture to test report
+  if(dutyCycleData.BitLevel == sysvar::Scope::BitAnalysis::DutyCycleResult::BitLevel::Dominant)
+  {
+    testReportAddWindowCapture("Scope", "", "Show Dominant Duty Cycle Result");  
+  }
+  else
+  {
+    testReportAddWindowCapture("Scope", "", "Show Recessive Duty Cycle Result");  
+  }
+  
+        
+  //Write result to test report
+  WriteDataToReport(dutyCycleData, defDutyCycle, violationDutyCycles);
+ 
+  
+}
+
+//*************************************************************************************************
+//  Function name : AddViolationsToTestReport
+//  ------------------------------------------------------------------------------------------------
+//  Description   : This function add all violations to the test report, if violations exists. 
+//  ------------------------------------------------------------------------------------------------
+//  Parameter     : defDutyCycle - the definition of the duty cycle 
+//  ------------------------------------------------------------------------------------------------
+//  Returncode    : none
+//**************************************************************************************************
+void AddViolationsToTestReport(ScopeDutyCycleDefinition defDutyCycle)
+{
+  int                                 currViolationIndex;
+  ScopeBitDataDutyCycle               dutyCycleData;
+  ScopeSerialBitAnalysisViolationData violationDutyCycles;
+  char                                fileName[1024];
+  
+  for(currViolationIndex = 0; currViolationIndex < violationsCount;++currViolationIndex)
+  {
+    //Get violation data
+    testWaitScopeGetSerialBitAnalysisViolationData(intHandle, currViolationIndex, 
+                                                   defDutyCycle, dutyCycleData, violationDutyCycles);
+   
+    //Show bit mask 
+    CheckStatusInternal(testWaitScopeShowMask(intHandle, dutyCycleData.BitField, dutyCycleData.BitNo, 3), "testWaitScopeShowMask");
+   
+    //Add picture to test report
+    testReportAddWindowCapture("Scope", "", "Show Bit mask of LIN message");
+   
+    //Write result to test report
+    
+    write("violationDutyCycles =%f", violationDutyCycles.ScopeSamplePeriod);
+    
+    WriteDataToReport(dutyCycleData, defDutyCycle, violationDutyCycles);
+    testWaitForTimeout(100);
+    testReportAddWindowCapture("DutyCycleConfigPanel1", "", "Measured Duty Cycle Values");    
+  }
+ 
+  snprintf(fileName, 1024, "ExportData%d.csfx", @sysvar::FileSuffix);
+  testWaitScopeExportData(fileName);
+  ++@sysvar::FileSuffix;
+  testStep("Bit Mask Violation", "File for error is %s", fileName); 
+ 
+}
+
+//*************************************************************************************************
+//  Function name : WriteDataToReport
+//  ------------------------------------------------------------------------------------------------
+//  Description   : This function write violation and/or duty cycle data to test report
+//  ------------------------------------------------------------------------------------------------
+//  Parameter     : defDutyCycle - the definition of the duty cycle 
+//  ------------------------------------------------------------------------------------------------
+//  Returncode    : none
+//**************************************************************************************************
+void WriteDataToReport(ScopeBitDataDutyCycle dutyCycleData,ScopeDutyCycleDefinition defDutyCycle, ScopeSerialBitAnalysisViolationData violationDutyCycles)
+{
+   if(dutyCycleData.BitLevel == @sysvar::Scope::BitAnalysis::DutyCycleResult::BitLevel::Dominant)
+   {
+     CheckAndWriteResultToTestReport(dutyCycleData, 
+                                     defDutyCycle, 
+                                     violationDutyCycles, 
+                                     1 - @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::MaxDutyCycleValue, 
+                                     1 - @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::MinDutyCycleValue);
+   }
+   else
+   {
+     CheckAndWriteResultToTestReport(dutyCycleData, 
+                                     defDutyCycle,
+                                     violationDutyCycles, 
+                                     @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::MinDutyCycleValue, 
+                                     @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::MaxDutyCycleValue);
+   }
+}
+
+
+//*************************************************************************************************
+//  Function name : WriteDataToReport
+//  ------------------------------------------------------------------------------------------------
+//  Description   : This function write violation and/or duty cycle data to test report
+//  ------------------------------------------------------------------------------------------------
+//  Parameter     : -
+//  ------------------------------------------------------------------------------------------------
+//  Returncode    : 1 - scope connected and scope has triggered, otherwise < 0
+//**************************************************************************************************
+int ProvideScopeData(dword waitForMessageId)
+{
+  int res;
+  snprintf(testStepName, 255, "Establish scope connection");
+  res = 1;
+  
+  if(DoScopeConnect() == 1)
+  {
+    snprintf(testStepName, 255, "Wait for message");
+    
+    if(waitForMessageId >= 0)
+    {
+      testWaitForMessage(waitForMessageId, 2000);
+      testGetWaitEventMsgData(msg);
+    }
+    else
+    {
+      testWaitForMessage(2000);
+      testGetWaitEventMsgData(msg);
+    }
+    
+    snprintf(testStepName, 255, "Trigger scope"); 
+    mResult = DoScopeTrigger();
+    
+    if (mResult != 1)
+    {
+       res = -1;
+    }
+  }
+  else
+  {
+    res = -1;
+  }
+    
+  return res;    
+}
+
+//*************************************************************************************************
+//  Function name : DoDutyCycleMeasurment
+//  ------------------------------------------------------------------------------------------------
+//  Description   : Execute a serial bit mask analysis and write the duty cycle results.
+//  ------------------------------------------------------------------------------------------------
+//  Parameter     : -
+//  ------------------------------------------------------------------------------------------------
+//  Returncode    : -
+//**************************************************************************************************
+testcase DoDutyCycleMeasurment()
+{
+  if(ProvideScopeData(-1) == 1)
+  {
+    CheckStatusInternal(DoDutyCycleMeasurementInternal(), "DoDutyCycleMeasurement");
+  }
+}
+
+int DoDutyCycleMeasurementInternal()
+{  
+    int result;
+    ScopeDutyCycleDefinition  defDutyCycle;
+    intHandle.Handle = 999;
+  
+    ConfigureBitMask(400);
+    
+    //----------------------------------------------------------------------------------------------------------------------------------------
+    //Start serial bit mask analysis
+    //----------------------------------------------------------------------------------------------------------------------------------------
+    violationsCount = testWaitScopePerformSerialBitAnalysis(msg, 0, @sysvar::Scope::BitAnalysis::AnalyseStartField, 
+                                                                    @sysvar::Scope::BitAnalysis::AnalyseStartField, 
+                                                                    polygonMask,  
+                                                                    @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::THDomMinVoltageValue, 
+                                                                    @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::ThRecMaxVoltageValue, 
+                                                                    intHandle);
+    //----------------------------------------------------------------------------------------------------------------------------------------
+    
+    if(violationsCount < 0) //error
+    {
+      result = violationsCount;
+    }
+    else
+    {
+      result = CheckStatusInternal(testWaitForScopeFitData(msg, eCAPLScopeDataField_LIN_FRAME, 
+                                                          eCAPLScopeDataField_LIN_FRAME, 52000, 52000), "testWaitForScopeFitData");
+      if(result == 1)
+      {
+        testReportAddWindowCapture("Scope", "", "LIN frame used for analysis:");
+        //--------------------------------------------------------------------------------------------------------------------------------
+        //Set duty cycle definition
+        //--------------------------------------------------------------------------------------------------------------------------------
+        defDutyCycle.THRecMax = @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::ThRecMaxVoltageValue;
+        defDutyCycle.THDomMax = @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::ThDomMaxVoltageValue;
+        defDutyCycle.THRecMin = @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::THRecMinVoltageValue;
+        defDutyCycle.THDomMin = @sysvar::Scope::BitAnalysis::DutyCycleConfiguration::THDomMinVoltageValue;
+        
+        //--------------------------------------------------------------------------------------------------------------------------------
+        //Violations found write to test report
+        //--------------------------------------------------------------------------------------------------------------------------------
+        if(violationsCount > 0)
+        {
+          AddViolationsToTestReport(defDutyCycle);
+        }
+        //--------------------------------------------------------------------------------------------------------------------------------
+        //No violations write cycle data of a defined field
+        //--------------------------------------------------------------------------------------------------------------------------------
+        else
+        {
+          AddToTestReport(@sysvar::Scope::BitAnalysis::AnalyseStartField, 1, defDutyCycle);
+          AddToTestReport(@sysvar::Scope::BitAnalysis::AnalyseStartField, 2, defDutyCycle);
+          testWaitForTimeout(100);
+          testReportAddWindowCapture("DutyCycleConfigPanel1", "Measured Duty Cycle Values", "Show Results Graphical");
+        }
+      }
+    }
+    
+    return result;
+}
+
+
+testcase DoDutyCycleMeasurment_ProvokError()
+{
+ 
+  linFrame 0 frameToSend;
+  int dlc;
+  int byteIndex;
+  long result;
+  int64 bitTimeInNs;
+  int bitIndex;
+  int index;
+  long baudrate;
+  dlc = 5;
+  frameToSend.id = 0x2;
+  
+  frameToSend.dlc = dlc;
+  linChangeDlc(frameToSend.id, frameToSend.dlc-1);
+  
+  Util_BitStream_Initialize();
+  Util_BitStream_AddHeader(13, 2, 0x55, 0, linGetProtectedID(0x2));
+  bitTimeInNs = linBits2Time_ns(1);
+  baudrate = 1e9 / bitTimeInNs;
+  Util_BitStream_SetBaudrate(baudrate);
+  
+  
+  for(byteIndex = 0; byteIndex < dlc-1; ++byteIndex)
+  {
+    frameToSend.byte(byteIndex) = 0x55;
+    
+    for(bitIndex = 0; bitIndex < 10; ++bitIndex)
+    {
+      index = byteIndex * 10 + bitIndex;
+      
+      if(@sysvar::Scope::BitAnalysis::Disturbance::BitLengths[index] == 0)
+      {
+        ByteBitLengths[bitIndex] = linBits2Time_ns(1);
+      }
+      else
+      {
+        ByteBitLengths[bitIndex] =  @sysvar::Scope::BitAnalysis::Disturbance::BitLengths[index];
+      }
+    }
+
+    Util_BitStream_AddLinByte(0x55, 10, ByteBitLengths);
+  }
+  
+  for(bitIndex = 0; bitIndex < 10; ++bitIndex)
+  {
+    index = (dlc-1) * 10 + bitIndex;
+    if(@sysvar::Scope::BitAnalysis::Disturbance::BitLengths[index] == 0)
+    {
+      ByteBitLengths[bitIndex] = linBits2Time_ns(1);
+    }
+    else
+    {
+      ByteBitLengths[bitIndex] =  @sysvar::Scope::BitAnalysis::Disturbance::BitLengths[index];
+    }
+  }
+  
+  Util_BitStream_AddLinByte(linGetChecksum(frameToSend), 10, ByteBitLengths);
+
+  DoScopeConnect();
+  
+  Util_BitStream_VariableTransmit(_True);
+  
+  if(ProvideScopeData(0x2) == 1)
+  {
+    CheckStatusInternal(DoDutyCycleMeasurementInternal(), "DoDutyCycleMeasurement_ProvokeError");
+  }  
+}
+
+
+
+

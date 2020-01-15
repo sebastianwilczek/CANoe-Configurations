@@ -1,0 +1,298 @@
+/*@!Encoding:1252*/
+variables
+{
+  //
+  // GNSSReceiver
+  //
+  // You can use this CAPL programm to set GNSS model positions
+  // which are connected and transmitted
+  //
+  // (c) 2002 Vector Informatik GmbH
+  //
+
+  //
+  // Constants
+  //
+  char kNodeLabel[32] = "GNSSReceiver";   // label of the node (for output to write window)  
+  int  kStateStopped  = 0; // simulation is stopped
+  int  kStateStarted  = 1; // simulation is started  
+  
+  // Models
+  int kModelLine      = 0; // Model line
+  int kModelRect      = 1; // Model rectangle  
+  int kModelMeander   = 2; // Model meander
+
+  // Node
+  char gGNSSReceiverName[8];        // NAME of the node
+  long gGNSSReceiverAddress = 0xfe; // Node address
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // Error constants
+  int kErrorNo       = 0;
+
+  // General global variables
+  int  gDbgLevel        = kDbgInfo; // Set debug level for output to write window0
+}
+
+on start
+{
+  StartUp();
+}
+
+on stopMeasurement
+{
+  ShutDown();
+}
+
+on envVar evCmdSimulationStart
+{
+  if( getValue( evCmdSimulationStart ) == 1 ) {
+    StartSimulation();
+  }
+}
+
+on envVar evCmdSimulationStop
+{
+  if( getValue( evCmdSimulationStop ) == 1 ) {
+    StopSimulation();
+  }
+}
+
+on envVar evCmdSpeedPause
+{
+  if( getValue( evCmdSpeedPause ) == 1 ) {
+    GNSSPauseSpeed();
+  }
+}
+
+AddModelRect()
+{
+  GNSSAddWpRect( getValue( evPRefLat ),
+                 getValue( evPRefLon ), 
+                 getValue( evPRefAlt ), 
+                 getValue( evRectWidth ),
+                 getValue( evRectHeight ),
+                 getValue( evRectRadius ) );
+}
+
+AddModelLine()
+{
+  writeDbgLevel( kDbgInfo, "<%s> evStraightLine = %i", kNodeLabel, getValue( evStraightLine ) );
+  GNSSAddWpLine( getValue( evP1Lat ),
+                 getValue( evP1Lon ), 
+                 getValue( evP1Alt ), 
+                 getValue( evP2Lat ),
+                 getValue( evP2Lon ),
+                 getValue( evP2Alt ),
+                 getValue( evStraightLine ) );
+}
+
+on envVar evSpeed
+{
+  GNSSSetSpeed( getValue( evSpeed ) );
+}
+
+on envVar evCmdSpeedContinue
+{
+  if( getValue( evCmdSpeedContinue ) == 1 ) {
+    GNSSContinueSpeed();
+  }
+}
+
+on preStart
+{
+  setWriteDbgLevel( gDbgLevel );
+}
+
+StartUp()
+{
+  writeDbgLevel( kDbgInfo, "<%s> StartUp", kNodeLabel );
+
+  // init address of this node
+  gGNSSReceiverAddress = GNSSReceiver.NmStationAddress; /* get node address */
+
+  // init deviece name
+  GNSSMakeName( gGNSSReceiverName, 
+                GNSSReceiver.NmJ1939AAC,
+                GNSSReceiver.NmJ1939IndustryGroup,
+                GNSSReceiver.NmJ1939SystemInstance,
+                GNSSReceiver.NmJ1939System,
+                GNSSReceiver.NmJ1939Function,
+                GNSSReceiver.NmJ1939FunctionInstance,
+                GNSSReceiver.NmJ1939ECUInstance,
+                GNSSReceiver.NmJ1939ManufacturerCode,
+                GNSSReceiver.NmJ1939IdentityNumber );
+
+  GNSSStartUp( gGNSSReceiverName, gGNSSReceiverAddress );
+
+  // set speed
+  putValue( evSpeed, 80 );
+
+  // set default line values
+  putValue( evP1Lat, 42.29 );
+  putValue( evP1Lon, -83.29 ); 
+  putValue( evP1Alt, 100 );
+  putValue( evP2Lat, 42.29 );
+  putValue( evP2Lon, 83.33 );
+  putValue( evP2Alt, 120 );
+
+  // set default rectangle/meander values
+  putValue( evPRefLat, 42.29 );
+  putValue( evPRefLon, -83.29 ); 
+  putValue( evPRefAlt, 100 );
+  putValue( evRectWidth, 50 );
+  putValue( evRectHeight, 200 );
+  putValue( evRectRadius, 20 );
+  putValue( evNumOfLoops, 5 ); 
+
+  InitializePGs();
+}
+
+ShutDown()
+{
+  GNSSShutDown();
+}
+
+StartSimulation()
+{
+  if( GNSSStartSimulation( 0 ) == 0 ) {
+    putValue( evSimulationState, kStateStarted );
+  }
+}
+
+StopSimulation()
+{
+  if( GNSSStopSimulation() == 0 ) {
+    putValue( evSimulationState, kStateStopped );
+  }
+}
+
+AddModelMeander()
+{
+  GNSSAddWpMeander( getValue( evPRefLat ),
+                    getValue( evPRefLon ), 
+                    getValue( evPRefAlt ), 
+                    getValue( evRectWidth ),
+                    getValue( evRectHeight ),
+                    getValue( evRectRadius ),
+                    getValue( evNumOfLoops ) );
+}
+
+on envVar evCmdRemoveWaypoints
+{
+  if( getValue( evCmdRemoveWaypoints ) == 1 ) {
+    GNSSRemoveWp();
+  }
+}
+
+//
+// Error indication
+//
+void GNSSAppErrorIndication( long errorClass, long errorNumber, long addCode)
+{
+  char strErrClass[32];
+  char strErrInfo[64];
+
+  switch(errorClass) {
+    case 1: snprintf( strErrClass, elCount(strErrClass), "TimeOut" ); break;
+    case 2: snprintf( strErrClass, elCount(strErrClass), "AddressClaiming" ); break;
+    case 3: snprintf( strErrClass, elCount(strErrClass), "CAN Error" ); break;
+    case 4: snprintf( strErrClass, elCount(strErrClass), "System Error" ); break;
+	case 5: snprintf( strErrClass, elCount(strErrClass), "Transport Protocol Error Error" ); break;
+  }
+
+  switch( errorNumber ) {
+    case 0x1: snprintf( strErrInfo, elCount(strErrInfo), "cts error" ); break;
+    case 0x2: snprintf( strErrInfo, elCount(strErrInfo), "peer to peer data timeout" ); break;
+    case 0x3: snprintf( strErrInfo, elCount(strErrInfo), "BAM data timeout" ); break;
+    case 0x4: snprintf( strErrInfo, elCount(strErrInfo), "acknowledge timeout" ); break;
+	case 0x10: snprintf( strErrInfo, elCount(strErrInfo), "lost address claiming or received address claim with higher priority" ); break;
+    case 0x15: snprintf( strErrInfo, elCount(strErrInfo), "init error: node name detected two times" ); break;
+    case 0x17: snprintf( strErrInfo, elCount(strErrInfo), "init error: node address detected two times" ); break;
+    case 0x30: snprintf( strErrInfo, elCount(strErrInfo), "exeption while choosing protokoll BAM or CMDT" ); break;
+    case 0x40: snprintf( strErrInfo, elCount(strErrInfo), "internal data buffer full" ); break;
+    case 0x60: snprintf( strErrInfo, elCount(strErrInfo), "user sends system pg " ); break;
+    case 0x71: snprintf( strErrInfo, elCount(strErrInfo), "transmission abort by receiver" ); break;
+    case 0x72: snprintf( strErrInfo, elCount(strErrInfo), "transmission abort by sender" ); break;
+  }
+
+  writeDbgLevel( kDbgInfo, "<%s> ERROR(0x%x) %s, %s", kNodeLabel, errorNumber, strErrClass, strErrInfo );
+}
+
+//
+// Commanded address indication
+//
+void GNSSAppCmdAddrIndication( long dataLen )
+{
+}
+
+//
+// Adress Claimed
+//
+void GNSSAppAddrClaimed()
+{
+}
+
+on envVar evCmdAddLine
+{
+  if( getValue( evCmdAddLine ) == 1 ) {
+    AddModelLine();
+    writeDbgLevel( kDbgInfo, "<%s> Add model line", kNodeLabel );
+  }
+}
+
+on envVar evCmdAddMeander
+{
+  if( getValue( evCmdAddMeander ) == 1 ) {
+    AddModelMeander();
+    writeDbgLevel( kDbgInfo, "<%s> Add model meander", kNodeLabel );
+  }
+}
+
+on envVar evCmdAddRectangle
+{
+  if( getValue( evCmdAddRectangle ) == 1 ) {
+    AddModelRect();
+    writeDbgLevel( kDbgInfo, "<%s> Add model rectangle", kNodeLabel );
+  }
+}
+
+int InitializePGs()
+{
+  int res;
+  DWORD enable, disable;
+  enable  = 1;
+  disable = 0;
+
+
+  // GNSS Position Data
+  res = GNSSSetPGSettings( 129029, enable, 255, 6, 1000 );
+  if (res != kErrorNo) return res;
+  
+  // Position Rapid Update
+  res = GNSSSetPGSettings( 129025, disable, 255, 2, 100 );
+  if (res != kErrorNo) return res;
+
+  // COG&SOG RapidUpdate
+  res = GNSSSetPGSettings( 129026, disable, 255, 2, 250 );
+  if (res != kErrorNo) return res;
+
+  // Position delta, high precision rapid update
+  res = GNSSSetPGSettings( 129027, enable, 255, 2, 250 );
+  if (res != kErrorNo) return res;
+
+  // Vehcile Position (J1939)
+  res = GNSSSetPGSettings( 65267, disable, 255, 2, 250 );
+  if (res != kErrorNo) return res;
+
+  // Vehcile Direction Speed (J1939)
+  res = GNSSSetPGSettings( 65256, disable, 255, 2, 250 );
+  if (res != kErrorNo) return res;
+
+  return kErrorNo;
+}

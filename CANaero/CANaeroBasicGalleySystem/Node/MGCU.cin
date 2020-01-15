@@ -1,0 +1,374 @@
+/*@@includes:*/
+includes
+{
+  #include "ARINCNode.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+/*
+ * MGCU - Master Galley Control Unit functionality Version 1.0
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Pr) Created 
+ */
+variables
+{
+  // Globals
+
+  enum MGCUState  gMGCU_State;
+
+  enum MGCU_DTAState
+  {
+    kMGCU_DTAStateReady,
+    kMGCU_DTAStateWaitForRFT,
+    kMGCU_DTAStateWaitForAck,
+    kMGCU_DTAStateWaitForData
+  };
+
+  enum MGCU_DTAState gMGCU_DTAState[kMaxGAINFeeders+1][kMaxGAINsPerFeeder];
+
+  enum MGCU_DTAMode
+  {
+    kMGCU_DTAMode,
+    kMGCU_DTAModeDownload
+  };
+
+  int       gMGCU_DTAMode[kMaxGAINFeeders+1][kMaxGAINsPerFeeder];
+
+  int       gMGCU_DTABlock[kMaxGAINFeeders+1][kMaxGAINsPerFeeder];
+  int       gMGCU_DTAParamNr[kMaxGAINFeeders+1][kMaxGAINsPerFeeder];
+  int       gMGCU_DTASubParamNr[kMaxGAINFeeders+1][kMaxGAINsPerFeeder];
+
+  int       gMGCU_DTABlockNr[kMaxGAINFeeders+1][kMaxGAINsPerFeeder];
+  int       gMGCU_DTAPacketNr[kMaxGAINFeeders+1][kMaxGAINsPerFeeder];
+  int       gMGCU_DTAMaxPacketsPerBlock[kMaxGAINFeeders+1][kMaxGAINsPerFeeder];
+  int       gMGCU_DTABytesCount[kMaxGAINFeeders+1][kMaxGAINsPerFeeder];
+
+  BYTE      gMGCU_DTADownload[kMaxGAINFeeders+1][kMaxGAINsPerFeeder][kDTAMaxBlocks][kDTAMaxParams][kDTAMaxSubParams];
+}
+/*@@end*/
+
+/*@@caplFunc:MGCU_ChangeState(MGCUState):*///function
+void MGCU_ChangeState (enum MGCUState newState)
+{
+  switch (newState) {
+    case kMGCUStateReservedInitialization:
+      break;
+
+    case kMGCUStateOperational:
+      if (gMGCU_State == kMGCUStateErrorCheck || gMGCU_State == kMGCUStateReservedInitialization) {
+        Node_NM_STA_Begin(gNode_NM_STA_CycleTimeMs);
+      }
+      break;
+
+    case kGAINStateError:
+      break;
+
+    case kGAINStateStandbyOff:
+      Node_NM_STA_End();
+      break;
+  }
+
+  OnMGCU_ChangeState(gMGCU_State, newState);
+
+  gMGCU_State = newState;
+  gMGCU_State = newState;
+}
+/*@@end*/
+
+/*@@caplFunc:MGCU_PowerUp():*///function
+void MGCU_PowerUp()
+{
+  MGCU_ChangeState(kMGCUStateReservedInitialization);
+
+  MGCU_ChangeState(kMGCUStateOperational);
+}
+/*@@end*/
+
+/*@@caplFunc:MGCU_PowerDown():*///function
+void MGCU_PowerDown ()
+{
+  MGCU_ChangeState(kMGCUStateReservedInitialization);
+}
+/*@@end*/
+
+/*@@caplFunc:DTA_Handle_DTA(byte,byte,byte,byte,byte,byte,message*):*///function
+void DTA_Handle_DTA (BYTE dir, BYTE prio, BYTE levelId, BYTE deviceId, BYTE codeExt, BYTE sysId, message * msg)
+{
+  int dtaType, i;
+  message DTA dta;
+  byte data[8];
+
+  dta = msg;
+
+  switch(gMGCU_DTAState[levelId][deviceId]) {
+    case kMGCU_DTAStateWaitForRFT:
+      if (dta.DTA_Descr_Type == 1 && dta.DTA_Descr_HandshakeType == kDTAAOTCodeHandshakeFrameRFT) {
+        switch (gMGCU_DTAMode[dta.DTA_SrcLevelId][dta.DTA_SrcDeviceId]) {
+          case kMGCU_DTAMode:
+            DTA_UploadNextPacket(dta.DTA_SrcLevelId, dta.DTA_SrcDeviceId);
+            break;
+          case kMGCU_DTAModeDownload:
+            gMGCU_DTAState[dta.DTA_SrcLevelId][dta.DTA_SrcDeviceId] = kMGCU_DTAStateWaitForData;
+            break;            
+        }
+
+        break;
+      }
+      break;
+    case kMGCU_DTAStateWaitForAck:
+      if (dta.DTA_Descr_Type == 1) {
+        switch (dta.DTA_Descr_HandshakeType) {
+          case kDTAAOTCodeHandshakeFrameAcknowledge:
+            gMGCU_DTABlockNr[dta.DTA_SrcLevelId][dta.DTA_SrcDeviceId]++;
+            gMGCU_DTAPacketNr[dta.DTA_SrcLevelId][dta.DTA_SrcDeviceId] = 0;
+            DTA_UploadNextPacket(dta.DTA_SrcLevelId, dta.DTA_SrcDeviceId);
+            break;
+          case kDTAAOTCodeHandshakeFrameRetryLast:
+            gMGCU_DTAPacketNr[dta.DTA_SrcLevelId][dta.DTA_SrcDeviceId] = 0;
+            DTA_UploadNextPacket(dta.DTA_SrcLevelId, dta.DTA_SrcDeviceId);
+            break;
+          case kDTAAOTCodeHandshakeFrameRetryAll:
+            gMGCU_DTABlockNr[dta.DTA_SrcLevelId][dta.DTA_SrcDeviceId] = 0;
+            gMGCU_DTAPacketNr[dta.DTA_SrcLevelId][dta.DTA_SrcDeviceId] = 0;
+            DTA_UploadNextPacket(dta.DTA_SrcLevelId, dta.DTA_SrcDeviceId);
+            break;
+          case kDTAAOTCodeHandshakeFrameAbort:
+            break;
+        }
+      }
+      break;
+    case kMGCU_DTAStateWaitForData:
+      if (dta.DTA_Descr_Type == 0) {       
+        for (i = 2; i < dta.dlc; i++) {
+          DTA_DownloadSetByte(dta.DTA_SrcLevelId, dta.DTA_SrcDeviceId, gMGCU_DTABytesCount[dta.DTA_SrcLevelId][dta.DTA_SrcDeviceId]++, dta.byte(i));
+        }
+
+        if ((dta.byte(1) & 0x80) >> 7) {
+          dta.DTA_SrcLevelId          = gNode_LevelId;
+          dta.DTA_SrcDeviceId         = gNode_DeviceId;
+          dta.DTA_Descr_Type          = 1;
+          dta.DTA_Descr_HandshakeType = kDTAAOTCodeHandshakeFrameAcknowledge;
+
+          CAN_GetDataFromMessage(dta, data);
+          Node_SendMessageRx(ARINC812_GetPrioFromId(dta.id), ARINC812_GetMsgCodeFromId(dta.id), levelId, deviceId, ARINC812_GetCodeExtFromId(dta.id), dta.dlc, data);
+        }
+      }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:DTA_UploadStart(byte,byte,byte,byte,byte):*///function
+void DTA_UploadStart(BYTE levelId, BYTE deviceId, BYTE dataBlockNr, BYTE paramNr, BYTE subParamNr)
+{
+  message DTA msg;
+  byte data[8];
+
+  msg.DTA_SrcLevelId          = gNode_LevelId;
+  msg.DTA_SrcDeviceId         = gNode_DeviceId;
+  msg.DTA_Descr_Type          = 1;
+  msg.DTA_Descr_HandshakeType = kDTAAOTCodeHandshakeFrameAOTUpBlock;
+
+  msg.byte(0)                 = kDTAMaxDataPacketsPerBlock;
+  msg.byte(1)                 = dataBlockNr;
+  msg.byte(2)                 = paramNr;
+  msg.byte(3)                 = subParamNr;
+
+  CAN_GetDataFromMessage(msg, data);
+  Node_SendMessageRx(ARINC812_GetPrioFromId(msg.id), ARINC812_GetMsgCodeFromId(msg.id), levelId, deviceId, ARINC812_GetCodeExtFromId(msg.id), msg.dlc, data);
+}
+/*@@end*/
+
+/*@@caplFunc:DTA_UploadNextPacket(byte,byte):*///function
+void DTA_UploadNextPacket(BYTE levelId, BYTE deviceId)
+{
+  message DTA dta;
+  int i;
+  byte data[8];
+
+  if (DTA_UploadGetRemainingByteCount(levelId, deviceId, gMGCU_DTABlockNr[levelId][deviceId] * gMGCU_DTAMaxPacketsPerBlock[levelId][deviceId] * 6 + gMGCU_DTAPacketNr[levelId][deviceId] * 6) > 0) {
+    dta.DTA_SrcLevelId         = gNode_LevelId;
+    dta.DTA_SrcDeviceId        = gNode_DeviceId;
+    dta.DTA_Descr_Type         = 0;
+    dta.DTA_Descr_DataPacketNr = gMGCU_DTAPacketNr[levelId][deviceId];
+
+    for (i = 2; i < 8; i++) {
+      dta.byte(i) = DTA_UploadGetByte(levelId, deviceId, gMGCU_DTAPacketNr[levelId][deviceId] * 6 + i - 2);
+    }
+  
+    CAN_GetDataFromMessage(dta, data);
+    Node_SendMessageRx(ARINC812_GetPrioFromId(dta.id), ARINC812_GetMsgCodeFromId(dta.id), levelId, deviceId, ARINC812_GetCodeExtFromId(dta.id), dta.dlc, data);
+  }
+  else {
+    DTA_UploadEnd(levelId, deviceId);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:DTA_UploadGetByte(byte,byte,int):*///function
+int DTA_UploadGetByte(byte levelId, byte deviceId, int index)
+{
+  int b, p, s, pos;
+
+  pos = 0;
+
+  for (b = gMGCU_DTABlock[levelId][deviceId]; b < (gMGCU_DTABlock[levelId][deviceId] == 255) ? kDTAMaxBlocks : gMGCU_DTABlock[levelId][deviceId] + 1; b++) {
+    for (p = gMGCU_DTAParamNr[levelId][deviceId]; p < (gMGCU_DTAParamNr[levelId][deviceId] = 255) ? kDTAParamsPerBlock[b] : gMGCU_DTAParamNr[levelId][deviceId] + 1; p++) {
+      for (s = gMGCU_DTASubParamNr[levelId][deviceId]; s < (gMGCU_DTASubParamNr[levelId][deviceId] = 255) ? kDTASubParamsPerParam[b][p] : gMGCU_DTASubParamNr[levelId][deviceId] + 1; s++) {
+        if (pos == index) {
+          return gNode_DTA[b][p][s];
+        }
+        pos++;
+      }
+    }
+  }
+
+  return -1;
+}
+/*@@end*/
+
+/*@@caplFunc:DTA_UploadEnd(byte,byte):*///function
+void DTA_UploadEnd(BYTE levelId, BYTE deviceId)
+{
+  message DTA msg;
+  byte data[8];
+
+  msg.DTA_SrcLevelId          = gNode_LevelId;
+  msg.DTA_SrcDeviceId         = gNode_DeviceId;
+  msg.DTA_Descr_Type          = 1;
+  msg.DTA_Descr_HandshakeType = kDTAAOTCodeHandshakeFrameEOT;
+
+  CAN_GetDataFromMessage(msg, data);
+  Node_SendMessageRx(ARINC812_GetPrioFromId(msg.id), ARINC812_GetMsgCodeFromId(msg.id), levelId, deviceId, ARINC812_GetCodeExtFromId(msg.id), msg.dlc, data);
+}
+/*@@end*/
+
+/*@@caplFunc:DTA_UploadGetRemainingByteCount(byte,byte,int):*///function
+int DTA_UploadGetRemainingByteCount(byte levelId, byte deviceId, int index)
+{
+  int b, p, s, pos;
+
+  pos = 0;
+
+  for (b = gMGCU_DTABlock[levelId][deviceId]; b < (gMGCU_DTABlock[levelId][deviceId] == 255) ? kDTAMaxBlocks : gMGCU_DTABlock[levelId][deviceId] + 1; b++) {
+    for (p = gMGCU_DTAParamNr[levelId][deviceId]; p < (gMGCU_DTAParamNr[levelId][deviceId] = 255) ? kDTAParamsPerBlock[b] : gMGCU_DTAParamNr[levelId][deviceId] + 1; p++) {
+      for (s = gMGCU_DTASubParamNr[levelId][deviceId]; s < (gMGCU_DTASubParamNr[levelId][deviceId] = 255) ? kDTASubParamsPerParam[b][p] : gMGCU_DTASubParamNr[levelId][deviceId] + 1; s++) {
+        pos++;
+      }
+    }
+  }
+
+  return pos - index;
+}
+/*@@end*/
+
+/*@@caplFunc:DTA_DownloadStart(byte,byte,byte,byte,byte):*///function
+void DTA_DownloadStart(BYTE levelId, BYTE deviceId, BYTE dataBlockNr, BYTE paramNr, BYTE subParamNr)
+{
+  message DTA msg;
+  byte data[8];
+
+  msg.DTA_SrcLevelId          = gNode_LevelId;
+  msg.DTA_SrcDeviceId         = gNode_DeviceId;
+  msg.DTA_Descr_Type          = 1;
+  msg.DTA_Descr_HandshakeType = kDTAAOTCodeHandshakeFrameAOTDownBlock;
+
+  msg.byte(0)                 = kDTAMaxDataPacketsPerBlock;
+  msg.byte(1)                 = dataBlockNr;
+  msg.byte(2)                 = paramNr;
+  msg.byte(3)                 = subParamNr;
+
+  CAN_GetDataFromMessage(msg, data);
+  Node_SendMessageRx(ARINC812_GetPrioFromId(msg.id), ARINC812_GetMsgCodeFromId(msg.id), levelId, deviceId, ARINC812_GetCodeExtFromId(msg.id), msg.dlc, data);
+}
+/*@@end*/
+
+/*@@caplFunc:DTA_DownloadSetByte(byte,byte,int,byte):*///function
+void DTA_DownloadSetByte(byte levelId, byte deviceId, int index, byte byteToSet)
+{
+  int b, p, s, pos;
+
+  pos = 0;
+
+  for (b = gMGCU_DTABlock[levelId][deviceId]; b < (gMGCU_DTABlock[levelId][deviceId] == 255) ? kDTAMaxBlocks : gMGCU_DTABlock[levelId][deviceId] + 1; b++) {
+    for (p = gMGCU_DTAParamNr[levelId][deviceId]; p < (gMGCU_DTAParamNr[levelId][deviceId] = 255) ? kDTAParamsPerBlock[b] : gMGCU_DTAParamNr[levelId][deviceId] + 1; p++) {
+      for (s = gMGCU_DTASubParamNr[levelId][deviceId]; s < (gMGCU_DTASubParamNr[levelId][deviceId] = 255) ? kDTASubParamsPerParam[b][p] : gMGCU_DTASubParamNr[levelId][deviceId] + 1; s++) {
+        if (pos == index) {
+          gMGCU_DTADownload[levelId][deviceId][b][p][s] = byteToSet;
+        }
+        pos++;
+      }
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:OnNode_Message(byte,byte,byte,byte,byte,byte,byte,message*):*///callback
+void OnNode_Message (BYTE dir, BYTE prio, BYTE msgCode, BYTE levelId, BYTE deviceId, BYTE codeExt, BYTE sysId, message * msg)
+{
+  message STA_GAIN msgSTA_GAIN;
+  message STA_MGCU msgSTA_MGCU;
+  message PBR      msgPBR;
+  message DTA      msgMGCU_DTA;
+
+  if (msgCode == ARINC812_GetMsgCodeFromId(msgSTA_MGCU.ID)) {
+    if (dir == TX) {
+      CancelTimer(gNode_NM_STA_TimeoutTimer);
+      SetTimer(gNode_NM_STA_TimeoutTimer, gNode_NM_STA_TimeoutTimeMs);
+    }
+    else Node_NM_Handle_STA_MGCU(prio, levelId, deviceId, codeExt, sysId, msg);
+  }
+  else if (msgCode == ARINC812_GetMsgCodeFromId(msgSTA_GAIN.ID)) {
+    Node_NM_Handle_STA_GAIN(prio, levelId, deviceId, codeExt, sysId, msg);
+  }
+  else if (msgCode == ARINC812_GetMsgCodeFromId(msgPBR.ID)) {
+    OnMGCU_PBR(prio, levelId, deviceId, codeExt, sysId, msg);
+  }
+  else if (msgCode == ARINC812_GetMsgCodeFromId(msgMGCU_DTA.id)) {
+    if (dir == TX) {
+      if (msgMGCU_DTA.DTA_Descr_Type == 1) { // Handshake packet
+        switch (msgMGCU_DTA.DTA_Descr_HandshakeType) {
+          case kDTAAOTCodeHandshakeFrameAOTUpBlock:
+            gMGCU_DTAState[msgMGCU_DTA.DTA_SrcLevelId][msgMGCU_DTA.DTA_SrcDeviceId] = kMGCU_DTAStateWaitForRFT;
+            gMGCU_DTABlock[msgMGCU_DTA.DTA_SrcLevelId][msgMGCU_DTA.DTA_SrcDeviceId]      = msgMGCU_DTA.byte(3);
+            gMGCU_DTAParamNr[msgMGCU_DTA.DTA_SrcLevelId][msgMGCU_DTA.DTA_SrcDeviceId]    = msgMGCU_DTA.byte(4);
+            gMGCU_DTASubParamNr[msgMGCU_DTA.DTA_SrcLevelId][msgMGCU_DTA.DTA_SrcDeviceId] = msgMGCU_DTA.byte(5);
+            break;
+          case kDTAAOTCodeHandshakeFrameAOTDownBlock:
+            gMGCU_DTAState[msgMGCU_DTA.DTA_SrcLevelId][msgMGCU_DTA.DTA_SrcDeviceId] = kMGCU_DTAStateWaitForRFT;
+            break;
+        }
+      }
+      else {  // Data packet
+        gMGCU_DTAPacketNr[msgMGCU_DTA.DTA_SrcLevelId][msgMGCU_DTA.DTA_SrcDeviceId] = msgMGCU_DTA.DTA_Descr_DataPacketNr;
+        if (gMGCU_DTAPacketNr[msgMGCU_DTA.DTA_SrcLevelId][msgMGCU_DTA.DTA_SrcDeviceId] + 1 < gMGCU_DTAMaxPacketsPerBlock[msgMGCU_DTA.DTA_SrcLevelId][msgMGCU_DTA.DTA_SrcDeviceId]) {
+          DTA_UploadNextPacket(msgMGCU_DTA.DTA_SrcLevelId, msgMGCU_DTA.DTA_SrcDeviceId);
+        }
+        else {
+          gMGCU_DTAState[msgMGCU_DTA.DTA_SrcLevelId][msgMGCU_DTA.DTA_SrcDeviceId] = kMGCU_DTAStateWaitForAck;
+        }
+      }
+    }
+    else DTA_Handle_DTA(dir, prio, levelId, deviceId, codeExt, sysId, msg);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:OnNode_GetSTA(message*):*///callback
+void OnNode_GetSTA (message* msg)
+{
+  message STA_MGCU msgSTA;
+
+  msgSTA.STA_MGCU_Impl_Func         = gNode_FuncFlags;
+  msgSTA.STA_MGCU_State             = gMGCU_State;
+  msgSTA.STA_MGCU_Power_Info        = 0;
+  msgSTA.STA_MGCU_Power_Info_Feeder = 0;
+  msgSTA.STA_MGCU_Pwr_Cntrl_Prio    = 0;
+  
+  msg = msgSTA;
+}
+/*@@end*/
+

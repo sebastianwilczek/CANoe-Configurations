@@ -1,0 +1,416 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "IVIM_Visualizer_Variables.cin"
+  #include "IVIM_Visualizer_Pictograms.cin"
+}
+
+void API_VisualizeIVIM(struct IVIM ivim)
+{
+  int isIviKnown, iviNr, optionalFieldsNr, givCount, givNr;
+  
+  switch (ivim.ivi.mandatory.iviStatus)
+  {
+    case 0: // New
+    case 1: // Update
+      {
+        isIviKnown = 0;
+        
+        for (iviNr = 0; iviNr < gIviCount; iviNr++)
+        {
+          if (iviParams[iviNr].id == ivim.ivi.mandatory.iviIdentificationNumber) // IVIM has been seen before
+          {
+            isIviKnown = 1;
+            break;
+          }
+        }
+
+        if (isIviKnown == 0) // IVIM is new, so create and draw it
+        {
+          iviParams[iviNr].id = ivim.ivi.mandatory.iviIdentificationNumber;
+          gIviCount++;
+
+          for (optionalFieldsNr = 0; optionalFieldsNr < ivim.ivi.optional.length; optionalFieldsNr++)
+          {
+            switch (ivim.ivi.optional.arrayValue[optionalFieldsNr].choice)
+            {
+              case 0: // GLC
+                {
+                  ExtractGLC(ivim.ivi.optional.arrayValue[optionalFieldsNr].glc, iviNr);
+                }
+                break;
+
+              case 1: // GIV
+                {
+                  iviParams[iviNr].givCount = givCount = ivim.ivi.optional.arrayValue[optionalFieldsNr].giv.length;
+                  for (givNr = 0; givNr < givCount; givNr++)
+                  {
+                    ExtractGIV(ivim.ivi.optional.arrayValue[optionalFieldsNr].giv, iviNr, givNr);
+                  }
+                }
+                break;
+              
+              case 2: // RCC
+                break;
+                
+              case 3: // TC
+                break;
+                
+              case 4: // LAC
+                break;
+            }
+          }
+          
+          DrawGLC(iviNr);
+          DrawGIV(iviNr);
+        }
+      }
+      break;
+    
+    case 2: // Cancellation
+      {
+        for (iviNr = 0; iviNr < gIviCount; iviNr++)
+        {
+          if (iviParams[iviNr].id == ivim.ivi.mandatory.iviIdentificationNumber) // IVIM has been seen before, so delete it
+          {
+            DeleteDrawnGLC(iviNr);
+            DeleteDrawnGIV(iviNr);
+            break;
+          }
+        }
+      }
+      break;
+  }
+}
+
+void ExtractGLC(struct IVIMIVI_GeographicLocationContainer glc, int iviNr)
+{
+  int  partCount, deltaCount, absoluteCount, partNr, deltaNr, absoluteNr;
+  long zoneId;
+  
+  // Reference position
+  iviParams[iviNr].glc.refLat = glc.referencePosition.latitude;
+  iviParams[iviNr].glc.refLon = glc.referencePosition.longitude;
+
+  // Parts
+  iviParams[iviNr].glc.partsCount = partCount = glc.parts.length;
+  for (partNr = 0; partNr < partCount; partNr++)
+  {
+    zoneId = glc.parts.arrayValue[partNr].zoneId;
+    if (iviParams[iviNr].glc.parts[partNr].zoneId != zoneId) // New Zone
+    {
+      iviParams[iviNr].glc.parts[partNr].zoneId = zoneId;
+      
+      // Delta positions
+      iviParams[iviNr].glc.parts[partNr].deltaPositionsCount = deltaCount = glc.parts.arrayValue[partNr].zone.segment.line.deltaPositions.length;      
+      for (deltaNr = 0; deltaNr < deltaCount; deltaNr++)
+      {
+        iviParams[iviNr].glc.parts[partNr].deltaPositions[deltaNr].lat = glc.parts.arrayValue[partNr].zone.segment.line.deltaPositions.arrayValue[deltaNr].deltaLatitude;
+        iviParams[iviNr].glc.parts[partNr].deltaPositions[deltaNr].lon = glc.parts.arrayValue[partNr].zone.segment.line.deltaPositions.arrayValue[deltaNr].deltaLongitude;
+      }
+      
+      // Absolute positions
+      iviParams[iviNr].glc.parts[partNr].absolutePositionsCount = absoluteCount = glc.parts.arrayValue[partNr].zone.segment.line.absolutePositions.length;
+      for (absoluteNr = 0; absoluteNr < absoluteCount; absoluteNr++)
+      {
+        iviParams[iviNr].glc.parts[partNr].absolutePositions[absoluteNr].lat = glc.parts.arrayValue[partNr].zone.segment.line.absolutePositions.arrayValue[absoluteNr].latitude;
+        iviParams[iviNr].glc.parts[partNr].absolutePositions[absoluteNr].lon = glc.parts.arrayValue[partNr].zone.segment.line.absolutePositions.arrayValue[absoluteNr].longitude;
+      }
+    }
+  }
+}
+
+void ExtractGIV(struct IVIMIVI_GeneralIviContainer giv, int iviNr, int givNr)
+{
+  int roadSignCount, attributeCount, detectionZoneNr, relevanceZoneNr, roadSignNr, attributeNr;
+  
+  // Detection zones
+  for (detectionZoneNr = 0; detectionZoneNr < giv.arrayValue[givNr].detectionZoneIds.length; detectionZoneNr++)
+  {
+    iviParams[iviNr].giv[givNr].detectionZoneIds[detectionZoneNr] = giv.arrayValue[givNr].detectionZoneIds.arrayValue[detectionZoneNr];
+    iviParams[iviNr].giv[givNr].detectionZoneIdsCount++;
+  }
+
+  // Relevance zones
+  for (relevanceZoneNr = 0; relevanceZoneNr < giv.arrayValue[givNr].relevanceZoneIds.length; relevanceZoneNr++)
+  {
+    iviParams[iviNr].giv[givNr].relevanceZoneIds[relevanceZoneNr] = giv.arrayValue[givNr].relevanceZoneIds.arrayValue[relevanceZoneNr];
+    iviParams[iviNr].giv[givNr].relevanceZoneIdsCount++;
+  }
+
+  // Road signs
+  iviParams[iviNr].giv[givNr].roadSignsCount = roadSignCount = giv.arrayValue[givNr].roadSignCodes.length;
+  for (roadSignNr = 0; roadSignNr < roadSignCount; roadSignNr++)
+  {
+    // ISO14823 Service category
+    iviParams[iviNr].giv[givNr].roadSigns[roadSignNr].pictogramServiceCategory = GetServiceCategory(giv, iviNr, givNr, roadSignNr);
+    
+    // ISO14823 Pictogram category
+    iviParams[iviNr].giv[givNr].roadSigns[roadSignNr].pictogramNature          = giv.arrayValue[givNr].roadSignCodes.arrayValue[roadSignNr].code.iso14823.pictogramCode.pictogramCategoryCode.nature;
+    iviParams[iviNr].giv[givNr].roadSigns[roadSignNr].pictogramSerial          = giv.arrayValue[givNr].roadSignCodes.arrayValue[roadSignNr].code.iso14823.pictogramCode.pictogramCategoryCode.serialNumber;
+    
+    // ISO14823 Attributes
+    iviParams[iviNr].giv[givNr].roadSigns[roadSignNr].pictogramAttributesCount = attributeCount = giv.arrayValue[givNr].roadSignCodes.arrayValue[roadSignNr].code.iso14823.attributes.length;
+    for (attributeNr = 0; attributeNr < attributeCount; attributeNr++)
+    {
+      iviParams[iviNr].giv[givNr].roadSigns[roadSignNr].pictogramAttributes[attributeNr].speed = giv.arrayValue[givNr].roadSignCodes.arrayValue[roadSignNr].code.iso14823.attributes.arrayValue[attributeNr].spe.spm.value;
+    }
+  }
+}
+
+long GetServiceCategory(struct IVIMIVI_GeneralIviContainer giv, int iviNr, int givNr, int roadSignNr)
+{
+  int firstCode, secondCode;
+  
+  firstCode = giv.arrayValue[givNr].roadSignCodes.arrayValue[roadSignNr].code.iso14823.pictogramCode.serviceCategoryCode.choice + 1;
+  
+  switch (firstCode)
+  {
+    case 1: // Traffic sign
+    {
+      secondCode = giv.arrayValue[givNr].roadSignCodes.arrayValue[roadSignNr].code.iso14823.pictogramCode.serviceCategoryCode.trafficSignPictogram + 1;
+    }
+    break;
+    case 2: // Public facilities sign
+    {
+      secondCode = giv.arrayValue[givNr].roadSignCodes.arrayValue[roadSignNr].code.iso14823.pictogramCode.serviceCategoryCode.publicFacilitiesPictogram + 1;
+    }
+    break;
+    case 3: // Ambient or road condition pictogram
+    {
+      secondCode = giv.arrayValue[givNr].roadSignCodes.arrayValue[roadSignNr].code.iso14823.pictogramCode.serviceCategoryCode.ambientOrRoadConditionPictogram + 1;
+    }
+    break;
+  }
+  
+  return firstCode * 10 + secondCode;
+}
+
+void DrawGLC(int iviNr)
+{
+  int   partNr;
+  long  refPosHandle, iviTextHandle;
+  float refPosLat, refPosLon, iviTextPosLat, iviTextPosLon;
+  char  iviText[20], refPosBmp[100];
+  
+  // Draw reference position
+  snprintf(refPosBmp, elCount(refPosBmp), "Images\\Inner\\Arrow.png");
+  refPosLat = iviParams[iviNr].glc.refLat / gFactorGeoPos;
+  refPosLon = iviParams[iviNr].glc.refLon / gFactorGeoPos;
+  
+  iviParams[iviNr].drawHandles.refPos = refPosHandle = C2xCreateMapObject(Bitmap);
+  C2xSetMapObjectBmpFilePath(refPosHandle, refPosBmp);
+  C2xSetMapObjectHeading    (refPosHandle, CalculateHeading(iviNr));
+  C2xSetMapObjectPosition   (refPosHandle, refPosLat, refPosLon);
+  C2xSetMapObjectSize       (refPosHandle, gRefPosSize);
+  C2xDrawMapObject          (refPosHandle);
+  
+  // Draw ID text
+  snprintf(iviText, elCount(iviText), "ID %i", iviParams[iviNr].id);
+  iviTextPosLat = iviParams[iviNr].glc.refLat / gFactorGeoPos + gIviTextOffsetLat;
+  iviTextPosLon = iviParams[iviNr].glc.refLon / gFactorGeoPos + gIviTextOffsetLon;
+  
+  iviParams[iviNr].drawHandles.textId = iviTextHandle = C2xCreateMapObject(Text);
+  C2xSetMapObjectPosition (iviTextHandle, iviTextPosLat, iviTextPosLon);
+  C2xSetMapObjectSize     (iviTextHandle, gIviTextSize);
+  C2xSetMapObjectLineColor(iviTextHandle, makeRGB(255, 255, 255)); // White
+  C2xSetMapObjectText     (iviTextHandle, iviText);
+  C2xDrawMapObject        (iviTextHandle);
+
+  // Draw parts
+  for (partNr = 0; partNr < iviParams[iviNr].glc.partsCount; partNr++)
+  {
+    if (iviParams[iviNr].glc.parts[partNr].absolutePositionsCount > 0)
+    {
+      DrawPart(iviNr, partNr, 1); // Use absolute positions
+    }
+    else
+    {
+      DrawPart(iviNr, partNr, 0); // Use relative positions
+    }
+  }
+}
+
+float CalculateHeading(int iviNr)
+{
+  float latPos1, lonPos1, latPos2, lonPos2;
+  
+  if (iviParams[iviNr].glc.partsCount == 0)
+  {
+    return 0;
+  }
+  
+  latPos1 = iviParams[iviNr].glc.refLat / gFactorGeoPos;
+  lonPos1 = iviParams[iviNr].glc.refLon / gFactorGeoPos;
+
+  if (iviParams[iviNr].glc.parts[0].absolutePositionsCount > 0)
+  {
+    latPos2 = iviParams[iviNr].glc.parts[0].absolutePositions[1].lat / gFactorGeoPos;
+    lonPos2 = iviParams[iviNr].glc.parts[0].absolutePositions[1].lon / gFactorGeoPos;
+  }
+  else // Use relative positions
+  {
+    latPos2 = latPos1 + iviParams[iviNr].glc.parts[0].deltaPositions[1].lat / gFactorGeoPos;
+    lonPos2 = lonPos1 + iviParams[iviNr].glc.parts[0].deltaPositions[1].lon / gFactorGeoPos;
+  }
+  
+  return DLLGetGeoAngle(latPos1, lonPos1, latPos2, lonPos2);
+}
+
+void DrawPart(int iviNr, int partNr, int useAbsolutePositions)
+{
+  int   zonesCount, zoneNr, givNr, detectionZoneNr, relevanceZoneNr;
+  long  zoneHandle;
+  float currentLat, currentLon, nextLat, nextLon, startPosLat, startPosLon, endPosLat, endPosLon, offsetLat, offsetLon;
+  
+  currentLat = iviParams[iviNr].glc.refLat;
+  currentLon = iviParams[iviNr].glc.refLon;
+  
+  if (useAbsolutePositions)
+  {
+    zonesCount = iviParams[iviNr].glc.parts[partNr].absolutePositionsCount;
+  }
+  else // Use relative positions
+  {
+    zonesCount = iviParams[iviNr].glc.parts[partNr].deltaPositionsCount;
+  }
+  
+  // Draw zones
+  for (zoneNr = 0; zoneNr < zonesCount; zoneNr++)
+  {
+    zoneHandle = C2xCreateMapObject(Line);
+    
+    if (useAbsolutePositions)
+    {
+      iviParams[iviNr].drawHandles.absoluteZones[zoneNr] = zoneHandle;
+      
+      nextLat = iviParams[iviNr].glc.parts[partNr].absolutePositions[zoneNr].lat;
+      nextLon = iviParams[iviNr].glc.parts[partNr].absolutePositions[zoneNr].lon;
+    }
+    else // Use relative positions
+    {
+      iviParams[iviNr].drawHandles.deltaZones[zoneNr] = zoneHandle;
+      
+      nextLat = currentLat + iviParams[iviNr].glc.parts[partNr].deltaPositions[zoneNr].lat;
+      nextLon = currentLon + iviParams[iviNr].glc.parts[partNr].deltaPositions[zoneNr].lon;
+    }
+    
+    // Determine whether zone is detection or relevance zone
+    for (givNr = 0; givNr < iviParams[iviNr].givCount; givNr++)
+    {
+      // Detection zones
+      for (detectionZoneNr = 0; detectionZoneNr < iviParams[iviNr].giv[givNr].detectionZoneIdsCount; detectionZoneNr++)
+      {
+        if (iviParams[iviNr].giv[givNr].detectionZoneIds[detectionZoneNr] == iviParams[iviNr].glc.parts[partNr].zoneId)
+        {
+          C2xSetMapObjectLineColor(zoneHandle, makeRGB(0, 0, 255)); // Blue
+          
+          // Add a small offset so that overlaps with relevance zones become visible
+          offsetLat = gDetectionZoneOffsetLat;
+          offsetLon = gDetectionZoneOffsetLon;
+          break;
+        }
+      }
+        
+      // Relevance zones
+      for (relevanceZoneNr = 0; relevanceZoneNr < iviParams[iviNr].giv[givNr].relevanceZoneIdsCount; relevanceZoneNr++)
+      {
+        if (iviParams[iviNr].giv[givNr].relevanceZoneIds[relevanceZoneNr] == iviParams[iviNr].glc.parts[partNr].zoneId)
+        {
+          C2xSetMapObjectLineColor(zoneHandle, makeRGB(0, 255, 0)); // Green
+          
+          // Add a small offset so that overlaps with detection zones become visible
+          offsetLat = gRelevanceZoneOffsetLat;
+          offsetLon = gRelevanceZoneOffsetLon;
+          break;
+        }
+      } 
+    }
+
+    startPosLat = currentLat / gFactorGeoPos + offsetLat;
+    startPosLon = currentLon / gFactorGeoPos + offsetLon;
+    endPosLat   = nextLat    / gFactorGeoPos + offsetLat;
+    endPosLon   = nextLon    / gFactorGeoPos + offsetLon;
+    
+    C2xSetMapObjectPosition(zoneHandle, startPosLat, startPosLon, endPosLat, endPosLon);
+    C2xSetMapObjectPenWidth(zoneHandle, gZonePenWidth);
+    C2xDrawMapObject       (zoneHandle);
+      
+    currentLat = nextLat;
+    currentLon = nextLon;
+  }
+}
+
+void DrawGIV(int iviNr)
+{
+  int   givNr, roadSignNr;
+  long  pictoHandle, pictoServiceCategory, pictoNature, pictoSerial, pictoAttributesCount;
+  float pictoPosLat, pictoPosLon;
+  char  pictoPath[1024];
+
+  // Draw pictograms
+  for (givNr = 0; givNr < iviParams[iviNr].givCount; givNr++)
+  {
+    for (roadSignNr = 0; roadSignNr < iviParams[iviNr].giv[givNr].roadSignsCount; roadSignNr++)
+    {      
+      iviParams[iviNr].drawHandles.pictograms[roadSignNr] = pictoHandle = C2xCreateMapObject(Bitmap);
+      
+      pictoPosLat          = iviParams[iviNr].glc.refLat / gFactorGeoPos + gPictogramOffsetLat + givNr * gPictogramGapLat;
+      pictoPosLon          = iviParams[iviNr].glc.refLon / gFactorGeoPos + gPictogramOffsetLon + givNr * gPictogramGapLon;
+      pictoServiceCategory = iviParams[iviNr].giv[givNr].roadSigns[roadSignNr].pictogramServiceCategory;
+      pictoNature          = iviParams[iviNr].giv[givNr].roadSigns[roadSignNr].pictogramNature;
+      pictoSerial          = iviParams[iviNr].giv[givNr].roadSigns[roadSignNr].pictogramSerial;
+      pictoAttributesCount = iviParams[iviNr].giv[givNr].roadSigns[roadSignNr].pictogramAttributesCount;
+      
+      CreatePictogram(pictoPath, pictoServiceCategory, pictoNature, pictoSerial, pictoAttributesCount, iviParams[iviNr].giv[givNr].roadSigns[roadSignNr].pictogramAttributes);
+      
+      C2xSetMapObjectBmpFilePath(pictoHandle, pictoPath);
+      C2xSetMapObjectPosition   (pictoHandle, pictoPosLat, pictoPosLon);
+      C2xSetMapObjectSize       (pictoHandle, gPictogramSize);
+      C2xDrawMapObject          (pictoHandle);
+    }
+  }
+}
+
+void DeleteDrawnGLC(int iviNr)
+{
+  int partNr, zoneNr;
+
+  // Delete reference position
+  C2xDeleteMapObject(iviParams[iviNr].drawHandles.refPos);
+  
+  // Delete ID text
+  C2xDeleteMapObject(iviParams[iviNr].drawHandles.textId);
+
+  // Delete delta zones
+  for (partNr = 0; partNr < iviParams[iviNr].glc.partsCount; partNr++)
+  {
+    for (zoneNr = 0; zoneNr < iviParams[iviNr].glc.parts[partNr].deltaPositionsCount; zoneNr++)
+    {
+      C2xDeleteMapObject(iviParams[iviNr].drawHandles.deltaZones[zoneNr]);
+    }
+  }
+  
+  // Delete absolute zones
+  for (partNr = 0; partNr < iviParams[iviNr].glc.partsCount; partNr++)
+  {
+    for (zoneNr = 0; zoneNr < iviParams[iviNr].glc.parts[partNr].absolutePositionsCount; zoneNr++)
+    {
+      C2xDeleteMapObject(iviParams[iviNr].drawHandles.absoluteZones[zoneNr]);
+    }
+  }
+}
+
+void DeleteDrawnGIV(int iviNr)
+{
+  int givNr, roadSignNr;
+  
+  // Delete pictograms
+  for (givNr = 0; givNr < iviParams[iviNr].givCount; givNr++)
+  {
+    for (roadSignNr = 0; roadSignNr < iviParams[iviNr].giv[givNr].roadSignsCount; roadSignNr++)
+    {
+      C2xDeleteMapObject(iviParams[iviNr].drawHandles.pictograms[roadSignNr]);
+    }
+  }
+}

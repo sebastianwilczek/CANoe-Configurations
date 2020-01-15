@@ -1,0 +1,87 @@
+/*@!Encoding:1252*/
+variables
+{
+  char gTestIdStr[10];     // Identifier generated for each test step shown in the test report
+  word gTestCaseIndex=0;
+  word gTestStepIndex=0;
+}
+
+UpdateTestIdStr()
+{
+  snprintf(gTestIdStr, elcount(gTestIdStr), "%d.%d", gTestCaseIndex, gTestStepIndex);
+}
+
+InitLibraryFunctions()
+{
+  // Init Testcase ID String
+  setTestId(1, 1);
+}
+
+setTestId(word tcIndex, word tsIndex)
+{
+  gTestCaseIndex=tcIndex;
+  gTestStepIndex=tsIndex;
+  updateTestIdStr();
+}
+
+IncTestStepId()
+{
+  gTestStepIndex++;
+  UpdateTestIdStr();
+}
+
+// Reusable sequence for sending a request and receiving the corresponding response
+// Return values:
+// 0 - error occurred
+// 1 - everything OK
+word SendRequestAndWaitForResponse(diagRequest *req, enum bool posResponseExpected)
+{
+  long ret;
+
+  // Trigger sending the request
+  if (0 > (ret=req.SendRequest())) { 
+    snprintf(gResultString, elcount(gResultString), "Trigger sending the request failed (Return code=%d)!", ret);
+    testStepFail(gTestIdStr, gResultString);
+    return 0;
+  }
+  testStepPass(gTestIdStr, "Trigger sending the request succeded.");
+
+  incTestStepId();
+  // Wait until the complete request has been sent, e.g. in case of long requests which spread over several messages (segmented message)
+  if (1!=(ret=testWaitForDiagRequestSent(req, cApplicationTimeoutMs))){ 
+    snprintf(gResultString, elcount(gResultString), "Failed to finish sending the request (Return code=%d)!", ret);
+    testStepFail(gTestIdStr, gResultString);
+    return 0;
+  }
+  testStepPass(gTestIdStr, "Request was sent successfully.");
+
+  incTestStepId();
+  // Wait until the complete response has been received, e.g. segmented messages might take some time for transmission
+  if (1!=(ret=testWaitForDiagResponse(req, cApplicationTimeoutMs))) {          
+    snprintf(gResultString, elcount(gResultString), "Valid response missing or received too late (Return code=%d)!", ret);
+    testStepFail(gTestIdStr, gResultString);
+    return 0;
+  }
+  testStepPass(gTestIdStr, "Response received successfully.");
+
+  incTestStepId();
+  // Check whether the response was a positive response
+  if (-1==(ret=diagGetLastResponseCode(req))) {
+    if (!posResponseExpected) {
+      snprintf(gResultString, elcount(gResultString), "Positive response received although negative response was expected!");
+      testStepFail(gTestIdStr, gResultString);
+      return 0;
+    }
+    testStepPass(gTestIdStr, "Positive Response received as expected.");
+  }
+  else if (ret>0) {
+    if (posResponseExpected) {
+      snprintf(gResultString, elcount(gResultString), "Negative response received (NRC=0x%02x) although positive response was expected!", ret);
+      testStepFail(gTestIdStr, gResultString);
+      return 0;
+    }
+    testStepPass(gTestIdStr, "Negative Response received as expected (NRC=%d).", ret);
+  }
+  return 1;
+}
+

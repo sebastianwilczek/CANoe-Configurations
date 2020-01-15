@@ -1,0 +1,465 @@
+/*@!Encoding:1252*/
+variables
+{
+  // dhcp constants
+  const int kDHCP_MAX_MTU = 1514;
+  const int kDHCP_FIXED_NON_UDP = 236;
+  const int kDHCP_UDP_OVERHEAD = 14 /*ethernet header*/ + 20 /*min ip header*/ + 8 /*udp header*/;
+  const int kDHCP_OPTION_LEN = kDHCP_MAX_MTU - kETHER_HDR_LEN - kIP_HDR_LEN - kUDP_HDR_LEN;
+  const int kDHCP_LEN = kDHCP_FIXED_NON_UDP + kDHCP_OPTION_LEN;
+  const int kDHCP_FIXED_LEN = kDHCP_FIXED_NON_UDP + kDHCP_UDP_OVERHEAD;
+  const int kDHCP_SNAME_LEN = 64;
+  const int kDHCP_FILE_LEN = 128;
+  const int kDHCP_DEFAULT_CLIENT_PORT = 68;
+  const int kDHCP_DEFAULT_SERVER_PORT = 67;
+  const int kBOOTP_MIN_LEN = 300;
+  const int kDHCP_MIN_LEN = 548;
+  
+  enum BootpMessageType
+  {
+    kBOOTREQUEST =	1,
+    kBOOTREPLY	= 2
+  };
+  
+  enum DhcpMessageType
+  {
+    kUNKNOWN = 0,
+    kDHCPDISCOVER = 1,
+    kDHCPOFFER = 2,
+    kDHCPREQUEST = 3,
+    kDHCPDECLINE = 4,
+    kDHCPACK = 5,
+    kDHCPNAK = 6,
+    kDHCPRELEASE = 7,
+    kDHCPINFORM = 8
+  };
+  
+  enum DhcpFlag
+  {
+    kDHCP_BROADCAST_FLAG = 0x80
+  };
+  
+  char DhcpMessageTypeNames[9][20] = 
+  { 
+    "UNKNOWN", 
+    "DHCPDISCOVER",
+    "DHCPOFFER",
+    "DHCPREQUEST",
+    "DHCPDECLINE",
+    "DHCPACK",
+    "DHCPNAK",
+    "DHCPRELEASE",
+    "DHCPINFORM"
+  };
+  
+  enum DhcpOptionCode
+  {
+    kDHO_PAD = 0,
+    kDHO_SUBNET_MASK = 1,
+    kDHO_TIME_OFFSET = 2,
+    kDHO_ROUTERS = 3,
+    kDHO_TIME_SERVERS = 4,
+    kDHO_NAME_SERVERS = 5,
+    kDHO_DOMAIN_NAME_SERVERS = 6,
+    kDHO_LOG_SERVERS = 7,
+    kDHO_COOKIE_SERVERS = 8,
+    kDHO_LPR_SERVERS = 9,
+    kDHO_IMPRESS_SERVERS = 10,
+    kDHO_RESOURCE_LOCATION_SERVERS = 11,
+    kDHO_HOST_NAME = 12,
+    kDHO_BOOT_SIZE = 13,
+    kDHO_MERIT_DUMP = 14,
+    kDHO_DOMAIN_NAME = 15,
+    kDHO_SWAP_SERVER = 16,
+    kDHO_ROOT_PATH = 17,
+    kDHO_EXTENSIONS_PATH = 18,
+    kDHO_IP_FORWARDING = 19,
+    kDHO_NON_LOCAL_SOURCE_ROUTING = 20,
+    kDHO_POLICY_FILTER = 21,
+    kDHO_MAX_DGRAM_REASSEMBLY = 22,
+    kDHO_DEFAULT_IP_TTL = 23,
+    kDHO_PATH_MTU_AGING_TIMEOUT = 24,
+    kDHO_PATH_MTU_PLATEAU_TABLE = 25,
+    kDHO_INTERFACE_MTU = 26,
+    kDHO_ALL_SUBNETS_LOCAL = 27,
+    kDHO_BROADCAST_ADDRESS = 28,
+    kDHO_PERFORM_MASK_DISCOVERY = 29,
+    kDHO_MASK_SUPPLIER = 30,
+    kDHO_ROUTER_DISCOVERY = 31,
+    kDHO_ROUTER_SOLICITATION_ADDRESS = 32,
+    kDHO_STATIC_ROUTES = 33,
+    kDHO_TRAILER_ENCAPSULATION = 34,
+    kDHO_ARP_CACHE_TIMEOUT = 35,
+    kDHO_IEEE802_3_ENCAPSULATION = 36,
+    kDHO_DEFAULT_TCP_TTL = 37,
+    kDHO_TCP_KEEPALIVE_INTERVAL = 38,
+    kDHO_TCP_KEEPALIVE_GARBAGE = 39,
+    kDHO_NIS_DOMAIN = 40,
+    kDHO_NIS_SERVERS = 41,
+    kDHO_NTP_SERVERS = 42,
+    kDHO_VENDOR_ENCAPSULATED_OPTIONS = 43,
+    kDHO_NETBIOS_NAME_SERVERS = 44,
+    kDHO_NETBIOS_DD_SERVER = 45,
+    kDHO_NETBIOS_NODE_TYPE = 46,
+    kDHO_NETBIOS_SCOPE = 47,
+    kDHO_FONT_SERVERS = 48,
+    kDHO_X_DISPLAY_MANAGER = 49,
+    kDHO_DHCP_REQUESTED_ADDRESS = 50,
+    kDHO_DHCP_LEASE_TIME = 51,
+    kDHO_DHCP_OPTION_OVERLOAD = 52,
+    kDHO_DHCP_MESSAGE_TYPE = 53,
+    kDHO_DHCP_SERVER_IDENTIFIER = 54,
+    kDHO_DHCP_PARAMETER_REQUEST_LIST = 55,
+    kDHO_DHCP_MESSAGE = 56,
+    kDHO_DHCP_MAX_MESSAGE_SIZE = 57,
+    kDHO_DHCP_RENEWAL_TIME = 58,
+    kDHO_DHCP_REBINDING_TIME = 59,
+    kDHO_DHCP_CLASS_IDENTIFIER = 60,
+    kDHO_DHCP_CLIENT_IDENTIFIER = 61,
+    kDHO_NISPLUS_DOMAIN = 64,
+    kDHO_NISPLUS_SERVERS = 65,
+    kDHO_TFTP_SERVER_NAME = 66,
+    kDHO_BOOTFILE_NAME = 67,
+    kDHO_MOBILE_IP_HOME_AGENT = 68,
+    kDHO_SMTP_SERVER = 69,
+    kDHO_POP_SERVER = 70,
+    kDHO_NNTP_SERVER = 71,
+    kDHO_WWW_SERVER = 72,
+    kDHO_FINGER_SERVER = 73,
+    kDHO_IRC_SERVER = 74,
+    kDHO_STREETTALK_SERVER = 75,
+    kDHO_STREETTALK_DA_SERVER = 76,
+    kDHO_DHCP_USER_CLASS_ID = 77,
+    kDHO_CLASSLESS_ROUTES = 121,
+    
+    kDHO_END = 255
+  };
+  
+  char DhcpOptionCodeNames[256][35] = 
+  {
+    "DHO_PAD",
+    "DHO_SUBNET_MASK",
+    "DHO_TIME_OFFSET",
+    "DHO_ROUTERS",
+    "DHO_TIME_SERVERS",
+    "DHO_NAME_SERVERS",
+    "DHO_DOMAIN_NAME_SERVERS",
+    "DHO_LOG_SERVERS",
+    "DHO_COOKIE_SERVERS",
+    "DHO_LPR_SERVERS",
+    "DHO_IMPRESS_SERVERS",
+    "DHO_RESOURCE_LOCATION_SERVERS",
+    "DHO_HOST_NAME",
+    "DHO_BOOT_SIZE",
+    "DHO_MERIT_DUMP",
+    "DHO_DOMAIN_NAME",
+    "DHO_SWAP_SERVER",
+    "DHO_ROOT_PATH",
+    "DHO_EXTENSIONS_PATH",
+    "DHO_IP_FORWARDING",
+    "DHO_NON_LOCAL_SOURCE_ROUTING",
+    "DHO_POLICY_FILTER",
+    "DHO_MAX_DGRAM_REASSEMBLY",
+    "DHO_DEFAULT_IP_TTL",
+    "DHO_PATH_MTU_AGING_TIMEOUT",
+    "DHO_PATH_MTU_PLATEAU_TABLE",
+    "DHO_INTERFACE_MTU",
+    "DHO_ALL_SUBNETS_LOCAL",
+    "DHO_BROADCAST_ADDRESS",
+    "DHO_PERFORM_MASK_DISCOVERY",
+    "DHO_MASK_SUPPLIER",
+    "DHO_ROUTER_DISCOVERY",
+    "DHO_ROUTER_SOLICITATION_ADDRESS",
+    "DHO_STATIC_ROUTES",
+    "DHO_TRAILER_ENCAPSULATION",
+    "DHO_ARP_CACHE_TIMEOUT",
+    "DHO_IEEE802_3_ENCAPSULATION",
+    "DHO_DEFAULT_TCP_TTL",
+    "DHO_TCP_KEEPALIVE_INTERVAL",
+    "DHO_TCP_KEEPALIVE_GARBAGE",
+    "DHO_NIS_DOMAIN",
+    "DHO_NIS_SERVERS",
+    "DHO_NTP_SERVERS",
+    "DHO_VENDOR_ENCAPSULATED_OPTIONS",
+    "DHO_NETBIOS_NAME_SERVERS",
+    "DHO_NETBIOS_DD_SERVER",
+    "DHO_NETBIOS_NODE_TYPE",
+    "DHO_NETBIOS_SCOPE",
+    "DHO_FONT_SERVERS",
+    "DHO_X_DISPLAY_MANAGER",
+    "DHO_DHCP_REQUESTED_ADDRESS",
+    "DHO_DHCP_LEASE_TIME",
+    "DHO_DHCP_OPTION_OVERLOAD",
+    "DHO_DHCP_MESSAGE_TYPE",
+    "DHO_DHCP_SERVER_IDENTIFIER",
+    "DHO_DHCP_PARAMETER_REQUEST_LIST",
+    "DHO_DHCP_MESSAGE",
+    "DHO_DHCP_MAX_MESSAGE_SIZE",
+    "DHO_DHCP_RENEWAL_TIME",
+    "DHO_DHCP_REBINDING_TIME",
+    "DHO_DHCP_CLASS_IDENTIFIER",
+    "DHO_DHCP_CLIENT_IDENTIFIER",
+    "",
+    "",
+    "DHO_NISPLUS_DOMAIN",
+    "DHO_NISPLUS_SERVERS",
+    "DHO_TFTP_SERVER_NAME",
+    "DHO_BOOTFILE_NAME",
+    "DHO_MOBILE_IP_HOME_AGENT",
+    "DHO_SMTP_SERVER",
+    "DHO_POP_SERVER",
+    "DHO_NNTP_SERVER",
+    "DHO_WWW_SERVER",
+    "DHO_FINGER_SERVER",
+    "DHO_IRC_SERVER",
+    "DHO_STREETTALK_SERVER",
+    "DHO_STREETTALK_DA_SERVER",
+    "DHO_DHCP_USER_CLASS_ID",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "DHO_CLASSLESS_ROUTES",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "DHO_END"
+  };
+  
+  struct dhcp_option
+  {
+    byte code;
+    byte len;
+    byte data[256];
+  };
+
+  _align(2) struct dhcp_header
+  {
+    BYTE  op;		/* Message opcode/type */
+    BYTE  htype;	/* Hardware addr type (see net/if_types.h) */
+    BYTE  hlen;		/* Hardware addr length */
+    BYTE  hops;		/* Number of relay agent hops from client */
+    DWORD xid;		/* Transaction ID */
+    WORD secs;		/* Seconds since client started looking */
+    WORD flags;	/* Flag bits */
+    DWORD ciaddr;	/* Client IP address (if already in use) */
+    DWORD yiaddr;	/* Client IP address */
+    DWORD siaddr;	/* IP address of next server to talk to */
+    DWORD giaddr;	/* DHCP relay agent IP address */
+    BYTE chaddr[16];	/* Client hardware address */
+    char sname[kDHCP_SNAME_LEN];	/* Server name */
+    char file[kDHCP_FILE_LEN];	/* Boot filename */
+    BYTE options[kDHCP_OPTION_LEN];
+  };  
+  
+  _align(2) struct dhcp_packet
+  {
+    struct ether_header eth;
+    struct ip_header    ip;
+    struct udp_header   udp;
+    struct dhcp_header  dhcp;
+  };
+}
+
+///////////////////////////////////////////////////////////////////////
+// Add a option at the given offset with the values of the given byte
+// array
+///////////////////////////////////////////////////////////////////////
+dword AppendDhcpOption(struct dhcp_header dhcp, dword offset, byte option, byte size, byte data[])
+{
+  byte i;
+  dhcp.options[offset++] = option;
+  dhcp.options[offset++] = size;
+  for(i=0; i<size; i++)
+  {
+    dhcp.options[offset++] = data[i];
+  }
+  return offset;
+}
+
+///////////////////////////////////////////////////////////////////////
+// Add a dhcp option at the given offset
+///////////////////////////////////////////////////////////////////////
+dword AppendDhcpOption(struct dhcp_header dhcp, dword offset, byte option, byte size, dword data)
+{
+  byte i;
+  if(size <= 4)
+  {
+    dhcp.options[offset++] = option;
+    dhcp.options[offset++] = size;
+    for(i=0; i<size && i<4; i++)
+    {
+      dhcp.options[offset++] = (data & (0x000000FF << (i*8))) >> (i*8);
+    }
+  }
+  return offset;
+}

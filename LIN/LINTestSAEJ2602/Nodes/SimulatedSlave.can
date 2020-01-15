@@ -1,0 +1,129 @@
+/*@!Encoding:1252*/
+variables
+{
+  const byte gkSinkSystem           = 0;  // System tab is the target of a notification to Write window
+  const byte gkSinkCAPL             = 1;  // CAPL tab is the target of a notification to Write window
+  const byte gkSinkTest             = 4;  // Test tab is the target of a notification to Write window
+  const byte gkSevError             = 3;  // Error severity of a notification to Write window
+  const byte gkSevWarn              = 2;  // Warning severity of a notification to Write window
+
+  //const int gkWakeupRetrDelay        = 150;  // Wake-up pulse retry delay in ms
+  //const int gkWakeupLength           = 1000; // Length of wake-up pulse in us
+  //const int gkWakeupRetrDelayBulk    = 2000; // Delay after three wake-up retries (one bulk)
+  //const int gkWakeupRetrNumInBulk    = 3;    // Number of wake-up retries in one builk
+  //const int gkWakeupRetrBulkNum      = 2;    // Maximum number of wake-up bulks 
+
+  msTimer gTimerWakeupBulk;          // timer to initiate next bulk of wake-up retries
+  byte    gIsDuringWakeupProcedure;  // flag indicating if currently transiting to wakeup state  
+  int     gWakeupRetriesCount;       // counter of wake-up retries
+  int     gWakeupBulkCount;          // counter of wake-up bulks
+
+}
+
+on start
+{
+  if (IsSimulated()) // don't activate tests when running in simulated mode
+  {
+    WriteLineEx(gkSinkCAPL, gkSevError
+      , "Simulated Slave: Conformance tests cannot run in simulated mode!");     
+    stop();
+  }
+}
+
+on linWakeupFrame
+{
+  if (1 == gIsDuringWakeupProcedure)
+  {
+    ++gWakeupRetriesCount;
+    if (gWakeupRetriesCount % @sysvar::J2602SlaveConfTesterDemo::WakeupRequestsInSequence == 0)
+    {
+      ++gWakeupBulkCount;
+      if (gWakeupBulkCount < @sysvar::J2602SlaveConfTesterDemo::WakeupSequences)
+      {
+        setTimer(gTimerWakeupBulk, @sysvar::J2602SlaveConfTesterDemo::WakeupSequencesDelay);
+      }
+      else
+      {
+        OnStopWakeupProcedure();
+      }
+    }
+  }
+}
+
+void OnStopWakeupProcedure ()
+{
+  gIsDuringWakeupProcedure = 0;
+  gWakeupRetriesCount = 0;
+  gWakeupBulkCount = 0;
+}
+
+void OnStartWakeupProcedure()
+{
+  gIsDuringWakeupProcedure = 1;
+  gWakeupRetriesCount = 0;
+  gWakeupBulkCount = 0;
+  linSendWakeup(@sysvar::J2602SlaveConfTesterDemo::WakeupRetrDelay, @sysvar::J2602SlaveConfTesterDemo::WakeupRequestsInSequence, @sysvar::J2602SlaveConfTesterDemo::WakeupLength);
+}
+
+on linFrame *
+{
+  if (1 == gIsDuringWakeupProcedure)
+  { 
+    OnStopWakeupProcedure();
+  }
+}
+
+on linTransmError
+{
+  if (1 == gIsDuringWakeupProcedure)
+  { 
+    OnStopWakeupProcedure();
+  }
+}
+
+on linCsError
+{
+  if (1 == gIsDuringWakeupProcedure)
+  { 
+    OnStopWakeupProcedure();
+  }
+}
+
+on linReceiveError
+{
+  if (1 == gIsDuringWakeupProcedure)
+  { 
+    OnStopWakeupProcedure();
+  }
+}
+
+on preStart
+{
+  gIsDuringWakeupProcedure = 0;
+  gWakeupRetriesCount = 0;
+  gWakeupBulkCount = 0;
+}
+
+on timer gTimerWakeupBulk
+{
+  if (1 == gIsDuringWakeupProcedure)
+  {
+    // initiate next bulk of wake-up retries
+    linSendWakeup(@sysvar::J2602SlaveConfTesterDemo::WakeupRetrDelay, @sysvar::J2602SlaveConfTesterDemo::WakeupRequestsInSequence, @sysvar::J2602SlaveConfTesterDemo::WakeupLength);
+  }
+}
+
+on sysvar sysvar::J2602SlaveConfTesterDemo::SlaveDNN
+{
+  
+  linSetNAD(@this | 0x60);
+}
+
+on sysvar sysvar::J2602SlaveConfTesterDemo::SendWakeupSequencies
+{
+  if (@this == 1)
+  {
+    OnStartWakeupProcedure();
+  }
+}
+

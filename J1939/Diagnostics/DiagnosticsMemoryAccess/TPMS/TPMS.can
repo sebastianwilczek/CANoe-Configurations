@@ -1,0 +1,2917 @@
+/*@@includes:*/
+includes
+{
+#include "..\CAPL\J1939.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+/*
+ * TPMS - Tire Pressure Monitor System             Version 1.5
+ *
+ * Copyright 2008-2009, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Jr) Created 
+ * 1.1 (Gw) Support of memory access
+ * 1.2 (AaronG) Added full write/erase functionality to memory
+ * 1.3 (Wfk) Multiplexed signals with proprietary SPNs
+ * 1.4 (Gw) Close memory access if a DM14 is received (instead of receiving a DM15)
+ * 1.5 (Gw) Start/stop broadcast messages if a DM13 message is received
+ * 1.6 (Gw) Support of SPACE 128 for some objects
+ */
+variables
+{
+    //Constants
+    const byte kSeveritySuccess = 0;
+    const byte kSeverityInfo    = 1;
+    const byte kSeverityWarning = 2;
+    const byte kSeverityError   = 3;
+    const byte kSeverityNo      = 4;
+
+    const int  kInitialized = 0;      // 
+    const int  kClaiming    = 1;      // 
+    const int  kOnline      = 2;      // 
+    const int  kOffline     = 3;      // 
+
+    const BYTE kTireFrontLeft  = 0x00;
+    const BYTE kTireFrontRight = 0x01;
+    const BYTE kTireRear1Left  = 0x10;
+    const BYTE kTireRear1Right = 0x11;
+    const BYTE kTireRear2Left  = 0x20;
+    const BYTE kTireRear2Right = 0x21;
+
+    const int kPressState_LowCritical  = -2;
+    const int kPressState_LowWarning   = -1;
+    const int kPressState_ok           =  0;
+    const int kPressState_HighWarning  =  1;
+    const int kPressState_HighCritical =  2;
+
+    const BYTE k_noDTC         = 0xff;
+
+    const int kExtFreezeFrameSize = 17;  // max. number of entries in extended freeze frame
+    const int kExtFreezeFrameSizeTPMS = 17; // number of entries in extended freeze frame for TPMS
+    const int kTableSize = 40;           // max. number of entries in gDTCActiveTable and gDTCPreviousTable
+
+    // proprietary SPNs
+    dword gTirePressSPN[3][2];
+    dword gTireTempSPN[3][2];
+    dword gRefTirePressSPN[3][2];
+    dword gTirePressUserSpace[3][2];
+    dword gTireTempUserSpace[3][2];
+    dword gRefTirePressUserSpace[3][2];
+ 
+    //Variables
+    char gNodeName[32]      = "TPMS"; // Name of the node, is used for output to write window
+    char gEEPROM[1029];   //mock EEPROM
+    
+    DWORD gWriteSink = 0;   // Index of tab in write window
+
+  // simulation constants
+
+  // communication variables
+  BYTE  gECUAddress       = kNullAddr;    // Address of this ECU
+  BYTE  gECUState         = kInitialized; // Communication state of the ECU
+  BYTE  gACLPending       = 0;            // 1, if sending ACL
+  BYTE  gACLRqPending     = 0;            // 1, if sending request for ACL was received during address claiming
+
+  pg ACL   TX_ACL;                        // TX Buffer: Address Claiming
+  pg ACKM  TX_ACKM;                       // TX Buffer: Acknowledge
+  pg SOFT  TX_SOFT  = { DLC = 10 };       // TX Buffer: Software identification
+  pg ECUID TX_ECUID = { DLC = 10 };       // TX Buffer: ECU identification
+  pg TPRI  TX_TPRI;                       // TX Buffer: Tire pressure reference information
+  pg TIRE  TX_TIRE;                       // TX Buffer: Tire
+  pg TPRS  RX_TPRS;                       // RX Buffer: Tire pressure reference setting   
+  msTimer ACLTimer;                       // Timer for address claiming
+   
+  // simulation variables
+  float gRefPressure[3][2] = {{0.0,0.0},{0.0,0.0},{0.0,0.0}}; // Reference tire pressue [kPa]
+  float gCurPressure[3][2] = {{0.0,0.0},{0.0,0.0},{0.0,0.0}}; // Current tire pressue [kPa]
+  int   gPressState[3][2]  = {{kPressState_ok,kPressState_ok},{kPressState_ok,kPressState_ok},{kPressState_ok,kPressState_ok}};
+  float gTireTemp[3][2]    = {{20.0,20.0},{20.0,20.0},{20.0,20.0}};  // Tire temperature [°C];
+  BYTE  gDM1State[3][2]    = {{k_noDTC,k_noDTC},{k_noDTC,k_noDTC},{k_noDTC,k_noDTC}};
+
+  // expanded freeze frame
+    _align(1) struct TPMS_expandedFreezeFrame
+  {
+    dword totalVehicleDistance;  // SPN 245
+    BYTE  timedate[5];           // SPN 960-964
+  word  vSpeed;                // SPN 84
+  BYTE  tirePressure;          // SPN 241
+  word  tireTemperature;       // SPN 242
+  BYTE  referenceTirePressure; // SPN 3191
+  word  ambientAirTemperature; // SPN 171
+  };
+  struct TPMS_expandedFreezeFrame gTPMS_expandedFreezeFrame;
+
+  // System timer
+  const int   kSystemTime    = 100;                  // System time in [ms]
+  const float kSystemTimeSec = kSystemTime / 1000.0; // System time in [sec]
+  msTimer     SystemTimer;                           // System timer
+
+  // Diagnostics
+  BYTE   gDTCActive;                   // True, if DTC is  active
+  DWORD  gDTCActiveTable[kTableSize];          // Table with active DTCs
+  DWORD  gDTCPreviousTable[kTableSize];        // Table with previously active DTCs
+  BYTE   gFreezeFrame[kTableSize][13];          // Freeze frames
+  msTimer  DM1Timer;                   // Timer for transsmision of DM1
+
+  // Constants for diagnostics
+  const BYTE kFMI_AboveNormalCritical = 0;    // DATA VALID BUT ABOVE NORMAL OPERATIONAL RANGE
+  const BYTE kFMI_BelowNormalCritical = 1;    // DATA VALID BUT BELOW NORMAL OPERATIONAL RANGE
+  const BYTE kFMI_AboveNormalWarn     = 0x0f; // DATA VALID BUT ABOVE NORMAL OPERATIONAL RANGE
+  const BYTE kFMI_BelowNormalWarn     = 0x11; // DATA VALID BUT BELOW NORMAL OPERATIONAL RANGE
+  const BYTE kFMI_DataErratic         = 2;    // DATA ERRATIC, INTERMITTENT OR INCORRECT
+  const BYTE kFMI_CauseUnknown        = 11;   // ROOT CAUSE NOT KNOWN
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel         = kDbgWarning; // Set debug level for output to write window
+
+  ////////////////////////////////////////////////////////////////////////
+  // Diagnostics Memory Access
+  //
+  // this ECU supports the (short) key/seed validation
+  ////////////////////////////////////////////////////////////////////////
+
+  // Timer
+  msTimer memTimerFailedReceiveSecurity;
+  msTimer memTimerFailedReceiveOpCompleted;
+  msTimer memTimerFailedReceiveClose;
+  msTimer memTimerWaitForData;
+  msTimer memTimerWaitForKey;
+
+  // Timeouts
+  const WORD kTimeoutWaitForClose   = 250; // 250 ms
+  const WORD kTimeoutWaitForData    = 250; // 250 ms
+  const WORD kTimeoutWaitForKey     = 250; // 250 ms
+  const WORD kTimeoutReceiveSecurity= 250; // 250 ms
+  // Tester settings
+  long gMemTesterAddress = 0;     // Address of the test which wants to access the memory
+  // Device settings
+  BYTE gMemState;      // Current state of the state machine
+  const BYTE kAccClosed      = 0; // There is memory access running 
+  const BYTE kAccRequested   = 1; // Memory access is requested
+  const BYTE kWaitForKey     = 2; // We are waiting for a key
+  const BYTE kWaitForLongKey = 3; // We are waiting for a long key
+  const BYTE kAccPermitted   = 4; // Memory access is permitted
+  const BYTE kAccFinished    = 5; // Operation is finished from view of the device (wait for close resp)
+  const BYTE kWaitForData    = 6; // We are waiting for data of the tool
+  BYTE gMemReentrantSecurity = 1; // If >0 then several consecutive requests are
+                                  // executed without checking security for every request
+
+  // DM 14
+  BYTE gDM14Addressing;
+  const BYTE kMemoryAddr  = 0; // Directed memory addressing
+  const BYTE kSpatialAddr = 1; // Directed spatial (object) addressing
+  BYTE gDM14Command;
+  const BYTE kCmdErase       = 0;
+  const BYTE kCmdRead        = 1;
+  const BYTE kCmdWrite       = 2;
+  const BYTE kCmdStatusReq   = 3;
+  const BYTE kCmdOpCompleted = 4;
+  const BYTE kCmdOpFailed    = 5;
+  const BYTE kCmdBootLoad    = 6;
+  const BYTE kCmdEdcpGen    = 7;
+  DWORD gDM14Pointer;   // Memory pointer or object ID (dependend on mMemoryAddressing)
+  DWORD gDM14LenReq;    // Length of the requested memory or number of requested objects
+  WORD  gDM14UserLevel; // User level or key
+  WORD  gDM14Space;     // SPACE if addressing is kSpatialAddr (e.g value 0 means SPN-SPACE). 
+  const WORD kSpaceNotUsed  = 0xFFFF; // desribes a invalid space 
+  const WORD kSpaceSPN      = 0;
+
+  // DM 15
+  // Response status of DM15
+  const BYTE kStatusProceed     = 0;
+  const BYTE kStatusBusy        = 1;
+  const BYTE kStatusOpCompleted = 4;
+  const BYTE kStatusOpFailed    = 5;
+  // EDCP Extension of DM15
+  const BYTE kEdcpExtComplete     = 0;   // Completed - all of the EDC Parameter has been sent
+  const BYTE kEdcpExtMoreHigh     = 2;   // More - Concatenate the following data as Higher order EDC Parameter
+  const BYTE kEdcpExtMoreLow      = 3;   // More - Concatenate the following data as Lower order EDC Parameter
+  const BYTE kEdcpExtErrInd       = 6;   // Data in Error Indicator/EDC Parameter is an Error Indicator
+  const BYTE kEdcpExtErrIndTime   = 7;   // Data in Error Indicator/EDC Parameter is an Error Indicator and Data in Seed is an expected time to completion
+  const BYTE kEdcpExtNoInd        = 255; // No Error Indicator/EDC Parameter Available
+  // Error indicator
+  const DWORD kNoError               = 0;    // No error
+  const DWORD kErrorNotIdentified    = 0x01; // Error NOT identified
+  const DWORD kProcElse              = 0x02; // Currently processing for someone else
+  const DWORD kProcEraseReq          = 0x10; // Currently processing Erase Request
+  const DWORD kProcReadReq           = 0x11; // Currently processing Read Request
+  const DWORD kProcWriteReq          = 0x12; // Currently processing Write Request
+  const DWORD kProcStatusReq         = 0x13; // Currently processing Status Request
+  const DWORD kProcBootLoadReq       = 0x16; // Currently processing Boot Load Request
+  const DWORD kProcEdcpGenReq        = 0x17; // Currently processing EDCP Generation Request
+  const DWORD kInvalidBoundary       = 0x101; // Addressing Error - Address not on a valid boundary (Block, Word, Object, etc.)
+  const DWORD kInvalidLength         = 0x102; // Addressing Error - Length not valid for memory structure and operation
+  const DWORD kInvalidKey            = 0x1003; // Security Error - Invalid Key {Seed}
+  // Seed of DM15
+  WORD gMemSeed = 0x1234;       // This seed is sent to a tester, when using a Seed/Key type security system
+  const WORD kSeedNo = 0xFFFF;  // No Further Key required of tester 
+  // Buffer of response variables
+  BYTE  gMemSendResponseAfterBinData = 0; // 1 if we have to send a response after the binary data message
+  WORD  gMemBufLength;
+  BYTE  gMemBufStatus;
+  DWORD gMemBufErrInd;
+  BYTE  gMemBufEdcpExt;
+  WORD  gMemBufseed;
+
+  // DM16
+  pg DM16 gPgDM16 = {DLC = 1785};         // Binary Data buffer
+  BYTE  gMemSendBinDataAfterResponse = 0; // 1 if we have to send a binary data message after the response 
+
+  // DM25
+  BYTE  gFreezeFrameEntry[kExtFreezeFrameSize];        // Extended Freeze frame data to copy into gFreezeFrame[Entry][18]
+
+  BYTE  gEnableBroadcast; // Bigger than 0 if broadcast messages are sent 
+  
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  // get proprietary SPNs 
+  gTirePressSPN[0][0]    = TIRE::TirePress_00.SPN;
+  gTirePressSPN[0][1]    = TIRE::TirePress_01.SPN;
+  gTirePressSPN[1][0]    = TIRE::TirePress_10.SPN;
+  gTirePressSPN[1][1]    = TIRE::TirePress_11.SPN;
+  gTirePressSPN[2][0]    = TIRE::TirePress_20.SPN;
+  gTirePressSPN[2][1]    = TIRE::TirePress_21.SPN;
+  gTireTempSPN[0][0]     = TIRE::TireTemp_00.SPN;
+  gTireTempSPN[0][1]     = TIRE::TireTemp_01.SPN;
+  gTireTempSPN[1][0]     = TIRE::TireTemp_10.SPN;
+  gTireTempSPN[1][1]     = TIRE::TireTemp_11.SPN;
+  gTireTempSPN[2][0]     = TIRE::TireTemp_20.SPN;
+  gTireTempSPN[2][1]     = TIRE::TireTemp_21.SPN;
+  gRefTirePressSPN[0][0] = TPRI::ReferenceTirePress_00.SPN;
+  gRefTirePressSPN[0][1] = TPRI::ReferenceTirePress_01.SPN;
+  gRefTirePressSPN[1][0] = TPRI::ReferenceTirePress_10.SPN;
+  gRefTirePressSPN[1][1] = TPRI::ReferenceTirePress_11.SPN;
+  gRefTirePressSPN[2][0] = TPRI::ReferenceTirePress_20.SPN;
+  gRefTirePressSPN[2][1] = TPRI::ReferenceTirePress_21.SPN;
+
+  // get object IDs for the user defined SPACE
+  gTirePressUserSpace[0][0]    = TIRE::TirePress_00.TPMS_Space;
+  gTirePressUserSpace[0][1]    = TIRE::TirePress_01.TPMS_Space;
+  gTirePressUserSpace[1][0]    = TIRE::TirePress_10.TPMS_Space;
+  gTirePressUserSpace[1][1]    = TIRE::TirePress_11.TPMS_Space;
+  gTirePressUserSpace[2][0]    = TIRE::TirePress_20.TPMS_Space;
+  gTirePressUserSpace[2][1]    = TIRE::TirePress_21.TPMS_Space;
+  gTireTempUserSpace[0][0]     = TIRE::TireTemp_00.TPMS_Space;
+  gTireTempUserSpace[0][1]     = TIRE::TireTemp_01.TPMS_Space;
+  gTireTempUserSpace[1][0]     = TIRE::TireTemp_10.TPMS_Space;
+  gTireTempUserSpace[1][1]     = TIRE::TireTemp_11.TPMS_Space;
+  gTireTempUserSpace[2][0]     = TIRE::TireTemp_20.TPMS_Space;
+  gTireTempUserSpace[2][1]     = TIRE::TireTemp_21.TPMS_Space;
+  gRefTirePressUserSpace[0][0] = TPRI::ReferenceTirePress_00.TPMS_Space;
+  gRefTirePressUserSpace[0][1] = TPRI::ReferenceTirePress_01.TPMS_Space;
+  gRefTirePressUserSpace[1][0] = TPRI::ReferenceTirePress_10.TPMS_Space;
+  gRefTirePressUserSpace[1][1] = TPRI::ReferenceTirePress_11.TPMS_Space;
+  gRefTirePressUserSpace[2][0] = TPRI::ReferenceTirePress_20.TPMS_Space;
+  gRefTirePressUserSpace[2][1] = TPRI::ReferenceTirePress_21.TPMS_Space;
+
+
+  if (getValue( EvTPMS_Enable ) == 1) {
+    TPMSInit();
+    TPMSStartUp();
+  }
+
+  gEnableBroadcast = 1;
+}
+/*@@end*/
+
+/*@@timer:SystemTimer:*/
+/*
+ * This system timer calulates the simulated values.
+ */
+on timer SystemTimer
+{
+  float tirePress;
+  BYTE  tireLocation;
+  int   PressStateNew;
+  long  tm[9];
+  BYTE  x,y,i;
+
+  // get pressures from EnvVars
+  gCurPressure[0][0] = getValue( EvTPMS_FrontLeftPressure );
+  gCurPressure[0][1] = getValue( EvTPMS_FrontRightPressure );
+  gCurPressure[1][0] = getValue( EvTPMS_Rear1LeftPressure );
+  gCurPressure[1][1] = getValue( EvTPMS_Rear1RightPressure );
+  gCurPressure[2][0] = getValue( EvTPMS_Rear2LeftPressure );
+  gCurPressure[2][1] = getValue( EvTPMS_Rear2RightPressure );
+
+  // check tire pressures and reset/set DTCs
+  for (x=0;x<3;x++)
+  {
+    for (y=0;y<2;y++)
+  {
+    PressStateNew = utilGetState( gRefPressure[x][y] , gCurPressure[x][y]  );
+    if (gPressState[x][y] != PressStateNew) {   // only if state changed
+      if (gPressState[x][y] != kPressState_ok) {  // reset old DTC
+        switch(gPressState[x][y]) {
+        case kPressState_LowCritical:
+        dtcDeactivate( gTirePressSPN[x][y], kFMI_BelowNormalCritical);
+        break;
+        case kPressState_LowWarning:
+        dtcDeactivate( gTirePressSPN[x][y], kFMI_BelowNormalWarn);
+        break;
+        case kPressState_HighWarning:
+        dtcDeactivate( gTirePressSPN[x][y], kFMI_AboveNormalWarn);
+        break;
+        case kPressState_HighCritical:
+        dtcDeactivate( gTirePressSPN[x][y], kFMI_AboveNormalCritical);
+        break;
+      default:
+        write("TPMS: invalid pressure state value");
+        break;
+      }
+    }
+      if (PressStateNew != kPressState_ok) {  // set new DTC
+
+      // fill expanded freeze frame
+      gTPMS_expandedFreezeFrame.totalVehicleDistance = 0; // SPN 245
+      getLocalTime(tm);
+      gTPMS_expandedFreezeFrame.timedate[0]=tm[1];    // SPN 960 - minutes
+      gTPMS_expandedFreezeFrame.timedate[1]=tm[2];    // SPN 961 - hours
+      gTPMS_expandedFreezeFrame.timedate[2]=tm[3]*4;  // SPN 962 - day
+      gTPMS_expandedFreezeFrame.timedate[3]=tm[4]+1;  // SPN 963 - month
+      gTPMS_expandedFreezeFrame.timedate[4]=tm[5]-85; // SPN 964 - year
+      gTPMS_expandedFreezeFrame.vSpeed = 0; // SPN 84
+      gTPMS_expandedFreezeFrame.tirePressure = (BYTE)(gCurPressure[x][y]/4); // SPN 241
+      gTPMS_expandedFreezeFrame.tireTemperature = (word)(273+gTireTemp[x][y]); // SPN 241
+      gTPMS_expandedFreezeFrame.referenceTirePressure = (BYTE)(gRefPressure[x][y]/8); // SPN 3191
+      gTPMS_expandedFreezeFrame.ambientAirTemperature = 9376; // 20 degree Celcius   SPN 171
+
+      // copy data in byte array for handover
+      for (i=0;i<kExtFreezeFrameSizeTPMS;i++) {
+        memcpy(gFreezeFrameEntry, 0, gTPMS_expandedFreezeFrame);
+      }
+
+        switch(PressStateNew) {
+        case kPressState_LowCritical:
+        dtcActivate( gTirePressSPN[x][y], kFMI_BelowNormalCritical);
+        break;
+        case kPressState_LowWarning:
+        dtcActivate( gTirePressSPN[x][y], kFMI_BelowNormalWarn);
+        break;
+        case kPressState_HighWarning:
+        dtcActivate( gTirePressSPN[x][y], kFMI_AboveNormalWarn);
+        break;
+        case kPressState_HighCritical:
+        dtcActivate( gTirePressSPN[x][y], kFMI_AboveNormalCritical);
+        break;
+      default:
+        write("TPMS: invalid new pressure state value");
+        break;
+      }
+    }
+      gPressState[x][y] = PressStateNew;
+    }
+  }
+  }
+
+  // update EnvVars
+  putValue( EvTPMS_FrontLeftState       , gPressState[0][0]+2 );
+  putValue( EvTPMS_FrontLeftWheelBitmap , utilGetBmpFromState(gPressState[0][0]) );
+  putValue( EvTPMS_FrontRightState      , gPressState[0][1]+2 );
+  putValue( EvTPMS_FrontRightWheelBitmap, utilGetBmpFromState(gPressState[0][1]) );
+  putValue( EvTPMS_Rear1LeftState       , gPressState[1][0]+2 );
+  putValue( EvTPMS_Rear1LeftWheelBitmap , utilGetBmpFromState(gPressState[1][0]) );
+  putValue( EvTPMS_Rear1RightState      , gPressState[1][1]+2 );
+  putValue( EvTPMS_Rear1RightWheelBitmap, utilGetBmpFromState(gPressState[1][1]) );
+  putValue( EvTPMS_Rear2LeftState       , gPressState[2][0]+2 );
+  putValue( EvTPMS_Rear2LeftWheelBitmap , utilGetBmpFromState(gPressState[2][0]) );
+  putValue( EvTPMS_Rear2RightState      , gPressState[2][1]+2 );
+  putValue( EvTPMS_Rear2RightWheelBitmap, utilGetBmpFromState(gPressState[2][1]) );
+
+  setTimer( SystemTimer, kSystemTime );
+}
+/*@@end*/
+
+/*@@caplFunc:TPMSInit():*///function
+/*
+ * Initialize the TPMS
+ */
+void TPMSInit()
+{
+  gECUAddress = TPMS.NmStationAddress;
+
+  TX_ACKM.SA = kNullAddr;
+  TX_ACKM.dword(0) = TX_ACKM.dword(4) = 0xffffffff;
+
+  TX_SOFT.SA = kNullAddr;
+  TX_SOFT.NmbrOfSftwreIdentificationFields = utilCopyStringToMsg( (pg CAPL_MSG)TX_SOFT, 1, "05081601*" );
+
+  TX_ECUID.SA = kNullAddr;
+  utilCopyStringToMsg( (pg CAPL_MSG)TX_ECUID, 0, "0125*0125*TPMS*TPMS*" );
+
+  TX_TPRI.SA = kNullAddr;
+  TX_TPRI.dword(0) = TX_TPRI.dword(4) = 0xffffffff;
+
+  TX_TIRE.SA = kNullAddr;
+  TX_TIRE.dword(0) = TX_TIRE.dword(4) = 0xffffffff;
+
+  RX_TPRS.SA = kNullAddr;
+  RX_TPRS.dword(0) = RX_TPRS.dword(4) = 0xffffffff;
+
+  TPMSRecalibrate();
+}
+/*@@end*/
+
+/*@@caplFunc:TPMSShutDown():*///function
+/*
+ * Shut down TPMS
+ *
+ * Send cannot claim address and stop sending messages
+ */
+void TPMSShutDown()
+{
+  cancelTimer( SystemTimer );
+  cancelTimer( DM1Timer );
+
+  TPMSChangeState( kOffline );
+  putValue( EvTPMS_Enable, 0 );
+
+  putValue( EvTPMS_FrontLeftState , 2 );
+  putValue( EvTPMS_FrontRightState, 2 );
+  putValue( EvTPMS_Rear1LeftState , 2 );
+  putValue( EvTPMS_Rear1RightState, 2 );
+  putValue( EvTPMS_Rear2LeftState , 2 );
+  putValue( EvTPMS_Rear2RightState, 2 );
+
+  putValue( EvTPMS_FrontLeftWheelBitmap , 0 );
+  putValue( EvTPMS_FrontRightWheelBitmap, 0 );
+  putValue( EvTPMS_Rear1LeftWheelBitmap , 0 );
+  putValue( EvTPMS_Rear1RightWheelBitmap, 0 );
+  putValue( EvTPMS_Rear2LeftWheelBitmap , 0 );
+  putValue( EvTPMS_Rear2RightWheelBitmap, 0 );
+}
+/*@@end*/
+
+/*@@caplFunc:TPMSStartUp():*///function
+/*
+ * Start up TPMS
+ *
+ * Begin address claiming. After successfully claiming
+ * an address, start sending cyclic messages.
+ */
+void TPMSStartUp()
+{
+  putValue( EvTPMS_Enable, 1 );
+
+  setTimer( SystemTimer, kSystemTime );
+  setTimer( DM1Timer, 0 );
+
+
+  TPMSChangeState( kClaiming );
+}
+/*@@end*/
+
+/*@@caplFunc:utilMax(float,float):*///function
+/*
+ * Clip the value to the range of min and max
+ */
+float utilMax( float a, float b)
+{
+  if (a > b) {
+    return a;
+  }
+  else {
+    return b;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:utilMin(float,float):*///function
+/*
+ * Clip the value to the range of min and max
+ */
+float utilMin( float a, float b)
+{
+  if (a > b) {
+    return b;
+  }
+  else {
+    return a;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:utilRange(float,float,float):*///function
+/*
+ * Clip the value to the range of min and max
+ */
+float utilRange( float value, float min, float max )
+{
+  if (value < min) return min;
+  if (value > max) return max;
+
+  return value;
+}
+/*@@end*/
+
+/*@@timer:ACLTimer:*/
+/*
+ * This timer elases 250ms after sending the address
+ * claim parameter group.
+ */
+on timer ACLTimer
+{
+  TPMSChangeState( kOnline );
+
+  // if a request for ACL was received during claiming phase,
+  // send ACL now.
+  if (gACLRqPending) {
+    gACLRqPending = 0;
+
+    output( TX_ACL );
+  }
+}
+/*@@end*/
+
+/*@@pg:CAN1.TPMS_Bus::ACL (0xEEFEFEX):*/
+/*
+ * Handle Adress Claiming
+ */
+on pg ACL
+{
+  pg ACL acl;
+
+  if ((gECUState != kOnline) || (gECUState != kClaiming)) return;
+
+  if (this.DIR == RX) {
+    if ((this.SA == TX_ACL.SA) && (TX_ACL.SA != kNullAddr)) {
+      acl.DWORD(0) = this.DWORD(0);
+      acl.DWORD(4) = this.DWORD(4);
+
+      // compare names for priority
+      if (utilCompareDeviceName( TX_ACL, acl ) > 0) {
+        // send address claiming PG again
+        gACLPending = 1;
+        output( TX_ACL );
+      }
+      else {
+        // go offline, we have a lower priority
+        TPMSChangeState( kOffline );
+      }
+    }
+  }
+  else if (this.DIR == TX) {
+    gACLPending = 0;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:utilCompareDeviceName(pg418316030x,pg418316030x):*///function
+/*
+ * Compare device names
+ *
+ * if pg1 has lower priority than pg2, return -1
+ * if pg1 has higher priority than pg2, return 1
+ * if both names are equal, return 0
+ */
+int utilCompareDeviceName( pg ACL pg1, pg ACL pg2 )
+{
+  int i = 0;
+  for( i = 7; i >= 0; i-- ) {
+    if (pg1.byte(i) > pg2.byte(i)) {
+      return -1;
+    }
+    else if (pg1.byte(i) < pg2.byte(i)) {
+      return 1;
+    }
+  }
+
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:TPMSChangeState(byte):*///function
+/*
+ * Change the state of the ECU
+ */
+void TPMSChangeState( BYTE newState )
+{
+  if (newState == kInitialized) {
+    // stop everthng immediately
+    cancelTimer( ACLTimer );
+    gECUState = kInitialized;
+    return;
+  }
+
+  switch( gECUState ) {
+    case kInitialized:
+    case kOffline:
+      if (newState == kClaiming) {
+        EnterClaiming();
+        gECUState = newState;
+      }
+      break;
+    case kClaiming:
+      if (newState == kOnline) {
+        EnterOnline();
+        gECUState = newState;
+      }
+      else if (newState == kOffline) {
+        cancelTimer( ACLTimer );
+        EnterOffline();
+        gECUState = newState;
+      }
+      break;
+    case kOnline:
+      if (newState == kOffline) {
+        cancelTimer( ACLTimer );
+        EnterOffline();
+        gECUState = newState;
+      }
+      else if (newState == kClaiming) {
+        EnterClaiming();
+        gECUState = newState;
+      }
+    break;
+  }
+
+}
+/*@@end*/
+
+/*@@caplFunc:EnterClaiming():*///function
+/*
+ * Start address claiming
+ */
+void EnterClaiming()
+{
+  cancelTimer( ACLTimer );
+
+  // send address claiming PG and wait 250ms
+  TX_ACL.SA = gECUAddress;
+  TX_ACL.DA = kGlobalAddr;
+  TX_ACL.ArbitraryAddressCapable = TPMS.NmJ1939AAC;
+  TX_ACL.IndustryGroup           = TPMS.NmJ1939IndustryGroup;
+  TX_ACL.VehicleSystem           = TPMS.NmJ1939System;
+  TX_ACL.VehicleSystemInstance   = TPMS.NmJ1939SystemInstance;
+  TX_ACL.Function                = TPMS.NmJ1939Function;
+  TX_ACL.FunctionInstance        = TPMS.NmJ1939FunctionInstance;
+  TX_ACL.ECUInstance             = TPMS.NmJ1939ECUInstance;
+  TX_ACL.ManufacturerCode        = TPMS.NmJ1939ManufacturerCode;
+  TX_ACL.IdentityNumber          = TPMS.NmJ1939IdentityNumber;
+
+  gACLPending = 1;
+
+  output( TX_ACL );
+
+  putValue( EvTPMS_Address, kNullAddr );
+
+  setTimer( ACLTimer, 250 );
+
+  writeDbgLevel( kDbgInfo, "<%s> start address claiming for address %d", gNodeName, TX_ACL.SA );
+}
+/*@@end*/
+
+/*@@caplFunc:EnterOnline():*///function
+/*
+ * Enter online state
+ */
+void EnterOnline()
+{
+  // set source addresses of TX messages
+  TX_ACKM.SA  = gECUAddress;
+  TX_SOFT.SA  = gECUAddress;
+  TX_ECUID.SA = gECUAddress;
+  TX_TPRI.SA  = gECUAddress;
+  TX_TIRE.SA  = gECUAddress;
+
+  putValue( EvTPMS_Address, gECUAddress );
+ 
+  writeDbgLevel( kDbgInfo, "<%s> online with address %d", gNodeName, TX_ACL.SA );
+}
+/*@@end*/
+
+/*@@caplFunc:EnterOffline():*///function
+/*
+ * Enter offline state
+ */
+void EnterOffline()
+{
+  cancelTimer( ACLTimer );
+
+  // send address claiming PG with NULL address
+  gACLPending = 1;
+  TX_ACL.SA   = kNullAddr;
+  output( TX_ACL );
+
+  putValue( EvTPMS_Address, TX_ACL.SA );
+
+  writeDbgLevel( kDbgInfo, "<%s> offline", gNodeName, TX_ACL.SA );
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  fillMockEEPROM();
+  setWriteDbgLevel( gDbgLevel );
+  TX_SOFT.DWORD(0) = TX_SOFT.DWORD(4) = 0xFFFFFFFF; //init datafield
+  TX_SOFT.BYTE(8) = TX_SOFT.BYTE(9) = 0xFF;
+  TX_ECUID.DWORD(0) = TX_ECUID.DWORD(4) = 0xFFFFFFFF; //init datafield
+  TX_ECUID.BYTE(8) = TX_ECUID.BYTE(9) = 0xFF;
+  TX_ACKM.DWORD(0) = TX_ACKM.DWORD(4) = 0xFFFFFFFF; //init datafield
+  TX_TPRI.DWORD(0) = TX_TPRI.DWORD(4) = 0xFFFFFFFF; //init datafield
+  TX_TIRE.DWORD(0) = TX_TIRE.DWORD(4) = 0xFFFFFFFF; //init datafield
+}
+/*@@end*/
+
+/*@@errorFrameErrorFrame:ErrorFrame:*/
+/*
+ * Handle error frame
+ */
+on errorFrame
+{
+  
+}
+/*@@end*/
+
+/*@@pg:CAN1.TPMS_Bus::RQST (0xEAFEFEX):*/
+/*
+ * Handle request message
+ */
+on pg RQST
+{
+  if (this.DIR != RX) return;
+  if ((this.DA != kGlobalAddr) && (this.DA != gECUAddress)) return;
+  
+  switch(gECUState) {
+    case kOnline:
+      switch(this.ParameterGroupNumber) {
+        case 0xEE00: output( TX_ACL   ); break;
+        case 0xFEDA: output( TX_SOFT  ); break;
+        case 0xFEF4: TPMSSendTIRE();     break;
+        case 0xFDB9: TPMSSendTPRI();     break;
+        case 0xFECB: dtcSendDM2();       break;
+        case 0xFECD: dtcSendDM4();       break;
+        case 0xFECE: dtcSendDM5();       break;
+        case 0xFED3: dtcClear( gDTCActiveTable );   break;
+        case 0xFECC: dtcClear( gDTCPreviousTable ); break;
+        default:
+          TX_ACKM.DA       = kGlobalAddr;
+          TX_ACKM.ControlByte = 1;
+          TX_ACKM.AddressNegativeAcknowledgement = gECUAddress;
+          TX_ACKM.ParameterGroupNumber = this.ParameterGroupNumber;
+          output( TX_ACKM );
+          break;
+      }
+      break;
+
+    case kOffline:
+      switch(this.ParameterGroupNumber) {
+        case 0xEE00: // ACL
+          output( TX_ACL );
+          break;
+      }
+      break;
+
+    case kClaiming:
+      switch(this.ParameterGroupNumber) {
+        case 0xEE00: // ACL
+          gACLRqPending = 1;
+          break;
+      }
+      break;
+  }
+
+
+}
+/*@@end*/
+
+/*@@envVar:EvTPMS_Enable:*/
+on envVar EvTPMS_Enable
+{
+  if (getValue( this )) {
+    TPMSInit();
+    TPMSStartUp();
+  }
+  else {
+    TPMSShutDown();
+  }
+}
+/*@@end*/
+
+/*@@pg:CAN1.TPMS_Bus::CA (0xFED8FEX):*/
+/*
+ * Handle commanded address message
+ */
+on pg CA
+{
+  if (this.DIR  != RX)      return;
+
+  if (utilCompareDeviceName( this, TX_ACL ) == 0) {
+    if (this.AddressAssignment != TX_ACL.SA) {
+      TX_ACL.SA   = this.AddressAssignment;
+      gECUAddress = this.AddressAssignment;
+     
+      TPMSChangeState( kClaiming );
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:utilCopyStringToMsg(pg536870910x,int,char[]):*///function
+/*
+ * Copy a string to the data field of a parameter group
+ *
+ * return   - Number of characters
+ * _pg      - Copy to this message
+ * startPos - Start at this position
+ * string   - The string to copy
+ */
+int utilCopyStringToMsg( pg CAPL_MSG _pg, int startPos, char string[] )
+{
+  int i, len;
+
+  len = strlen( string );
+
+  for( i = 0; i < len; i++ ) {
+    _pg.byte( startPos + i ) = string[i];
+  }
+
+  return len;
+}
+/*@@end*/
+
+/*@@caplFunc:dtcActivate(dword,dword):*///function
+/*
+ * Activate a DTC (diagnostic trouble code)
+ *
+ * spn - Suspect Parameter Number
+ * fmi - Failure Mode Indentifier
+ */
+void dtcActivate( DWORD spn, DWORD fmi )
+{
+  dtcUpdateTable( gDTCActiveTable  , 0, spn, fmi );
+  dtcUpdateTable( gDTCPreviousTable, 0, spn, fmi );
+
+  dtcFillFreezeFrame( spn, fmi );
+
+  // set timer
+  if (gDTCActive == 0) {
+    gDTCActive = 1;
+    setTimer( DM1Timer, 0 );
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:dtcCountTable(dword[]):*///function
+/*
+ * Count number of active DTCs in a table (diagnostic trouble code)
+ *
+ * return - Number of active DTCs
+ * table  - the table to update
+ */
+int dtcCountTable( DWORD table[] )
+{
+  DWORD i, count;
+
+  count = 0;
+  for( i = 0; i < elCount(table); i++ ) {
+    if (table[i] > 0) {
+      count++;
+    }
+  }
+
+  return count;
+}
+/*@@end*/
+
+/*@@caplFunc:dtcDeactivate(dword,dword):*///function
+/*
+ * Deactivate a DTC (diagnostic trouble code)
+ *
+ * spn - Suspect Parameter Number
+ * fmi - Failure Mode Indentifier
+ */
+void dtcDeactivate( DWORD spn, DWORD fmi )
+{
+  dtcUpdateTable( gDTCActiveTable     , 1, spn, fmi );
+}
+/*@@end*/
+
+/*@@caplFunc:dtcFillFreezeFrame(dword,dword):*///function
+/*
+ * Fill freeze frame data for a SPN
+ *
+ * Fetch the data from TX_EEC1 and TX_ET1
+ *
+ * spn    - Suspect Parameter Number
+ * fmi    - Failure Mode Indentifier
+ */
+dtcFillFreezeFrame( DWORD spn, DWORD fmi )
+{
+  int i, j;
+  pg DM4 tmp;
+
+  for( i = 0; i < 2; i++ ) {
+    if (gFreezeFrame[i][0] == 0) { // FreezeFrameLength == 0
+      tmp.FreezeFrameLength = 13;
+      tmp.dword(1) = (spn & 0xffff) | ((spn & 0x70000) << 5) | ((fmi & 0x1f) << 16) | ((/*oc*/1 & 0x7f) << 24);
+      tmp.EngTorqueMode                 = 0xff;
+      tmp.EngIntakeManifold1Press            = 0xff;
+      tmp.EngSpeed                      = 0xff;
+      tmp.EngPercentLoadAtCurrentSpeed  = 0xff;
+      tmp.EngCoolantTemp                = 0xff;
+      tmp.WheelBasedVehicleSpeed        = 0xffff;
+
+      // copy data to freeze frame
+      for( j = 0; j < 13; j++ ) {
+        gFreezeFrame[i][j] = tmp.byte(j);
+      }
+      break;
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:dtcSendDM2():*///function
+/*
+ * Send DM2 PGN (Previously Active Diagnostic Trouble Codes)
+ */
+void dtcSendDM2()
+{
+  pg DM2 dm2TP = { DLC = 1785 };
+  int activeCount, i;
+
+  dm2TP.SA                           = gECUAddress;
+  dm2TP.RedStopLampState             = 0x00;
+  dm2TP.ProtectLampStatus            = 0x00;
+  dm2TP.AmberWarningLampStatus       = 0x00;
+  dm2TP.MalfunctionIndicatorLampStatus = 0x00;
+  dm2TP.byte(1) = 0xff;
+
+  // copy active DTCs to dm1
+  activeCount = 0;
+  dm2TP.DLC   = 1785;
+  for( i = 0; i < elCount(gDTCPreviousTable); i++ ) {
+    if (gDTCPreviousTable[i] != 0) {
+      dm2TP.byte(2+activeCount*4)   = (gDTCPreviousTable[i]      ) & 0xff;
+      dm2TP.byte(2+activeCount*4+1) = (gDTCPreviousTable[i] >>  8) & 0xff;
+      dm2TP.byte(2+activeCount*4+2) = (gDTCPreviousTable[i] >> 16) & 0xff;
+      dm2TP.byte(2+activeCount*4+3) = (gDTCPreviousTable[i] >> 24) & 0xff;
+      activeCount++;
+    }
+  }
+
+  dm2TP.DLC = 2 + activeCount * 4;
+  output( dm2TP );
+}
+/*@@end*/
+
+/*@@caplFunc:dtcSendDM4():*///function
+/*
+ * Send DM4 message (FREEZE FRAME PARAMETERS)
+ */
+void dtcSendDM4()
+{
+  pg DM4 dm4TP = { DLC = 13 };
+  int i, j, pos;
+
+  dm4TP.SA = gECUAddress;
+
+  pos = 0;
+  for( i = 0; i < 2; i++ ) {
+    if (gFreezeFrame[i][0] > 0) { // FreezeFrameLength > 0
+      for( j = 0; j < 13; j++ ) {
+        dm4TP.byte(pos) = gFreezeFrame[i][j];
+      }
+      pos += 13;
+    }
+  }
+
+  dm4TP.dlc = pos;
+  output( dm4TP );
+}
+/*@@end*/
+
+/*@@caplFunc:dtcSendDM5():*///function
+/*
+ * Send DM5 message (DIAGNOSTIC READINESS)
+ */
+void dtcSendDM5()
+{
+  pg DM5 dm5PG;
+
+  dm5PG.SA       = gECUAddress;
+  dm5PG.dword(0) = dm5PG.dword(4) = 0xffffffff;
+  dm5PG.ActiveTroubleCodes           = dtcCountTable( gDTCActiveTable );
+  dm5PG.PreviouslyActiveTroubleCodes = dtcCountTable( gDTCPreviousTable );
+  dm5PG.OBDCompliance                = 5;      // Not intended to meet OBD II requirements
+  dm5PG.byte(3)                      = 0x00;   // Continuously Monitored Systems NOT Support
+  dm5PG.word(4)                      = 0x0000; // Non-continuously Monitored Systems NOT Support
+  dm5PG.word(6)                      = 0x0000; // Non-continuously Monitored Systems Status NOT Support
+
+  output( dm5PG );
+}
+/*@@end*/
+
+/*@@caplFunc:dtcUpdateTable(dword[],int,dword,dword):*///function
+//
+/*
+ * Update a DTC table (diagnostic trouble code)
+ *
+ * table  - the table to update
+ * remove - 1=remove DTC, 0=set DTC
+ * spn    - Suspect Parameter Number
+ * fmi    - Failure Mode Indentifier
+ */
+void dtcUpdateTable( DWORD table[], int remove, DWORD spn, DWORD fmi )
+{
+  DWORD oc, i;
+  BYTE  found;
+
+  if (remove == 1) {
+    // search for SPN and FMI in gDTCActiveTable
+    for( i = 0; i < elCount(table); i++ ) {
+      if ((table[i] & 0xffffff) == ((spn & 0xffff) | ((spn & 0x70000) << 5) | ((fmi & 0x1f) << 16))) {
+        // we found the entry, now we set the entry to 0
+        table[i] = 0;
+        break;
+      }
+    }
+  }
+  else {
+    // search for SPN and FMI in gDTCActiveTable
+    found = 0;
+    for( i = 0; i < elCount(table); i++ ) {
+      if ((table[i] & 0xffffff) == ((spn & 0xffff) | ((spn & 0x70000) << 5) | ((fmi & 0x1f) << 16))) {
+        // we found the entry, now we increase the occurence counter
+        oc = ((table[i] >> 24) & 0x7f);
+        oc++;
+        table[i] &= 0x80ffffff;
+        table[i] |= (oc << 24);
+        found = 1;
+        break;
+      }
+    }
+
+    // if SPN and FMI was not found add a new entry to the table
+    if (found == 0) {
+      for( i = 0; i < elCount(table); i++ ) {
+        if (table[i] == 0) {
+          oc = 1;
+          table[i] = (spn & 0xffff) | ((spn & 0x70000) << 5) | ((fmi & 0x1f) << 16) | ((oc & 0x7f) << 24);
+          break;
+        }
+      }
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:TPMSRecalibrate():*///function
+/*
+ * Recalibrate the reference tire pressures.
+ */
+void TPMSRecalibrate()
+{
+  gRefPressure[0][0]  = getValue( EvTPMS_FrontLeftPressure );
+  gRefPressure[0][1]  = getValue( EvTPMS_FrontRightPressure );
+  gRefPressure[1][0]  = getValue( EvTPMS_Rear1LeftPressure );
+  gRefPressure[1][1]  = getValue( EvTPMS_Rear1RightPressure );
+  gRefPressure[2][0]  = getValue( EvTPMS_Rear2LeftPressure );
+  gRefPressure[2][1]  = getValue( EvTPMS_Rear2RightPressure );
+}
+/*@@end*/
+
+/*@@pg:CAN1.TPMS_Bus::TPRS (0xAEFEFEX):*/
+/*
+ * Handle TPRS
+ */
+on pg TPRS
+{
+  if (this.DIR  != RX)      return;
+  if (gECUState != kOnline) return;
+  if ((this.DA  != kGlobalAddr) && (this.DA != TPMS.NmStationAddress)) return;
+
+  RX_TPRS.SA = this.SA;
+  RX_TPRS.DA = this.DA;
+  RX_TPRS.DWORD(0) = this.DWORD(0);
+  RX_TPRS.DWORD(4) = this.DWORD(4);
+
+
+  switch(RX_TPRS.TireLocation) {
+    case kTireFrontLeft:
+      gRefPressure[0][0]  = RX_TPRS.ReferenceTirePressSetting_00.phys;
+      break;
+    case kTireFrontRight:
+      gRefPressure[0][1] = RX_TPRS.ReferenceTirePressSetting_01.phys;
+      break;
+    case kTireRear1Left:
+      gRefPressure[1][0]  = RX_TPRS.ReferenceTirePressSetting_10.phys;
+      break;
+    case kTireRear1Right:
+      gRefPressure[1][1] = RX_TPRS.ReferenceTirePressSetting_11.phys;
+      break;
+    case kTireRear2Left:
+      gRefPressure[2][0]  = RX_TPRS.ReferenceTirePressSetting_20.phys;
+      break;
+    case kTireRear2Right:
+      gRefPressure[2][1] = RX_TPRS.ReferenceTirePressSetting_21.phys;
+      break;
+    default:
+      // unknow tire location, send NACK
+      TX_ACKM.DA       = kGlobalAddr;
+      TX_ACKM.ControlByte = 1;
+      TX_ACKM.AddressNegativeAcknowledgement = RX_TPRS.SA;
+      TX_ACKM.ParameterGroupNumber = RX_TPRS.PGN;
+      output( TX_ACKM );
+      break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:TPMSSendTPRI():*///function
+/*
+ * Send TPRI for all tires
+ */
+void TPMSSendTPRI()
+{
+  TX_TPRI.TireLocation               = kTireFrontLeft;
+  TX_TPRI.ReferenceTirePress_00.phys = gRefPressure[0][0];
+  output( TX_TPRI );
+
+  TX_TPRI.TireLocation               = kTireFrontRight;
+  TX_TPRI.ReferenceTirePress_01.phys = gRefPressure[0][1];
+  output( TX_TPRI );
+
+  TX_TPRI.TireLocation               = kTireRear1Left;
+  TX_TPRI.ReferenceTirePress_10.phys = gRefPressure[1][0];
+  output( TX_TPRI );
+
+  TX_TPRI.TireLocation               = kTireRear1Right;
+  TX_TPRI.ReferenceTirePress_11.phys = gRefPressure[1][1];
+  output( TX_TPRI );
+
+  TX_TPRI.TireLocation               = kTireRear2Left;
+  TX_TPRI.ReferenceTirePress_20.phys = gRefPressure[2][0];
+  output( TX_TPRI );
+
+  TX_TPRI.TireLocation               = kTireRear2Right;
+  TX_TPRI.ReferenceTirePress_21.phys = gRefPressure[2][1];
+  output( TX_TPRI );
+}
+/*@@end*/
+
+/*@@caplFunc:TPMSSendTIRE():*///function
+/*
+ * Send TIRE for all tires
+ */
+void TPMSSendTIRE()
+{
+  TX_TIRE.TireLocation      = kTireFrontLeft;
+  TX_TIRE.TirePress_00.phys = gCurPressure[0][0];
+  TX_TIRE.TireTemp_00.phys  = gTireTemp[0][0];
+  output( TX_TIRE );
+
+  TX_TIRE.TireLocation      = kTireFrontRight;
+  TX_TIRE.TirePress_01.phys = gCurPressure[0][1];
+  TX_TIRE.TireTemp_01.phys  = gTireTemp[0][1];
+  output( TX_TIRE );
+
+  TX_TIRE.TireLocation      = kTireRear1Left;
+  TX_TIRE.TirePress_10.phys = gCurPressure[1][0];
+  TX_TIRE.TireTemp_10.phys  = gTireTemp[1][0];
+  output( TX_TIRE );
+
+  TX_TIRE.TireLocation      = kTireRear1Right;
+  TX_TIRE.TirePress_11.phys = gCurPressure[1][1];
+  TX_TIRE.TireTemp_11.phys  = gTireTemp[1][1];
+  output( TX_TIRE );
+
+  TX_TIRE.TireLocation      = kTireRear2Left;
+  TX_TIRE.TirePress_20.phys = gCurPressure[2][0];
+  TX_TIRE.TireTemp_20.phys  = gTireTemp[2][0];
+  output( TX_TIRE );
+
+  TX_TIRE.TireLocation      = kTireRear2Right;
+  TX_TIRE.TirePress_21.phys = gCurPressure[2][1];
+  TX_TIRE.TireTemp_21.phys  = gTireTemp[2][1];
+  output( TX_TIRE );
+}
+/*@@end*/
+
+/*@@caplFunc:utilGetBmpFromState(int):*///function
+/*
+ * Get bitmap index form pressure state
+ */
+int utilGetBmpFromState( int state )
+{
+  switch(state) {
+    case -1:
+    case  1:
+      return 1;
+    case -2:
+    case  2:
+      return 2;
+    default:
+      return 0;
+
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:utilGetState(float,float):*///function
+/*
+ * Get state from tire pressure
+ */
+float utilGetState( float refPress, float press )
+{
+  float lowWarnLimit     = 0.90;
+  float lowCriticalLimit = 0.85;
+  float hiWarnLimit      = 1.10;
+  float hiCriticalLimit  = 1.15;
+
+  if (press < refPress * lowCriticalLimit) {
+    return -2;
+  }
+  else if (press < refPress * lowWarnLimit) {
+    return -1;
+  }
+  else if (press > refPress * hiCriticalLimit) {
+    return 2;
+  }
+  else if (press > refPress * hiWarnLimit) {
+    return 1;
+  }
+  else {
+    return 0;
+  }
+}
+/*@@end*/
+
+/*@@envVar:EvTPMS_Recalibrate:*/
+/*
+ * Recalibrate
+ */
+on envVar EvTPMS_Recalibrate
+{
+  TPMSRecalibrate();
+}
+/*@@end*/
+
+/*@@timer:DM1Timer:*/
+/*
+ * Send diagnostic PG DM1 (active diagnostic trouble codes) on 1Hz clock
+ */
+on timer DM1Timer
+{
+  pg DM1 dm1TP = { DLC = 1785 };
+  int    activeCount, i;
+  DWORD  fmi;
+
+  dm1TP.SA = gECUAddress;
+
+  //set up ZAF (zero DTCs active)
+  dm1TP.ProtectLampStatus               = 0x0;
+  dm1TP.AmberWarningLampStatus          = 0x0;
+  dm1TP.RedStopLampState                = 0x0;
+  dm1TP.MalfunctionIndicatorLampStatus  = 0x0;
+  dm1TP.FlashProtectLamp                = 0x3;
+  dm1TP.FlashAmberWarningLamp           = 0x3;
+  dm1TP.FlashRedStopLamp                = 0x3;
+  dm1TP.FlashMalfuncIndicatorLamp       = 0x3;
+  dm1TP.DTC1                            = 0x00000000;
+  dm1TP.byte(6)                         = 0xFF;
+  dm1TP.byte(7)                         = 0xFF;
+
+  // copy active DTCs to dm1
+  activeCount = 0;
+  for( i = 0; i < elCount(gDTCActiveTable); i++ )
+  {//populate the DM1 PG
+      
+    if (gDTCActiveTable[i] != 0)
+    {//active DTC at location i
+        
+      //populate DM1 with DTCs from Active Table
+      dm1TP.byte(2+activeCount*4)   = (gDTCActiveTable[i]      ) & 0xff;
+      dm1TP.byte(2+activeCount*4+1) = (gDTCActiveTable[i] >>  8) & 0xff;
+      dm1TP.byte(2+activeCount*4+2) = (gDTCActiveTable[i] >> 16) & 0xff;
+      dm1TP.byte(2+activeCount*4+3) = (gDTCActiveTable[i] >> 24) & 0xff;
+      
+      activeCount++;
+
+      //get FMI
+      fmi = (gDTCActiveTable[i] >> 16) & 0x1f;
+      
+      switch(fmi)
+      {//determine Lamp Status based on FMI
+        case kFMI_AboveNormalWarn:
+        case kFMI_BelowNormalWarn:
+          if (dm1TP.AmberWarningLampStatus == 0)
+          {
+              dm1TP.AmberWarningLampStatus = 0x01;
+              dm1TP.FlashAmberWarningLamp = 0x00;
+          }
+          break;
+        
+        case kFMI_CauseUnknown:
+          if (dm1TP.MalfunctionIndicatorLampStatus == 0)
+          {
+              dm1TP.MalfunctionIndicatorLampStatus  = 0x01;
+              dm1TP.FlashMalfuncIndicatorLamp = 0x00;
+          }
+          break;
+        
+        case kFMI_AboveNormalCritical:
+        case kFMI_BelowNormalCritical:
+          if (dm1TP.RedStopLampState == 0)
+          {
+            dm1TP.RedStopLampState = 0x01;
+            dm1TP.FlashRedStopLamp = 0x01;
+          }
+          break;
+
+        default:
+          {
+            dm1TP.ProtectLampStatus               = 0x0;
+            dm1TP.AmberWarningLampStatus          = 0x0;
+            dm1TP.RedStopLampState                = 0x0;
+            dm1TP.MalfunctionIndicatorLampStatus  = 0x0;
+            dm1TP.FlashProtectLamp                = 0x3;
+            dm1TP.FlashAmberWarningLamp           = 0x3;
+            dm1TP.FlashRedStopLamp                = 0x3;
+            dm1TP.FlashMalfuncIndicatorLamp       = 0x3;
+          }
+          break;
+      }
+    }
+  }
+
+  if(activeCount > 1)
+  {//more than one DTC -> DLC > 8
+      gDTCActive = 1;
+      dm1TP.DLC = 2 + activeCount * 4;
+  }
+  else if(activeCount == 1)
+  {//one DTC, DLC = 8
+      gDTCActive = 1;
+    dm1TP.DLC = 8;
+  }
+  else
+  {//0 DTC, DLC = 8
+    gDTCActive = 0;
+    dm1TP.DLC = 8;
+}
+
+  //output DM1
+  output( dm1TP );
+  //ensure 1Hz transmission of DM1
+  setTimer( DM1Timer, 1000 );
+}
+/*@@end*/
+
+/*@@caplFunc:utilCompareDeviceName(pg419354878x,pg418316030x):*///function
+/*
+ * Compare device names
+ *
+ * if pg1 has lower priority than pg2, return -1
+ * if pg1 has higher priority than pg2, return 1
+ * if both names are equal, return 0
+ */
+int utilCompareDeviceName( pg CA pg1, pg ACL pg2 )
+{
+  int i = 0;
+  for( i = 7; i >= 0; i-- ) {
+    if (pg1.byte(i) > pg2.byte(i)) {
+      return -1;
+    }
+    else if (pg1.byte(i) < pg2.byte(i)) {
+      return 1;
+    }
+  }
+
+  return 0;
+}
+/*@@end*/
+
+/*@@pg:CAN1.TPMS_Bus::DM14 (0xD9FEFEX):*/
+//
+// Memory Access Request
+//
+on pg DM14
+{
+    pg DM14 dm14;
+
+    if (this.DIR != RX)
+    {//not received by this node
+        return;
+    }
+    
+    if (gECUState == 0)
+    {//ECU is NOT active
+        return;
+    }
+
+    if ((this.DA != kGlobalAddr) && (this.DA != gECUAddress))
+    {//not a global PG and not the correct destination address
+        return;
+    }
+
+    //copy data
+    dm14.DWORD(0) = this.DWORD(0);
+    dm14.DWORD(4) = this.DWORD(4);
+  
+
+    //repel request if we are already work on a request
+    switch (gMemState) 
+    {
+        case kAccClosed:
+        {//0: Memory access running
+
+            //set tester address
+            gMemTesterAddress = this.SA;
+
+            //store request
+            gMemState = kAccRequested;
+            gDM14Command = this.Command;
+            gDM14Addressing = this.PointerType;
+            
+            if (gDM14Addressing == kMemoryAddr) 
+            {//direct memory addressing
+
+                gDM14Pointer  = this.Pointer + (this.PointerExtension << 24);
+                gDM14Space    = kSpaceNotUsed;
+            }
+            else
+            {//spatial addressing
+                
+                gDM14Pointer  = this.Pointer;
+                gDM14Space    = this.PointerExtension;
+            }
+
+            gDM14LenReq = this.NumberRequested + (this.NumberRequestedHigh << 8);
+            gDM14UserLevel = this.KeyOrUserLevel;
+    
+            memOnMemReq();
+        }
+        break;
+
+        case kAccRequested: 
+        {//1:  ignore request if already working on a request
+            
+            memRejectReq();
+            return;
+        }
+
+        case kWaitForKey:
+        {//2:  waiting on the key
+            
+            cancelTimer( memTimerWaitForKey );
+            memCheckReqParams( dm14 );
+
+            if (memValidateKey( this.KeyOrUserLevel )) 
+            {
+                memOnMemReq(); 
+            }
+        }
+        break;
+
+        case kWaitForLongKey:
+        {//3:
+            cancelTimer( memTimerWaitForKey );
+            writeDbgLevel( kDbgWarning, "<%s> a long key has to be received with DM18.", gNodeName ); 
+        }
+        break;
+
+        case kAccFinished:
+        {//5: Operation is finished (from view of the device) and waiting for close response
+
+            //if a further operation is finished we execute the next request
+            CancelTimer( memTimerFailedReceiveClose );
+
+            if ((this.Command == kCmdOpCompleted) || (this.Command == kCmdOpFailed)) 
+            {
+              gMemState = kAccClosed;
+            }
+            else 
+            {  
+              //if a further operation is finished we execute the next request
+              gDM14Command = this.Command;
+              gDM14Addressing = this.PointerType;
+            
+              if (gDM14Addressing == kMemoryAddr) 
+              {//direct memory addressing
+
+                  gDM14Pointer = this.Pointer + (this.PointerExtension << 24);
+                  gDM14Space = kSpaceNotUsed;
+              }
+              else 
+              {//spatial addressing
+
+                  gDM14Pointer = this.Pointer;
+                  gDM14Space = this.PointerExtension;
+              }
+
+              gDM14LenReq = this.NumberRequested + (this.NumberRequestedHigh << 8);
+              gDM14UserLevel = this.KeyOrUserLevel;
+
+              if (gMemReentrantSecurity) 
+              {
+                  //here we don't check security again and permit access at once
+                memOnMemReq();
+              }
+              else 
+              {
+                  gMemState = kAccRequested;
+              }
+
+              memOnMemReq();
+            }
+        }
+        break;
+
+        case kAccPermitted:
+        {//4:
+        }
+        case kWaitForData:
+        {//6:
+        }
+        default:
+        {
+            writeDbgLevel( kDbgWarning, "<%s> invalid state (%u) when receiving a request.", gNodeName, gMemState );
+        }
+        break;
+    }  
+}
+/*@@end*/
+
+/*@@pg:CAN1.TPMS_Bus::DM15 (0xD8FEFEX):*/
+//
+// Memory Access Response
+//
+on pg DM15
+{
+    if (this.DIR == TX)  
+    {
+        if (this.SA == gECUAddress) 
+        {
+            if (gMemSendBinDataAfterResponse) 
+            {
+                output(gPgDM16);
+                gMemSendBinDataAfterResponse = 0;
+            }
+        }
+        return;
+    }
+  
+    if (gECUState != kOnline)
+    {//ECU is inactive
+        return;
+    }
+
+    if ((this.DA != kGlobalAddr) && (this.DA != gECUAddress))
+    {//not global message and not intended for this ECU
+        return;
+    }
+
+    switch( gMemState ) 
+    {
+        case kAccClosed:
+        {//0: Memory access running
+        }
+
+        case kAccRequested: 
+        {//1:  ignore request if already working on a request
+        }
+
+        case kWaitForKey:
+        {//2:  waiting on the key
+        }
+
+        case kWaitForLongKey:
+        {//3:  waiting for the long key
+        }
+
+        case kAccPermitted:
+        {//4:  memory access is permitted
+        }
+        break;
+    
+        case kAccFinished:
+        {//5: Operation is finished (from view of the device) and waiting for close response
+        }
+        break;
+        
+        case kWaitForData:
+        {//6: waiting on data from the tool
+        }
+        
+        default:
+        {}
+    }
+}
+/*@@end*/
+
+/*@@caplFunc:memRejectReq():*///function
+//
+// Reject a memory request if there is already a not closed request
+//
+void memRejectReq()
+{
+  DWORD errInd;
+
+  errInd = kNoError;
+  switch (gDM14Command) {
+  case kCmdErase:
+    errInd = kProcEraseReq;
+    break;
+  case kCmdRead:
+    errInd = kProcReadReq;
+    break;
+  case kCmdWrite:
+    errInd = kProcWriteReq;
+    break;
+  case kCmdStatusReq:
+    errInd = kProcStatusReq;
+    break;
+  case kCmdOpCompleted:
+    errInd = kProcElse;
+    break;
+  case kCmdOpFailed:
+    errInd = kProcElse;
+    break;
+  case kCmdBootLoad:
+    errInd = kProcBootLoadReq;;
+    break;
+  case kCmdEdcpGen:
+    errInd = kProcEdcpGenReq;
+    break;
+  }
+  memSendResponse( 0, kStatusBusy, errInd, kEdcpExtErrInd, kSeedNo );
+  writeDbgLevel( kDbgWarning, "<%s> cannot handle request because device is busy.", gNodeName );
+}
+/*@@end*/
+
+/*@@caplFunc:memOnMemReq():*///function
+//
+// Call a certain memory request command
+// 
+void memOnMemReq()
+{
+  switch (gDM14Command)
+  {//process memory access request
+
+    case kCmdErase:
+    {//0:  erase memory
+        memOnCmdErase();
+    }
+    break;
+
+    case kCmdRead:
+    {//1:  read memory
+        memOnCmdRead();
+    }
+    break;
+
+    case kCmdWrite:
+    {//2:  write memory
+    }
+
+    case kCmdBootLoad:
+    {//6:  boot load
+        memOnCmdWriteOrBootLoad();
+    }
+    break;
+        
+    // not implemented
+    case kCmdStatusReq:
+    {//3:
+    }
+
+    case kCmdEdcpGen:
+    {//7:
+    }
+    break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:memCheckReqParams(pg416939774x):*///function
+//
+// Call this function to check if the parameters of an repeated request 
+// are equal to the parameters of the initial request
+//
+int memCheckReqParams( pg DM14 dm14 )
+{
+  pg DM14 pgDM14;
+
+  DWORD pointer;
+  WORD space;
+
+  pgDM14.Command          = dm14.Command;
+  pgDM14.PointerType      = dm14.PointerType;
+  pgDM14.NumberRequested  = dm14.NumberRequested;
+
+  if (gDM14Addressing == kMemoryAddr)
+  {//direct memory addressing
+      
+    //set pointer and ignore space
+    pointer  = dm14.Pointer + (dm14.PointerExtension << 24);
+    space    = kSpaceNotUsed;
+  }
+  else
+  {//spatial addressing
+      
+    //set pointer and space
+    pointer  = dm14.Pointer;
+    space    = dm14.PointerExtension;
+  }
+
+  if (gDM14Command != pgDM14.Command ||           //command changed
+      gDM14Addressing != pgDM14.PointerType ||    //incorrect addressing type
+      gDM14Pointer != pointer ||                  //pointer changed
+      gDM14Space != space ||                      //space changed
+      gDM14LenReq != pgDM14.NumberRequested       //length changed
+     )                        
+  {
+    //indicate to user that the repeated request is not the same as the original request
+    writeLineEx( gWriteSink, kSeverityWarning, "<%s> repeated request uses different paramters.", gNodeName );
+    //indicate request is different
+    return 0;
+  }
+  
+  //indicate request is same
+  return 1;
+}
+/*@@end*/
+
+/*@@caplFunc:memValidateKey(word):*///function
+//
+// Validate the short key and send a response
+// Return 1 if key is valid otherwise 0
+// 
+int memValidateKey( WORD nKey )
+{
+  if (nKey == gMemSeed) 
+  {//key is valid (to simplify matters we always allow the requested length)
+      
+    if( (gDM14LenReq + gDM14Pointer + 1 > elCount(gEEPROM)) &&
+        (gDM14Addressing == kMemoryAddr)
+      )
+    {//throw bounds error
+
+      //transmit DM15 indicating error accessing memory
+      memSendResponse( 0, kStatusBusy, kInvalidLength, kEdcpExtErrInd, kSeedNo );
+      gMemState = kAccClosed;
+      return -1;
+    }
+    else
+    {
+      memSendResponse( gDM14LenReq, kStatusProceed, kNoError, kEdcpExtNoInd, kSeedNo);
+      gMemState = kAccPermitted;
+      return 1;
+    }
+  }
+  else 
+  {// key is invalid
+    memSendResponse( 0, kStatusBusy, kInvalidKey, kEdcpExtErrInd, kSeedNo );
+    gMemState = kAccClosed;
+    return 0;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:memSendResponse(word,byte,dword,byte,word):*///function
+//
+// Send a memory access response
+//
+void memSendResponse( WORD length, BYTE status, DWORD errInd, BYTE edcpExt, WORD seed )
+{
+  pg DM15 pgMemResp;
+
+  if (gECUState  != kOnline) return;
+
+  pgMemResp.SA                = gECUAddress;
+  pgMemResp.DA                = gMemTesterAddress;
+  pgMemResp.EDCP_Extension    = edcpExt;
+  pgMemResp.ErrorIndicator    = errInd;
+  pgMemResp.NumberAllowed     = length & 0xFF; 
+  pgMemResp.NumberAllowedHigh = (length >> 8) & 0xFF;
+  pgMemResp.Seed              = seed;
+  pgMemResp.Status            = status;
+
+  output( pgMemResp);
+
+  // if a new request is received we are waiting for the key
+  if (gMemState == kAccRequested) {
+    gMemState = kWaitForKey;
+    setTimer( memTimerWaitForKey, kTimeoutWaitForKey );
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:memOnCmdErase():*///function
+//
+// Handle an erase command
+// 
+void memOnCmdErase()
+{
+  switch (gMemState) 
+  {
+    case kAccRequested:
+    {//1:  access requested, send short seed
+        
+      memSendResponse( 0, kStatusProceed, kNoError, kEdcpExtNoInd, gMemSeed );
+      gMemState = kWaitForKey;
+    }
+    break;
+
+    case kAccPermitted:
+    {//4:  access has been permitted
+      memDoErase();
+    }
+    break;
+
+    //these cases all fall through to the default
+    case kAccClosed:
+    {//0:
+    }
+    case kWaitForKey:
+    {//2:
+    }
+    case kWaitForLongKey:
+    {//3:
+    }
+    case kWaitForData:
+    {//6:
+    }
+    default:
+    {
+      writeLineEx( gWriteSink, kSeverityWarning, "<%s> invalid state (%u) when calling memOnCmdErase.", gNodeName, gMemState );
+    }
+    break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:memDoErase():*///function
+//
+// Execute erase command and initialize close sequence
+//
+void memDoErase()
+{
+  int ok;
+
+  gMemState = kAccPermitted;
+
+  ok = memDataErase();
+
+  if (ok) 
+  {// send positive response
+      memSendResponse( 0, kStatusOpCompleted, kNoError, kEdcpExtNoInd, kSeedNo );
+  }
+  else
+  {//send negative response (e.g. invalid length)
+      memSendResponse( 0, kStatusOpFailed, kInvalidLength, kEdcpExtErrInd, kSeedNo );
+  }
+
+  gMemState = kAccFinished;
+  SetTimer( memTimerFailedReceiveClose, kTimeoutWaitForClose );
+}
+/*@@end*/
+
+/*@@caplFunc:memOnCmdRead():*///function
+//
+// Handle a read command
+// 
+void memOnCmdRead()
+{
+  dword i, ok;
+
+  switch (gMemState) 
+  {
+    case kAccPermitted:
+      memDoRead();
+    break;
+    
+    case kAccRequested:
+      switch (gDM14Addressing) 
+      {
+        case kMemoryAddr:
+          // send short seed
+          memSendResponse( 0, kStatusProceed, kNoError, kEdcpExtNoInd, gMemSeed );
+          gMemState = kWaitForKey;
+          break;
+
+        case kSpatialAddr:
+          ok = 1;
+          for (i = 0; i < gDM14LenReq; i++)
+          {
+            if (IsValidObjectId(gDM14Pointer + i) == 0)
+            { 
+              ok = 0;
+              writeDbgLevel( kDbgWarning, "<%s> Object 0x%x is not implemented by the device.", gNodeName, (gDM14Pointer + i) ); 
+            }
+          }
+          if (ok == 1)
+          {// send short seed
+            memSendResponse( 0, kStatusProceed, kNoError, kEdcpExtNoInd, gMemSeed );
+            gMemState = kWaitForKey;
+          }
+          else
+          {//at least one object is not supported
+            gMemState = kAccClosed;
+            memSendResponse( 0, kStatusBusy, kInvalidBoundary, kEdcpExtErrInd, kSeedNo );
+          }
+          break;
+      }     
+      break;
+
+      case kAccFinished:
+      {
+        switch (gDM14Addressing) 
+        {
+          case kMemoryAddr:
+          break;
+
+          case kSpatialAddr:
+            ok = 1;
+            for (i = 0; i < gDM14LenReq; i++)
+            {
+              if (IsValidObjectId(gDM14Pointer + i) == 0)
+              { 
+                ok = 0;
+                writeDbgLevel( kDbgWarning, "<%s> Object 0x%x is not implemented by the device.", gNodeName, (gDM14Pointer +1) ); 
+              }
+            }
+            if (ok == 1)
+            {//here we don't check security again and permit access at once
+               gMemState = kAccPermitted;
+               memSendResponse( gDM14LenReq, kStatusProceed, kNoError, kEdcpExtNoInd, kSeedNo );
+            }
+            else
+            {//at least one object is not supported
+               gMemState = kAccClosed;
+               memSendResponse( 0, kStatusBusy, kInvalidBoundary, kEdcpExtErrInd, kSeedNo );
+            }
+            break;
+        }
+      }    
+      break;
+
+    case kAccClosed:
+    case kWaitForKey:
+    case kWaitForLongKey:
+    case kWaitForData:
+    default:
+      writeDbgLevel( kDbgWarning, "<%s> invalid state (%u) when calling memOnCmdRead.", gNodeName, gMemState );
+    break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:memDoRead():*///function
+//
+// Execute the read process and initialize close sequence
+//
+void memDoRead()
+{
+  int ok;
+
+  gMemState = kAccPermitted;
+  
+  //read data from EEPROM
+  ok = memDataRead();
+
+  if (ok == 1)
+  {//send positive response
+
+      memSendResponseAfterBinData( 0, kStatusOpCompleted, kNoError, kEdcpExtNoInd, kSeedNo );
+  }
+  else if (ok == 0)
+  {//send negative response (invalid length)
+
+      memSendResponseAfterBinData( 0, kStatusBusy, kInvalidLength, kEdcpExtErrInd, kSeedNo );    
+  }
+
+  gMemState = kAccFinished;
+}
+/*@@end*/
+
+/*@@caplFunc:memSendResponseAfterBinData(word,byte,dword,byte,word):*///function
+//
+// Send a response after a binary data message is sent
+//
+void memSendResponseAfterBinData( WORD length, BYTE status, DWORD errInd, BYTE edcpExt, WORD seed )
+{
+  gMemSendResponseAfterBinData = 1;
+  gMemBufLength  = length;
+  gMemBufStatus  = status;
+  gMemBufErrInd  = errInd;
+  gMemBufEdcpExt = edcpExt;
+  gMemBufseed    = seed;
+}
+/*@@end*/
+
+/*@@caplFunc:memDataRead():*///function
+//
+// Read binary data and send it to the tester
+//
+int memDataRead()
+{
+  DWORD i, dataLength, startLoc;
+  FLOAT pressFrontRight;  
+
+  if (gECUState != kOnline)
+  {//ECU is inactive
+      return -2;
+  }
+
+  //get the front right tire pressure
+  pressFrontRight = getValue( EvTPMS_FrontRightPressure );
+
+  //fill source and destination addresses
+  gPgDM16.SA = gECUAddress;
+  gPgDM16.DA = gMemTesterAddress;
+
+  //get location to read from
+  dataLength = gDM14LenReq;
+  startLoc = gDM14Pointer;
+
+  if((gDM14Addressing == kMemoryAddr) &&
+     ((dataLength > elCount(gEEPROM)) || 
+      (dataLength + startLoc > elCount(gEEPROM))
+     )
+    )
+  {//throw bounds error
+
+    //transmit DM15 indicating error accessing memory
+    return 0;
+  }
+  else
+  {//valid memory access
+
+    switch (gDM14Addressing) 
+    {
+      case kMemoryAddr:
+      {//direct memory addressing
+          
+          //ensure looking at correct data locations
+          dataLength++;
+                          
+          for (i = 0; i < dataLength; i++)
+          {//get data
+              gPgDM16.byte(i + 1) = gEEPROM[i + startLoc];
+          }
+          for (i = _max(0, dataLength-1); i < 8; i++)
+          {//fill rest of message
+              gPgDM16.byte(i + 1) = 0xFF;
+          }
+          gPgDM16.dlc = _max( 8, dataLength );
+          gPgDM16.NumberOfOccurance = dataLength - 1;
+
+          gMemSendBinDataAfterResponse = 1;
+          return 1;
+      }
+
+      case kSpatialAddr:
+      {//spatial memory addressing
+
+        dataLength = 1;
+        for (i = 0; i < gDM14LenReq; i++)
+        {
+          //get data
+          if (((gDM14Pointer + i) == gTirePressSPN[0][0]) ||
+              ((gDM14Pointer + i) == gTirePressUserSpace[0][0]))
+          {
+            gPgDM16.byte(dataLength) = (BYTE)(getValue( EvTPMS_FrontLeftPressure )/4);
+            dataLength += 1;
+          }
+          else if (((gDM14Pointer + i) == gTirePressSPN[0][1]) ||
+                   ((gDM14Pointer + i) == gTirePressUserSpace[0][1]))
+          {
+            gPgDM16.byte(dataLength) = (BYTE)(getValue( EvTPMS_FrontRightPressure )/4);
+            dataLength += 1;
+          }
+          else if (((gDM14Pointer + i) == gTirePressSPN[1][0]) ||
+                   ((gDM14Pointer + i) == gTirePressUserSpace[1][0]))
+          {
+            gPgDM16.byte(dataLength) = (BYTE)(getValue( EvTPMS_Rear1LeftPressure )/4);
+            dataLength += 1;
+          }
+          else if (((gDM14Pointer + i) == gTirePressSPN[1][1]) ||
+                   ((gDM14Pointer + i) == gTirePressUserSpace[1][1]))
+          {
+            gPgDM16.byte(dataLength) = (BYTE)(getValue( EvTPMS_Rear1RightPressure )/4);
+            dataLength += 1;
+          }
+          else if (((gDM14Pointer + i) == gTirePressSPN[2][0]) ||
+                   ((gDM14Pointer + i) == gTirePressUserSpace[2][0]))
+          {
+            gPgDM16.byte(dataLength) = (BYTE)(getValue( EvTPMS_Rear2LeftPressure )/4);
+            dataLength += 1;
+          }
+          else if (((gDM14Pointer + i) == gTirePressSPN[2][1]) ||
+                   ((gDM14Pointer + i) == gTirePressUserSpace[2][0]))
+          {
+            gPgDM16.byte(dataLength) = (BYTE)(getValue( EvTPMS_Rear2RightPressure )/4);
+            dataLength += 1;
+          }
+          else if (((gDM14Pointer + i) == gTireTempSPN[0][0]) ||
+                   ((gDM14Pointer + i) == gTireTempUserSpace[0][0]))
+          {
+            gPgDM16.word(dataLength) = (word)((273+gTireTemp[0][0])*32);
+            dataLength += 2;
+          }
+          else if (((gDM14Pointer + i) == gTireTempSPN[0][1]) ||
+                   ((gDM14Pointer + i) == gTireTempUserSpace[0][1]))
+          {
+            gPgDM16.word(dataLength) = (word)((273+gTireTemp[0][1])*32);
+            dataLength += 2;
+          }
+          else if (((gDM14Pointer + i) == gTireTempSPN[1][0]) ||
+                   ((gDM14Pointer + i) == gTireTempUserSpace[1][0]))
+          {
+            gPgDM16.word(dataLength) = (word)((273+gTireTemp[1][0])*32);
+            dataLength += 2;
+          }
+          else if (((gDM14Pointer + i) == gTireTempSPN[1][1]) ||
+                   ((gDM14Pointer + i) == gTireTempUserSpace[1][1]))
+          {
+            gPgDM16.word(dataLength) = (word)((273+gTireTemp[1][1])*32);
+            dataLength += 2;
+          }
+          else if (((gDM14Pointer + i) == gTireTempSPN[2][0]) ||
+                   ((gDM14Pointer + i) == gTireTempUserSpace[2][0]))
+          {
+            gPgDM16.word(dataLength) = (word)((273+gTireTemp[2][0])*32);
+            dataLength += 2;
+          }
+          else if (((gDM14Pointer + i) == gTireTempSPN[2][1]) ||
+                   ((gDM14Pointer + i) == gTireTempUserSpace[2][1]))
+          {
+            gPgDM16.word(dataLength) = (word)((273+gTireTemp[2][1])*32);
+            dataLength += 2;
+          }
+          else if (((gDM14Pointer + i) == gRefTirePressSPN[0][0]) ||
+                   ((gDM14Pointer + i) == gRefTirePressUserSpace[0][0]))
+          {
+            gPgDM16.byte(dataLength) = (BYTE)(gRefPressure[0][0]/8);
+            dataLength += 1;
+          }
+          else if (((gDM14Pointer + i) == gRefTirePressSPN[0][1]) ||
+                   ((gDM14Pointer + i) == gRefTirePressUserSpace[0][1]))
+          {
+            gPgDM16.byte(dataLength) = (BYTE)(gRefPressure[0][1]/8);
+            dataLength += 1;
+          }
+          else if (((gDM14Pointer + i) == gRefTirePressSPN[1][0]) ||
+                   ((gDM14Pointer + i) == gRefTirePressUserSpace[1][0]))
+          {
+            gPgDM16.byte(dataLength) = (BYTE)(gRefPressure[1][0]/8);
+            dataLength += 1;
+          }
+          else if (((gDM14Pointer + i) == gRefTirePressSPN[1][1]) ||
+                   ((gDM14Pointer + i) == gRefTirePressUserSpace[1][1]))
+          {
+            gPgDM16.byte(dataLength) = (BYTE)(gRefPressure[1][1]/8);
+            dataLength += 1;
+          }
+          else if (((gDM14Pointer + i) == gRefTirePressSPN[2][0]) ||
+                   ((gDM14Pointer + i) == gRefTirePressUserSpace[2][0]))
+          {
+            gPgDM16.byte(dataLength) = (BYTE)(gRefPressure[2][0]/8);
+            dataLength += 1;
+          }
+          else if (((gDM14Pointer + i) == gRefTirePressSPN[2][1]) ||
+                   ((gDM14Pointer + i) == gRefTirePressUserSpace[2][1]))
+          {
+             gPgDM16.byte(dataLength) = (BYTE)(gRefPressure[2][1]/8);
+             dataLength += 1;
+          }
+        }
+    
+        for (i = _max(0, dataLength-1); i < 8; i++)
+        {//fill rest of message
+            gPgDM16.byte(i + 1) = 0xFF;
+        }
+        gPgDM16.dlc = _max( 8, dataLength );
+        gPgDM16.NumberOfOccurance = dataLength - 1;
+
+        gMemSendBinDataAfterResponse = 1;
+        return 1;
+      }
+      
+      default:
+      {
+          return -1;
+      }
+
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:memOnCmdWriteOrBootLoad():*///function
+//
+// Handle a write command
+// 
+void memOnCmdWriteOrBootLoad()
+{
+  dword i, ok;
+
+  switch (gMemState)
+  {
+    case kAccPermitted:
+    {//4:  memory access permitted - allow the tester to transmit
+        
+      //see if the timeout occurs
+      SetTimer( memTimerWaitForData, kTimeoutWaitForData );
+      gMemState = kWaitForData;
+    }
+    break;
+
+    case kAccRequested:
+    {//1:  memory access is being requested
+      
+      //transmit seed
+      switch (gDM14Addressing) 
+      {
+        case kMemoryAddr:
+        {//direct memory addressing
+      
+            //send short seed
+            memSendResponse( 0, kStatusProceed, kNoError, kEdcpExtNoInd, gMemSeed );
+            gMemState = kWaitForKey;
+        }
+        break;
+
+        case kSpatialAddr:
+        {//spatial addressing
+
+          ok = 1;
+          for (i = 0; i < gDM14LenReq; i++)
+          {
+            if (IsObjectWritable(gDM14Pointer + i) == 0)
+            {//object is not writable
+              ok = 0;
+              writeDbgLevel( kDbgWarning, "<%s> Object 0x%x is read only.", gNodeName, (gDM14Pointer + i) );         
+            }
+            else if (IsValidObjectId(gDM14Pointer + i) == 0)
+            {//object is not supported
+              ok = 0;
+              writeDbgLevel( kDbgWarning, "<%s> Object 0x%x is implemented by the device.", gNodeName, (gDM14Pointer + i) );
+            }
+        }
+          if (ok == 1)
+          {//send short seed
+            memSendResponse( 0, kStatusProceed, kNoError, kEdcpExtNoInd, gMemSeed );
+            gMemState = kWaitForKey;
+          }
+          else
+          {// at least one object is read only or not supported
+            gMemState = kAccClosed;
+            memSendResponse( 0, kStatusBusy, kInvalidBoundary, kEdcpExtErrInd, kSeedNo );
+          }
+        }
+        break;
+      }
+    }
+    break;
+
+    case kAccFinished:
+    {
+      switch (gDM14Addressing) 
+      {
+        case kMemoryAddr:
+          break;
+
+        case kSpatialAddr:
+        {//spatial addressing
+
+          ok = 1;
+          for (i = 0; i < gDM14LenReq; i++)
+          {
+            if (IsObjectWritable(gDM14Pointer + i) == 0 )
+            {//object is read only
+              ok = 0;
+              writeDbgLevel( kDbgWarning, "<%s> Object 0x%x is read only.", gNodeName, (gDM14Pointer + i) );         
+            }
+            else if (IsValidObjectId(gDM14Pointer + i) == 0)
+            {//object is not supported
+              ok = 0;
+              writeDbgLevel( kDbgWarning, "<%s> Object 0x%x is implemented by the device.", gNodeName, (gDM14Pointer + i) );
+            }
+          }
+          if (ok == 1)
+          {//here we don't check security again and permit access at once
+            gMemState = kAccPermitted;
+            memSendResponse( gDM14LenReq, kStatusProceed, kNoError, kEdcpExtNoInd, kSeedNo );
+          }
+          else
+          {//at least one object is read only or not supported
+             gMemState = kAccClosed;
+             memSendResponse( 0, kStatusBusy, kInvalidBoundary, kEdcpExtErrInd, kSeedNo );
+          }
+        }
+      break;
+      }
+    }
+    break;
+
+    case kAccClosed:
+    case kWaitForKey:
+    case kWaitForLongKey:
+    case kWaitForData:
+    default:
+    {
+        writeLineEx( gWriteSink, kSeverityWarning, "<%s> invalid state (%u) when calling memOnCmdWriteOrBootLoad.", gNodeName, gMemState );
+    }
+    break;
+  }
+}
+/*@@end*/
+
+/*@@timer:memTimerFailedReceiveClose:*/
+//
+// Timeout for failure to hear a close from a tester
+//
+on timer memTimerFailedReceiveClose
+{
+  if (gMemState != kAccClosed) {
+    WriteDbgLevel( kDbgWarning, "<%s> timeout while waiting for a \"Close\" of the tool. Memory access is canceled.", gNodeName ); 
+  }
+  gMemState = kAccClosed;
+}
+/*@@end*/
+
+/*@@timer:memTimerFailedReceiveOpCompleted:*/
+//
+// Timeout for failure to receive a complete transfer of the data set
+// once an operation was allowed
+//
+on timer memTimerFailedReceiveOpCompleted
+{
+  WriteDbgLevel( kDbgWarning, "<%s> timeout while waiting for a \"Transfer Completed\" of the tester. Memory access is canceled.", gNodeName );
+  gMemState = kAccClosed;
+}
+/*@@end*/
+
+/*@@timer:memTimerWaitForData:*/
+//
+// Timeout if data is not sent by the tester
+//
+on timer memTimerWaitForData
+{
+  WriteDbgLevel( kDbgWarning, "<%s> timeout while waiting for data of the tool. Memory access is canceled.", gNodeName ); 
+  gMemState = kAccClosed;
+}
+/*@@end*/
+
+/*@@timer:memTimerWaitForKey:*/
+//
+// Timeout if key is not sent by the tester
+//
+on timer memTimerWaitForKey
+{
+  WriteDbgLevel( kDbgWarning, "<%s> timeout while waiting for a key of the tester. Memory access is canceled.", gNodeName ); 
+  gMemState = kAccClosed;
+}
+/*@@end*/
+
+/*@@timer:memTimerFailedReceiveSecurity:*/
+//
+// Timeout for failure to receive further security from a tester
+// when the Device has required same
+//
+on timer memTimerFailedReceiveSecurity
+{
+  WriteDbgLevel( kDbgWarning, "<%s> no security data is received from the tool. Memory access is canceled.", gNodeName ); 
+  gMemState = kAccClosed;
+}
+/*@@end*/
+
+/*@@pg:CAN1.TPMS_Bus::DM16 (0xD7FEFEX):*/
+//
+// Binary Data Transfer
+//
+on pg DM16
+{
+  int i, buf;
+    
+  if (this.DIR == TX) {
+    // we have sent a binary data message 
+    if (this.DA == gMemTesterAddress && this.SA == gECUAddress) {
+      if (gMemSendResponseAfterBinData) {
+        memSendResponse(gMemBufLength,gMemBufStatus,gMemBufErrInd,gMemBufEdcpExt,gMemBufseed);
+        SetTimer( memTimerFailedReceiveClose, kTimeoutWaitForClose );
+        gMemSendResponseAfterBinData = 0;
+      }
+    }
+    return;
+  }
+
+
+  if (gECUState  != kOnline) return;
+  if ((this.DA != kGlobalAddr) && (this.DA != gECUAddress)) return;
+
+  if (gMemState == kWaitForData) {
+    CancelTimer( memTimerWaitForData );
+
+    // copy data to global variable
+    for (i=0; i<this.dlc; ++i) {
+      gPgDM16.BYTE(i) = this.BYTE(i);
+    }
+    gPgDM16.dlc = this.dlc;
+
+    // write
+    memDoWrite();
+  }
+  else {
+    writeDbgLevel( kDbgWarning, "<%s> invalid state (%u) when receiving data from the tester.", gNodeName, gMemState );
+  }
+
+}
+/*@@end*/
+
+/*@@caplFunc:memDoWrite():*///function
+//
+// Execute write process and initialize close sequence
+//
+void memDoWrite()
+{
+  int ok;
+
+  gMemState = kAccPermitted;
+  
+  //write to the EEPROM
+  ok = memDataWrite();
+
+  if (ok) 
+  {//send positive response
+      memSendResponse( 0, kStatusOpCompleted, kNoError, kEdcpExtNoInd, kSeedNo );
+  }
+  else
+  {//send negative response (e.g. invalid length)
+      memSendResponse( 0, kStatusOpCompleted, kInvalidLength, kEdcpExtErrInd, kSeedNo );    
+  }
+
+  gMemState = kAccFinished;
+  
+  SetTimer( memTimerFailedReceiveClose, kTimeoutWaitForClose );
+}
+/*@@end*/
+
+/*@@caplFunc:memDataWrite():*///function
+//
+// Write received data (received data is stored in gPgDM16)
+//
+int memDataWrite()
+{
+
+  DWORD i, dataLength, startLoc, spaceLoc;        
+  pg TIRE pgTIRE;
+  pg TPRI pgTPRI;
+
+  if (gECUState == kOffline)
+  {//ECU is inactive
+    return -2;
+  }
+
+  //get location to write to
+  dataLength = gDM14LenReq;
+  startLoc = gDM14Pointer;
+
+  if((gDM14Addressing == kMemoryAddr) &&
+     ((dataLength > elCount(gEEPROM)) || 
+      (dataLength + startLoc > elCount(gEEPROM))
+     )
+    )
+  {//throw bounds error
+
+    //transmit DM15 indicating error accessing memory
+    return 0;
+  }
+  else
+  {//valid memory access
+
+    switch (gDM14Addressing)
+    {
+      case kMemoryAddr:
+      {//direct memory addressing
+
+        //ensure looking at correct data locations
+        dataLength++;               
+        
+        for (i = 0; i < dataLength; i++)
+        {//write the data
+            
+            gEEPROM[i + startLoc] = gPgDM16.byte(i + 1);
+        }
+
+        writeLineEx( gWriteSink, kSeverityInfo, "<%s> data is written to address 0x%x of the device (length = %u).", gNodeName, gDM14Pointer, gDM14LenReq  );                
+        return 1;
+      }
+
+      case kSpatialAddr:
+      {//spatial memory addressing
+          
+        dataLength = 1;
+        for (i = 0; i < gDM14LenReq; i++)
+        {
+
+          if ((gDM14Pointer + i) == gRefTirePressSPN[0][0])
+          {
+            gRefPressure[0][0] = gPgDM16.byte(dataLength)*8;
+            dataLength += 1;
+          }
+          else if ((gDM14Pointer + i) == gRefTirePressSPN[0][1])
+          {
+            gRefPressure[0][1] = gPgDM16.byte(dataLength)*8;
+            dataLength += 1;
+          }
+          else if ((gDM14Pointer + i) == gRefTirePressSPN[1][0])
+          {
+            gRefPressure[1][0] = gPgDM16.byte(dataLength)*8;
+            dataLength += 1;
+          }
+          else if ((gDM14Pointer + i) == gRefTirePressSPN[1][1])
+          {
+            gRefPressure[1][1] = gPgDM16.byte(dataLength)*8;
+            dataLength += 1;
+          }
+          else if ((gDM14Pointer + i) == gRefTirePressSPN[2][0])
+          {
+            gRefPressure[2][0] = gPgDM16.byte(dataLength)*8;
+            dataLength += 1;
+          }
+          else if ((gDM14Pointer + i) == gRefTirePressSPN[2][1])
+          {
+            gRefPressure[2][1] = gPgDM16.byte(dataLength)*8;
+            dataLength += 1;
+          }
+        }
+
+        return 1;
+      }
+      break;
+
+      default:
+      {
+        return -1;
+      }
+    }
+  }
+
+  return 0;
+}
+/*@@end*/
+
+/*@@pg:CAN1.TPMS_Bus::TPCM (0xECFEFEX),TPMS_Bus::TPDT (0xEBFEFEX):*/
+//
+// Flow control for the CMDT transport protocol
+//
+// Because CANoe is a passive tool we have to transmit
+// the CTS and EoMA message for the transport sessions
+// which we receive.
+//
+on pg TPCM, TPDT
+{
+  BYTE  sessionAddress[1]  = { kNullAddr };
+  BYTE  sessionsPackets[1] = { 0 };
+  BYTE  sessionsBytes[1]   = { 0 };
+  DWORD sessionPGN[1]      = { 0x0000 };
+  int   i;
+  pg    TPCM cmPG;
+  cmPG.DWORD(0) = cmPG.DWORD(4) = 0xFFFFFFFF; //init datafield
+
+  if (this.DIR != RX)      return;
+  if (gECUState != kOnline) return;
+  if ((this.DA != kGlobalAddr) && (this.DA != gECUAddress)) return;
+
+  cmPG.SA  = gECUAddress;
+  cmPG.DA  = this.SA;
+  cmPG.CAN = this.CAN;
+  cmPG.dword(0) = cmPG.dword(4) = 0xffffffff;
+
+  if (this.PF == 0xec) { // Command
+    if (this.byte(0) == 0x10) { // RTS
+      // new session
+      for( i = 0; i < elCount(sessionAddress); i++ ) {
+        if ((sessionAddress[i] == this.SA) || (sessionAddress[i] == kNullAddr)) {
+          sessionAddress[i]  = this.SA;
+          sessionsPackets[i] = this.byte(3); 
+          sessionsBytes[i]   = this.word(1);
+          sessionPGN[i]      = (this.byte(7)) | (this.byte(6) << 8) | (this.byte(5) << 16);
+          // send CTS
+          cmPG.ControlByte   = cmPG.ControlByte::CTS;
+          cmPG.NumberOfPacketsThatCanBeSent = 1;
+          cmPG.NextPacketNumberToBeSent     = 1;
+          cmPG.PGNumber      = sessionPGN[i];
+          output( cmPG );
+          break;
+        }
+      }
+    }
+  }
+  else if (this.PF == 0xeb) { // Data
+    // find session
+    for( i = 0; i < elCount(sessionAddress); i++ ) {
+      if (sessionAddress[i] == this.SA) {
+        if (this.byte(0) < sessionsPackets[i]) {
+          // send CTS
+          cmPG.ControlByte   = cmPG.ControlByte::CTS;
+          cmPG.NumberOfPacketsThatCanBeSent = 1;
+          cmPG.NextPacketNumberToBeSent     = this.byte(0) + 1;
+          cmPG.PGNumber      = sessionPGN[i];
+          output( cmPG );
+        }
+        else { // last packet
+          // send CTS
+          cmPG.ControlByte          = cmPG.ControlByte::EoMA;
+          cmPG.TotalMessageSize     = sessionsBytes[i];
+          cmPG.TotalNumberOfPackets = sessionsPackets[i];
+          cmPG.PGNumber             = sessionPGN[i];
+          output( cmPG );
+          sessionAddress[i]  = kNullAddr; // close session
+        }
+        break;
+      }
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:dtcClear(dword[]):*///function
+/*
+ * Clear a single SPN or the whole table of SPNs.
+ *
+ * table - Clear this table
+ */
+void dtcClear( DWORD table[] )
+{
+  int i;
+  for( i = 0; i < elCount(table); i++ ) {
+    table[i] = 0;
+  }
+}
+/*@@end*/
+
+/*@@pg:CAN1.TPMS_Bus::DM22 (0xC3FEFEX):*/
+/*
+ * Individual clear/reset of active or previsouly active DTC
+ */
+on pg DM22
+{
+  DWORD   spn;
+  DWORD   fmi;
+  pg DM22 dm22;
+
+  if (this.DIR != RX) return;
+  if ((this.DA != kGlobalAddr) && (this.DA != gECUAddress)) return;
+
+  spn = this.SPN1;
+  fmi = this.FailureModeIdentifier1;
+
+  switch(this.IndividualDTCClearControlByte) {
+    case 1:  // Request to clear previously active DTC
+      dtcUpdateTable( gDTCPreviousTable     , 1, spn, fmi );
+      break;
+    case 17: // Request to clear active DTC
+      dtcUpdateTable( gDTCActiveTable  , 1, spn, fmi );
+      break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:fillMockEEPROM():*///function
+//
+//This function fills the mock EEPROM
+//
+fillMockEEPROM ()
+{
+  int i;
+  
+  for (i = 0; i < elCount(gEEPROM) - 1; i++)
+  {//fill the mock EEPROM
+      
+    if(i < 256)
+    {
+        gEEPROM[i] = i;
+    }
+    else
+    {
+        gEEPROM[i] = (i - 1) % 255;
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:memDataErase():*///function
+//
+// Erase Memory Locations specified
+//
+int memDataErase()
+{
+  DWORD i, dataLength, startLoc;    
+  
+  if (gECUState == kOffline)
+  {//ECU is inactive
+    return -2;
+  }
+
+  //get location to write to
+  dataLength = gDM14LenReq;
+  startLoc = gDM14Pointer;    
+
+  if((gDM14Addressing == kMemoryAddr) &&
+     ((dataLength > elCount(gEEPROM)) || 
+      (dataLength + startLoc > elCount(gEEPROM))
+     )
+    )
+  {//throw bounds error
+
+    //transmit DM15 indicating error accessing memory
+    return 0;
+  }
+  else
+  {//valid memory access
+              
+    for (i = 0; i < dataLength; i++)
+    {//write the data
+                    
+      gEEPROM[i + startLoc] = 0xFF;
+    }
+
+    return 1;
+  }
+}
+/*@@end*/
+
+/*@@pg:CAN1.TPMS_Bus::DM13 (0xDFFEFEX):*/
+//
+// Stop Start Broadcast
+//
+on pg DM13
+{
+    pg DM13 pgDM13;
+
+    if (this.DIR != RX)
+    {
+      //not received by this node
+      return;
+    }
+    
+    if (gECUState == 0)
+    {
+      //ECU is NOT active
+      return;
+    }  
+
+    if ((this.DA != kGlobalAddr) && (this.DA != gECUAddress))
+    {
+      //not a global PG and not the correct destination address
+      return;
+    }
+
+
+    if (this.CurrentDataLink == 1) // start broadcast
+    {
+       if (gEnableBroadcast == 0) 
+      {
+        write("TPMS: Broadcast messages are started");
+        setTimer( DM1Timer, 1000 );
+        gEnableBroadcast = 1;
+      }
+    }
+    else if (this.CurrentDataLink == 0) // stop broadcast
+    {
+      if (gEnableBroadcast == 1) 
+      {
+        write("TPMS: Broadcast messages are stopped");
+        cancelTimer( DM1Timer );
+        gEnableBroadcast = 0;
+      }
+      
+    }
+}
+/*@@end*/
+
+/*@@caplFunc:GetObjectId(byte,signal):*///function
+DWORD GetObjectId( BYTE space, signal * sig )
+{
+  switch (space)
+  {
+    case 0x00: // SPN SPACE
+      return DBLookup( sig ).SPN;
+    case 0x80: // User defined SPACE
+      return DBLookup( sig ).TPMS_Space;
+    default:
+      return 0xFFFF;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:IsValidObjectId(dword):*///function
+BYTE IsValidObjectId( DWORD objectId )
+{
+  switch (gDM14Space)
+  {
+    case 0: // SPN Space
+      return (objectId == TX_TIRE.TirePress_00.SPN          ||
+              objectId == TX_TIRE.TirePress_01.SPN          ||
+              objectId == TX_TIRE.TirePress_10.SPN          ||
+              objectId == TX_TIRE.TirePress_11.SPN          ||
+              objectId == TX_TIRE.TirePress_20.SPN          ||
+              objectId == TX_TIRE.TirePress_21.SPN          ||
+              objectId == TX_TIRE.TireTemp_00.SPN           ||
+              objectId == TX_TIRE.TireTemp_01.SPN           ||
+              objectId == TX_TIRE.TireTemp_10.SPN           ||
+              objectId == TX_TIRE.TireTemp_11.SPN           ||
+              objectId == TX_TIRE.TireTemp_20.SPN           ||
+              objectId == TX_TIRE.TireTemp_21.SPN           ||
+              objectId == TX_TPRI.ReferenceTirePress_00.SPN ||
+              objectId == TX_TPRI.ReferenceTirePress_01.SPN ||
+              objectId == TX_TPRI.ReferenceTirePress_10.SPN ||
+              objectId == TX_TPRI.ReferenceTirePress_11.SPN ||
+              objectId == TX_TPRI.ReferenceTirePress_20.SPN ||
+              objectId == TX_TPRI.ReferenceTirePress_21.SPN );
+    case 128: // user defined SPACE
+      return (objectId == TX_TIRE.TirePress_00.TPMS_Space          ||
+              objectId == TX_TIRE.TirePress_01.TPMS_Space          ||
+              objectId == TX_TIRE.TirePress_10.TPMS_Space          ||
+              objectId == TX_TIRE.TirePress_11.TPMS_Space          ||
+              objectId == TX_TIRE.TirePress_20.TPMS_Space          ||
+              objectId == TX_TIRE.TirePress_21.TPMS_Space          ||
+              objectId == TX_TIRE.TireTemp_00.TPMS_Space           ||
+              objectId == TX_TIRE.TireTemp_01.TPMS_Space           ||
+              objectId == TX_TIRE.TireTemp_10.TPMS_Space           ||
+              objectId == TX_TIRE.TireTemp_11.TPMS_Space           ||
+              objectId == TX_TIRE.TireTemp_20.TPMS_Space           ||
+              objectId == TX_TIRE.TireTemp_21.TPMS_Space           ||
+              objectId == TX_TPRI.ReferenceTirePress_00.TPMS_Space ||
+              objectId == TX_TPRI.ReferenceTirePress_01.TPMS_Space ||
+              objectId == TX_TPRI.ReferenceTirePress_10.TPMS_Space ||
+              objectId == TX_TPRI.ReferenceTirePress_11.TPMS_Space ||
+              objectId == TX_TPRI.ReferenceTirePress_20.TPMS_Space ||
+              objectId == TX_TPRI.ReferenceTirePress_21.TPMS_Space );
+    default:
+      return 0;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:IsObjectWritable(dword):*///function
+BYTE IsObjectWritable( DWORD objectId )
+{  
+  switch (gDM14Space)
+  {
+    case 0: // SPN Space
+      if (objectId == TX_TPRI.TireLocation.SPN ||
+          objectId == TX_TIRE.TireLocation.SPN ||  
+          objectId == TX_TIRE.TirePress_00.SPN ||
+          objectId == TX_TIRE.TirePress_01.SPN ||
+          objectId == TX_TIRE.TirePress_10.SPN ||
+          objectId == TX_TIRE.TirePress_11.SPN ||
+          objectId == TX_TIRE.TirePress_20.SPN ||
+          objectId == TX_TIRE.TirePress_21.SPN ||
+          objectId == TX_TIRE.TireTemp_00.SPN  ||
+          objectId == TX_TIRE.TireTemp_01.SPN  ||
+          objectId == TX_TIRE.TireTemp_10.SPN  ||
+          objectId == TX_TIRE.TireTemp_11.SPN  ||
+          objectId == TX_TIRE.TireTemp_20.SPN  ||
+          objectId == TX_TIRE.TireTemp_21.SPN )
+      {
+        return 0;
+      }
+      break;
+    case 128: // user defined SPACE
+      if (objectId == TX_TPRI.TireLocation.TPMS_Space ||
+          objectId == TX_TIRE.TireLocation.TPMS_Space ||  
+          objectId == TX_TIRE.TirePress_00.TPMS_Space ||
+          objectId == TX_TIRE.TirePress_01.TPMS_Space ||
+          objectId == TX_TIRE.TirePress_10.TPMS_Space ||
+          objectId == TX_TIRE.TirePress_11.TPMS_Space ||
+          objectId == TX_TIRE.TirePress_20.TPMS_Space ||
+          objectId == TX_TIRE.TirePress_21.TPMS_Space ||
+          objectId == TX_TIRE.TireTemp_00.TPMS_Space  ||
+          objectId == TX_TIRE.TireTemp_01.TPMS_Space  ||
+          objectId == TX_TIRE.TireTemp_10.TPMS_Space  ||
+          objectId == TX_TIRE.TireTemp_11.TPMS_Space  ||
+          objectId == TX_TIRE.TireTemp_20.TPMS_Space  ||
+          objectId == TX_TIRE.TireTemp_21.TPMS_Space )
+      {
+        return 0;
+      }
+      break;
+    default:
+      return 1;
+  }
+
+  return 1;
+}
+/*@@end*/
+

@@ -1,0 +1,648 @@
+/*@!Encoding:1252*/
+variables
+{
+  // Abbreviations:
+  // CLS = Central Locking System
+
+  long cLockMinVelocity = 50;    // Velocity when the CLS should lock
+  int  gWindowMovement = 0;      // -1 when moving down, 1 when moving up
+  int  cMinWindowPosition = 0;   // Min/Max window positions (that can be shown)
+  int  cMaxWindowPosition = 16;  //         by the window-bitmap
+  int  gCurrentDiffPos;          // Indicates the current movement
+  int  gCurrentWindowPos;        // Holds the current position
+
+  int  gsStateKeyDown = 0;       // Last applied state of the DownKey for the window-lift
+  int  gsStateKeyUp   = 0;       // Last applied state of the UpKey for the window-lift
+
+  int  gCrashApplied = 0;        // We had a crash?
+
+  int  cWindowStateCurrentlyOpening = 2;  // enums that reflect the enum in the CANdb++-database
+  int  cWindowStateCurrentlyClosing = 1;
+  int  cWindowStateNotMoving = 0;
+
+  // Window movement simulation
+  mstimer tWindow;
+  dword cUpdateRateWindow = 300;  //ms
+
+  int  gInvalidWindowKeyKombinationOccurred = 0;
+  
+  enum SessionEnum {DefaultSession, ExtendedSession};
+  enum SessionEnum eSession=DefaultSession;
+  
+  enum LockstateEnum {Locked, Unlocked};
+  enum LockstateEnum eVariantCodingLockstate=Locked;
+  
+  // Initial variant coding settings
+  enum VehicleTypeEnum { Coupe=1, Sedan=2, Transporter=3 };
+  enum CountryCodeEnum { Europe=1, USA=2, Japan=3 };
+  const cSpecialPreference = 0x47;
+  struct CodingStruct { enum CountryCodeEnum eCountryCode; enum VehicleTypeEnum eVehicleType; byte bSpecialPreference; } ;
+  struct CodingStruct sCoding={Europe, Coupe, cSpecialPreference};
+  msTimer tVariantCodingLock;
+  
+  // same seed every time for simplification of the example 
+  byte gSeedArray[4]={0x12, 0x34, 0x56, 0x78}; 
+  
+  // Fault memory simulation
+  const cMaxNumberOfFaults=3;   // Maximum number of faults the memory can hold
+  const cStatus=0x79;           // only one statusbyte supported for simplification of the example
+  struct FaultStruct {byte DTC[3]; byte StatusByte;};
+  struct HeaderStruct {byte ServiceID; byte Subfunction; byte StatusByte;};
+  struct FaultMemoryStruct {dword NumberOfFaults; dword NextFaultMemLocationForStorage; struct HeaderStruct Header; struct FaultStruct Fault[cMaxNumberOfFaults];};
+  struct FaultMemoryStruct FaultMemory = {0, 0, {ServiceID=0x59, Subfunction=0x02, StatusByte=cStatus},
+                                             { {DTC={0x00, 0x00, 0x00}, StatusByte=0},
+                                               {DTC={0x00, 0x00, 0x00}, StatusByte=0},
+                                               {DTC={0x00, 0x00, 0x00}, StatusByte=0}
+                                             }
+                                         };
+  const cInvalidWindowKeyKombinationOccurred=0x01;
+  const cVariantCodingIllegalAccess=0x02;
+  const cErrorSample3=0x03;
+  
+  struct FaultStruct SupportedDTC[cMaxNumberOfFaults] = { {DTC={0x00, 0x00, 0x01}, StatusByte=cStatus},
+                                                          {DTC={0x00, 0x00, 0x02}, StatusByte=cStatus},
+                                                          {DTC={0x00, 0x00, 0x03}, StatusByte=cStatus}  
+                                                          };
+}
+
+on message LockingRemoteControlRequest
+{
+  int LockRequestState = -1;
+
+  // Check if there was a change in the signals and indicate them to the appropriate handlers
+
+  if(LockRequestState != this.LockRequest)
+  {
+    if(this.LockRequest == 1)  // RequestLock
+    SignalLock();
+    else if(this.LockRequest == 2) // RequestUnlock
+    SignalUnlock();
+    else if(this.LockRequest == 3) // Comfort close
+    SignalComfortClose();
+    // else: idle
+
+    LockRequestState = this.LockRequest;
+  }
+}
+
+void AddDTC(dword DTC_ID)
+{
+  dword k;
+  
+  for (k=0; k<FaultMemory.NumberOfFaults; k++) {
+    if (!memcmp(FaultMemory.Fault[k], SupportedDTC[DTC_ID-1])) return; // Do nothing since DTC has already been stored
+  }
+  
+  memcpy(FaultMemory.Fault[FaultMemory.NextFaultMemLocationForStorage], SupportedDTC[DTC_ID-1]);
+  
+  if (FaultMemory.NumberOfFaults < cMaxNumberOfFaults) {
+    FaultMemory.NumberOfFaults++;
+  }
+  FaultMemory.NextFaultMemLocationForStorage=(FaultMemory.NextFaultMemLocationForStorage + 1 ) % cMaxNumberOfFaults;  // Next time overwrite oldest fault, if necessary
+
+}
+
+SignalLock ()
+{
+  // CLS lock has been requested. This request can be served easily.
+  $CentralLockingSystemState::LockState = 1;
+
+  if($VehicleMotion::EngineRunning == 0)
+  {
+    // Activate the Anti-Theft-System only if the engine is not running
+    $CentralLockingSystemState::AntiTheftSystemActive = 1;
+  }
+}
+
+
+
+SignalUnlock ()
+{
+  // Any unlock signal has been occurred.
+
+  $CentralLockingSystemState::LockState = 0;
+  $CentralLockingSystemState::AntiTheftSystemActive = 0;
+
+  if(@sysvar::SystemUnderTest::ErrorInWindowApplication)
+  {
+
+  }
+  else
+  {
+    SignalWindowUp(0);  // stop a potentially moving window due to safety reasons
+                        // maybe a child within the car leans out of the window
+  }
+}
+
+on message VehicleMotion
+{
+  int lStateCrash = -1;
+  long lStateVelocity = -1;
+  int lStateEngine = -1;
+
+  // Check if there was a change in the signals and indicate them to the appropriate handlers
+
+  if(lStateCrash != this.CrashDetected)
+  {
+    if(this.CrashDetected == 1)
+      SignalCrash();
+
+    lStateCrash = this.CrashDetected;
+  }
+
+  if(lStateVelocity != this.Velocity)
+  {
+    SignalVelocity(this.Velocity.phys);
+
+    lStateVelocity = this.Velocity;
+  }
+
+  if(lStateEngine != this.EngineRunning)
+  {
+    SignalEngine(this.EngineRunning);
+
+    lStateEngine = this.EngineRunning;
+  }
+}
+
+SignalCrash ()
+{
+  // Crash has been occurred
+  // A crash shall automatically open the CLS (under some circumstances)
+
+  int lUnlock;
+
+  lUnlock = 0;
+
+  if(@sysvar::SystemUnderTest::ErrorInCrashSensorUsage)
+  {
+    // This is an error injection: 
+    // Crash sensor applied in all states, independent to the engine
+    lUnlock = 1;
+  }
+  else
+  {
+    // This is the normal behavior:
+    // Apply the crash sensor only, if the engine is running.
+    // Otherwise a theft might get control over the car
+    // when he hammers a bit onto a crash-sensor.
+
+    if($VehicleMotion::EngineRunning || $VehicleMotion::Velocity)
+    lUnlock = 1;
+  }
+
+  if(lUnlock)
+  {
+    gCrashApplied = 1;
+    $CentralLockingSystemState::LockState = 0;
+  }
+}
+
+SignalVelocity (long aVelocity)
+{
+  int lApply;
+
+  lApply = 0;
+
+  if(aVelocity >= cLockMinVelocity && $VehicleMotion::EngineRunning)
+  {
+    // It is allowed to lock motion dependent only, if there
+    // is/was no crash.
+
+    if(@sysvar::SystemUnderTest::ErrorCrashSensorOnVelocity)
+      lApply = 1;            // Causes a safety-Problem. Locked if speed was too fast
+    else if(!gCrashApplied)  
+      lApply = 1;            // Intended behavior
+
+    if(lApply)
+    {
+      $CentralLockingSystemState::LockState = 1;
+    }
+  }
+}
+
+SignalComfortClose ()
+{
+  // comfort close was requested.
+
+  // 1. Lock CLS
+  $CentralLockingSystemState::LockState = 1;
+
+  // 2. Close the windows
+  StartMovingWindows(-1);
+}
+
+on message WindowControl
+{
+  // Check if there was a change in the signals and indicate them to the appropriate handlers
+
+  if(this.KeyDown && this.KeyUp && !@sysvar::SystemUnderTest::ErrorKeyUpAndDownError)
+  {
+    // - Indicate whether an invalid input-status of the Up/down-keys for the window lift has occurred.  
+    AddDTC(cInvalidWindowKeyKombinationOccurred);
+
+    StopMovingWindows();    // invalid command, therefore windows must be stopped
+                            // due to safety reasons
+  }
+  else
+  {
+    if(this.KeyDown != gsStateKeyDown)
+    {
+      SignalWindowDown(this.KeyDown);
+      gsStateKeyDown = this.KeyDown;
+    }
+  
+    if(this.KeyUp   != gsStateKeyUp)
+    {
+      SignalWindowUp(this.KeyUp);
+      gsStateKeyUp   = this.KeyUp;
+    }
+  }
+}
+
+SignalWindowUp (int aStart)
+{
+  // Request to move up the windows.
+
+  // aStart = 1 if the WindowMovement shall be started
+  // aStart = 0 if the WindowMovement shall be stopped
+
+  if(aStart)
+  {
+    StartMovingWindows(-1);
+  }
+  else
+  {
+    StopMovingWindows();
+  }
+}
+
+SignalWindowDown (int aStart)
+{
+  // Request to move down the windows.
+
+  // aStart = 1 if the WindowMovement shall be started
+  // aStart = 0 if the WindowMovement shall be stopped
+
+  if(aStart)
+  {
+    StartMovingWindows(1);
+  }
+  else
+  {
+    StopMovingWindows();
+  }
+}
+
+ApplyWindowMove ()
+{
+  // Normally we should know the signal value 
+  gCurrentWindowPos = $WindowState::WindowPosition;
+
+  if(gCurrentDiffPos < 0)  // We move up
+  {
+    if(gCurrentWindowPos > cMinWindowPosition) // not yet fully closed
+    gCurrentWindowPos += gCurrentDiffPos;
+  }
+  else if(gCurrentDiffPos > 0)  // We move down
+  {
+    if(gCurrentWindowPos < cMaxWindowPosition) // not yet fully opened
+    gCurrentWindowPos += gCurrentDiffPos;
+  }
+  else
+  {
+    // We do nothing, because there is no request to move
+  }
+
+  // Indicate the current window position
+  $WindowState::WindowPosition = gCurrentWindowPos;
+}
+
+on timer tVariantCodingLock
+{
+  LockVariantCoding();
+}
+
+on timer tWindow
+{
+  // Maybe the windows shall be moved...
+  ApplyWindowMove();
+  SetTimer(this, cUpdateRateWindow);
+}
+
+StartMovingWindows (int aDir)
+{
+  // aDir < 0: moving up
+  // aDir > 0: moving down
+
+  CancelTimer(tWindow);  
+  SetTimer(tWindow, cUpdateRateWindow);
+  gCurrentDiffPos = aDir;
+  ApplyWindowMove();
+
+  if(aDir > 0)
+  {
+    $WindowState::WindowMotion = cWindowStateCurrentlyOpening;
+  }
+  else if(aDir < 0)
+  {
+    $WindowState::WindowMotion = cWindowStateCurrentlyClosing;
+  }
+  else
+  {
+    $WindowState::WindowMotion = cWindowStateNotMoving;
+  }
+}
+
+StopMovingWindows ()
+{
+  CancelTimer(tWindow);
+  gCurrentDiffPos = 0;
+  ApplyWindowMove();
+
+  $WindowState::WindowMotion = cWindowStateNotMoving;
+}
+
+SignalEngine (int aState)
+{
+  // aState = 1: switched on
+  // aState = 0: switched off
+
+  // Reset the crash sensor when the engine state changes
+  gCrashApplied = 0;
+}
+
+OSEKTL_DataInd( long count) 
+{
+  /* This function returns the number of data received */
+
+  byte rxBuffer[4096];
+
+  writeDbgLevel(1,"%NODE_NAME%: OSEKTL_DataInd");
+
+  OSEKTL_GetRxData( rxBuffer, count);
+  Diag_DataInd( rxBuffer, count, OSEKTL_GetSrcAdr());
+}
+
+OSEKTL_ErrorInd( int error) 
+{
+  /* This function returns error messages */
+  writeDbgLevel(1,"%NODE_NAME%: OSEKTL_ErrorInd");
+
+  Diag_ErrorInd( error);
+}
+
+_OSEKTL_DataReq( byte data[]) 
+{
+  /* The diagnostics layer transports data via a 
+     CAPL callback interface. */
+
+  byte val1;
+
+  writeDbgLevel(1,"%NODE_NAME%: _OSEKTL_DataReq");
+
+  if( elcount( data) >= 2)  val1 = data[1];
+  else  val1 = 0;
+
+  writeDbgLevel(1,"%NODE_NAME%: Send %d bytes: %02x %02x ...", elcount( data), data[0], val1);
+  OSEKTL_DataReq( data, elcount( data));
+  writeDbgLevel(1,"%NODE_NAME%: Done.");
+}
+
+long _OSEKTL_GetSrcAdr() 
+{
+  /* This Function returns the source address 
+     of the last received message */
+
+  writeDbgLevel(1,"%NODE_NAME%: _OSEKTL_GetSrcAdr");
+
+  return OSEKTL_GetSrcAdr();
+}
+
+_OSEKTL_SetAdrMode( long mode) 
+{
+  writeDbgLevel(1,"%NODE_NAME%: _OSEKTL_SetAdrMode");
+
+  switch( mode) 
+  {
+    case 0:	OSEKTL_SetNrmlMode(); break;  /* Toggles to normal addressing */ 
+    case 1:	OSEKTL_SetExtMode();  break;  /* Toggles to extended addressing */
+    case 2:	OSEKTL_SetNrFixMode();  break;/* Toggles to normalfixed addressing */ 
+    case 3:	OSEKTL_SetMixedMode();  break;/* Toggles to mixed addressing */ 
+  }
+}
+
+_OSEKTL_SetEcuAdr( BYTE adr) 
+{
+  writeDbgLevel(1,"%NODE_NAME%: _OSEKTL_SetEcuAdr");
+
+  /* This function will set the controller address */ 
+  OSEKTL_SetEcuNumber( adr);
+}
+
+_OSEKTL_SetRxId( dword rxID) 
+{
+  writeDbgLevel(1,"%NODE_NAME%: _OSEKTL_SetRxId");
+
+  /* This function will set the receive ID */
+  OSEKTL_SetRxId( rxID);
+}
+
+_OSEKTL_SetTgtAdr( BYTE adr) 
+{
+  /* This function will set the target address */
+
+  writeDbgLevel(1,"%NODE_NAME%: _OSEKTL_SetTgtAdr");
+
+  OSEKTL_SetTgtAdr( adr);
+}
+
+_OSEKTL_SetTxId( dword txID) 
+{
+  writeDbgLevel(1,"%NODE_NAME%: _OSEKTL_SetTxId");
+
+  /* This function will set the target address */
+  OSEKTL_SetTxId( txID);
+}
+
+OSEKTL_DataCon( long count) 
+{
+  /* This function returns the number 
+  of data succsessfully sent */
+
+  writeDbgLevel(1,"%NODE_NAME%: OSEKTL_DataCon");
+
+  Diag_DataCon( count);
+}
+
+on diagRequest DefaultSession_Start
+{
+  DiagResponse this resp;
+  
+  eSession=DefaultSession;
+  diagSendPositiveResponse(resp);
+  LockVariantCoding();
+}
+
+on diagRequest ExtendedDiagnosticSession_Start
+{
+  DiagResponse this resp;
+  
+  eSession=ExtendedSession;
+  diagSendPositiveResponse(resp);
+  LockVariantCoding();
+}
+
+on diagRequest Coding_Read
+{
+  DiagResponse this resp;
+  
+  if (eSession==ExtendedSession) {
+    diagSetParameter(resp, "Codingstring.CountryType", sCoding.eCountryCode);
+    diagSetParameter(resp, "Codingstring.VehicleType", sCoding.eVehicleType);
+    diagSetParameter(resp, "Codingstring.SpecialAdjustment", sCoding.bSpecialPreference);
+    diagSendPositiveResponse(resp);
+  }
+  else {
+    diagSendNegativeResponse(resp, 0x7F); // Service not supported in default session
+  }
+}
+
+on diagRequest Coding_Write
+{
+  DiagResponse this resp;
+  //struct CodingStruct NewCoding;
+  
+  if (eSession==ExtendedSession) {
+    if (eVariantCodingLockstate==Unlocked) {
+      
+      sCoding.eVehicleType = (enum VehicleTypeEnum) diagGetParameter(this, "Codingstring.VehicleType");
+      sCoding.eCountryCode = (enum CountryCodeEnum) diagGetParameter(this, "Codingstring.CountryType");
+      sCoding.bSpecialPreference = (byte) diagGetParameter(this, "Codingstring.SpecialAdjustment");
+      diagSendPositiveResponse(resp);
+    }
+    else {
+      diagSendNegativeResponse(resp, 0x33);             // Security Access denied
+      AddDTC(cVariantCodingIllegalAccess); // Store corresponding DTC
+    }
+  }
+  else {
+    diagSendNegativeResponse(resp, 0x7F); // Service not supported in default session
+  }
+}
+
+on diagRequest SeedLevel1_Request
+{
+  DiagResponse this resp;
+
+  
+  if (eSession==ExtendedSession) {
+    if (eVariantCodingLockstate==Unlocked) {
+      // Already unlocked
+      diagSendNegativeResponse(resp, 0x22); // Conditions not correct
+      LockVariantCoding();
+    }
+    else {
+      diagSetParameterRaw(resp, "SecuritySeed", gSeedArray, elcount(gSeedArray)); // Return the same seed every time for simplification of the example
+      diagSendPositiveResponse(resp);
+      
+    }
+  }
+  else {
+    diagSendNegativeResponse(resp, 0x7F); // Service not supported in default session
+  }
+}
+on diagRequest KeyLevel1_Send
+{
+  DiagResponse this resp;
+  byte keyArrayDetermined[4];
+  byte keyArrayReceived[4];
+  dword keyArraySize;
+  dword k;
+  
+  if (eSession==ExtendedSession) {
+    if (eVariantCodingLockstate==Unlocked) {
+      // Already unlocked
+      diagSendNegativeResponse(resp, 0x22); // Conditions not correct
+      LockVariantCoding();
+    }
+    else {
+      diagGetParameterRaw(this, "SecurityKey", keyArrayReceived, elcount(keyArrayReceived));
+      diagGenerateKeyFromSeed (gSeedArray, elcount(gSeedArray), 1, "", "", keyArrayDetermined, elcount(keyArrayDetermined), keyArraySize);  
+      for (k=0; k<4; k++) {
+        if (keyArrayDetermined[k]!=keyArrayReceived[k]) {
+          diagSendNegativeResponse(resp, 0x35); // Invalid key
+          LockVariantCoding();
+          return;
+        }
+      }
+      eVariantCodingLockstate=Unlocked;
+      setTimer(tVariantCodingLock, 1000); // Allow variant coding write only within 1 sec
+      diagSendPositiveResponse(resp);
+    }
+  }
+  else {
+    diagSendNegativeResponse(resp, 0x7F); // Service not supported in default session
+  }
+}
+
+on diagRequest FaultMemory_ReadAllIdentified
+{
+  diagResponse this resp;
+  dword k;
+
+  BYTE rawResp[ 3 + cMaxNumberOfFaults * 4];
+
+  memcpy (rawResp, 0, FaultMemory.Header);
+  for (k=0;k<FaultMemory.NumberOfFaults;k++) {
+    memcpy(rawResp, 3+k*4, FaultMemory.Fault[k]);
+  }
+  DiagResize( resp, 3+4*FaultMemory.NumberOfFaults);
+  DiagSetPrimitiveData( resp, rawResp, 3+4*FaultMemory.NumberOfFaults);
+
+  DiagSendPositiveResponse(resp);
+  LockVariantCoding();
+}
+
+void LockVariantCoding()
+{
+  eVariantCodingLockstate=Locked;
+  cancelTimer(tVariantCodingLock);
+}
+
+on diagRequest FaultMemory_Clear
+{
+  DiagResponse this lResp;
+  
+  // Let's clear our DTC's:
+  FaultMemory.NumberOfFaults=0;
+  FaultMemory.NextFaultMemLocationForStorage=0;
+
+  // Send response
+  DiagSendPositiveResponse(lResp);
+}
+
+on start
+{
+  // Here the outputs of the diagnostic callback functions are switched off
+  setWriteDbgLevel(0);
+}
+
+on diagRequest FaultMemory_ReadAllSupported
+{
+  // Return a list of all DTCs this ECU may set
+
+  DiagResponse this resp;
+
+  diagSetParameter( resp, "DtcStatusbyte", 0x79);
+  diagResize( resp, 3 + 3 * 4); // 3 DTC plus the prefix
+  diagSetComplexParameter( resp, "ListOfDTCAndStatus", 0, "DTC", 0x01);
+  diagSetComplexParameter( resp, "ListOfDTCAndStatus", 0, "DtcStatusbyte", 0x79);
+  diagSetComplexParameter( resp, "ListOfDTCAndStatus", 1, "DTC", 0x02);
+  diagSetComplexParameter( resp, "ListOfDTCAndStatus", 1, "DtcStatusbyte", 0x79);
+  diagSetComplexParameter( resp, "ListOfDTCAndStatus", 2, "DTC", 0x03);
+  diagSetComplexParameter( resp, "ListOfDTCAndStatus", 2, "DtcStatusbyte", 0x79);
+
+  DiagSendResponse( resp);
+}
+

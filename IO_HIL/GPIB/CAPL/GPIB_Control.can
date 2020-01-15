@@ -1,0 +1,180 @@
+/*@!Encoding:1252*/
+variables
+{
+  // Connection parameters
+  const long cEot = 1; // GPIB EOI line is set at the end of the write operation
+  const long cEos = 0; // End-pf-String behavior
+  const long cTimeout = 13; // Timeout of the ddevice: 10s
+
+  // Buffer for write operation
+  const long cBufferSize = 1024;
+  char gBuffer[cBufferSize];
+
+  // Status variables
+  long gDeviceID = 0;
+  int  gConnected = 0;  
+}
+
+
+
+on preStart
+{
+  Connect();
+}
+
+Connect ()
+{
+  long retVal;
+
+  Write("Connection Params:");
+  Write("==================");
+  Write("Board Index: %d", @sysvar::GPIB::Board_Index);
+  Write("Primary Address: %d", @sysvar::GPIB::Primary_Address);
+  Write("Secondary Address:  %d", @sysvar::GPIB::Secondary_Address);
+  Write("timeout:  %d", cTimeout);
+  Write("eot:      %d", cEot);
+  Write("eos:      %d", cEos);
+  Write("");
+    
+  // Opens the GPIB device
+  gDeviceID = GPIBDevOpen(@sysvar::GPIB::Board_Index, // Board Index
+                          @sysvar::GPIB::Primary_Address, // Primary Address
+                          @sysvar::GPIB::Secondary_Address,  // Secondary Address
+                          cTimeout,                // Timeout
+                          cEot,                    // Eot
+                          cEos);                   // Eos
+
+  if( gDeviceID < 0 )
+  {
+    Write("ERROR: Call to GPIBDevOpen failed (Code: %d)!", gDeviceID);
+    return;
+  }
+
+  // Activates the GPIB device
+  retVal = GPIBDevOnline(gDeviceID, 1);
+
+  if( retVal < 0 )
+  {
+    Write("ERROR: Call to GPIBDevOnline failed (Code: %d)!", retVal);
+    return;
+  }
+            
+  Write("Connection to GPIB device succeeded...");
+  gConnected = 1;                            
+}
+
+
+
+on stopMeasurement
+{
+  Disconnect();
+}
+
+Disconnect ()
+{
+  long retVal;
+
+  // Deactivates the GPIB device
+  retVal = GPIBDevOnline(gDeviceID, 0);
+
+  if( retVal < 0 )
+  {
+    Write("ERROR: Call to GPIBDevOnline failed (Code: %d)!", retVal);
+  }
+}
+
+
+
+// This function is called if a query or write operation raises an error condition
+GPIBOnError (long deviceDescriptor, char query[], char response[], long status, long error)
+{
+  write("GPIB ERROR: device %d, query %s, error %d", deviceDescriptor, query, error);
+}
+
+
+
+on sysvar sysvar::GPIB::Query
+{
+  if( @this == 1 )
+  {
+    Query();
+  }
+}
+
+// This function is called when a query should be send
+Query ()
+{
+  long retVal;
+
+  if( gConnected <= 0 )
+  {
+    return;
+  }
+
+  GetSendString();
+
+  // query operation
+  retVal = GPIBQueryEx(gDeviceID, gBuffer, cBufferSize);
+
+  if( retVal < 0 )
+  {
+    Write("GPIB ERROR: Call to GPIBQueryEx failed (Code: %d)!", retVal);
+  }
+  
+  else
+  {
+    Write("GPIB Query: %s", gBuffer);
+  }       
+}
+
+// This functions reads the string from the panel GPIB control that should be send
+GetSendString ()
+{
+  sysGetVariableString("GPIB", "SendString", gBuffer, cBufferSize);
+}
+
+// This function is called when the query returns
+GPIBResponse (long dev, char query[], char buffer[])
+{
+  if (dev == gDeviceID)
+  {
+	  sysSetVariableString("GPIB", "ReceivedString", buffer); 
+    Write("GPIB Response: %s", buffer);  
+	}
+}
+
+
+
+on sysvar sysvar::GPIB::Write
+{
+  if( @this == 1 )
+  {
+    Write();
+  }
+}
+
+// This function is called when a write operation should be send
+Write ()
+{
+  long retVal;
+
+  if( gConnected <= 0 )
+  {
+    return;
+  }
+
+  GetSendString();
+
+  // write operation
+  retVal = GPIBWriteStr(gDeviceID, gBuffer);
+
+  if( retVal < 0 )
+  {
+    Write("GPIB ERROR: Call to GPIBWriteStr failed (Code: %d)!", retVal);
+  }
+  
+  else
+  {
+    Write("GPIB Write: %s", gBuffer);
+  }  
+}

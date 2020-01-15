@@ -1,0 +1,305 @@
+/*@@var:*/
+variables 
+{
+   msTimer tTimer1,tTimer2;
+   int gErrorFrames = 0;   // Send Errorframes 0=No 1=Yes
+   int gMessageFrames = 1; // Send Messageframes 0=No 1=Yes 
+   int gChip2Also = 1;
+   int gErrFrameNo = 3;    // Burst Errorframes
+   int gExtended = 0;      // Send Extended Frames 0=No 1=Yes 
+   int gCycleTime;
+   int gBurstCnt = 1;
+   const int kErrorCycleTime = 20;
+
+   char gLogHandel1[20] = "CAN1";
+   char gLogHandel2[20] = "CAN2";
+
+   dword gNewPage; 
+}
+/*@@end*/
+
+/*@@key:'+':*/
+on key '+'
+{ 
+   gErrFrameNo++;
+   writeDbgLevel(1," err frames: %d ",gErrFrameNo); 
+}
+/*@@end*/
+
+/*@@key:'-':*/
+on key '-'
+{
+   if (gErrFrameNo==0) return;
+   gErrFrameNo--;
+   writeDbgLevel(1," err frames: %d ",gErrFrameNo); 
+}
+/*@@end*/
+
+/*@@key:'e':*/
+on key 'e'
+{
+   if ( gErrorFrames == 1 )
+   {
+      gErrorFrames = 0;
+   }
+   else
+   {
+      gErrorFrames = 1;
+   }
+}
+/*@@end*/
+
+/*@@key:'r':*/
+on key 'r'
+{
+   resetcan();
+   Write("CAN was reset");
+}
+/*@@end*/
+
+/*@@key:PageUp:*/
+on key PAGEUP
+{
+   gCycleTime++;
+   writeDbgLevel(1," gCycleTime: %dms ",gCycleTime); 
+}
+/*@@end*/
+
+/*@@key:PageDown:*/
+on key PAGEDOWN
+{
+   if (gCycleTime==1) return;
+   gCycleTime--;
+   writeDbgLevel(1," gCycleTime: %dms ",gCycleTime); 
+}
+/*@@end*/
+
+/*@@key:End:*/
+on key END
+{
+   if (gBurstCnt==1) return;
+   gBurstCnt--;
+   writeDbgLevel(1," gBurstCnt: %d ",gBurstCnt); 
+}
+/*@@end*/
+
+/*@@key:Home:*/
+on key HOME
+{
+   if (gBurstCnt>20) return;
+   gBurstCnt++;
+   writeDbgLevel(1," gBurstCnt: %d ",gBurstCnt); 
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start 
+{
+   gCycleTime = Stress1.CycleTime;  // get Value of Messageattribut CycleTime 
+                                    // from Message Stress1 in Database Stress
+   setWriteDbgLevel(1);
+
+   setTimer(tTimer1,50);
+   setTimer(tTimer2,100);
+
+   SendBurst(16);    // Call function SendBurst
+
+   writeDbgLevel(1," err frames on: %d #: %d",gErrorFrames,gErrFrameNo); 
+   if (gBurstCnt>=0)
+   {
+      writeDbgLevel(1," gBurstCnt: %d ",gBurstCnt); 
+   }
+   else 
+   {
+      writeDbgLevel(1," gBurstCnt: %d -> every %d th time",gBurstCnt, (gBurstCnt*(-1))); 
+   }
+   writeDbgLevel(1," gCycleTime: %dms ",gCycleTime); 
+
+   // Create a new page in the write window for instructions
+
+   gNewPage = writeCreate("Instructions");
+   writeLineEx(gNewPage,2," Use the keyboard to control the stress program ");
+   writeLineEx(gNewPage,4,"");
+   writeLineEx(gNewPage,4,"<PageUp>/......to increment/decrement the cycle");
+   writeLineEx(gNewPage,4,"<PageDown>     time of the messages Stress1");
+   writeLineEx(gNewPage,4,"               and Stress2");
+   writeLineEx(gNewPage,4,"<Home>,<End>...to increment/decrement the burst");
+   writeLineEx(gNewPage,4,"               count of Stress1 and Stress2");
+   writeLineEx(gNewPage,4,"<m>............to stop/start sending Stress1");
+   writeLineEx(gNewPage,4,"               and Stress2 on the CAN bus");
+   writeLineEx(gNewPage,4,"<e>............to start/stop sending errorFrames");
+   writeLineEx(gNewPage,4,"<+>,<->.... ...to increment/decrement the Burst");
+   writeLineEx(gNewPage,4,"               of errorFrames");
+   writeLineEx(gNewPage,4,"<b> ...........to send a burst (Stress1)");
+   writeLineEx(gNewPage,4,"<r>............to reset CAN");
+   writeLineEx(gNewPage,4,"<h>,<s>........to start/stop information output");
+   writeLineEx(gNewPage,4,"               in the Write window 'System'");
+   writeLineEx(gNewPage,4,"<c>............to clear Write window 'System'");
+}
+/*@@end*/
+
+/*@@timer:tTimer1:*/
+on timer tTimer1 
+{
+   message can1.Stress1 msgStress1;        
+   message can2.Stress2 msgStress2; 
+   message can1.StressExtended1 msgExtended1 ;
+   message can2.StressExtended2 msgExtended2 ;
+   
+   int i;
+   int counter;
+
+   setTimer(tTimer1,gCycleTime);    
+
+   if (gBurstCnt>=0) 
+   {          
+      msgStress2.Counter++;
+      msgStress1.Counter++;
+      msgExtended1.Counter++;
+      msgExtended2.Counter++;
+      for (i=0;i<gBurstCnt;i++) 
+      {
+         msgStress1.BurstCount = i;
+         msgStress2.BurstCount = i;
+         if (gChip2Also) output(msgStress2);
+         output(msgStress1);
+         if(gExtended)
+         {
+            output(msgExtended1);
+            if (gChip2Also) output(msgExtended2);
+         } 
+      }
+   }
+   else 
+   {
+      if (counter==0)
+      {
+         msgStress2.Counter++;
+         msgStress1.Counter++;
+         msgExtended2.Counter++;
+         msgExtended2.Counter++;
+         if (gChip2Also) output(msgStress2);
+         output(msgStress1);
+         if(gExtended)
+         {
+            output(msgExtended1);
+            if (gChip2Also) output(msgExtended2);
+         } 
+         counter = gBurstCnt+1;
+      }
+      else 
+      {
+         counter++;
+      }
+   }
+}
+/*@@end*/
+
+/*@@timer:tTimer2:*/
+on timer tTimer2
+{
+   int i;
+   setTimer(this,kErrorCycleTime);                 
+   if (gErrorFrames)
+   {
+      for (i=0;i<gErrFrameNo;i++) 
+      {
+         output(ErrorFrame);
+      }
+   }
+}
+/*@@end*/
+
+/*@@key:'m':*/
+on key 'm'
+{
+   if ( gMessageFrames == 1 )
+   {
+      cancelTimer(tTimer1);    
+      gMessageFrames = 0;
+      write("Stop sending message Stress1 and Stress2");
+   }
+   else
+   {
+      setTimer(tTimer1,gCycleTime);    
+      gMessageFrames = 1;
+      write("Start sending message Stress1 and Stress2");
+   }
+}
+/*@@end*/
+
+/*@@caplFunc:SendBurst(int):*/
+SendBurst(int numb)
+{
+   // Send message Stress1 with a BurstCount = 16
+
+   message Stress1 msgStress1;
+   int i;
+   for (i=0; i<numb; i++)
+   {
+      msgStress1.BurstCount = i;
+      output(msgStress1);
+   }
+}
+/*@@end*/
+
+/*@@key:'b':*/
+on key 'b'
+{
+   SendBurst(16);
+}
+/*@@end*/
+
+/*@@key:'c':*/
+on key 'c'
+{
+   writeClear(0); // Clear CAPL-page of the write window
+}
+/*@@end*/
+
+/*@@key:'h':*/
+on key 'h'
+{
+   setWriteDbgLevel(5);
+   Write("The priority for the Debug CAPL");
+   Write("function is set to medium priority (5).");
+}
+/*@@end*/
+
+/*@@key:'s':*/
+on key 's'
+{
+  setWriteDbgLevel(0);
+  Write("The priority for the Debug CAPL");
+  Write("function is set to the lowest priority (0).");
+}
+/*@@end*/
+
+/*@@sysvarUpdate:Stress::CAN1Run:*/
+on sysvar_update sysvar::Stress::CAN1Run
+{
+  if(@sysvar::Stress::CAN1Run) 
+  {
+    StartLogging(gLogHandel1,@sysvar::Stress::PreCAN1);
+  }
+  else
+  {
+    StopLogging(gLogHandel1,@sysvar::Stress::PostCAN1);
+  }
+}
+/*@@end*/
+
+/*@@sysvarUpdate:Stress::CAN2Run:*/
+on sysvar_update sysvar::Stress::CAN2Run
+{
+  if(@sysvar::Stress::CAN2Run) 
+  {
+    StartLogging(gLogHandel2,@sysvar::Stress::PreCAN2);
+  }
+  else
+  {
+    StopLogging(gLogHandel2,@sysvar::Stress::PostCAN2);
+  }
+}
+/*@@end*/
+

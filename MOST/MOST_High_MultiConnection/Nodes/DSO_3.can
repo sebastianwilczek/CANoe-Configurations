@@ -1,0 +1,235 @@
+/*@@includes:*/
+includes
+{
+#include "MOST_MHP.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  char gECU[32]  = "DSO 3";
+  const long cBufferSize = 65536;
+
+  // Default settings will be applied in preStart before ports are invoked 
+  long  gDefaultTransportMode = cTransportMode_Packet;
+  long  gDefaultFrameSize = 0x28;
+  long  gDefaultAckMode = cAckMode_Block;
+  long  gPrio = 1;
+
+  dword gDSO_PortHandle;
+  byte  gDSO_Buffer[cBufferSize]; 
+
+  // own address
+  dword gDSO_FBlockID   = 0x52;
+  dword gDSO_InstanceID = 0x01;
+  dword gDSO_FunctionID = 0xE03;
+  dword gDSO_OpTypeID   = 0xC; 
+
+  // fault injection
+  int gIsDataWrongSize;
+  int gIsNotResponding;
+  int gIsTransmissionDelayed;
+  mstimer gHoldTimer;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:Navigation.Image.Get (0x52E031):*/
+on mostAMSMessage Navigation.Image.Get
+{
+  dword destDevice;
+  long  packetSize; 
+
+  destDevice = this.SA;
+
+  // Fault injection: Function doesn't respond
+  if(gIsNotResponding == 1)
+    return;
+  
+  // Fault injection: Packet has unexpected number of bytes
+  if(gIsDataWrongSize == 0)
+    packetSize = cBufferSize;
+  else
+    packetSize = 10000;
+  
+  GenerateData(packetSize);  
+  if(MH_ReqTrans(gDSO_PortHandle, 
+                 destDevice, 
+                 gDSO_FBlockID, 
+                 gDSO_InstanceID, 
+                 gDSO_FunctionID, 
+                 gDSO_OpTypeID, 
+                 gDSO_Buffer, 
+                 packetSize) == cAPIResult_Ok)
+   
+  {
+    writeDbgLevel(3,"CAPL: %s: Navigation.Image.Status requests transmission to 0x%X.", 
+                  gECU, 
+                  destDevice);
+  }
+  else
+  {
+    writeDbgLevel(3,"CAPL: %s: Navigation.Image.Status failed to request transmission to 0x%X.", 
+                  gECU,
+                  destDevice);
+  }
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  mostApplicationNode();
+  ///////////////////////////////////////////////////////////////////
+  // Initialize default settings used by ports created subsequently 
+  // Note, that packet transport mode must be set BEFORE frame 
+  // sizes can be set, that are larger than allowed on the control 
+  // channel.
+
+  MH_SetTxTranspMode(0, gDefaultTransportMode); 
+  MH_SetTxFrameSize(0, gDefaultFrameSize);
+  MH_SetTxBlockAck(0, gDefaultAckMode);
+
+  if (mostGetSpeedGrade(mostGetChannel()) == 3)
+  {
+    MH_UseProtocolRev(0, 3);
+  }
+
+  MH_SetVerbose(0);
+
+  // register MHP tx port for DSO1 instance 
+  gDSO_PortHandle = MH_CreateTxPort("");    
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndTxConnectionClosed(dword,long):*///callback
+MH_IndTxConnectionClosed(dword handle, long res)
+{
+  ReportErrorsToWrite (res);
+}
+/*@@end*/
+
+/*@@caplFunc:ReportErrorsToWrite(long):*///function
+ReportErrorsToWrite (long res)
+{
+  switch (res)
+  {
+    case 0:     writeDbgLevel(0, "CAPL: %s: Result (%d): OK", gECU, res);     break;
+    case 1:     writeDbgLevel(0, "CAPL: %s: Error (%d): Number of Send retries exceeded", gECU, res);          break;
+    case 2:     writeDbgLevel(0, "CAPL: %s: Error (%d): Number of Trans retries exceeded", gECU, res);         break;
+    case 3:     writeDbgLevel(0, "CAPL: %s: Error (%d): Number of End retries exceeded", gECU, res);           break;
+    case 4:     writeDbgLevel(0, "CAPL: %s: Error (%d): Number of Ready retries exceeded", gECU, res);         break;
+    case 5:     writeDbgLevel(0, "CAPL: %s: Error (%d): Number of Frame Retries exceeded", gECU, res);         break;
+    case 6:     writeDbgLevel(0, "CAPL: %s: Error (%d): Number of Receive retries execeeded", gECU, res);      break;
+    case 10:    writeDbgLevel(0, "CAPL: %s: Error (%d): Receive buffer could not be provided", gECU, res);     break;
+    case 11:    writeDbgLevel(0, "CAPL: %s: Error (%d): Connection rejected via higher priority", gECU, res);  break;
+    case 13:    writeDbgLevel(0, "CAPL: %s: Result (%d): Transmission terminated by receiver", gECU, res);     break;
+    case 14:    writeDbgLevel(0, "CAPL: %s: Result (%d): Transmission terminated by sender", gECU, res);       break;
+    case 15:    writeDbgLevel(0, "CAPL: %s: Error (%d): Transmission killed by sender", gECU, res);            break;
+    case 16:    writeDbgLevel(0, "CAPL: %s: Error (%d): Parameter out of range", gECU, res);                   break;
+    default:    writeDbgLevel(0, "CAPL: %s: Error (%d): Unknown error", gECU, res);                            break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndTxBlockFinished(dword,long,long,long):*///callback
+MH_IndTxBlockFinished(dword handle, long blockSize, long segId, long blockCnt) 
+{
+  ////////////////////////////////////////////////////////////////////////
+  // this callback is only implemented for the purpose of fault injection
+  
+  if((gIsTransmissionDelayed == 1) &&
+     (blockCnt == 0))
+  {
+    // transmission is delayed by activation of cyclic HOLD CONNECTION sending 
+    // after transmission of first block
+    MH_SetTxOnHold(handle, 1, cTxHoldEvent);
+    setTimer(gHoldTimer, 5000);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:GenerateData(long):*///function
+GenerateData (long size)
+{
+  long i;
+
+  if(size > cBufferSize)
+    return;
+
+  // generate dummy data
+  for(i = 0; i < size ; i++ )
+  {
+    gDSO_Buffer[i] = 0x30+i;
+  }
+
+  // Insert image type header (.gif)
+  gDSO_Buffer[0] = 0x47;
+  gDSO_Buffer[1] = 0x49;
+  gDSO_Buffer[2] = 0x46;
+  gDSO_Buffer[3] = 0x38;
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  // deactivate fault injections
+  gIsDataWrongSize = 0;
+  gIsTransmissionDelayed = 0;
+  gIsNotResponding = 0;
+}
+/*@@end*/
+
+/*@@timer:gHoldTimer:*/
+on timer gHoldTimer
+{
+  // deactivate cyclic sending of HOLD CONNECTION TX
+  MH_SetTxOnHold(gDSO_PortHandle, 0, cTxHoldEvent);
+}
+/*@@end*/
+
+/*@@sysvarChange:DSO3::FaultInjection:*/
+on sysvar DSO3::FaultInjection
+{
+  // first deactivate all fault injections in any case
+  ResetFaultInjection ();
+  switch(@this)
+  {
+  case 0:
+    // do nothing
+    break;
+
+  case 1:    
+    gIsNotResponding = 1;
+    break;
+
+  case 2:
+    MH_SetTxPriority(gDSO_PortHandle, 1);
+    break;
+
+  case 3:
+    gIsTransmissionDelayed = 1;
+    break;
+
+  case 4:
+    gIsDataWrongSize = 1;
+    break;
+
+  default:
+    break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ResetFaultInjection():*///function
+ResetFaultInjection ()
+{
+  // deactivate all fault injections
+  gIsDataWrongSize = 0;
+  gIsNotResponding = 0;
+  gIsTransmissionDelayed = 0; 
+  MH_SetTxPriority(gDSO_PortHandle, 127);
+}
+/*@@end*/
+

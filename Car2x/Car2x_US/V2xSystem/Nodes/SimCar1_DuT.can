@@ -1,0 +1,201 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "Usecases.cin"
+  #include "TrackLoader.cin"
+  #include "Position.cin"
+  #include "Car2xAPI.cin"
+  
+  #include "..\DataSources_Templates\ASNV_Template_BaseDatatypes.cin"
+  #include "..\DataSources_Templates\ASNV_Template_BasicSafetyMessage.cin"
+}
+
+/****************************************************************/
+//
+// SimCar includes the SimCar.cin in which the behaviour
+// is implemented. This CAPL programm configures the behaviour
+// of the included CAPL programm.
+//
+/****************************************************************/
+variables
+{
+  char stationId[4] = {0, 0, 0, 1};
+  
+  struct Pos3D pos;
+  
+  struct Vehicle // vehicle information
+  {
+    struct Pos3D pos;       // position
+    int64  timestampTai;    // position update milli seconds tai 2004
+    double speed;
+    double heading;
+  };
+  
+  struct Vehicle gVehicle =
+  {
+    pos       = { 0.0, 0.0, 0.0 }
+  };
+  
+  struct Gps
+  {
+    char   name[256];
+    long   handle;
+  };
+  
+  struct Gps gGps = { ".\\TRACKS\\GPS_Log_DuT.log", 0 };
+  
+  const float gMultiplier = 10000000.0;
+  const int kMaxNumbOfCars = 10;
+  
+  float gLatDuT  = 0;  // stores the last latitude of the device under test
+  float gLonDuT  = 0;  // stores the last longitude of the device under test
+  float gHeadDuT = 0;  // stores the last heading of the device under test
+  
+  float gDistanceSimCar2ToRCHA    = 100;
+  float gDirectionSimCar2ToRCHA = 0;
+  
+  int gMessageCount = 0;
+}
+
+/****************************************************************/
+// Called on simulation start
+/****************************************************************/
+on start
+{
+  C2xRegisterCallback(kRxIndication   , "OnRx");
+  C2xRegisterCallback(kPreTxIndication, "OnTxBSM", "BasicSafetyMessage") ;
+  
+  // open gps route file
+  gGps.handle = API_SetFilePathLogFile(gGps.name, 0); // GPS file
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//  Callback called before BSM is transmitted
+////////////////////////////////////////////////////////////////////////////////
+void OnTxBSM(LONG packet)
+{
+  struct BasicSafetyMessage bsmData;
+  int   i;
+  long  errCode;
+  
+  UpdatePosition();
+    
+  bsmData.messageId = 20;
+  
+  bsmData.value.basicSafetyMessage.coreData.msgCnt = gMessageCount;
+  
+  if(gMessageCount == 128) // max
+  {
+    bsmData.value.basicSafetyMessage.coreData.msgCnt = 0;
+    gMessageCount = 0;
+  }
+  else
+  {
+    gMessageCount++;
+  }
+  
+  bsmData.value.basicSafetyMessage.coreData.id.stringLength = 4;
+  memcpy(bsmData.value.basicSafetyMessage.coreData.id.string, stationId, bsmData.value.basicSafetyMessage.coreData.id.stringLength);
+
+  
+  // Update BSM data
+  bsmData.value.basicSafetyMessage.coreData.lat     = gVehicle.pos.latitude * 10000000;
+  bsmData.value.basicSafetyMessage.coreData.lon     = gVehicle.pos.longitude * 10000000;
+  bsmData.value.basicSafetyMessage.coreData.heading = gVehicle.heading / 0.0125;
+  bsmData.value.basicSafetyMessage.coreData.speed   = gVehicle.speed;
+  
+  API_SetBasicSafetyMessageParams(packet, bsmData);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// update DUT position data
+////////////////////////////////////////////////////////////////////////////////
+void UpdatePosition()
+{
+  int64 nowTai ;
+  int i ;
+  struct PositionData gpsPos;
+
+  API_StartReadingPositions(gGps.handle);
+
+  API_GetTrackData(gGps.Handle, gpsPos) ;
+
+  nowTai = C2xConvertTimeToMSSinceUTC(C2xGetITSTimestamp(), 0);
+  
+  gVehicle.timestampTai  = nowTai;
+  gVehicle.pos.latitude  = gpsPos.latitude;
+  gVehicle.pos.longitude = gpsPos.longitude;
+  gVehicle.speed         = gpsPos.speed;
+  gVehicle.heading       = gpsPos.heading;
+  
+  gLatDuT =  gpsPos.latitude;
+  gLonDuT =  gpsPos.longitude;
+  gHeadDuT = gpsPos.heading;
+  
+  @sysvar::DUT::Current_lat  = gpsPos.latitude;
+  @sysvar::DUT::Current_lon  = gpsPos.longitude;
+  @sysvar::DUT::Current_head = gpsPos.heading;
+}
+
+/******************************************************/
+//  Function is called when a packet is received
+/******************************************************/
+void OnRx (LONG channel, LONG dir, LONG radioChannel, LONG signalStrength, LONG sigQuality, LONG packet)
+{
+  char   msgId[4];
+  char   event[13];
+  float  lat      = 0;
+  float  lon      = 0;
+  float  head     = 0;
+  int    transm   = 0;
+  word   distance = 0;
+  int    obDirect = 0;
+  int    obDist   = 0;
+  struct BasicSafetyMessage bsmData;
+    
+  // Get the data of the BSM
+  API_GetBasicSafetyMessageParams(packet, bsmData);
+
+  memcpy(msgId, bsmData.value.basicSafetyMessage.coreData.id.string, bsmData.value.basicSafetyMessage.coreData.id.stringLength);
+
+  lat    = bsmData.value.basicSafetyMessage.coreData.lat;
+  lon    = bsmData.value.basicSafetyMessage.coreData.lon;
+  head   = bsmData.value.basicSafetyMessage.coreData.heading;
+  
+  switch(msgId[3])
+  {
+    case 1: // DuT
+      break;
+    case 2: // Road Hazard Vehicle
+    {
+      obDirect = bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.supplementalVehicleExt.obstacle.obDirect;
+      obDist   = bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.supplementalVehicleExt.obstacle.obDist;
+    
+      ProcessRCHA(lat, lon, head, obDirect, obDist);
+    }
+    break;
+    case 3: // Cross Traffic
+    {
+      ProcessCTA(lat, lon, head); 
+    }
+    break;
+    case 4: // Hard Braking
+    {
+      // Get the event code
+      memcpy(event, bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.vehicleSafetyExt.events.string, bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.vehicleSafetyExt.events.stringLength);
+    
+      // process the message. function is defined in Usecases.cin
+      ProcessEEBL(lat, lon, head, event[7]);
+    }
+    break;
+    case 5: // Disabled Vehicle
+    {
+      // Get the event code
+      memcpy(event, bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.vehicleSafetyExt.events.string, bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.vehicleSafetyExt.events.stringLength);
+
+      // process the message. function is defined in Usecases.cin
+      ProcessSVA(lat, lon, head, event[11]);
+    }
+    break;
+  }
+}

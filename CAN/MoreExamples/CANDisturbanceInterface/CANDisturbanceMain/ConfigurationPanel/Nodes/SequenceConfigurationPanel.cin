@@ -1,0 +1,241 @@
+/*@!Encoding:1252*/
+includes
+{
+}
+
+variables
+{
+  struct CANDisturbanceSettings arbSettingsDisturbance;
+  struct CANDisturbanceSettings dbrSettingsDisturbance;
+  canDisturbanceSequence outputSequence;
+}
+
+on start
+{
+  CommonCANDisturbanceLibrary_Get_BitTiming_Settings_For(@sysvar::CANDisturbanceInterface1::DeviceNo, eArbitrationPhase, arbSettingsDisturbance);
+  CommonCANDisturbanceLibrary_Get_BitTiming_Settings_For(@sysvar::CANDisturbanceInterface1::DeviceNo, eDataPhase, dbrSettingsDisturbance);
+  
+  @sysvar::CanDisturbanceSequencePanel::ArbTicks   = arbSettingsDisturbance.TicksOneBitTime;
+  
+  @sysvar::CanDisturbanceSequencePanel::DbrTicks   = dbrSettingsDisturbance.TicksOneBitTime;
+  
+  @sysvar::CanDisturbanceSequencePanel::ArbBaudrate  = arbSettingsDisturbance.Baudrate / 1e3;
+  @sysvar::CanDisturbanceSequencePanel::DbrBaudrate = dbrSettingsDisturbance.Baudrate / 1e3; 
+  
+  
+  UpdateSequence();
+}
+
+void UpdateSequence()
+{
+  char  outputString[32786];
+  char  pattern[32];
+  char  seqValue[32];
+  char  seqLength[6];
+  char  seqLevelValue;
+  long  length;
+  long  offset;
+  long  startIndex;  
+ 
+  strncpy(pattern, "[rRd][[0-9]*]", elCount(pattern));
+  
+  outputSequence.Clear();
+  
+  sysGetVariableString(sysvar::CanDisturbanceSequencePanel::DisplaySequence, outputString, elCount(outputString));
+  
+  length = strlen(outputString);
+  offset = 0;
+  startIndex = 0;
+  
+  if(length > 0)
+  {
+    while(offset >= 0)
+    {
+      if(offset == 0)
+      {
+        startIndex = strstr_regex(outputString, pattern);
+        offset = strstr_regex_off(outputString, startIndex+1, pattern);
+      
+        if(offset < 0 && startIndex == 0)
+        {
+          //Only one segment is available 
+          offset = strstr_regex_off(outputString, startIndex+1, "]") + 2; 
+          strncpy(seqValue, outputString, offset - startIndex); 
+          offset = -1;
+        }
+        else
+        {
+          strncpy(seqValue, outputString, offset - startIndex);  
+        }
+      }
+      else
+      {      
+        offset = strstr_regex_off(outputString, startIndex+1, pattern);
+        if(offset > 0)
+        {
+          substr_cpy(seqValue, outputString, startIndex, offset - startIndex, elCount(seqValue));
+        }
+        
+        if(offset < 0 && startIndex > 0)
+        {
+          //Last segment 
+          offset = strstr_regex_off(outputString, startIndex+1, "]") + 2; 
+          substr_cpy(seqValue, outputString, startIndex, offset - startIndex, elCount(seqValue));  
+          offset = -1;
+        }
+        
+      }
+    
+      if(startIndex >= 0)
+      {
+        startIndex = offset;
+        
+        seqLevelValue = seqValue[0];
+        substr_cpy(seqLength, seqValue, 2, strstr_regex(seqValue, "]")-2, elCount(seqLength));
+        strtol(seqLength, length);
+        write("Length=%d SeqLevelValue=%c %s", length, seqLevelValue, seqValue);
+        outputSequence.AppendToSequence(length, seqLevelValue);
+      }
+    }
+  }
+}
+
+
+void GetSegmentValue(char value[])
+{
+  if(@sysvar::CanDisturbanceSequencePanel::CurrentSegmentValue == sysvar::CanDisturbanceSequencePanel::CurrentSegmentValue::Dominant)
+  {
+    value[0] = 'd';
+  }
+  else if(@sysvar::CanDisturbanceSequencePanel::CurrentSegmentValue == sysvar::CanDisturbanceSequencePanel::CurrentSegmentValue::Recessive)
+  {
+    value[0] = 'r';
+  }
+  else if(@sysvar::CanDisturbanceSequencePanel::CurrentSegmentValue == sysvar::CanDisturbanceSequencePanel::CurrentSegmentValue::RecessiveStress)
+  {
+    value[0] = 'R';
+  }
+  else
+  {
+    value[0] = '\0';
+  }
+  
+  value[1] = '\0';
+}
+
+on sysvar sysvar::CanDisturbanceSequencePanel::BtnAddSegment
+{
+  char segmentValue[2];
+  
+  if(@this == 1)
+  {
+    GetSegmentValue(segmentValue);
+    
+    switch(@sysvar::CanDisturbanceSequencePanel::OptionSegLengthUser)
+    {
+      case 1:        
+        AppendToVisualSequenceRepresentation(@sysvar::CanDisturbanceSequencePanel::ArbTicks, segmentValue[0]);
+        break;
+      case 2:        
+        AppendToVisualSequenceRepresentation(@sysvar::CanDisturbanceSequencePanel::DbrTicks, segmentValue[0]);
+        break;
+      case 3:        
+        AppendToVisualSequenceRepresentation(@sysvar::CanDisturbanceSequencePanel::UserSegmentLength, segmentValue[0]);        
+        break;
+    }    
+  }
+}
+
+on sysvar sysvar::CanDisturbanceSequencePanel::BtnClearSequence
+{ 
+  char appendString[1];
+  
+  if(@this == 1)
+  {
+    write("Clear seq");
+    outputSequence.clear();
+    
+    appendString[0] = '\0';
+  
+    sysSetVariableString(sysvar::CanDisturbanceSequencePanel::DisplaySequence, appendString);
+    CheckSequenceLength();
+  }
+}
+  
+on sysvar sysvar::CanDisturbanceSequencePanel::UserSegmentLength
+{
+  @sysvar::CanDisturbanceSequencePanel::UserSegmentLengthInNs = 6.25 * @this;
+}
+  
+void AppendToVisualSequenceRepresentation(word ticks, char segmentValue)
+{
+  char outputString[32786];
+  char appendString[1024];
+  
+  if(ticks > 5)
+  {
+    if(segmentValue != 'd' && segmentValue != 'R' && segmentValue != 'r')
+    {
+      WriteToStatus("The segment value must be 'd', 'r' or 'R'. Segment is not added.", -3);  
+    }
+    else
+    {
+      sysGetVariableString(sysvar::CanDisturbanceSequencePanel::DisplaySequence, outputString, elCount(outputString));
+      
+      snprintf(appendString, elCount(appendString), "%c[%d]", segmentValue, ticks);
+      
+      strncat(outputString, appendString, elCount(outputString));
+      
+      sysSetVariableString(sysvar::CanDisturbanceSequencePanel::DisplaySequence, outputString);
+      
+      
+      outputSequence.AppendToSequence(ticks, segmentValue);
+      
+      WriteToStatus("Configuration OK", 0);
+    }
+  }
+  else
+  {
+    WriteToStatus("The minimum length of an segment is 5 ticks. Segment is not added.", -2);
+  }
+}
+
+byte CheckSequenceLength()
+{
+  byte result;
+  char curSeq[2];
+  
+  result = 1;
+  
+  sysGetVariableString(sysvar::CanDisturbanceSequencePanel::DisplaySequence, curSeq, elCount(curSeq));
+  
+  if(strlen(curSeq) == 0)
+  {
+    result = 0;
+    WriteToStatus("No sequence configured yet. Trigger is not configureable without Sequence", -1);    
+  }
+  else
+  {
+    WriteToStatus("Configuration OK", 0);    
+  }
+  
+  return result;
+}
+
+void WriteToStatus(char statusText[], int errorCode)
+{
+  char curSeq[32768];
+  
+  if(errorCode < 0)
+  {
+    @sysvar::CanDisturbanceSequencePanel::ErrorCode = 1;
+    snprintf(curSeq, elCount(curSeq), "Error ( %d ): %s", errorCode, statusText);
+    sysSetVariableString(sysvar::CanDisturbanceMainPanel::StatusText, curSeq);
+  }
+  else
+  {
+    @sysvar::CanDisturbanceSequencePanel::ErrorCode = 0;
+     snprintf(curSeq, elCount(curSeq), "%s", statusText);
+     sysSetVariableString(sysvar::CanDisturbanceMainPanel::StatusText, curSeq);
+  }
+}

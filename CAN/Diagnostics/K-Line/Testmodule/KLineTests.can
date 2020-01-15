@@ -1,0 +1,375 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "..\Nodes\KLine_Utilities.cin"
+  #include "..\Nodes\TesterECUSettings.cin"
+}
+
+variables
+{
+  char  gEcuQual[15] = "KLineTester";
+  char buffer[256];
+}
+
+// Tests shows how to use the AccessTimingParameter service
+testcase TC_AccessTimingParameters()
+{
+  // This test shows the usage of the AccessTimingParameter service using a raw KLine message.
+  
+  int readLimitsOfPossibleTimingParameter = 0;
+  long status;
+  BYTE accessTimingParametersRequest[7], expectedAccessTimingParametersResponse[6];
+  int i = 0;
+  
+  
+  if (DiagSetTarget(gEcuQual) < 0)
+  {
+    snprintf(buffer, elcount(buffer), "Target %s could not be set.", gEcuQual);
+    TeststepFail(buffer);
+    return;
+  } 
+  else
+  {
+    snprintf(buffer, elcount(buffer), "Target %s set successfully.", gEcuQual);
+    TeststepPass(buffer);
+  }
+
+  // Connect Channel
+  if (DiagConnectChannel() < 0)
+  {
+    TeststepFail("Channel could not be connected.");
+    return;
+  }
+  else
+  {
+    TestStepPass("Channel connected successfully.");
+  }
+
+
+  status = TestWaitForDiagChannelConnected(2000);
+  if (EVENT_OCCURED == status)
+  {
+    snprintf(buffer, elcount(buffer), "Connected to target ECU: %s", gEcuQual);
+    TeststepPass(buffer);
+  }
+  else
+  {
+    snprintf(buffer, elcount(buffer), "Error connecting to target ECU: %s", gEcuQual);
+    TeststepPass(buffer);
+    return;
+  }  
+  
+  TestStep("Execution", "Send Access Timing Parameters request to read limits and verify the response.");
+
+  // Define request and expected response
+  accessTimingParametersRequest[0] = 0x80;
+  accessTimingParametersRequest[1] = 0xE9;
+  accessTimingParametersRequest[2] = 0xF1;
+  accessTimingParametersRequest[3] = 0x02;
+  accessTimingParametersRequest[4] = 0x83;
+  accessTimingParametersRequest[5] = 0x00;
+  accessTimingParametersRequest[6] = 0x00;
+  
+  // Set checksum
+  for (i = 0; i < elcount(accessTimingParametersRequest) - 1; ++i)
+  {
+    accessTimingParametersRequest[6] += accessTimingParametersRequest[i];
+  }
+
+  expectedAccessTimingParametersResponse[0] = 0x80;
+  expectedAccessTimingParametersResponse[1] = 0xF1;
+  expectedAccessTimingParametersResponse[2] = 0xE9;
+  expectedAccessTimingParametersResponse[3] = 0x07;
+  expectedAccessTimingParametersResponse[4] = 0xC3;
+  
+  // Set checksum
+  for (i = 0; i < elcount(expectedAccessTimingParametersResponse) - 1; ++i)
+  {
+    expectedAccessTimingParametersResponse[5] += expectedAccessTimingParametersResponse[i];
+  }
+  
+  // Send raw request
+  DiagSendRequestPDU(accessTimingParametersRequest, elcount(accessTimingParametersRequest));
+  
+  if (EVENT_OCCURED == testWaitForDiagKLineFrameTransmitted(100))
+  {
+    TestStepPass("AccessTimingParameters request sent successfully.");
+  }
+  else
+  {
+    TestStepFail("AccessTimingParameters could not be sent.");
+  }
+  
+  if (EVENT_OCCURED == testWaitForDiagKLineFrameReceived(100))
+  {
+    BYTE AccessTimingParametersData[100];
+    long numberOfReceivedBytes;
+    TestStepPass("AccessTimingParameters response received successfully.");
+    numberOfReceivedBytes = TestGetWaitEventKLineFrame(AccessTimingParametersData, elcount(AccessTimingParametersData));
+   
+    // Test expected bytes and report timings
+    for (i = 0; i < numberOfReceivedBytes; ++i)
+    {
+      if (i < 5)
+      {
+        // Test expected bytes of AccessTimingParameters service
+        if (expectedAccessTimingParametersResponse[i] == AccessTimingParametersData[i])
+        {
+          snprintf(buffer, elcount(buffer), "AccessTimingParameters: Received correct byte %d, value 0x%x", i, AccessTimingParametersData[i]);
+          TestStepPass(buffer);
+        }
+        else
+        {
+          snprintf(buffer, elcount(buffer), "AccessTimingParameters: Received incorrect byte %d, value 0x%x. Expected value: 0x%x", i, AccessTimingParametersData[i], expectedAccessTimingParametersResponse[i]);
+          TestStepFail(buffer);
+        }
+      }
+      else
+      {
+        BYTE P2min, P2max, P3min, P3max, P4min;  
+        // Report Timing Values
+        switch (i)
+        {
+          case 5:
+            snprintf(buffer, elcount(buffer), "P2min: Byte Value = %X; Duration: %.1f ms", AccessTimingParametersData[i], 0.5*AccessTimingParametersData[i]);
+            TestStep("P2min",buffer);
+            break;
+          case 6:
+            snprintf(buffer, elcount(buffer), "P2max: Byte Value = %X; Duration: %.1f ms", AccessTimingParametersData[i], 0.5*AccessTimingParametersData[i]);
+            TestStep("P2max",buffer);
+            break;
+          case 7:
+            snprintf(buffer, elcount(buffer), "P3min: Byte Value = %X; Duration: %.1f ms", AccessTimingParametersData[i], 0.5*AccessTimingParametersData[i]);
+            TestStep("P3min",buffer);
+            break;
+          case 8:
+            snprintf(buffer, elcount(buffer), "P3max: Byte Value = %X; Duration: %.1f ms", AccessTimingParametersData[i], 0.5*AccessTimingParametersData[i]);
+            TestStep("P3max",buffer);
+            break;
+          case 9:
+            snprintf(buffer, elcount(buffer), "P4min: Byte Value = %X; Duration: %.1f ms", AccessTimingParametersData[i], 0.5*AccessTimingParametersData[i]);
+            TestStep("P4min",buffer);
+            break;
+        }   
+      }      
+    }
+  }
+  else
+  {
+    TestStepFail("AccessTimingParameters response not received.");
+  }
+  
+  DiagCloseChannel();
+ 
+  if (EVENT_OCCURED == TestWaitForDiagChannelClosed(1000))
+  {
+    TestStepPass("Channel closed successfully.");
+  }
+  else
+  {
+    TestStepFail("Channel could not be closed.");
+  }
+}
+
+// Test shows the beahvior when a wrong fast init pattern is sent. 
+testcase TC_FastInitLowPhase()
+{
+  int i;
+  long status;
+  dword iniL, wup;
+  const long iniLDefault = 25000;
+  const long wupDefault  = 50000;
+  
+  iniL = 23000;
+  
+  // Variation of iniL between 23 and 27 ms
+  for (i = 0; i < 5; ++i)
+  {
+    diagRequest ReadEcuIdentification req;
+    
+    if (DiagSetTarget(gEcuQual) < 0)
+    {
+      snprintf(buffer, elcount(buffer), "Target %s could not be set.", gEcuQual);
+      TeststepFail(buffer);
+      return;
+    } 
+    else
+    {
+      snprintf(buffer, elcount(buffer), "Target %s set successfully.", gEcuQual);
+      TeststepPass(buffer);
+    }
+  
+   
+    KLine_SetWakeupTimesTester(iniL, wupDefault);
+    
+    DiagConnectChannel();
+    
+    // Check for StartCommunication request!
+    
+    if (EVENT_OCCURED == testWaitForDiagKLineFrameTransmitted(1000))
+    {
+      TestStepPass("Start Communication request sent successfully.");
+    }
+    else
+    {
+      TestStepFail("Start Communication request could not be sent.");
+    }
+    
+    // Check for response to StartCommunication
+       
+    status = testWaitForDiagKLineFrameReceived(1000);
+    
+    write("STATUS: %d iniL:  %d", status, iniL);
+    
+    if (iniL >= 24000 && iniL <= 26000)
+    {
+      if (EVENT_OCCURED == status)
+      {
+        TestStepPass("ECU responded to Start Communication after correct wake up pattern.");
+      }
+      else
+      {
+        TestStepFail("ECU did not respond to Start Communication after correct wake up pattern.");
+        KLine_CloseChannel();
+        return;
+      }
+    }
+    else
+    {
+      if (EVENT_OCCURED == status)
+      {
+        TestStepFail("ECU responded to Start Communication after incorrect wake up pattern.");
+        KLine_CloseChannel();
+        return;
+      }
+      else
+      {
+        TestStepPass("ECU did not respond to Start Communication after incorrect wake up pattern.");
+      }
+    }
+    
+    // Send a request
+    
+    req.SendRequest();
+    
+    if (iniL >= 24000 && iniL <= 26000)
+    {
+      if (EVENT_OCCURED == TestWaitForDiagRequestSent(req, 1000))
+      {
+        TestStepPass("Request sent successfully.");
+      }
+      else
+      {
+        TestStepFail("Request could not be sent.");
+      }
+    
+      status = TestWaitForDiagResponse(req, 1000);
+    
+      if (EVENT_OCCURED == status)
+      {
+        TestStepPass("ECU responded after correct wake up pattern.");
+      }
+      else
+      {
+        TestStepFail("ECU did not respond after correct wake up pattern.");
+      }
+    }
+    
+    KLine_CloseChannel();
+   
+    iniL += 1000;
+  }
+  
+  KLine_SetWakeupTimesTester(iniLDefault, wupDefault);
+}
+
+// Test checks that after a channel is closed due to a timeout a request will not be answered.
+testcase TC_NoAnswerAfterP2ExtendenTimout()
+{
+  diagRequest TesterPresent req;
+  long suppressAutomaticStopCommunication = 1;
+  long activateAutomaticStopCommunication = 0;
+  long status;
+  
+  if (DiagSetTarget(gEcuQual) < 0)
+  {
+    snprintf(buffer, elcount(buffer), "Target %s could not be set.", gEcuQual);
+    TeststepFail(buffer);
+    return;
+  } 
+  else
+  {
+    snprintf(buffer, elcount(buffer), "Target %s set successfully.", gEcuQual);
+    TeststepPass(buffer);
+  }
+  
+  // Channel will not be closed with a StopCommunication request after a P2 extended timout.
+  KLine_SuppressAutomaticStopCommunication(suppressAutomaticStopCommunication);
+  
+  req.SendRequest();
+    
+  if (EVENT_OCCURED == TestWaitForDiagRequestSent(req, 1000))
+  {
+    TestStepPass("Request sent successfully.");
+  }
+  else
+  {
+    TestStepFail("Request could not be sent.");
+  }
+    
+  status = TestWaitForDiagResponse(req, 1000);
+    
+  if (EVENT_OCCURED == status)
+  {
+    TestStepPass("ECU responded correctly.");
+  }
+  else
+  {
+    TestStepFail("ECU did not respond.");
+  }
+  
+  testWaitForTimeout(6500); // wait longer than P2 extended. ECU must close the connection and not answer to a request.
+  KLine_SetInitType(NONE);
+
+  req.SendRequest();
+    
+  if (EVENT_OCCURED == TestWaitForDiagRequestSent(req, 1000))
+  {
+    TestStepPass("Request sent successfully.");
+  }
+  else
+  {
+    TestStepFail("Request could not be sent.");
+  }
+    
+  status = TestWaitForDiagResponse(req, 1000);
+    
+  if (EVENT_OCCURED == status)
+  {
+    TestStepFail("ECU responded after timeout.");
+  }
+  else
+  {
+    TestStepPass("ECU did not respond after timeout.");
+  }
+  
+  KLine_CloseChannel();
+  
+  KLine_SuppressAutomaticStopCommunication(activateAutomaticStopCommunication);
+  KLine_SetInitType(FAST);
+}
+
+void KLine_CloseChannel()
+{
+  DiagCloseChannel();
+ 
+  if (EVENT_OCCURED == TestWaitForDiagChannelClosed(1000))
+  {
+    TestStepPass("Channel closed successfully.");
+  }
+  else
+  {
+    TestStepFail("Channel could not be closed.");
+  }
+}
+

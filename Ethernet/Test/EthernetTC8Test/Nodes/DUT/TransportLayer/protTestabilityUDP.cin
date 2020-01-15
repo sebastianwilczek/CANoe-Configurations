@@ -1,0 +1,822 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "structASRTestability.cin"
+  #include "UDPSocket.cin"
+  #include "IP.cin"
+  
+}
+
+variables
+{  
+//  //for using TCP/IP stack
+  msTimer mstDelaySendata;
+  dword gdwDelaySendSocketH;
+  struct _SEND_DATA gDelaySendDataInfo;  
+}
+
+/// <Services>
+int closeSocketUDP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  int iRet = 0;
+  word wIdx;
+  dword dwSocketHandle;
+  struct _CLOSE_SOCKET closeSocket;
+  
+  //get parameters
+  getCloseSocketParamsUDP(closeSocket, recvData.TestabilityMsg.bParameters);
+  
+  iRet = closeUDPSocket(closeSocket.wSocketId);
+  if(iRet != kTrue)
+  {
+    sendData.TestabilityMsg.Header.rid = RID_E_ISD;
+  }
+  else
+  {
+    sendData.TestabilityMsg.Header.rid = RID_E_OK;
+  }
+  return iRet;  
+}
+
+/// <Services>
+// Return value - 1: Success, 0: Fail 
+int createAndBindUDP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  int iRet = 0;
+  dword dwSocketHandle;
+  word wSocketIdx;
+  struct _CREATE_AND_BIND createAndBind;
+  
+  //get available Socket Handle index
+  wSocketIdx = getUDPSocketId();
+  if(wSocketIdx == kINVALID_UDP_SOCKET_INDEX)
+  {
+    sendData.TestabilityMsg.Header.rid = RID_E_UCS;
+    return kFalse; //NG
+  }
+  // Get create and bind parameters
+  getCreateAndBindParams(createAndBind, recvData.TestabilityMsg.bParameters);
+  
+  // Create and open udp socket
+  switch(createAndBind.localAddr.wAddrLength)
+  {
+    case kIPv6_ADDRESS_LENGTH_SIZE:
+      dwSocketHandle = openUDPSocketIPv6(createAndBind);
+      break;
+    case kIPv4_ADDRESS_LENGTH_SIZE:
+      dwSocketHandle = openUDPSocketIPv4(createAndBind);
+      break;
+    default:
+      sendData.TestabilityMsg.Header.rid = RID_E_INV;
+      return iRet; //NG
+      break;
+  }
+  // check result
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    write("<%BASE_FILE_NAME%> UdpOpen failed: Result %d", IpGetLastError());
+    sendData.TestabilityMsg.Header.rid = RID_E_UBS;
+    return iRet; //NG
+  }
+  //Join Multicase address group
+  joinMulticastGroup(dwSocketHandle, createAndBind.localAddr.wAddrLength);
+  
+  // save to socket info after success to open udp socket
+  saveUDPSocketHandle(wSocketIdx, dwSocketHandle);
+  // set socket index to response parameter
+  AddMessageParamsUint16(sendData.TestabilityMsg, wSocketIdx);
+  // set result ID, OK
+  sendData.TestabilityMsg.Header.rid = RID_E_OK;
+  
+  return 1;
+}
+
+/// <Helpers>
+void SetMsgHeaderLen(struct _Testabilty_Message_Header header, dword dwParamlen)
+{
+  // Testability message length is 8 + real parameter length
+  header.dwLen = kTESTABILITY_PARAMETER_SIZE_OFFSET + dwParamlen;
+}
+
+/// <Helpers>
+void AddMessageParamsUint16(struct _Testabilty_Message sendMsg, word wData)
+{
+  int64 i64Idx;
+  i64Idx = sendMsg.Header.dwLen - kTESTABILITY_PARAMETER_SIZE_OFFSET;
+  if(i64Idx + 2 < kMAX_TESTABILITY_PARAM_LENGTH &&  i64Idx >= 0 )
+  {
+    sendMsg.bParameters.word(i64Idx) = swapWord(wData);
+    sendMsg.Header.dwLen += 2;
+  }
+}
+
+/// <Helpers>
+long AddIPTimeStampOptionInfo(ethernetPacket * packet, word wSocketID)
+{
+  word wTotalLen;
+  word wTimestampLen;
+  word wIPv4HeaderLen;
+  word wIPv4TotalLen;
+  word wIPv4PayloadLen;
+  int pos;
+  
+  //
+  //calculate total length, IPv4 header/total length
+  //
+  wTimestampLen = getUDPSocketTimeInfoLen(wSocketID);
+  packet.Length = packet.Length + wTimestampLen;
+
+  //
+  // Update IPv4 header length and Total Length
+  //
+  wIPv4HeaderLen = IPv4GetHeaderLength(packet);
+  IPv4SetHeaderLength(packet, wIPv4HeaderLen + wTimestampLen);  
+
+  //
+  // Update IPv4 total length (header plus payload)
+  //
+  wIPv4TotalLen = IPv4GetTotalLength(packet);
+  IPv4SetTotalLength(packet, wIPv4TotalLen + wTimestampLen);  
+  
+  //
+  //Copy UDP header and payload
+  //
+  wIPv4PayloadLen = wIPv4TotalLen - wIPv4HeaderLen;
+  for(pos = wIPv4PayloadLen - 1; pos >= 0; pos--)
+  {
+    packet.byte(wIPv4HeaderLen + wTimestampLen + pos) = packet.byte(wIPv4HeaderLen + pos);
+  }
+  //
+  //Insert IP timestamp option header
+  //
+  copyTimestampOptionData(packet, wSocketID, wIPv4HeaderLen);
+  
+  //calculate IPv4 check sum
+  Ipv4UpdateChecksum(packet);
+  
+  return kTrue;
+}
+
+/// <Socket>
+// open UDP socket, IPv4
+dword openUDPSocketIPv4(struct _CREATE_AND_BIND data)
+{
+  dword dwPort;  
+  dword dwSocketHandle;
+
+  dwSocketHandle = kINVALID_SOCKET;
+  dwPort = (data.wLocalPort == 0xFFFF )? 0: data.wLocalPort;
+  
+  //bind
+  if(data.bDoBind == kTrue)
+  {
+    dwSocketHandle = udpOpen(data.localAddr.dwIpv4Addr, dwPort);
+    if(@sysvar::TC8_DUT_Config::VerbosityTestability > TABIT_LV_DEBUG)
+    {
+      write("DUT Handle[%x] udpOpen(%x, %x)", dwSocketHandle, data.localAddr.dwIpv4Addr, dwPort);
+    }
+  }
+  //no bind
+  else
+  {
+    dwSocketHandle = UdpOpen(0, dwPort);    
+  }
+  return dwSocketHandle;  
+}
+
+/// <Socket>
+// open UDP socket, IPv6
+dword openUDPSocketIPv6(struct _CREATE_AND_BIND data)
+{
+  dword dwPort;  
+  dword dwSocketHandle;
+  byte bIPv6Addr[kIPv6_ADDRESS_LENGTH_SIZE];
+
+  dwSocketHandle = kINVALID_SOCKET;
+  dwPort = (data.wLocalPort == 0xFFFF )? 0: data.wLocalPort;
+  
+  //bind
+  if(data.bDoBind == kTrue)
+  {
+    dwSocketHandle = UdpOpen(data.localAddr.ipv6Addr, dwPort);
+  }
+  //no bind
+  else
+  {
+    IpGetAddressAsArray("::", bIPv6Addr);
+    dwSocketHandle = UdpOpen(bIPv6Addr, dwPort);    
+  }
+  return dwSocketHandle;  
+}
+
+/// <Socket>
+// open UDP socket, IPv4
+long joinMulticastGroup(dword dwSocketH, word wAddrLen)
+{
+  long lRet;
+  
+  if(dwSocketH == kINVALID_SOCKET)
+  {
+    return kFalse;
+  }
+  
+  if(wAddrLen == kIPv6_ADDRESS_LENGTH_SIZE)
+  {
+    WriteEx(1, 3, "IPv6 multicaset is not implemented yet");
+    return kFalse;
+  }
+  else
+  {
+    lRet = ipJoinMulticastGroup(dwSocketH, kdwIPV4_INTERFACE_INDEX, ipGetAddressAsNumber(kstrIPv4Multicast_IP));
+    if(lRet != 0)
+      outputSocketErrorInfo(dwSocketH);
+    lRet = ipJoinMulticastGroup(dwSocketH, kdwIPV4_INTERFACE_INDEX, ipGetAddressAsNumber("224.0.0.1"));
+    if(lRet != 0)
+      outputSocketErrorInfo(dwSocketH);
+  }  
+  return kTrue;
+}
+
+/// <Services>
+int sendDataUDP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  long lSendResult = 0;
+  dword dwSocketHandle;
+  struct _SEND_DATA sendDataInfo;
+  
+  // Get send data parameters
+  getSendDataParams(sendDataInfo, recvData.TestabilityMsg.bParameters);
+  
+  //check socket handle  
+  dwSocketHandle = getUDPSocketHandle(sendDataInfo.wSocketId);
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    sendData.TestabilityMsg.Header.rid = RID_E_ISD;
+    return 0;
+  }
+  //Send Data
+  if(@sysvar::TC8_DUT_Config::SendDataAfterTabitRes == 1)
+  {
+    if(@sysvar::TC8_DUT_Config::VerbosityTestability > TABIT_LV_DEBUG)
+      Write("Delay sendDataUDP()");
+    gdwDelaySendSocketH = dwSocketHandle;
+    memcpy(gDelaySendDataInfo, sendDataInfo);
+    setTimer(mstDelaySendata, kDEF_UDP_DELAY_SEND_DATA_TIME);
+    sendData.TestabilityMsg.Header.rid = RID_E_OK;
+  }
+  else
+  {
+    lSendResult = sendUDPSocketData(dwSocketHandle, sendDataInfo);;
+    //Set Result ID
+    sendData.TestabilityMsg.Header.rid = getResultIDFromSocketResult(sendDataInfo.wSocketId, lSendResult);
+  }
+  return 1;
+}
+
+on timer mstDelaySendata
+{
+  sendUDPSocketData(gdwDelaySendSocketH, gDelaySendDataInfo);
+}
+
+/// <Socket>
+long sendUDPSocketData(dword dwSocketHandle, struct _SEND_DATA sendDataInfo)
+{
+  long lRet = -1;
+  char errMsg[255];                // error message buffer.
+  
+  long lSendLen;
+  long lLastErr;
+   
+  //check size;
+  lSendLen = (sendDataInfo.wTotalLen > sendDataInfo.data.wLength) ? sendDataInfo.wTotalLen : sendDataInfo.data.wLength;
+  
+  //send IPv4 UDP packet 
+  if(sendDataInfo.ipxaddr.wAddrLength == kIPv4_ADDRESS_LENGTH_SIZE)
+  {
+    lRet = udpSendTo(dwSocketHandle, sendDataInfo.ipxaddr.dwIpv4Addr, sendDataInfo.wDestPort,
+              sendDataInfo.data.bData, lSendLen);
+  }
+  //send IPv6 UDP packet 
+  else if(sendDataInfo.ipxaddr.wAddrLength == kIPv6_ADDRESS_LENGTH_SIZE)
+  {
+    lRet = udpSendTo(dwSocketHandle, sendDataInfo.ipxaddr.ipv6Addr, sendDataInfo.wDestPort,
+              sendDataInfo.data.bData, lSendLen);
+  }
+  //address type error 
+  else
+  {
+    writeLineEx(1, 3, "### <%BASE_FILE_NAME%> sendUDPSocketData() address length NG ###");
+  }
+  lLastErr = IpGetLastSocketError(dwSocketHandle);
+  if( (lRet != 0) && lLastErr != 997)
+  {
+
+    IpGetLastSocketErrorAsString( dwSocketHandle, errMsg, elcount(errMsg) );
+    writeLineEx(1, 3, "<%BASE_FILE_NAME%> [portTestabilityUDP.cin] IpGetLastSocketErrorAsString: %s", errMsg);  
+  }
+  
+  return lRet;
+}
+
+
+/// <Services>
+int receiveAndForwardUDP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  long lResult = 0;
+  dword dwSocketHandle;
+  struct _RECEIVE_AND_FORWARD recvAndForward;
+  word wDropCount;
+
+  
+  // Get receive and forward parameters
+  getReceiveAndForwardParams(recvAndForward, recvData.TestabilityMsg.bParameters);
+
+  //check socket handle
+  dwSocketHandle = getUDPSocketHandle(recvAndForward.wSocketId);
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    sendData.TestabilityMsg.Header.rid = RID_E_ISD;
+    return 0;
+  }
+  // configure socket to receive max data
+  if(recvAndForward.wMaxLen == 0xFFFF)
+  {
+    configureSocketReceiveBufMax(dwSocketHandle);
+  }
+  // start to recive
+  lResult = startUdpReceive(dwSocketHandle);
+  sendData.TestabilityMsg.Header.rid = getResultIDFromSocketResult(dwSocketHandle, lResult);
+  if(sendData.TestabilityMsg.Header.rid != (enum Result_ID)RID_E_OK)
+  {
+    return 0;
+  }
+  // set drop count to response parameter
+  wDropCount = getUDPSocketInfoDropCnt(recvAndForward.wSocketId);  
+  AddMessageParamsUint16(sendData.TestabilityMsg, wDropCount);
+
+  //set receive and forward information to socket info array
+  //and reset drop counter
+  setUDPSocketInfoRecvFwd(recvAndForward.wSocketId, kTrue, 
+                          recvAndForward.wMaxFwd, recvAndForward.wMaxLen);
+  
+  return 1;
+}
+
+/// <Services>
+int configureSocketUDP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  long lResult;
+  dword dwSocketHandle;  
+  struct _CONFIGURE_SOCKET configSocket;
+  enum Address_Type addrType;
+  word wParam;
+  enum Bool bInvalidParam;
+  byte bSetting;
+  
+  // Get socket configuration parameters
+  getConfigureSocketParams(configSocket, recvData.TestabilityMsg.bParameters);
+
+  //check socket handle
+  dwSocketHandle = getUDPSocketHandle(configSocket.wSocketId);
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    sendData.TestabilityMsg.Header.rid = RID_E_ISD;
+    return 0;
+  }
+  // Get address type
+  addrType = getUDPSocketAddrType(configSocket.wSocketId);
+  
+  lResult = -1;
+  wParam = 0;
+  bInvalidParam = kFalse;
+  bSetting = configSocket.ParamVal.bData[0];
+
+
+  switch(configSocket.wParamId)
+  {
+    case PARAM_ID_IP_TTL_HOP:
+      lResult = configureSocketTTL_HopLimit(dwSocketHandle, bSetting, addrType);
+      break;
+    case PARAM_ID_IP_PRIORITY:
+      lResult = configureSocketPriority(dwSocketHandle, bSetting, addrType);
+      break;
+    case PARAM_ID_IP_DONT_FLAG:
+      lResult = configureSocketDontFragment(dwSocketHandle, bSetting, addrType);
+      break;
+    case PARAM_ID_IP_TIM_OPT:
+      lResult = configureSocketTimestampOption(configSocket.wSocketId, addrType, configSocket.ParamVal.bData, configSocket.ParamVal.wLength);
+      break;
+    case PARAM_ID_IP_TOS:
+      lResult = configureSocketTypeOfService(dwSocketHandle, bSetting, addrType);
+      break;
+    default:
+      sendData.TestabilityMsg.Header.rid = RID_E_INV;
+      bInvalidParam = kTrue;
+      outputErrorMsg("configureSocketUDP() wParamId NG");
+      break;
+  }
+  if(bInvalidParam != kTrue)
+  {
+    sendData.TestabilityMsg.Header.rid = getResultIDFromSocketResult(dwSocketHandle, lResult);
+  }
+
+  return 1;
+}
+
+
+/// <EthILSend>
+// configure To Send Udp method(for TestAbility)
+// ret 1:succeed 0:failed
+int configToSendUdp(int srcPort, dword dstIpAddr, int dstPort, byte data[], word dataLength)
+{
+  int iRet;
+  struct _Token_Eth_Packet sendData;
+  
+  // inititalise
+  initEthTokenData(sendData);
+  
+  // send UDP 
+  sendData.qwSource = kDIface_0_MAC_ADDR;
+  sendData.type = Eth_Type_IPv4;
+  sendData.ipv4.dwSource =  GetDutIpAsNummer();
+  sendData.ipv4.dwDestination = dstIpAddr;
+  sendData.ipv4.protocol = IPv4_Prot_UDP;
+  sendData.ipv4.udp.wSource = srcPort;
+  sendData.ipv4.udp.wDestination = dstPort;  
+  
+  iRet = sendPacketOrCacheForArp(sendData, dstIpAddr);
+  
+  return iRet;
+}
+
+/// <GetParameters>
+void getCloseSocketParamsUDP(struct _CLOSE_SOCKET data, byte params[])
+{
+  data.wSocketId = getWordData(params, 0);
+}
+
+/// <GetParameters>
+void getCreateAndBindParams(struct _CREATE_AND_BIND data, byte params[])
+{
+  data.bDoBind = params[0];
+  data.wLocalPort = getWordData(params, 1);
+  getIpxAddr(data.localAddr, params, 3);
+}
+
+/// <GetParameters>
+// offset : byte offset
+void getIpxAddr(struct _IPxADDR data, byte params[], dword offset)
+{
+  word wAddrLength; //address length
+  
+  wAddrLength = getWordData(params, offset);
+  // IP
+  if(wAddrLength == kIPv6_ADDRESS_LENGTH_SIZE)
+  {
+    // IPv6
+    memcpy_off(data.ipv6Addr, 0, params, offset + SIZE_LENGTH, wAddrLength);
+  }
+  else if(wAddrLength == kIPv4_ADDRESS_LENGTH_SIZE)
+  {
+    // IPv4
+    data.dwIpv4Addr = params.Dword(offset + SIZE_LENGTH);
+  }
+  data.wAddrLength = wAddrLength;
+}
+
+
+/// <GetParameters>
+// get SEND_DATA parameters
+void getSendDataParams(struct _SEND_DATA sendInfo, byte params[])
+{
+  long offset;
+  long lIdx;
+  long lPos;
+  
+  sendInfo.wSocketId = getWordData(params, 0); //Socket ID
+  sendInfo.wTotalLen = getWordData(params, 2); //totalLen
+  sendInfo.wDestPort = getWordData(params, 4); //destPort
+  getIpxAddr(sendInfo.ipxaddr, params, 6);     //ipxaddr
+  offset = 6 + SIZE_LENGTH + sendInfo.ipxaddr.wAddrLength;
+  sendInfo.data.wLength = getWordData(params, offset); //data length
+  memcpy_off(sendInfo.data.bData, 0, params, offset + 2, sendInfo.data.wLength); //data
+  
+  if(sendInfo.wTotalLen < sendInfo.data.wLength)
+  {
+    outputWaringMsg("getSendDataParams() totalLen[%d] < data length[%d]");
+  }
+  else if(sendInfo.wTotalLen > sendInfo.data.wLength)
+  {
+    lPos=0;
+    for(lIdx = sendInfo.data.wLength; lIdx < sendInfo.wTotalLen; lIdx++)
+    {
+      sendInfo.data.bData[lIdx] = sendInfo.data.bData[lPos++];
+      if(lPos >= sendInfo.data.wLength)
+      {
+        lPos = 0;
+      }
+    }
+  }
+}
+
+/// <GetParameters>
+// get RECEIVE_AND_FORWARD parameters
+void getReceiveAndForwardParams(struct _RECEIVE_AND_FORWARD recvForward, byte params[])
+{
+  recvForward.wSocketId = getWordData(params, 0); //Socket ID
+  recvForward.wMaxFwd   = getWordData(params, 2); //Maximum length of payload to be forwarded per event
+  recvForward.wMaxLen   = getWordData(params, 4); //Maximum count of bytes to receive over all
+}
+
+/// <GetParameters>
+// get CONFIGRE_SOCKET parameters
+void getConfigureSocketParams(struct _CONFIGURE_SOCKET configSocket, byte params[])
+{
+  configSocket.wSocketId = getWordData(params, 0); //Socket ID
+  configSocket.wParamId  = getWordData(params, 2); //paramId
+  configSocket.ParamVal.wLength  = getWordData(params, 4); //data length
+  memcpy_off(configSocket.ParamVal.bData, 0, params, 6, configSocket.ParamVal.wLength); //data
+}
+
+/// <Helpers>
+word getWordData(byte bData[], dword offset)
+{
+  return swapWord(bData.word(offset));
+}
+
+/// <Helpers>
+dword getDWordData(byte bData[], dword offset)
+{
+  return swapDWord(bData.dword(offset));
+}
+
+/// <Helpers>
+// get result id from the return value of TCP/IP API functions
+// lResult : 0 - RID_E_OK , other - Error
+enum Result_ID getResultIDFromSocketResult(dword dwSocket, long lResult)
+{
+  if( (lResult != 0) && IpGetLastSocketError(dwSocket) != 997)
+  {
+    outputSocketErrorInfo(dwSocket);
+    if(lResult == kWSA_INIVALID_PARAMETER)
+    {
+      return RID_E_ISD;
+    }
+    return RID_E_NOK;
+  }
+  return RID_E_OK;
+}
+
+/// <Socket>
+// start to Receive UDP packet 
+long startUdpReceive(dword dwSocketHandle)
+{
+  long lResult;
+  char cDummyBuffer[1];
+  
+  // Set size to 0 to enforce reception in callback only
+  lResult = UdpReceiveFrom(dwSocketHandle, cDummyBuffer, 0);
+  
+  return lResult;
+}
+
+/// <Socket>
+int closeUDPSocket(word wIdx)
+{
+  dword dwSocketHandle;
+  int iRet = 0;
+  
+  long lRet;
+  
+  //get socket handle
+  dwSocketHandle = getUDPSocketHandle(wIdx);
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    return iRet;
+  }
+  //close UDP socket;
+  lRet = UdpClose(dwSocketHandle);
+  resetUDPSocketHandle(wIdx);
+  if(lRet != 0)
+  {
+    outputSocketErrorInfo(dwSocketHandle);
+    return iRet;
+  }
+  // socket closed successfully
+  return 1;
+  
+}
+
+/// <Services>
+//
+// forwarding received data, IPv4 
+//
+long forwardReceivedDataUDPoverIPv4(struct _EVENT_RECV_FWD eventRecvFwd)
+{
+  const kLEN_FORWARD_PARAMS_HEADER = 4 + SIZE_LENGTH + kIPv4_ADDRESS_LENGTH_SIZE + SIZE_LENGTH;
+                             //fullLen(uint16) + srcPort(uint16) + srcAdr(2+4) + VINT8 length(2)
+  byte bPacketData[kTESTABILITY_HEADER_SIZE + kMAX_TESTABILITY_PARAM_LENGTH];
+
+  long lResult;
+  struct _Testabilty_Message_Header msgHeader;
+  dword dwLength;
+    
+  lResult = 0;
+  //calculate packet size and check it
+  dwLength = kTESTABILITY_HEADER_SIZE + kLEN_FORWARD_PARAMS_HEADER; //testability header size  
+  dwLength += eventRecvFwd.payload.wLength; //payload length
+  if(dwLength > elcount(bPacketData))
+  {
+    outputErrorMsg("forwardReceivedDataIPv4() Error buffer is short");
+    //make testability message header and write it to buffer
+    InitEventMsgHeader(msgHeader, GID_UDP, PID_RECEIVE_AND_FORWARD, RID_E_ISB);
+    makeTestAbilityHeader(msgHeader, bPacketData);
+
+    //send packet
+    dwLength = kTESTABILITY_HEADER_SIZE;
+    lResult = sendPacketTestabilityUDPSocket(gdwTesterIPv4Addr,  gdwTesterIPv4Port,  bPacketData, dwLength);
+  }
+  else
+  {
+    //make testability message header and write it to buffer
+    InitEventMsgHeader(msgHeader, GID_UDP, PID_RECEIVE_AND_FORWARD, RID_E_OK);
+    SetMsgHeaderLen(msgHeader, kLEN_FORWARD_PARAMS_HEADER + eventRecvFwd.payload.wLength);
+    makeTestAbilityHeader(msgHeader, bPacketData);
+  
+    //write RECEIVE_AND_FORWARD parameters
+    makeTestabilityForwardParams(eventRecvFwd, bPacketData, (dword)kTESTABILITY_HEADER_SIZE, IPv4_Prot_UDP);
+  
+    //send packet
+    lResult = sendPacketTestabilityUDPSocket(gdwTesterIPv4Addr,  gdwTesterIPv4Port,  bPacketData, dwLength);
+  }
+
+  return lResult;
+}
+
+//
+// TCP/IP stack callback function for IPv4
+//
+void OnUdpReceiveFrom(dword dwSocket, long lResult, dword dwAddress, dword dwPort, byte bBuffer[], dword dwSize)
+{
+  int wSocketIdx;
+  byte bResult;
+  word wMaxFwdLen;
+  word wFwdLen;
+  word wMaxCount;
+  word wFwdCount;
+  struct _EVENT_RECV_FWD eventRecvFwd;
+  dword dwSourceAddress;
+  
+  wSocketIdx = kINVALID_UDP_SOCKET_INDEX;
+  //
+  // Source address error check, no global address, no multicast address
+  //
+  dwSourceAddress = swapDword(dwAddress);
+  if( ((dwSourceAddress & kMULTICAST_ADR_FLAG) == kMULTICAST_ADR_FLAG) || 
+      ((dwSourceAddress & kBROADCAST_ADR_FLAG) == kBROADCAST_ADR_FLAG) )
+  {
+    if(@sysvar::TC8_DUT_Config::VerbosityTestability > TABIT_LV_DEBUG)
+    {
+      Write("DUT OnUdpReceiveFrom(IPv4) source address error");
+    }
+    startUdpReceive(dwSocket);    
+    return;
+  }
+  
+  //
+  // Testablity Port
+  //
+  if(dwUdpTestabilitySocketHandle == dwSocket)
+  {
+    //get Tester address and port numbers
+    gdwTesterIPv4Addr = dwAddress;
+    gdwTesterIPv4Port = dwPort;
+    
+    startUdpReceive(dwSocket);    
+    return;
+  }
+  //
+  // Serach Testablity UDP socket 
+  //
+  else if(getUDPSocketIndexFromHandle(wSocketIdx, dwSocket) != kTrue)
+  {
+    //no socket found
+    startUdpReceive(dwSocket);
+    return;
+  }
+  //
+  //socket handle found, check if forwarding enabled
+  //
+  if(isUDPSocketRecvFwdEnabled(wSocketIdx) == kTrue)
+  {
+    if(@sysvar::TC8_DUT_Config::VerbosityTestability > TABIT_LV_DEBUG)
+    {
+      write("[%f] OnUdpReceiveFrom() RecvFwdEnabled() Fwd Address[%x], Port[%x]", timeNow()/100000.0,  gdwTesterIPv4Addr, gdwTesterIPv4Port);
+    }
+    
+    //get - max length/event, max count bytes, current count bytes 
+    wMaxFwdLen = getUDPSocketInfoMaxFwd(wSocketIdx);
+    wMaxCount = getUDPSocketInfoMaxLen(wSocketIdx);
+    wFwdCount = getUDPSocketInfoFwdCount(wSocketIdx);
+    //check max forward length / event
+    wFwdLen = (dwSize > (dword)wMaxFwdLen) ? wMaxFwdLen : (word)dwSize;
+    //check maximum count bytes to receive over all and forwarded count bytes
+    if(wMaxCount != kTESTABILITY_RECV_FWD_CNT_NOLIMIT)
+    {
+      if( (dword)wFwdCount + (dword)wFwdLen > wMaxCount )
+      {
+        wFwdLen = wMaxCount - wFwdCount;
+      }
+    }
+    //set event parameters for RECEIVE_AND_FORWARD event
+    eventRecvFwd.wFullLen = dwSize;
+    eventRecvFwd.wSrcPort = dwPort;
+    eventRecvFwd.ip.wAddrLength = kIPv4_ADDRESS_LENGTH_SIZE;
+    eventRecvFwd.ip.dwIpv4Addr = dwAddress;
+    eventRecvFwd.payload.wLength = wFwdLen;
+    memcpy(eventRecvFwd.payload.bData, bBuffer, wFwdLen); //copy payload data to vint8
+    
+    // forward received packet
+    forwardReceivedDataUDPoverIPv4(eventRecvFwd);
+    //add forwarded count
+    addUDPSocketInfoFwdCount(wSocketIdx, wFwdLen);
+  }
+  else
+  {
+    addUDPSocketInfoDropCount(wSocketIdx, dwSize);
+  }
+  //trigger the next reception
+  startUdpReceive(dwSocket);
+  
+}
+
+
+
+/// <Services>
+//
+// forwarding received data, IPv6 (is not tested)
+//
+long forwardReceivedDataUDPoverIPv6(struct _EVENT_RECV_FWD eventRecvFwd)
+{
+  const kLEN_FORWARD_PARAMS_HEADER = 4 + SIZE_LENGTH + kIPv6_ADDRESS_LENGTH_SIZE + SIZE_LENGTH;
+                             //fullLen(uint16) + srcPort(uint16) + srcAdr(2+16) + VINT8 length(2)
+  byte bPacketData[kTESTABILITY_HEADER_SIZE + kMAX_TESTABILITY_PARAM_LENGTH];
+
+  long lResult;
+  struct _Testabilty_Message_Header msgHeader;
+  dword dwLength;
+  
+  lResult = 0;
+  //calculate packet size and check it
+  dwLength = kTESTABILITY_HEADER_SIZE + kLEN_FORWARD_PARAMS_HEADER; //testability header size  
+  dwLength += eventRecvFwd.payload.wLength; //payload length
+  if(dwLength > elcount(bPacketData))
+  {
+    outputErrorMsg("forwardReceivedDataIPv6() Error buffer is short");
+    //make testability message header and write it to buffer
+    InitEventMsgHeader(msgHeader, GID_UDP, PID_RECEIVE_AND_FORWARD, RID_E_ISB);
+    makeTestAbilityHeader(msgHeader, bPacketData);
+
+    //send packet
+    dwLength = kTESTABILITY_HEADER_SIZE;
+    lResult = sendPacketTestabilityUDPSocket(gbTesterIPv6Addr,  gdwTesterIPv6Port,  bPacketData, dwLength);
+  }
+  else
+  {
+    //make testability message header and write it to buffer
+    InitEventMsgHeader(msgHeader, GID_UDP, PID_RECEIVE_AND_FORWARD, RID_E_OK);
+    SetMsgHeaderLen(msgHeader, kLEN_FORWARD_PARAMS_HEADER + eventRecvFwd.payload.wLength);
+    makeTestAbilityHeader(msgHeader, bPacketData);
+  
+    //write RECEIVE_AND_FORWARD parameters
+    makeTestabilityForwardParams(eventRecvFwd, bPacketData, (dword)kTESTABILITY_HEADER_SIZE, IPv4_Prot_UDP);
+  
+    //send packet
+    lResult = sendPacketTestabilityUDPSocket(gbTesterIPv6Addr,  gdwTesterIPv6Port,  bPacketData, dwLength);
+  }
+
+  return lResult;
+}

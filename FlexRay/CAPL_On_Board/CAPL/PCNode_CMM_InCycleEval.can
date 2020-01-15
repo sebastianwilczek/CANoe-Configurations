@@ -1,0 +1,258 @@
+/*@@includes:*/
+includes
+{
+#include "InCycleResponseDef.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  // Program: Evaluation of In-Cycle Responses V 1.0
+
+  // For slot definitions of In-Cycle Repetition demo see include file
+
+  int    gLastObservedCycle  = -1;
+  int    gDoEvaluation       = 0;
+
+  long   gObservedRounds     = 0;
+
+  int    gdStaticSlotVal     = 43;    // MT
+  double gdMacrotickVal      = 1.375; // us
+  int    gdCycleVal          = 5000;  // us
+
+  long   pcMisses[pcSlotCount];
+  long   cobMisses[cobSlotCount];
+
+  long   pcMissEvent[pcSlotCount];
+  long   cobMissEvent[cobSlotCount];
+
+  double cobRespTimes[cobSlotCount];
+  double pcRespTimes[pcSlotCount];
+
+  double cobAvgRespTimes[cobSlotCount];
+  double pcAvgRespTimes[pcSlotCount];
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  declareCOBResponses();
+  declarePcResponses();
+  initMisses();
+  initResponseTimes();
+}
+/*@@end*/
+
+/*@@frFrame:MsgChannel1.*:*/
+on FRFrame MsgChannel1.*
+{
+  if ((gLastObservedCycle != -1) && (gLastObservedCycle != this.FR_Cycle))
+  {
+    // start evaluation in second observed cycle:
+    gDoEvaluation = 1;
+  }
+
+  if (gDoEvaluation > 0)
+  {
+    CheckPcReply(this.FR_SlotID, this.FR_Cycle, this.byte(0));
+    CheckCOBReply(this.FR_SlotID, this.FR_Cycle, this.byte(0));
+  }
+
+  gLastObservedCycle = this.FR_Cycle;
+}
+/*@@end*/
+
+/*@@frStartCycle:MsgChannel1.*:*/
+on FRStartCycle MsgChannel1.*
+{
+  if ((this.FR_Cycle % sendCycleRep) == cycleStart)
+  {
+    calcAvgResponseTimes();
+
+    gObservedRounds++;
+    @sysvar::InCycleResponse::totalNumOfCycles = gObservedRounds;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:CheckCOBReply(int,int,byte):*///function
+void CheckCOBReply (int slotId, int cycle, byte data)
+{
+  int i;
+
+  for (i = 0; i < cobSlotCount; ++i)
+  {
+    if (cobSlots[i] == slotId)
+    {
+      if (data != cycle)
+      {
+        cobMissEvent[i] = 1;
+        SysSetVariableLongArray(sysVar::InCycleResponse::cobMissEvent, cobMissEvent, cobSlotCount);
+        //SysSetVariableLongArray("InCycleResponse","cobMissEvent", cobMissEvent, cobSlotCount);
+
+        ++cobMisses[i];
+        SysSetVariableLongArray(sysVar::InCycleResponse::COBMisses, cobMisses, cobSlotCount);
+        //SysSetVariableLongArray("InCycleResponse","COBMisses", cobMisses, cobSlotCount);
+      }
+      else
+      {
+        cobMissEvent[i] = 0;
+        SysSetVariableLongArray(sysVar::InCycleResponse::cobMissEvent, cobMissEvent, cobSlotCount);
+        //SysSetVariableLongArray("InCycleResponse","cobMissEvent", cobMissEvent, cobSlotCount);
+      }
+      break;
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:CheckPcReply(int,int,byte):*///function
+void CheckPcReply (int slotId, int cycle, byte data)
+{
+  int i;
+
+  for (i = 0; i < pcSlotCount; ++i)
+  {
+    if (pcSlots[i] == slotId)
+    {
+      if (data != cycle)
+      {
+        pcMissEvent[i] = 1;
+        SysSetVariableLongArray(sysVar::InCycleResponse::pcMissEvent, pcMissEvent, pcSlotCount);
+        //SysSetVariableLongArray("InCycleResponse","pcMissEvent", pcMissEvent, pcSlotCount);
+
+        ++pcMisses[i];
+        SysSetVariableLongArray(sysVar::InCycleResponse::pcMisses, pcMisses, pcSlotCount);
+        //SysSetVariableLongArray("InCycleResponse","pcMisses", pcMisses, pcSlotCount);
+      }
+      else
+      {
+        pcMissEvent[i] = 0;
+        SysSetVariableLongArray(sysVar::InCycleResponse::pcMissEvent, pcMissEvent, pcSlotCount);
+        //SysSetVariableLongArray("InCycleResponse","pcMissEvent", pcMissEvent, pcSlotCount);
+      }
+      break;
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:declareCOBResponses():*///function
+void declareCOBResponses ()
+{
+  // To be called in "on preStart":
+  int i;
+
+  // For In-Cycle Repetition demo:
+  for(i = 0; i < cobSlotCount; ++i)
+  {
+    // Declare send buffers for COB node (ESP) here:
+    FRSetSendFrame(cobSlots[i], channelMask, cStaticPayloadLen, cycleStart, cycleRepetition, flags, channel);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:declarePcResponses():*///function
+void declarePcResponses ()
+{
+  // To be called in "on preStart":
+  int i;
+
+  // For In-Cycle Repetition demo:
+  for(i = 0; i < pcSlotCount; ++i)
+  {
+    FRSetSendFrame(pcSlots[i], channelMask, cStaticPayloadLen, cycleStart, cycleRepetition, flags, channel);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:initMisses():*///function
+void initMisses ()
+{
+  int i;
+
+  for (i = 0; i < cobSlotCount; ++i)
+  {
+    cobMisses[i] = 0;
+    cobMissEvent[i] = 0;
+  }
+  SysSetVariableLongArray(sysVar::InCycleResponse::COBMisses, cobMisses, cobSlotCount);
+  //SysSetVariableLongArray("InCycleResponse","COBMisses", cobMisses, cobSlotCount);
+  SysSetVariableLongArray(sysVar::InCycleResponse::cobMissEvent, cobMissEvent, cobSlotCount);
+  //SysSetVariableLongArray("InCycleResponse","cobMissEvent", cobMissEvent, cobSlotCount);
+  for (i = 0; i < pcSlotCount; ++i)
+  {
+    pcMisses[i] = 0;
+    pcMissEvent[i] = 0;
+  }
+  SysSetVariableLongArray(sysVar::InCycleResponse::pcMisses, pcMisses, pcSlotCount);
+  //SysSetVariableLongArray("InCycleResponse","pcMisses", pcMisses, pcSlotCount);
+  SysSetVariableLongArray(sysVar::InCycleResponse::pcMissEvent, pcMissEvent, pcSlotCount);
+  //SysSetVariableLongArray("InCycleResponse","pcMissEvent", pcMissEvent, pcSlotCount);
+
+  gObservedRounds = 0;
+  @sysvar::InCycleResponse::totalNumOfCycles = gObservedRounds;
+}
+/*@@end*/
+
+/*@@key:'r':*/
+on key 'r'
+{
+  initMisses();
+}
+/*@@end*/
+
+/*@@caplFunc:initResponseTimes():*///function
+void initResponseTimes ()
+{
+  int i;
+
+  for (i = 0; i < cobSlotCount; ++i)
+  {
+    cobRespTimes[i] = (cobSlots[i] - triggerSlot) * gdStaticSlotVal * gdMacrotickVal;
+  }
+  sysSetVariableFloatArray(sysVar::InCycleResponse::cobResponseTime, cobRespTimes, cobSlotCount);
+  //sysSetVariableFloatArray("InCycleResponse","cobResponseTime", cobRespTimes, cobSlotCount);
+  for (i = 0; i < pcSlotCount; ++i)
+  {
+    pcRespTimes[i] = (pcSlots[i] - triggerSlot) * gdStaticSlotVal * gdMacrotickVal;
+  }
+  sysSetVariableFloatArray(sysVar::InCycleResponse::pcResponseTime, pcRespTimes, pcSlotCount);
+  //sysSetVariableFloatArray("InCycleResponse","pcResponseTime", pcRespTmes, pcSlotCount);
+}
+/*@@end*/
+
+/*@@caplFunc:calcAvgResponseTimes():*///function
+void calcAvgResponseTimes ()
+{
+  int i;
+
+  for (i = 0; i < cobSlotCount; ++i)
+  {
+    if (gObservedRounds > 0)
+      cobAvgRespTimes[i] = ( ( cobMisses[i] * (cobRespTimes[i] + gdCycleVal) ) + ( (gObservedRounds - cobMisses[i]) * cobRespTimes[i] ) ) / gObservedRounds;
+  }
+  sysSetVariableFloatArray(sysVar::InCycleResponse::cobAvgResponseTime, cobAvgRespTimes, cobSlotCount);
+  //sysSetVariableFloatArray("InCycleResponse","cobAvgResponseTime", cobAvgRespTimes, cobSlotCount);
+  for (i = 0; i < pcSlotCount; ++i)
+  {
+    if (gObservedRounds > 0)
+      pcAvgRespTimes[i] = ( ( pcMisses[i] * (pcRespTimes[i] + gdCycleVal) ) + ( (gObservedRounds - pcMisses[i]) * pcRespTimes[i] ) ) / gObservedRounds;
+  }
+  sysSetVariableFloatArray(sysVar::InCycleResponse::pcAvgResponseTime, pcAvgRespTimes, pcSlotCount);
+  //sysSetVariableFloatArray("InCycleResponse","pcAvgResponseTime", pcAvgRespTmes, pcSlotCount);
+}
+/*@@end*/
+
+/*@@sysvarChange:InCycleResponse::resetMisses:*/
+on sysvar sysvar::InCycleResponse::resetMisses
+{
+  if (@this == 1)
+  {
+    initMisses();
+  }
+}
+/*@@end*/
+

@@ -1,0 +1,180 @@
+/*@!Encoding:1252*/
+includes
+{
+}
+
+variables
+{
+  enum DelayTransition
+  {
+    first_bhm = 0,
+    bhm_to_brm,
+    brm_to_bcp,
+    bcp_to_broNotReady,
+    broNotReady_to_broReady,
+    broReady_to_bcl_bcs,
+    bcl_bcs_to_bcl_bcs_bcm,
+    bcl_bcs_bcm_to_bst,
+    bst_to_bsd,
+    bsd_to_end
+  };
+  
+  dword msStartOfChargingMS = 0;
+  msTimer tmrUpdateStatus;
+  double inputEnergy;
+}
+
+on start
+{
+  GBT27930IL_InitAsBMS();
+  setControlForeColor("BMS", "btnStoreSettings", MakeRGB(0, 128, 0));
+}
+
+on sysvar GBT27930::BMS::svStart
+{
+  if(@this == 1)
+  {
+    SetDelayTransition();
+    GBT27930IL_StartChargingSimulation();
+    Set_BMS_ManufacturereName();
+  }
+  else
+  {
+    GBT27930IL_StopChargingSimualtion();
+  }
+}
+
+on sysvar_update GBT27930::BMS::svManufacturerName
+{
+  Set_BMS_ManufacturereName();
+}
+
+Set_BMS_ManufacturereName()
+{
+  char buf[5];
+  dword textAsDWord;
+
+  sysGetVariableString(sysvar::GBT27930::BMS::svManufacturerName, buf, elcount(buf));
+  textAsDWord = (buf[0] << 0) + (buf[1] << 8) + (buf[2] << 16) + (buf[3] << 24);
+  $BRM::ManufacturerName = textAsDWord;
+}
+
+on sysvar GBT27930::BMS::svStoreSettings
+{
+  if(@this == 1)    
+    startValuesUpdateList("BMS Settings", 1);
+}
+
+on preStop
+{
+  setControlForeColor("BMS", "btnStoreSettings", MakeRGB(128, 128, 128));
+}
+
+long GBT27930IL_OnTxPrepare(pg* pgToSend)
+{
+  char buf[18];
+  int pos;
+
+  if(pgToSend.pgn == BRM.pgn && pgToSend.dlc >= 41)
+  {
+    sysGetVariableString(sysvar::GBT27930::BMS::svVIN, buf, elcount(buf));
+    for(pos = 0; pos < 17; pos++)
+    {
+      pgToSend.byte(pos + 24) = buf[pos];
+    }
+  }
+  return 1;
+}
+on sysvar GBT27930::BMS::svSuspendCharging
+{
+  if(@this == 1)    
+    GBT27930IL_SuspendCharging();
+}
+
+on sysvar GBT27930::BMS::svStopChargingWithError
+{
+  if(@this == 1)
+    GBT27930IL_SetCommunicationState(50); //Send BMS Error Message
+  else
+    GBT27930IL_SetCommunicationState(19); //End of Charging
+}
+
+void SetDelayTransition()
+{
+  GBT27930IL_SetDelayForStateTransition(first_bhm,               @GBT27930::BMS::DelayTransition::svBHM);
+  GBT27930IL_SetDelayForStateTransition(bhm_to_brm,              @GBT27930::BMS::DelayTransition::svBRM);
+  GBT27930IL_SetDelayForStateTransition(brm_to_bcp,              @GBT27930::BMS::DelayTransition::svBCP);
+  GBT27930IL_SetDelayForStateTransition(bcp_to_broNotReady,      @GBT27930::BMS::DelayTransition::svBRO_NotReady);
+  GBT27930IL_SetDelayForStateTransition(broNotReady_to_broReady, @GBT27930::BMS::DelayTransition::svBRO_Ready);
+  GBT27930IL_SetDelayForStateTransition(broReady_to_bcl_bcs,     @GBT27930::BMS::DelayTransition::svBCL_BCS);
+  GBT27930IL_SetDelayForStateTransition(bcl_bcs_to_bcl_bcs_bcm,  @GBT27930::BMS::DelayTransition::svBCL_BCS_BSM);
+  GBT27930IL_SetDelayForStateTransition(bcl_bcs_bcm_to_bst,      @GBT27930::BMS::DelayTransition::svBST);
+  GBT27930IL_SetDelayForStateTransition(bst_to_bsd,              @GBT27930::BMS::DelayTransition::svBSD);
+  GBT27930IL_SetDelayForStateTransition(bsd_to_end,              @GBT27930::BMS::DelayTransition::svEnd);
+}
+
+
+////////////////////////////////////////////////////
+on timer tmrUpdateStatus
+{
+  int commState;
+  SetBCS();  
+  $BSD::SuspendStateOfChargeSOC.phys = $BCS::CurrentChargeState.txrq;
+  commState = GBT27930IL_GetCommunicationState();
+  if(commState >= 12 && commState <= 14) // sending of BCL, BCS and BSM
+  {
+    setTimer(tmrUpdateStatus, 1000);
+  }
+}
+
+void GBT27930IL_OnTxMessage(pg * txPG)
+{
+  if(txPG.pgn == BRM.PGN)
+  {
+    msStartOfChargingMS = 0;
+      inputEnergy = 0;
+      $BCS::EstimatedRemainingChargingTime.phys = 0;
+      $BCS::CurrentChargeState.phys = $BCP::StatusOfCharge.phys;
+  }
+  else if(txPG.pgn == BCL.PGN)
+  {
+    if(msStartOfChargingMS == 0)
+    {
+      msStartOfChargingMS = timeNow() / 100;
+      //inputEnergy = 0;
+      //$BCS::EstimatedRemainingChargingTime.phys = 0;
+      //$BCS::CurrentChargeState.phys = $BCP::StatusOfCharge.phys;
+      setTimer(tmrUpdateStatus, 1000);
+      SetBCS();  
+    }
+  }
+}
+
+void SetBCS()
+{
+  double additionalEnergy, remainingEnergy;
+  double chargingTimeMinutes;
+  
+  $BCS::MeasuredChargingVoltage.phys = getSignal(CCS::VoltageOutputValue) * (0.99 + random(100)/5000.0);
+  $BCS::MeasuredChargingCurrent.phys = getSignal(CCS::CurrentOutputValue) * (0.99 + random(100)/5000.0);
+  
+  additionalEnergy = abs((getSignal(CCS::VoltageOutputValue) * getSignal(CCS::CurrentOutputValue) * @GBT27930::BMS::svEfficiency / 100) / 3600000); //kWh
+  inputEnergy = inputEnergy + additionalEnergy;
+  $BCS::CurrentChargeState.phys = $BCP::StatusOfCharge.phys + (inputEnergy / $BCP::TotalNominalEnergy.phys) * 100;
+  remainingEnergy = $BCP::TotalNominalEnergy.phys * (1.0 - $BCP::StatusOfCharge.phys/100.0) - inputEnergy;
+  chargingTimeMinutes = ((timeNow() / 100) - msStartOfChargingMS) / 60000.0;
+  if(inputEnergy == 0 || chargingTimeMinutes < 2)
+    $BCS::EstimatedRemainingChargingTime.phys = 0;
+  else
+    $BCS::EstimatedRemainingChargingTime.phys = (remainingEnergy / inputEnergy) * chargingTimeMinutes;
+}
+
+long GBT27930IL_OnRxMessage(pg * rxPG)
+{
+  if(rxPG.PGN == 0x1F00)//Charger Error message, CEM
+  {
+    GBT27930IL_SetCommunicationState(19); //End of charging
+  }
+  return 1;
+}
+

@@ -1,0 +1,64 @@
+
+variables
+{
+  msTimer gtAccelerator;               // Minimum acceleration simulation
+  float   gCurrentAcceleration = 0;
+  dword   gtAccUpdateRate = 50;        // How often is the acceleration be calc'ed
+}
+
+on start
+{
+  // Start the "minimum simulation" for the acceleration
+  SetTimer(gtAccelerator, gtAccUpdateRate);
+
+  // Set the target ECU for diagnostic requests
+  DiagSetTarget("SUT");   // We test the ECU of this name
+}
+
+on timer gtAccelerator
+{
+  float lCurrVelocity;
+
+  // Minimum acceleration simulation.
+
+  if($VehicleMotion::EngineRunning)  // Engine is running?
+  {
+    if(@sysvar::SystemUnderTest::Accelerate > 0)  // want to accelerate?
+    {
+      gCurrentAcceleration = 0.5;
+    }
+
+    if(@sysvar::SystemUnderTest::Decelerate > 0)
+    {
+      gCurrentAcceleration = -1;     // brakes are stronger than the engine :-)
+    }
+
+    if(@sysvar::SystemUnderTest::Accelerate == 0 && @sysvar::SystemUnderTest::Decelerate == 0)
+    {
+      gCurrentAcceleration = 0;
+    }
+  }
+  else
+  {
+    if(@sysvar::SystemUnderTest::Decelerate > 0)
+    {
+      gCurrentAcceleration = -1;
+    }
+    else
+    {
+      gCurrentAcceleration = -0.5;  // Engine brake
+    }
+  }
+
+  if(lCurrVelocity > 0 || gCurrentAcceleration > 0)
+  {
+    lCurrVelocity += gCurrentAcceleration;
+
+    if (lCurrVelocity < 0) lCurrVelocity = 0;
+    
+    $VehicleMotion::Velocity = lCurrVelocity;
+  }
+
+  SetTimer(this, gtAccUpdateRate);
+}
+

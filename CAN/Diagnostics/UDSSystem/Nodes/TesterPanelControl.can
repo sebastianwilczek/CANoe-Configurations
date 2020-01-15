@@ -1,0 +1,277 @@
+/*@!Encoding:1252*/
+includes
+{
+}
+
+variables
+{
+  char gECU[20]="DoorFL";
+  mstimer tVoltageRead;
+  msTimer tWindowPosRead;
+  msTimer tOdometerValueRead;
+  msTimer tVariantCodingTimeout;
+  
+  enum eVarCodeResult {Undefined, NOK, OK};
+}
+
+on start
+{
+  writeDbgLevel(1, "Tester Panel gP2Timeout=%d, gP2extended=%d", diagGetP2Timeout(gECU, 1, 2), diagGetP2Extended(gECU, 1, 2));
+  VariantCodingShowResult(Undefined);
+}
+
+// Cyclic requests of non-UUDT DIDs
+on timer tVoltageRead
+{
+  diagRequest DoorFL.DID_Voltage_Read req;
+
+  req.SendRequest();
+}
+
+on timer tWindowPosRead
+{
+  diagRequest DoorFL.Additional.WindowLiftFinePositionRead req;
+
+  req.SendRequest();
+}
+
+on timer tOdometerValueRead
+{
+  diagRequest DoorFL.DID_OdometerValue_Read req;
+
+  req.SendRequest();
+}
+
+// Timeout in case there is no response to the Variant Coding request
+on timer tVariantCodingTimeout
+{
+  VariantCodingShowResult(NOK);
+}
+
+on key 'f'
+{
+  diagRequest DoorFL.EcuIdentification_Read req;
+  
+  write("Trying to send a functional group request...");
+  req.SendFunctional();
+}
+
+on sysvar sysvar::Tester_Display::BtnReadSerialAndDoorStatus
+{
+  diagRequest DoorFL.SerialNumber_Read reqSerialNoRead;
+  diagRequest DoorFL.Door_Status_Read reqDoorStatusRead;
+
+  if (@this==1) {
+    reqSerialNoRead.SendRequest();
+    reqDoorStatusRead.SendRequest();
+  }
+}
+
+on diagResponse DoorFL.SerialNumber_Read
+{
+  long serialNumber;
+
+  if (this.IsPositiveResponse()) {
+    serialNumber=this.GetParameter("SerialNumber");
+  
+    if (serialNumber>=0) @sysvar::Tester_Display::DeterminedSerialNumber=serialNumber;
+  }
+}
+
+on diagResponse DoorFL.Door_Status_Read
+{
+  long ret;
+  double DoorContacts[1];
+  
+  if (this.IsPositiveResponse()) {
+    ret=this.GetParameter("Door_Contact", DoorContacts);
+  
+    if (ret>=0) {
+      @sysvarMember::Tester_Display::OpenDoorContacts.FrontLeft=this.GetParameter("Door_Contact.Door_contact_front_left");
+      @sysvarMember::Tester_Display::OpenDoorContacts.FrontRight=this.GetParameter("Door_Contact.Door_contact_front_right");
+      @sysvarMember::Tester_Display::OpenDoorContacts.RearLeft=this.GetParameter("Door_Contact.Door_contact_rear_left");
+      @sysvarMember::Tester_Display::OpenDoorContacts.RearRight=this.GetParameter("Door_Contact.Door_contact_rear_right");
+    }
+    else {
+      write("Error when reading door contact status (ret=%d)", ret);
+    }
+  }  
+}
+
+on sysvar sysvar::Tester_Display::BtnWindowPosition0
+{
+  diagRequest DoorFL.DID_WindowLiftRoughPosition_Write req;
+  if (@this==1) {
+    req.SetParameter("WindowLiftRoughPosition", "0,00%");
+    req.SendRequest();
+  }
+}
+
+on sysvar sysvar::Tester_Display::BtnWindowPosition50
+{
+  diagRequest DoorFL.DID_WindowLiftRoughPosition_Write req;
+  if (@this==1) {
+    req.SetParameter("WindowLiftRoughPosition", "50,00%");
+    req.SendRequest();
+  }  
+}
+
+on sysvar sysvar::Tester_Display::BtnWindowPosition100
+{
+  diagRequest DoorFL.DID_WindowLiftRoughPosition_Write req;
+  if (@this==1) {
+    req.SetParameter("WindowLiftRoughPosition", "100,00%");
+    req.SendRequest();
+  }    
+}
+
+on sysvar sysvar::Tester_Display::BtnInternalsCyclicRead
+{
+  diagRequest DoorFL.Sawtooth_Send_fast reqSawtoothSend;
+  diagRequest DoorFL.Sawtooth_Stop reqSawtoothStop;
+  diagRequest DoorFL.SineWave_Send_fast reqSinewaveSend;
+  diagRequest DoorFL.SineWave_Stop reqSineWaveStop;
+
+  if (@this==1) {
+    reqSawtoothSend.SendRequest();
+    reqSinewaveSend.SendRequest();
+    setTimerCyclic(tOdometerValueRead, 500);
+  }
+  else {
+    reqSawtoothStop.SendRequest();
+    reqSineWaveStop.SendRequest();
+    cancelTimer(tOdometerValueRead);
+  }
+}
+
+on sysvar sysvar::Tester_Display::BtnWindowPosCyclicRead
+{
+  if (@this==1) {
+    setTimerCyclic(tWindowPosRead, 500);
+  }
+  else {
+    cancelTimer(tWindowPosRead);
+  }  
+}
+
+on sysvar sysvar::Tester_Display::BtnVoltageCyclicRead
+{
+  if (@this==1) {
+    setTimerCyclic(tVoltageRead, 500);
+  }
+  else {
+    cancelTimer(tVoltageRead);
+  }
+}
+
+//==========================
+// Variant coding sequences
+//==========================
+
+// Switch to Extended Session and read variant coding
+on sysvar sysvar::Tester_Display::BtnReadVariantCoding
+{
+  diagRequest DoorFL.ExtendedDiagnosticSession_Start reqExtSession;
+  diagRequest DoorFL.Variant_Coding_Read reqVarCoding;
+  
+  if (@this==1) {
+    setTimer(tVariantCodingTimeout, 1000);
+    VariantCodingShowResult(Undefined);
+    // Checking on return values indicating an error when sending the requests or when receiving the responses was omitted here to simplify the example
+    reqExtSession.SendRequest();
+    reqVarCoding.SendRequest();
+  }
+}
+
+// Switch via Extended Session to Programming Session and then request seed
+on sysvar sysvar::Tester_Display::BtnWriteVariantCoding
+{
+  diagRequest DoorFL.ExtendedDiagnosticSession_Start reqExtSession;
+  diagRequest DoorFL.ProgrammingSession_Start reqProgSession;
+  diagRequest DoorFL.SeedLevel_0x01_Request reqSeed;
+  
+  if (@this==1) {
+    setTimer(tVariantCodingTimeout, 1000);
+    VariantCodingShowResult(Undefined);
+    // Checking on return values indicating an error when sending the requests or when receiving the responses was omitted here to simplify the example
+    reqExtSession.SendRequest();
+    reqProgSession.SendRequest();
+    reqSeed.SendRequest();
+  }
+}
+
+// Compute Key from Seed using the Seed&Key DLL, then write Variant Coding
+on diagResponse DoorFL.SeedLevel_0x01_Request
+{
+  diagRequest DoorFL.KeyLevel_0x01_Send reqKeySend;
+  diagRequest DoorFL.Variant_Coding_Write reqCodingWrite;
+  word seed;
+  word securityKey;
+  byte seedArray[2];
+  byte keyArray[2];
+  dword keyActualSizeOut;
+  
+  seed=this.GetParameter("SecuritySeed");
+  seedArray[1]=(seed>>8)&0xFF;
+  seedArray[0]=seed&0xFF;
+  diagGenerateKeyFromSeed(gECU, seedArray , 2, 1, "", "" , keyArray, elcount(keyArray), keyActualSizeOut); 
+  
+  securityKey=(((word)keyArray[1])<<8) | keyArray[0];
+
+  reqKeySend.SetParameter("SecurityKey", securityKey);
+  // Checking on return values indicating an error when sending the requests or when receiving the responses was omitted here to simplify the example
+  reqKeySend.SendRequest();
+
+  reqCodingWrite.SetParameter("Codingstring.CountryType", @sysvar::Tester_Display::VariantCodingCountyCode);
+  reqCodingWrite.SetParameter("Codingstring.VehicleType", @sysvar::Tester_Display::VariantCodingVehicleType);
+  reqCodingWrite.SetParameter("Codingstring.WindowLift_Support", @sysvar::Tester_Display::VariantCodingWindowLiftSupport);
+  reqCodingWrite.SetParameter("Codingstring.VehicleSpeedToLockDoor", @sysvar::Tester_Display::VariantCodingSpeedToLockDoor);
+
+  reqCodingWrite.SendRequest();
+}
+
+// Chec result of Variant Coding Write response
+on diagResponse DoorFL.Variant_Coding_Write
+{
+  cancelTimer(tVariantCodingTimeout);
+  if (this.IsPositiveResponse()) {
+    VariantCodingShowResult(OK);
+  }
+  else {
+    VariantCodingShowResult(NOK);
+  }
+}
+
+on diagResponse DoorFL.Variant_Coding_Read
+{
+  cancelTimer(tVariantCodingTimeout);
+  if (this.IsPositiveResponse()) {
+    // Checking on return values indicating an error when getting the parameters was omitted here to simplify the example
+    @sysvar::Tester_Display::VariantCodingCountyCode=this.GetParameter("Codingstring.CountryType");
+    @sysvar::Tester_Display::VariantCodingVehicleType=this.GetParameter("Codingstring.VehicleType");
+    @sysvar::Tester_Display::VariantCodingWindowLiftSupport=this.GetParameter("Codingstring.WindowLift_Support");
+    @sysvar::Tester_Display::VariantCodingSpeedToLockDoor=this.GetParameter("Codingstring.VehicleSpeedToLockDoor");
+    VariantCodingShowResult(OK);
+  }
+  else {
+    VariantCodingShowResult(NOK);
+  }
+}
+
+void VariantCodingShowResult(enum eVarCodeResult result)
+{
+  switch (result) {
+    case OK:
+      sysSetVariableString(sysvar::Tester_Display::VariantCodingResult, "OK");
+      setControlColors("VariantCoding", "VariantCodingResultText", MakeRGB(16,160,16), MakeRGB(0,0,0));
+      break;
+    case NOK:
+      sysSetVariableString(sysvar::Tester_Display::VariantCodingResult, "NOK");
+      setControlColors("VariantCoding", "VariantCodingResultText", MakeRGB(255,0,0), MakeRGB(0,0,0));
+      break;
+    default:
+      sysSetVariableString(sysvar::Tester_Display::VariantCodingResult, "");
+      setControlColors("VariantCoding", "VariantCodingResultText", MakeRGB(255,255,255), MakeRGB(255,255,255));
+      break;
+  }
+}

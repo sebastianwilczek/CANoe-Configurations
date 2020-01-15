@@ -1,0 +1,516 @@
+/*@@includes:*/
+includes
+{
+  // include DLL with file streaming extensions
+  // path relative to this CAPL file
+  #pragma library ("MostSyncStrmToDir.dll")
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  //
+  // This CAPL program applies the CAPL DLL MostSyncStrmToDir.dll
+  // to record data of synchronous MOST channels.
+  // 
+  // In addition it writes an info file containing alterations of 
+  // the allocation table and timing details of the streamed files.
+
+  // channel of MOST interface
+  long  gChannel        = 1;
+  // name of extension DLL for streaming (path relative to cfg file)
+  char  gDllName[200]   = "MostSyncStrmToDir.dll";
+  // streaming direction
+  char  gDirection      = RX;
+  // latency: 0 (short reaction time, high CPU load)...
+  //          4 (slow reaction time, low CPU load)
+  char  gLatency        = 2;
+  // digits of file name counter
+  long  gFileCntDigits  = 4;
+  // file size in frames
+  long  gFileSizeInFrames = 500000; // note: 44100 frms ~ 1 s
+  // streaming rx options
+  dword gOptions        = 1;
+
+  // info file
+  char  gInfoFile[260] = "data.txt";
+
+  // ini file
+  char gIniFile[260] = "MOSTStreamPlayer.ini";
+
+  // read from file 'MOSTStreamPlayer.ini':
+  char  gDir[260]       = "";       // Target directory
+  long  gNumChannels    = 60;       // Number of channels streamed
+  int   gManualTrigger  = 0;        // Should the streaming be startet manually or with measurement start?
+  int   gPreTriggerTime = 10;       // How many seconds to buffer for manual triggering?
+  float gFrequency      = 44100.0;  // MOST frame rate
+
+  // streaming states (see OnMostSyncStrmState)
+  const int kClosed  = 1;
+  const int kOpened  = 2;
+  const int kStarted = 3;
+  const int kStopped = 4;
+
+  // streaming errors (see OnMostSyncStrmError)
+  const int kOK                          =   0;
+  const int kOpenFailed                  =   1;
+  const int kCloseFailed                 =   2;
+  const int kStartFailed                 =   3;
+  const int kStopFailed                  =   4;
+  const int kDriverCallFailed            =  10; // call of the bus interface driver failed
+  const int kDirectionNotSupported       =  11; // the streaming direction is not supported by the client
+  const int kNumSyncChannelsNotSupported =  12; // the number of streaming channels is not supported by the client
+  const int kOptionsNotSupported         =  13; // the streaming options are not supported by the client
+  const int kLatencyNotSupported         =  14; // the suggested latency is not supported by the client
+  const int kInvalidInterface            =  15;
+  const int kBufferUnderrunHW            =  40; // 0-data was streamed (TX only)
+  const int kBufferUnderrunClient        =  41; // client didn't provide buffer in time (TX only)
+  const int kBufferOverflowHW            =  42; // synchr data got lost (RX only)
+  const int kBufferOverflowClient        =  43; // client didn't provide buffer in time (RX only)
+  const int kBufferErrorClient           =  44; // streaming client was unable to prepare/process a buffer
+  const int kBufferErrorStart            =  45; // no buffers provided at start of streaming (TX: 0-data was streamed; RX: data got lost)
+  const int kBufferErrorStop             =  46; // buffer underrun or overflow reported after the stream has been stopped
+  const int kUnknownError                = 255; 
+
+  // specific file states reported from MostSyncStrmToFile.dll
+  // see OnMostSyncStrmTFState
+  const int kFileState_Closed       = 0;
+  const int kFileState_Opened       = 1;
+
+  // specific errors reported from MostSyncStrmToFile.dll
+  // see OnMostSyncStrmTFError
+  const int kFileError_NoFile       = 1;
+  const int kFileError_OpenFailed   = 2;
+  const int kFileError_ReadError    = 4;
+  const int kFileError_EndOfFile    = 5;
+
+
+  dword gHandle;              // handle for synchronous channel streaming
+
+  char  gNodeName[40]     = "StreamToDir";  // name of this node
+
+  long  gStreamOpenSuccess = 0;
+  long  gStartRecordingAsSoonAsPossible = 0;
+
+  // manual trigger
+  char gManualTriggerNamespace[20] = "MOSTStreamPlayer";
+  char gManualTriggerSysVarName[20] = "ManualTrigger";
+  long gManualTriggerState = 0;
+  mstimer gManualTriggerTimer;
+  const int kManualTriggerTimerInterval = 100;
+
+
+  // data indication calculations
+  mstimer gDataIndicationTimer; 
+  const long kDataIndicationTimerInterval = 50;
+  const int64 kDataIndicationEventIntervalMin = 150 * 1000000; // note: stable lock time is about 100 ms
+
+  // debug output: set to 0 if you want minimum output to the write window
+  int gDebugLevel = 2;
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{ 
+  setWriteDbgLevel(gDebugLevel);
+
+  // get the channel, the node is assigned to
+  gChannel = mostGetChannel();
+
+  // initialize extension DLL for file streaming
+  // binds the CAPL node exclusively to the DLL
+  gHandle = mostSyncStrmInit(gChannel, gDirection, gDllName);
+
+  if(0 == gHandle)
+    writeDbgLevel(1, "%s: Initialization of streaming client failed (%s)", gNodeName, gDllName);
+
+  // read configuration
+  ReadIniFile();
+
+  // manual trigger
+  SysDefineNamespace( gManualTriggerNamespace );
+  SysDefineVariableInt( gManualTriggerNamespace, gManualTriggerSysVarName, 0 );
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncStrmError(dword,long):*///callback
+void OnMostSyncStrmError(dword handle, long errorcode)
+{
+  // this callback reports a general streaming error
+  writeDbgLevel(6, "%s: Internal error %d occured while streaming", gNodeName, errorcode);
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncStrmState(dword,long):*///callback
+void OnMostSyncStrmState(dword handle, long state)
+{
+  // state of a stream is reported
+  
+  if(handle != gHandle)
+    return;
+
+  switch(state)
+  {
+    case kOpened:
+    {
+      // start streaming
+
+      byte channels[60];
+      long i, ret;
+
+      // start streaming
+      for(i = 0; i < gNumChannels; ++i)
+        channels[i] = i;
+      ret = mostSyncStrmStart(gHandle, channels);
+      if(ret != 0)
+        writeDbgLevel(1, "%s: Failed to start stream (%d)", gNodeName, ret);
+
+      break;
+    }
+    case kStarted:
+    {
+      if((gManualTrigger == 0) ||
+         (gStartRecordingAsSoonAsPossible && gStreamOpenSuccess))
+      {
+        StartRecording();
+      }
+      break;
+    }
+  }
+}
+/*@@end*/
+
+/*@@mostAllocTable:OnMostAllocTable():*/
+OnMostAllocTable()
+{
+  char alloctable[60];
+  byte alloctableb[60];
+  int64 timeNS, origTimeNS;
+  int i;
+
+  // allocation table changed
+  if(mostEventChannel() != gChannel)
+    return;
+
+  MostGetAllocTable(mostEventChannel(), alloctableb, 60);
+  for(i = 0; i < 60; ++i)
+    alloctable[i] = alloctableb[i];
+  origTimeNS = 100000 * mostEventOrigTime();
+  timeNS = mostEventTimeNS();
+
+  // report chnage to streaming dll
+  // we cannot transfer byte arrays to a CAPL DLL -> char array
+  MostSyncStrmTDAllocTable(timeNS, origTimeNS, alloctable);
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  if(gHandle == 0)
+  {
+    writeLineEx(0,3,"Streaming not possible!");
+    writeLineEx(0,3,"Please check you have a VN2610 interface box connected!");
+    stop();
+  }
+
+  if(strlen(gDir) == 0)
+  {
+    // set a default path
+    char absPath[260];
+    writeDbgLevel(5, "%s: Using default directory for streaming", gNodeName);
+    getAbsFilePath("", absPath, elcount(absPath));
+    snprintf(gDir, elcount(gDir), "%sAudioFiles", absPath);
+  }
+
+  // manual trigger
+  if(gManualTrigger)
+    SetTimer(gManualTriggerTimer, kManualTriggerTimerInterval);
+
+  // start timer for providing data indication event to the dll
+  SetTimer(gDataIndicationTimer, kDataIndicationTimerInterval);
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncStrmTDError(long,char[]):*///callback
+void OnMostSyncStrmTDError(long fileerror, char file[])
+{
+  // this callback of the streaming dll
+  // reports a specific streaming error
+
+  switch(fileerror)
+  {
+  case kFileError_NoFile:
+    writeDbgLevel(2, "%s: No file specified", gNodeName);
+    break;
+  case kFileError_OpenFailed:
+    writeDbgLevel(2, "%s: Failed to open file %s", gNodeName, file);
+    stop();
+    break;
+  case kFileError_ReadError:
+    writeDbgLevel(2, "%s: Failed to read data from file", gNodeName);
+    break;
+  case kFileError_EndOfFile:
+    writeDbgLevel(2, "%s: End of file reached", gNodeName);
+    mostSyncStrmStop(gHandle);
+    break;
+  }
+
+  // any error stop measurement
+  stop();
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncStrmTDState(long,char[]):*///callback
+void OnMostSyncStrmTDState(long filestate, char file[])
+{
+  // this callback of the streaming dll
+  // reports a specific streaming state
+  
+  if((filestate != kFileState_Closed) && (filestate != kFileState_Opened))
+    return;
+ 
+  if(filestate == kFileState_Closed)
+  {
+    writeDbgLevel(6, "%s: File closed: %s", gNodeName, file);
+  }
+  else if(filestate == kFileState_Opened)
+  {
+    writeDbgLevel(6, "%s: File opened: %s", gNodeName, file);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:OpenStream():*///function
+OpenStream()
+{
+  long ret;
+  char path[260];
+  char absPath[260];
+
+  // set file parameters
+
+  snprintf(path, elcount(path), "%s\\%s", gDir, gInfoFile);
+  getAbsFilePath(path, absPath, elcount(absPath));
+
+  // maximum file size
+  MostSyncStrmTDSetMaxFrames(gFileSizeInFrames);
+
+  // set target file name
+  MostSyncStrmTDSetInfoFile(absPath);
+
+  // pre-trigger time
+  MostSyncStrmTDSetPreTriggerTime(gPreTriggerTime * 1000);
+
+
+  // open stream
+  if((gNumChannels < 1) || (gNumChannels > 60))
+  {
+    writeDbgLevel(2, "%s: Channels not specified correctly", gNodeName);
+    return;
+  }
+
+  ret = mostSyncStrmOpen(gHandle, gNumChannels, gOptions, gLatency);
+  if(ret != 0)
+    writeDbgLevel(2, "%s: Failed to open stream (%d)", gNodeName, ret); 
+  else
+    gStreamOpenSuccess = 1;
+}
+/*@@end*/
+
+/*@@mostStableLock:OnMostStableLock():*/
+OnMostStableLock()
+{
+  long bFirst = 1;
+
+  if(mostEventChannel() != gChannel)
+    return;
+
+  if(!bFirst)
+  {
+    CalculateDataIndication();
+    return;
+  }
+
+  // start streaming on first stable lock only
+  bFirst = 0;
+
+  OpenStream();
+}
+/*@@end*/
+
+/*@@caplFunc:ReadIniFile():*///function
+ReadIniFile ()
+{
+  char buf[260] = "";
+
+  //write("%s: Reading configuration from %s:", gNodeName, gIniFile );
+  writeDbgLevel(6, "%s:", gNodeName);
+  
+  // the directory for the streaming data
+  getProfileString( "General", "DataDirectory", ".\\AudioFiles", gDir, elcount( gDir ), gIniFile );
+  writeDbgLevel(6, "   DataDirectory:   %s", gDir );
+
+  // the number of channels to stream
+  gNumChannels = 4 * getProfileInt( "Recording", "Quadlets", 15, gIniFile );
+  writeDbgLevel(6, "   Quadlets:        %d", gNumChannels / 4 );
+
+  // record entire measurement or trigger recording manually?
+  getProfileString( "Recording", "ManualTrigger", "False", buf, elcount( buf ), gIniFile );
+  if( buf[0] == 'T' && buf[1] == 'r' && buf[2] == 'u' && buf[3] == 'e' )
+  {
+    gManualTrigger = 1;
+    writeDbgLevel(6, "   Trigger:         manual" );
+  }
+  else
+  {
+    gManualTrigger = 0;
+    writeDbgLevel(6, "   Trigger:         entire measurement" );
+  }
+
+  // time preceding the trigger, that should also be stored
+  gPreTriggerTime = getProfileInt( "Recording", "PreTriggerTime", 10, gIniFile );
+  if( gManualTrigger == 1 )
+    writeDbgLevel(6, "   PreTriggerTime:  %d s", gPreTriggerTime );
+
+  // the frequency of the MOST network
+  gFrequency = getProfileFloat( "Playback", "SystemFrequency", 44100.0, gIniFile );
+  writeDbgLevel(6, "   SystemFrequency: %.0f Hz", gFrequency );
+}
+/*@@end*/
+
+/*@@timer:gManualTriggerTimer:*/
+on timer gManualTriggerTimer
+{
+  long oldState;
+
+  // remember old state
+  oldState = gManualTriggerState;
+
+  // get new state
+  gManualTriggerState = SysGetVariableInt( gManualTriggerNamespace, gManualTriggerSysVarName );
+  if( gManualTriggerState != 0 )
+    gManualTriggerState = 1;
+
+  // perform action if state has changed
+  if( oldState != gManualTriggerState )
+  {
+    switch( gManualTriggerState )
+    {
+      case 1:
+        StartRecording();
+        break;
+      default:
+        StopRecording();
+        break;
+    }
+  }
+
+  // restart timer
+  SetTimer( gManualTriggerTimer, kManualTriggerTimerInterval );
+}
+/*@@end*/
+
+/*@@caplFunc:StartRecording():*///function
+StartRecording ()
+{
+  if(gStreamOpenSuccess)
+  {
+    // stream is open -> start recording
+    int64 tsnow;
+    tsnow = timeNowNS();
+    writeDbgLevel(6, "Start recording at %f s", tsnow/1.0e9);
+
+    MostSyncStrmTDStartRecording(tsnow);
+  }
+  else
+  {
+    // stream is not opened yet
+    gStartRecordingAsSoonAsPossible = 1;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:StopRecording():*///function
+StopRecording()
+{
+  if(gStreamOpenSuccess)
+  {
+    int64 tsnow;
+    tsnow = timeNowNS();
+    writeDbgLevel(6, "Stop recording at %f s", tsnow/1.0e9);
+    MostSyncStrmTDStopRecording(tsnow);
+  }
+  gStartRecordingAsSoonAsPossible = 0;
+}
+/*@@end*/
+
+/*@@timer:gDataIndicationTimer:*/
+on timer gDataIndicationTimer
+{
+  CalculateDataIndication();
+}
+/*@@end*/
+
+/*@@caplFunc:CalculateDataIndication():*///function
+CalculateDataIndication ()
+{
+  long newState;
+  long oldState = 0;
+  int64 oldTimeNS;
+
+  // very simple alg. to determine if the ring is stable and therefore streaming data is valid
+
+  if(mostGetLockEx(gChannel) == 2)
+  {
+    // stable lock
+    newState = 2; // data available
+  }
+  else
+  {
+    newState = 0; // no data
+  }
+
+  if(oldState != newState)
+  {
+    int64 timeNS;
+    timeNS = timeNowNS();
+
+    if((timeNS - oldTimeNS) < kDataIndicationEventIntervalMin)
+    {
+      // do not report too much events
+      // mark data as instable
+      newState = 1; // data sometimes available
+    }
+
+
+    if(oldState != newState)
+    {
+      // report state to streaming dll
+      int64 origTimeNS;
+      MostSyncStrmTDDataIndication(timeNS, origTimeNS, oldState, newState);
+
+      oldTimeNS = timeNS;
+      oldState = newState;
+    }
+
+  }
+
+  // check again a little later
+  cancelTimer(gDataIndicationTimer);
+  setTimer(gDataIndicationTimer, kDataIndicationTimerInterval);
+}
+/*@@end*/
+
+/*@@mostLightLockError:mostLightLockError:*/
+on mostLightLockError
+{
+  if(this.MsgChannel != gChannel)
+    return;
+  if(this.most_Light == 0)
+    CalculateDataIndication();
+}
+/*@@end*/
+

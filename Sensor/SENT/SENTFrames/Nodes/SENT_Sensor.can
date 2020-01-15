@@ -1,0 +1,86 @@
+/*@!Encoding:1252*/variables
+{
+  msTimer CommunicationUpdateTimer;
+  byte gAnimationValue = 0;
+}
+
+on start
+{
+  write("\n");
+  writeDbgLevel(15,"SENTBasic Demo has to use VTSystem with VT2710 module \nand real wired SENT ports");
+  write("\n");
+  
+  if (isSimulated())
+  {
+    write("\n");
+    writeDbgLevel(15,"!!! Demo can't run in simulated mode!, Simulation stopped !!!");
+    write("\n");
+    StopCANoe();    
+  }
+  
+  enableControl("SENTFrames", "DataBits", !@SENT_Communication::SendRampSignal);
+  enableControl("SENTFrames", "CRCBits", @SENT_Communication::CRCMode != 0);
+  SentSensorFrameUpdate();
+  setTimerCyclic(CommunicationUpdateTimer, 20, 20);
+}
+
+on timer CommunicationUpdateTimer
+{
+  // animate at least one signal in panel
+  gAnimationValue = gAnimationValue+ 1;
+  
+  // limit data range 
+  if ( gAnimationValue > 64)
+  {
+    gAnimationValue = 0;
+  }  
+  
+  // call function to transfer data into objects to be transferred by SENT communication
+  SentSensorFrameUpdate();  
+}
+
+on sysvar (
+   SENT_Communication::CRCMode
+  |SENT_Communication::CRCBits
+  |SENT_Communication::StatusBits
+  |SENT_Communication::DataBits
+  |SENT_Communication::SendRampSignal)
+{
+  enableControl("SENTFrames", "DataBits", !@SENT_Communication::SendRampSignal);
+  enableControl("SENTFrames", "CRCBits", @SENT_Communication::CRCMode != 0);
+  SentSensorFrameUpdate();
+}
+
+enum sensorSentCrcMode LongToCRCMode(long mode)
+{
+  switch (mode)
+  {
+    case 0: return eSentAutoCrc;
+    case 1: return eSentManualCrc;
+    case 2: return eSentWrongCrc;
+    case 3: return eSentRecommendedCrc;
+    case 4: return eSentLegacyCrc;
+  }
+  return eSentAutoCrc;
+}
+
+void SentSensorFrameUpdate()
+{
+  SentSensorFrameStruct frame;
+  frame.CrcMode = LongToCRCMode(@SENT_Communication::CRCMode);
+  frame.CrcBits = @SENT_Communication::CRCBits;
+  frame.StatusBits = @SENT_Communication::StatusBits;
+  if (@SENT_Communication::SendRampSignal)
+  {
+    @SENT_Communication::DataBits = gAnimationValue;
+  }
+  frame.DataBits = @SENT_Communication::DataBits;
+  // transfer actual values into signals, defined by SENSOR::SENT menue
+  sysvar::SENSOR::SENT::Sensor.QueueSentFrame(frame);
+}
+
+void StopCANoe()
+{
+  stop();
+}
+

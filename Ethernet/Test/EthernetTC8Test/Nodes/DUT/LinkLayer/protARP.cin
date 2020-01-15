@@ -1,0 +1,293 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+variables
+{
+  // ARP Entry Type
+  enum ARP_Operation
+  {
+    Arp_Operation_Request = 1, 
+    Arp_Operation_Reply = 2,
+    Arp_Operation_RequestReverse = 3,
+    Arp_Operation_ReplyReverse = 4,
+    
+    Arp_Operation_Invalid = 0xFF
+  };
+  
+  enum ARP_ProtType
+  {
+    Arp_ProtType_IPv4 = 0x0800,
+    
+    Arp_ProtType_Invalid = 0xFFFF
+  };
+    
+  enum ARP_HwType
+  {
+    Arp_HwType_Ethernet = 1,
+    
+    Arp_HwType_Invalid = 0xFF
+  };
+    
+  // byte length of hardware adress in ethernet
+  const byte kETHERNET_HWSIZE = 6;  
+  const byte kIPv4_PROTSIZE = 4;
+    
+  struct _Token_ARP
+  {    
+    qword qwSource;
+    qword qwDestination;
+    enum ARP_HwType hwType;
+    enum ARP_ProtType protType;
+    byte bHwSize;
+    byte bProtSize;
+    enum ARP_Operation operation;
+    qword qwHwSourceAddr;
+    dword dwProtSourceAddr;
+    qword qwHwDestinationAddr;
+    dword dwProtDestinationAddr;
+  };  
+}
+
+/// <initialize>
+// inititalization of ARP token data
+void initArpTokenData(struct _Token_ARP data)
+{   
+  data.qwSource = 0;
+  data.qwDestination = 0;
+  data.hwType = Arp_HwType_Invalid;
+  data.ProtType  = Arp_ProtType_Invalid;
+  data.bHwSize = 0;
+  data.bProtSize = 0;
+  data.operation = Arp_Operation_Invalid;
+  data.qwHwSourceAddr = 0;
+  data.dwProtSourceAddr = 0;
+  data.qwHwDestinationAddr = 0;
+  data.dwProtDestinationAddr = 0;
+}
+
+/// <getPacketData>
+// get received arp data
+int getArpPacket(struct _Token_ARP data, long handle)
+{  
+  // set received arp data to packet object
+  getArpPacketHeaderData(data, handle);
+  
+  return 1;
+}
+
+/// <getPacketData>
+// get received arp data to packet object
+void getArpPacketHeaderData(struct _Token_ARP data, long handle)
+{  
+  // type
+  data.hwType = (enum ARP_HwType)EthGetTokenInt(handle, "arp", "hwType");
+  data.protType = (enum ARP_ProtType)EthGetTokenInt(handle, "arp", "protType");
+  
+  // size
+  data.bHwSize = EthGetTokenInt(handle, "arp", "hwSize");
+  data.bProtSize = EthGetTokenInt(handle, "arp", "protSize");
+  
+  data.operation = (enum ARP_Operation)EthGetTokenInt(handle, "arp", "operation");
+  
+  data.qwDestination = EthGetTokenInt64(handle, "eth", "destinstion", kBYTE_OFFSET, kBYTE_LENGTH_HWADDRESS, kBYTE_ORDER_INTEL);
+  data.qwSource = EthGetTokenInt64(handle, "eth", "source", kBYTE_OFFSET, kBYTE_LENGTH_HWADDRESS, kBYTE_ORDER_INTEL);
+  
+  data.qwHwSourceAddr = EthGetTokenInt64(handle, "arp", "hwSourceAddr", kBYTE_OFFSET, kBYTE_LENGTH_HWADDRESS, kBYTE_ORDER_INTEL);
+  data.qwHwDestinationAddr = EthGetTokenInt64(handle, "arp", "hwDestinationAddr", kBYTE_OFFSET, kBYTE_LENGTH_HWADDRESS, kBYTE_ORDER_INTEL);
+  data.dwProtSourceAddr = EthGetTokenInt(handle, "arp", "protSourceAddr", kBYTE_OFFSET, kBYTE_LENGTH_IP, kBYTE_ORDER_INTEL);
+  data.dwProtDestinationAddr = EthGetTokenInt(handle, "arp", "protDestinationAddr", kBYTE_OFFSET, kBYTE_LENGTH_IP, kBYTE_ORDER_INTEL);
+  
+}
+
+/// <sendPacket/constructHeader>
+// construct arp header packet handle
+void constructArpHeader(qword srcMacAddr, qword srcHwAddr, dword srcIpAddr, qword dstMacAddr, qword dstHwAddr, dword dstIpAddr, enum ARP_Operation operation, long lPacketHandle)
+{  
+  // construct Ethernet header
+  EthSetTokenInt64(lPacketHandle, "eth", "source", kBYTE_OFFSET, kBYTE_LENGTH_HWADDRESS, kBYTE_ORDER_INTEL, srcHwAddr);
+  EthSetTokenInt64(lPacketHandle, "eth", "destination", kBYTE_OFFSET, kBYTE_LENGTH_HWADDRESS, kBYTE_ORDER_INTEL, dstHwAddr);
+  
+  
+  // construct ARP header
+  EthInitProtocol(lPacketHandle, "arp");
+  EthSetTokenInt(lPacketHandle, "arp", "operation", operation);
+    
+  EthSetTokenInt64(lPacketHandle, "arp", "hwSourceAddr", kBYTE_OFFSET, kBYTE_LENGTH_HWADDRESS, kBYTE_ORDER_INTEL, srcMacAddr);  
+  EthSetTokenInt64(lPacketHandle, "arp", "hwDestinationAddr", kBYTE_OFFSET, kBYTE_LENGTH_HWADDRESS, kBYTE_ORDER_INTEL, dstMacAddr); 
+  EthSetTokenInt(lPacketHandle, "arp", "protSourceAddr", kBYTE_OFFSET, kBYTE_LENGTH_IP, kBYTE_ORDER_INTEL, srcIpAddr);  
+  EthSetTokenInt(lPacketHandle, "arp", "protDestinationAddr", kBYTE_OFFSET, kBYTE_LENGTH_IP, kBYTE_ORDER_INTEL, dstIpAddr);    
+}
+
+/// <sendPacket>
+// construct arp packet handle
+// ret 1:succeed 0:failed
+int constructArpPacket(struct _Token_ARP data, long lPacketHandle)
+{
+  constructArpHeader(data.qwSource, data.qwHwSourceAddr, data.dwProtSourceAddr, data.qwDestination, data.qwHwDestinationAddr, data.dwProtDestinationAddr, data.operation, lPacketHandle);
+
+  return 1;  
+}
+
+/// <makePacketData>
+// make arp packet data
+// return 1:receive is nessasary  0:receive is unnecessary
+int makeArpPacket(struct _Token_ARP recvData, struct _Token_ARP sendData)
+{
+  int iRet;
+  
+  iRet = 0;
+   
+  if(isArpHeader(recvData) == 0)
+  {
+    return 0;
+  }
+  
+  switch(recvData.operation)
+  {
+    // ARP Request
+    case Arp_Operation_Request:
+      // Check IP
+      if(recvData.dwProtDestinationAddr ==  GetDutIpAsNummer())
+      {
+        sendData.qwHwSourceAddr = kDIface_0_MAC_ADDR;
+        sendData.qwSource = kDIface_0_MAC_ADDR;
+        sendData.dwProtSourceAddr =  GetDutIpAsNummer();
+        sendData.qwHwDestinationAddr = recvData.qwHwSourceAddr;
+        sendData.qwDestination = recvData.qwSource;
+        sendData.dwProtDestinationAddr = recvData.dwProtSourceAddr;
+        sendData.operation = Arp_Operation_Reply;
+        sendData.hwType = Arp_HwType_Ethernet;
+
+        iRet = 1;
+      }
+      break;
+      
+    // other
+    default:
+      break;
+  }  
+  
+  return iRet;
+}
+
+/// <processPacketData>
+// processing arp packet
+int procArp(struct _Token_ARP recvData)
+{
+  int iRet;
+  
+  iRet = 0;
+  
+  if(isArpHeader(recvData) == 0)
+  {
+    return 0;
+  }
+    
+  switch(recvData.operation)
+  {
+    // ARP Request
+    case Arp_Operation_Request:
+      // Check IP
+      if(recvData.dwProtDestinationAddr ==  GetDutIpAsNummer())
+      {
+        // set ARP table
+        setArpTable(recvData.dwProtSourceAddr, recvData.qwHwSourceAddr, dynamic);
+        iRet = 1;
+      }
+      break;
+      
+    // ARP Reply
+    case Arp_Operation_Reply:
+      // Check IP
+      if(recvData.dwProtDestinationAddr ==  GetDutIpAsNummer())
+      {
+        // set ARP table
+        setArpTable(recvData.dwProtSourceAddr, recvData.qwHwSourceAddr, dynamic);
+        iRet = 1;
+      }
+      break;
+      
+    // other
+    default:
+      break;
+  }  
+    
+  return iRet;
+}
+
+// arp protocol header fomat check
+// retÅ@1:header fomat correct 0:header fomat error
+int isArpHeader(struct _Token_ARP data)
+{  
+  // Check Hardware type. Hardware Type != Ethernet
+  if(data.hwType != Arp_HwType_Ethernet)
+  {
+    return 0;
+  }
+  
+  // Check Hardware size.
+  if(data.bHwSize != kETHERNET_HWSIZE || data.bProtSize != kIPv4_PROTSIZE)
+  {
+    return 0;
+  }
+  
+  // check protocol type
+  if(data.protType != Arp_ProtType_IPv4)
+  {
+    return 0;
+  }
+  
+  return 1;
+}
+
+/// <forTestAbility>
+// configure To Send ARP method(for TestAbility)
+// ret 1:succeed 0:failed
+int configToSendArp(qword dstAddr, qword dstHwAddr, dword dstIpAddr, enum ARP_Operation operation)
+{
+  int iRet = 0;
+  int sendTblNo = 0;
+  struct _Token_Eth_Packet sendData;
+  
+  iRet = 0;
+  
+  // inititalise
+  initEthTokenData(sendData);
+  
+  sendData.type = Eth_Type_ARP;
+  sendData.qwSource = sendData.arp.qwSource = kDIface_0_MAC_ADDR;
+  sendData.qwDestination = sendData.arp.qwDestination = dstAddr;
+
+  sendData.arp.qwHwSourceAddr = kDIface_0_MAC_ADDR;
+  sendData.arp.qwHwDestinationAddr = dstHwAddr;
+  
+  sendData.arp.dwProtSourceAddr =  GetDutIpAsNummer();
+  sendData.arp.dwProtDestinationAddr = dstIpAddr;
+  sendData.arp.operation = operation;
+  
+  // send arp
+  iRet = sendPacket(sendData);
+  
+  return iRet;
+}

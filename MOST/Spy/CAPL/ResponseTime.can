@@ -1,0 +1,466 @@
+variables
+{
+  ////////////////////////////////////////////////////////////////////////////////
+  // User changeable variables and constants
+  // Set default values in function "Init_ConfigurationVariables"
+  ////////////////////////////////////////////////////////////////////////////////
+
+  // The histogram contains kNumberOfHistogramRanges-2 "normal" ranges of which the width can be defined
+  // (mHistogramRangeWidth). The offset where the first "normal" histogram range
+  // should start can also be defined (mHistogramOffset).
+  // The response times below the offset and above the last "normal" range are covered
+  // by two additional ranges "smaller" and "greater". They are the first respectively
+  // the last of the altogether kNumberOfHistogramRanges ranges of the histogram.
+
+  // Histogram offset. Range: 0 ... 30.000.000 탎  (= 30 s).
+  long mHistogramOffset = 100;
+
+  // Histogram range width. Range: 1 ... 3.000.000 탎 (= 3 s).
+  long mHistogramRangeWidth = 1000;  
+  
+  
+  ////////////////////////////////////////////////////////////////////////////////
+  // internal variables and constants
+  // DO NOT CHANGE!
+  ////////////////////////////////////////////////////////////////////////////////
+
+  // constants
+  const float kNanoOverTimeUnit = 1E3; // 1E3 탎 // 1E6 ms
+  const WORD kReportInterval = 1000;
+  const BYTE kMaxDevices = 16;
+  const BYTE kNumberOfHistogramRanges = 12;
+  const long kDestAdr = 0x100;
+  const long kInstID = 1;
+  const long kMsgChannel = 1;
+
+  // timers
+  mstimer mReportTimer;
+
+  // control variables
+  int mMeasurementIsRunning = 0;
+
+  // internal values
+  DWORD mMinResponseTime;
+  DWORD mMaxResponseTime;
+  int64 mAvgResponseTimeSum;
+  DWORD mOpenRequests[kMaxDevices][kMaxDevices];
+  DWORD mHistogram[kNumberOfHistogramRanges];
+  DWORD mHistogramRanges[kNumberOfHistogramRanges-1];
+  DWORD mNumberOfOccurences;
+
+  long mAddressMap[long];
+}
+
+on mostMessage *
+{
+  // pass message on
+  output(this);
+
+  if (!this.MOST_IsSpy)
+    return;
+
+  // Handle request
+  if (this.OpType >= 1 && this.OpType <= 8)
+    Handle_Request (this.SA, this.DA, this.Time_Ns/kNanoOverTimeUnit);
+
+  // Handle response
+  else if (this.OpType >= 9 && this.OpType <= 0xF)
+    Handle_Response (this.SA, this.DA, this.Time_Ns/kNanoOverTimeUnit);
+
+  // OpType 'Set' does not force a response, so we don't consider it.
+  else
+    return;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function updates the Histrogram ranges in the panel used for 
+// the response time analysis.
+////////////////////////////////////////////////////////////////////////////////
+Refresh_Histrogram_Range_Descriptions()
+{
+  long i;
+  char buffer[100];
+  char buffer_control[100];
+  
+  if(mHistogramOffset >= 10000 && mHistogramRangeWidth >= 10000)    // show ms
+  {
+    for (i=0; i<kNumberOfHistogramRanges-1; ++i)
+    {
+      snprintf(buffer_control,elcount(buffer_control),"cov_interval%d", i);
+      snprintf(buffer,elcount(buffer),"< %8.2lf", mHistogramRanges[i]/1000.0);
+    
+      putValueToControl("Response Times", buffer_control, buffer);
+    }
+    
+    snprintf(buffer_control,elcount(buffer_control),"cov_interval%d", i);
+    snprintf(buffer,elcount(buffer),"> %8.2lf", mHistogramRanges[i-1]/1000.0);
+
+    putValueToControl("Response Times", buffer_control, buffer);
+    
+    putValueToControl("Response Times", "cov_timescale", "ms");
+  }
+  else                                                              // show 탎
+  {
+    for (i=0; i<kNumberOfHistogramRanges-1; ++i)
+    {
+      snprintf(buffer_control,elcount(buffer_control),"cov_interval%d", i);
+      snprintf(buffer,elcount(buffer),"< %ld", mHistogramRanges[i]);
+    
+      putValueToControl("Response Times", buffer_control, buffer);
+    }
+    
+    snprintf(buffer_control,elcount(buffer_control),"cov_interval%d", i);
+    snprintf(buffer,elcount(buffer),"> %ld", mHistogramRanges[i-1]);
+
+    putValueToControl("Response Times", buffer_control, buffer);
+    
+    putValueToControl("Response Times", "cov_timescale", "탎");
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function restores the default settings of the response time analysis
+// and resets the entire response time statistics.
+////////////////////////////////////////////////////////////////////////////////
+on key 'r'
+{
+  // stop report timer
+  ReportTimer_Stop ();
+
+  // restore default settings of the response time analysis
+  Init_ConfigurationVariables ();
+  Init_InternalVariables ();
+
+  // restart report timer
+  ReportTimer_Start (1);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function initializes the internal variables used for the response time
+// analysis.
+////////////////////////////////////////////////////////////////////////////////
+Init_InternalVariables ()
+{
+  int i, j;
+
+  // min / max values
+  mMinResponseTime = 0xFFFFFFFF;
+  mMaxResponseTime = 0;
+  mAvgResponseTimeSum=0;
+
+  // global counter
+  mNumberOfOccurences = 0;
+
+  // open request matrix
+  for (i=0; i<kMaxDevices; ++i)
+    for (j=0; j<kMaxDevices; ++j)
+      mOpenRequests[i][j] = 0;
+
+  // histogram
+  for (i=0; i<kNumberOfHistogramRanges; ++i)
+    mHistogram[i] = 0;
+    
+}
+
+on timer mReportTimer
+{
+  // send report message
+  Fill_ResponseTimeSysvars ();
+
+  // restart report timer
+  ReportTimer_Start (kReportInterval);
+}
+
+on start
+{
+  // set internal flags
+  mMeasurementIsRunning = 1;
+
+  // initialize response time analysis
+  Init_ConfigurationVariables ();
+  Init_InternalVariables ();
+
+  // restart report timer
+  ReportTimer_Start (1);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function sets the default settings for the response time analysis
+////////////////////////////////////////////////////////////////////////////////
+Init_ConfigurationVariables ()
+{
+  // Histogram offset. Range: 0 ... 30000000 탎 (= 30 s). Default: 0 ms
+  // Histogram range width. Range: 1 ... 3000000 탎 (= 3 s). Default: 20 ms
+
+  Set_HistogramOffset (100); 
+  Set_HistogramRangeWidth (1000);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function fills the results into the corresponding system variables
+////////////////////////////////////////////////////////////////////////////////
+Fill_ResponseTimeSysvars ()
+{
+  int i;
+  float percentValue;
+  DWORD avgResponseTime;
+
+  // general statistic values
+  if (mNumberOfOccurences == 0)
+    avgResponseTime = 0;
+  else
+    avgResponseTime = mAvgResponseTimeSum / mNumberOfOccurences;
+    
+  @sysvar::Response::NumberOfOccurences = mNumberOfOccurences;
+  @sysvar::Response::MinimumResponseTime = mMinResponseTime;
+  @sysvar::Response::AverageResponseTime = avgResponseTime;
+  @sysvar::Response::MaximumResponseTime = mMaxResponseTime;
+
+  // Histogram ranges
+  for (i=0; i< kNumberOfHistogramRanges; ++i)
+  {
+    if (mNumberOfOccurences == 0)
+    {
+      percentValue = 0;
+    }
+    else
+    { // That is 100.00 percent; the two decimal digits are produced 
+      // by the exponent given in the function catalog
+      percentValue = mHistogram[i] * 100 /* 100.00 */ / mNumberOfOccurences;
+    }
+    @sysvar::Response::Range[i]=percentValue;
+  }
+}
+
+on sysvar Response::btCommit
+{
+  if(mHistogramRangeWidth == @Response::inRangeWidth 
+    && mHistogramOffset == @Response::inOffset)
+    return;
+  
+  Set_HistogramRangeWidth(@Response::inRangeWidth);
+  Set_HistogramOffset(@Response::inOffset);	
+  
+  Refresh_Histrogram_Range_Descriptions();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function can be used to change the histogram range width. It also
+// recalculates the histogram ranges and resets the entire response time statistic.
+////////////////////////////////////////////////////////////////////////////////
+Set_HistogramRangeWidth (DWORD rangeWidth)
+{
+  // stop report timer
+  ReportTimer_Stop ();
+
+  // set new range width
+  if (rangeWidth < 1)
+    mHistogramRangeWidth = 1;
+  else if (rangeWidth > 3000000)
+    mHistogramRangeWidth = 3000000;
+  else
+    mHistogramRangeWidth = rangeWidth;
+
+  // recalculate histogram ranges and reset statistic
+  Calculate_HistogramRanges ();
+  Refresh_Histrogram_Range_Descriptions();
+  Init_InternalVariables ();
+
+  // restart report timer
+  ReportTimer_Start (1);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function can be used to change the histogram offset. It also recalculates
+// the histogram ranges and resets the entire response time statistic.
+////////////////////////////////////////////////////////////////////////////////
+Set_HistogramOffset (DWORD offset)
+{
+  // stop report timer
+  ReportTimer_Stop ();
+
+  // set new offset
+  if (offset < 0)
+    mHistogramOffset = 0;
+  else if (offset > 30000000)
+    mHistogramOffset = 30000000;
+  else
+    mHistogramOffset = offset;
+
+  // recalculate histogram ranges and reset statistic
+  Calculate_HistogramRanges ();
+  Init_InternalVariables ();
+
+  // restart report timer
+  ReportTimer_Start (1);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function calculated the upper bounds for the 10 "normal" histogram
+// ranges and the special range "smaller"
+////////////////////////////////////////////////////////////////////////////////
+Calculate_HistogramRanges ()
+{
+  int i;
+
+  mHistogramRanges[0] = mHistogramOffset;
+  for (i=1; i<kNumberOfHistogramRanges-1; ++i)
+    mHistogramRanges[i] = mHistogramRanges[i-1] + mHistogramRangeWidth;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function increments the global counter, updates the minimum and maximum
+// values and increments the number of responses in the corresponding
+// histogram range.
+////////////////////////////////////////////////////////////////////////////////
+Add_HistogramValue (DWORD responseTime)
+{
+  // global counter
+  mNumberOfOccurences++;
+
+  // min / max values
+  if (responseTime < mMinResponseTime)
+    mMinResponseTime = responseTime;
+  if (responseTime > mMaxResponseTime)
+    mMaxResponseTime = responseTime;
+
+  mAvgResponseTimeSum+=responseTime;
+
+  // special range "smaller"
+  if (responseTime < mHistogramRanges[0])
+    mHistogram[0]++;
+  // "normal" ranges
+  else if (responseTime < mHistogramRanges[1])
+    mHistogram[1]++;
+  else if (responseTime < mHistogramRanges[2])
+    mHistogram[2]++;
+  else if (responseTime < mHistogramRanges[3])
+    mHistogram[3]++;
+  else if (responseTime < mHistogramRanges[4])
+    mHistogram[4]++;
+  else if (responseTime < mHistogramRanges[5])
+    mHistogram[5]++;
+  else if (responseTime < mHistogramRanges[6])
+    mHistogram[6]++;
+  else if (responseTime < mHistogramRanges[7])
+    mHistogram[7]++;
+  else if (responseTime < mHistogramRanges[8])
+    mHistogram[8]++;
+  else if (responseTime < mHistogramRanges[9])
+    mHistogram[9]++;
+  else if (responseTime < mHistogramRanges[10])
+    mHistogram[10]++;
+  // special range "greater"
+  else
+    mHistogram[11]++;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function handles the incoming requests
+////////////////////////////////////////////////////////////////////////////////
+Handle_Request (WORD source, WORD destination, DWORD timestamp)
+{
+  long sourceIdx=0;
+  long destIdx=0;
+  
+  sourceIdx=GetIdxFromAddress(source);
+  destIdx  =GetIdxFromAddress(destination);
+   
+  // array range check
+  if (sourceIdx > kMaxDevices - 1 || destIdx > kMaxDevices - 1)
+  {
+    write("Too many devices %d,%d", sourceIdx, destIdx);
+    return;
+  }
+  // we cannot handle events with timestamp 0
+  if (timestamp == 0)
+    return;
+
+  // If no open request for this source <-> destination combination exists,
+  // we add it to the matrix of open requests. If not, we ignore this request.
+  if (mOpenRequests[sourceIdx][destIdx] == 0)
+    mOpenRequests[sourceIdx][destIdx] = timestamp;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function handles the incoming responses and updates the statistic
+// values if appropriate.
+////////////////////////////////////////////////////////////////////////////////
+Handle_Response (WORD source, WORD destination, DWORD timestamp)
+{
+  DWORD deltaT;
+  long sourceIdx;
+  long destIdx;
+
+  sourceIdx = GetIdxFromAddress(source);
+  destIdx   = GetIdxFromAddress(destination);
+  
+  // array range check
+  if (sourceIdx > kMaxDevices - 1 || destIdx > kMaxDevices - 1)
+    return;
+  // we cannot handle events with timestamp 0
+  if (timestamp == 0)
+    return;
+
+  // If no open request for this source <-> destination combination exists,
+  // we ignore this response. Otherwise we resolve the open request and
+  // add the response time to the histogram.
+  if (mOpenRequests[destIdx][sourceIdx] != 0)
+  {
+    deltaT = timestamp - mOpenRequests[destIdx][sourceIdx];
+    mOpenRequests[destIdx][sourceIdx] = 0;
+    Add_HistogramValue (deltaT);
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function stops the report timer
+////////////////////////////////////////////////////////////////////////////////
+ReportTimer_Stop ()
+{
+  // timers can only run while measurement is running
+  if (mMeasurementIsRunning == 1)
+    CancelTimer (mReportTimer);
+}
+
+on stopMeasurement
+{
+  Fill_ResponseTimeSysvars();
+
+  // set internal flags
+  mMeasurementIsRunning = 0;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function starts the report timer
+////////////////////////////////////////////////////////////////////////////////
+ReportTimer_Start (WORD interval)
+{
+  if (interval < 1)
+    interval = 1;
+
+  CancelTimer (mReportTimer);
+
+  // timers may only be started while measurement is running
+  if (mMeasurementIsRunning == 1)
+    SetTimer (mReportTimer, interval);
+}
+
+on *
+{
+  // forward all frames
+  output(this);
+}
+
+
+long GetIdxFromAddress (long address)
+{
+  long idx;
+  
+  if (!mAddressMap.containsKey(address))
+    mAddressMap[address] =  mAddressMap.size();
+
+  idx = mAddressMap[address];
+  return idx;
+}
+

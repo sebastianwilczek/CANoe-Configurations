@@ -1,0 +1,455 @@
+variables
+{
+  ////////////////////////////////////////////////////////////////////////////////
+  // User changeable variables and constants
+  // Set values in function "Init_ConfigurationVariables"
+  ////////////////////////////////////////////////////////////////////////////////
+
+  // Time span for floating average. Range: 1 s ... 16383 (0x3FFF) s (~ 4.5 h)
+  WORD mTimeSpanForFloatingAverage;
+
+  // Bus frequency. Range: 30000 Hz ... 50000 Hz. Default: 44100 Hz
+  DWORD mBusFrequency;
+  WORD mMostSpeedgrade;
+
+
+  ////////////////////////////////////////////////////////////////////////////////
+  // internal variables and constants
+  // DO NOT CHANGE!
+  ////////////////////////////////////////////////////////////////////////////////
+
+  // constants
+  const WORD kReportInterval = 1000;
+  const BYTE kMaxDevices = 16;
+  const long kDestAdr = 0x100;
+  const long kInstID = 1;
+  const long kMsgChannel = 1;
+  const WORD kMaxNumValuesForFloatingAverage = 0x7FFF;
+  const WORD kMOST25 = 1;
+  const WORD kMOST50 = 2;
+  const WORD kMOST150 = 3;
+
+  // timers
+  mstimer mReportTimer;
+
+  // control variables
+  WORD mNumValuesForFloatingAverage;
+  WORD mCurrentNumValuesForFloatingAverage;
+  WORD mFloatingAveragePosition;
+  QWORD mMaxBusLoad;
+  int  mMeasurementIsRunning = 0;
+
+  // internal values
+  WORD mNumMsgsCurrent[kMaxDevices];
+  WORD mNumMsgsMin[kMaxDevices];
+  WORD mNumMsgsMax[kMaxDevices];
+  WORD mNumMsgsFloatingAverage[kMaxDevices][kMaxNumValuesForFloatingAverage];
+  
+  QWORD mNumDataBytes[kMaxDevices];
+
+  long mAddressMap[long];
+}
+
+
+on mostMessage *
+{
+  long idx;
+
+  // pass message on
+  output (this);
+
+  // count spy messages only
+  if (!this.Most_IsSpy)
+    return;
+
+  // calculate array position
+  // distinguish between devices using the source address
+  idx = GetIdxFromAddress(this.SA);
+
+  // increment appropriate counter
+  mNumMsgsCurrent[idx]++;
+  if ((mMostSpeedgrade==kMOST150)||(mMostSpeedgrade==kMOST50))
+  {
+    mNumDataBytes[idx]=mNumDataBytes[idx]+23ll+this.DLC; // +12+4+2+4+1+this.DLC; // Admin + SA+DA+ CRC+MsgId+<DLC>
+  }
+}
+
+on start
+{
+  // set internal flags
+  mMeasurementIsRunning = 1;
+
+  // initialize response time analysis
+  Init_ConfigurationVariables ();
+  Init_InternalVariables ();
+
+  // restart report timer
+  ReportTimer_Start ();
+}
+
+on timer mReportTimer
+{
+  // send report messages
+  Report ();
+
+  // restart report timer
+  ReportTimer_Start ();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function sets the default settings for the bus load analysis
+////////////////////////////////////////////////////////////////////////////////
+Init_ConfigurationVariables ()
+{
+  // Time span for floating average. Range: 1 s ... 16383 (0x3FFF) s (= 4.5 h), Default: 15 s
+  Set_TimeSpanForFloatingAverage (15);
+  
+  mMostSpeedgrade=mostGetSpeedgrade(1); 
+
+  // Bus frequency. Range: 30000 Hz ... 50000 Hz, Default: 48000 Hz
+  Set_BusFrequency (48000);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function initializes the internal variables used for the bus load
+// analysis.
+////////////////////////////////////////////////////////////////////////////////
+Init_InternalVariables ()
+{
+  // stop report timer
+  ReportTimer_Stop ();
+
+  // init variables
+  Init_Nodelist();
+  Init_MinMaxValues ();
+  Init_CurrentValues ();
+  Init_AverageValueCalculation ();
+
+  // restart report timer
+  ReportTimer_Start ();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function restores the default settings of the bus load analysis
+// and resets the entire bus load statistics.
+////////////////////////////////////////////////////////////////////////////////
+on key 'r'
+{
+  // stop report timer
+  ReportTimer_Stop ();
+
+  Init_ConfigurationVariables ();
+  Init_InternalVariables ();
+
+  // restart report timer
+  ReportTimer_Start ();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function generates a full report
+////////////////////////////////////////////////////////////////////////////////
+Report ()
+{
+  // do some preparing steps
+  Report_Prepare ();
+
+  // fill and send report messages
+  Fill_NodeList();
+  Fill_CurrentValues ();
+  Fill_MaxValues ();
+  Fill_FloatingAverage ();
+
+  // do some finalizing steps
+  Report_Finish ();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function does some finalizing steps for the report
+////////////////////////////////////////////////////////////////////////////////
+Report_Finish ()
+{
+  Init_CurrentValues ();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function does some preparing steps for the report
+////////////////////////////////////////////////////////////////////////////////
+Report_Prepare ()
+{
+  int i;
+
+  for (i=0; i<kMaxDevices; ++i)
+  {
+    // Min Values
+    if (mNumMsgsCurrent[i] < mNumMsgsMin[i])
+      mNumMsgsMin[i] = mNumMsgsCurrent[i];
+
+    //  Max Values
+    if (mNumMsgsCurrent[i] > mNumMsgsMax[i])
+      mNumMsgsMax[i] = mNumMsgsCurrent[i];
+
+    // Floating Average
+    mNumMsgsFloatingAverage[i][mFloatingAveragePosition] = mNumMsgsCurrent[i];
+  }
+
+  // adapt floating average control variables
+  ++mFloatingAveragePosition;
+  if (mFloatingAveragePosition == mNumValuesForFloatingAverage)
+    mFloatingAveragePosition = 0;
+
+  if (mCurrentNumValuesForFloatingAverage < mNumValuesForFloatingAverage)
+    ++mCurrentNumValuesForFloatingAverage;
+}
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+// This function fills current values to the corresponding system variables
+////////////////////////////////////////////////////////////////////////////////
+Fill_CurrentValues ()
+{
+  WORD currentValue; 
+  float currentPercentValue;
+  int i;
+
+  for (i=0; i< kMaxDevices; ++i)
+  {
+    // calculate values
+    currentValue = mNumMsgsCurrent[i] * 1000 / kReportInterval;
+    switch (mMostSpeedgrade)
+    {
+       case kMOST25: currentPercentValue = currentValue * 100 / mMaxBusLoad; break;
+       case kMOST50: currentPercentValue = mNumDataBytes[i] * 100000.0 / kReportInterval / mMaxBusLoad; break;
+       case kMOST150:currentPercentValue = mNumDataBytes[i] * 100000.0 / kReportInterval / mMaxBusLoad; break;
+    }
+    
+    @Busload::MsgPerSecond[i]=currentValue;
+    @Busload::Load[i]=currentPercentValue;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function fills current values to the corresponding system variables
+////////////////////////////////////////////////////////////////////////////////
+Fill_NodeList()
+{
+  long i;
+  
+  for (i=0; i<kMaxDevices; i++)
+  {    
+    @Busload::NodeAdr[i] = 0;
+  }
+  for (long idx: mAddressMap)
+  {    
+    @Busload::NodeAdr[mAddressMap[idx]] = idx;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function fills and sends the report messages "MaxValues"
+// and "MaxPercentValues"
+////////////////////////////////////////////////////////////////////////////////
+Fill_MaxValues ()
+{
+  int i;
+  DWORD maxValue, maxPercentValue;
+
+  for (i=0; i< kMaxDevices; ++i)
+  {
+    // calculate value
+    maxValue = mNumMsgsMax[i] * 1000 / kReportInterval;
+    maxPercentValue = maxValue * 100 / mMaxBusLoad;
+
+    // fill messages
+    @Busload::MsgPerSecondMax[i]= maxValue;
+    @Busload::LoadMax[i]= maxPercentValue;
+  }
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// This function fills and sends the report messages "AverageValues"
+// and "AveragePercentValues"
+////////////////////////////////////////////////////////////////////////////////
+Fill_FloatingAverage ()
+{
+  int i, j;
+  WORD sum, averageValue, averagePercentValue;
+
+  for (i=0; i<kMaxDevices; ++i)
+  {
+    // calculate values
+    sum = 0;
+    for (j=0; j<mCurrentNumValuesForFloatingAverage; ++j)
+      sum += mNumMsgsFloatingAverage[i][j];
+
+    averageValue = sum * 1000 / (mCurrentNumValuesForFloatingAverage * kReportInterval);
+    averagePercentValue = averageValue * 100 / mMaxBusLoad;
+
+    // fill messages
+    @Busload::MsgPerSecondAvg[i] = averageValue;
+    @Busload::LoadAvg[i] = averagePercentValue;
+  }
+}
+////////////////////////////////////////////////////////////////////////////////
+// This function can be used to set the time span for the floating average values.
+// It also resets the all average values.
+////////////////////////////////////////////////////////////////////////////////
+Set_TimeSpanForFloatingAverage (WORD timeSpan)
+{
+  // stop report timer
+  ReportTimer_Stop ();
+
+  // set new time span value
+  if (timeSpan < 1)
+    mTimeSpanForFloatingAverage = 1;
+  else if (timeSpan > 0x3FFF)
+    mTimeSpanForFloatingAverage = 0x3FFF;
+  else
+    mTimeSpanForFloatingAverage = timeSpan;
+
+  // recalculate the nessessary number of values
+  Calculate_NumValuesForFloatingAverage ();
+
+  // restart report timer
+  ReportTimer_Start ();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function calculates the number of values needed to calculate the
+// floating average considering the given time span and report iterval.
+////////////////////////////////////////////////////////////////////////////////
+Calculate_NumValuesForFloatingAverage ()
+{
+  mNumValuesForFloatingAverage = mTimeSpanForFloatingAverage * 1000 / kReportInterval;
+  if (mNumValuesForFloatingAverage < 1)
+    mNumValuesForFloatingAverage = 1;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function calculates the maximum busload from the given frequency.
+////////////////////////////////////////////////////////////////////////////////
+Calculate_MaxBusLoad ()
+{
+  switch (mMostSpeedgrade)
+  {
+    case kMOST25: mMaxBusLoad = mBusFrequency / 16; break;
+    case kMOST50: mMaxBusLoad = mBusFrequency * 4; break;
+    case kMOST150: mMaxBusLoad = mBusFrequency * 4; break;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function can be used to change the internal bus frequency variable.
+// It also recalculates the corresponding maximum bus load.
+////////////////////////////////////////////////////////////////////////////////
+Set_BusFrequency (WORD frequency)
+{
+  if (frequency < 30000)
+    mBusFrequency = 30000;
+  else if (frequency > 50000)
+    mBusFrequency = 50000;
+  else
+    mBusFrequency = frequency;
+
+  Calculate_MaxBusLoad ();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function starts the report timer
+////////////////////////////////////////////////////////////////////////////////
+ReportTimer_Start ()
+{
+  CancelTimer (mReportTimer);
+
+  // timers may only be started while measurement is running
+  if (mMeasurementIsRunning == 1)
+    SetTimer (mReportTimer, kReportInterval);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function stops the report timer
+////////////////////////////////////////////////////////////////////////////////
+ReportTimer_Stop ()
+{
+  // timers can only run while measurement is running
+  if (mMeasurementIsRunning == 1)
+    CancelTimer (mReportTimer);
+}
+
+on stopMeasurement
+{
+  // set internal flags
+  mMeasurementIsRunning = 0;
+}
+
+Init_Nodelist()
+{
+  mAddressMap.clear();  
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// This function initializes the internal variables used for the bus load
+// analysis.
+////////////////////////////////////////////////////////////////////////////////
+Init_AverageValueCalculation ()
+{
+  int i, j;
+
+  // average values
+  for (i=0; i<kMaxDevices; ++i)
+    for (j=0; j<kMaxNumValuesForFloatingAverage; ++j)
+      mNumMsgsFloatingAverage[i][j] = 0;
+
+  // control variable for floating average
+  mFloatingAveragePosition = 0;
+  mCurrentNumValuesForFloatingAverage = 0;
+}
+
+Init_CurrentValues ()
+{
+  int i;
+
+  // current values
+  for (i=0; i<kMaxDevices; ++i)
+  {
+    mNumMsgsCurrent[i] = 0;
+    mNumDataBytes[i] = 0;
+  }
+}
+
+Init_MinMaxValues ()
+{
+  int i;
+
+  for (i=0; i<kMaxDevices; ++i)
+  {
+    // min / max values
+    mNumMsgsMax[i] = 0;
+    mNumMsgsMin[i] = 0xFFFF;
+  }
+}
+
+on preStart
+{
+  writeLineEx(0,1,"");
+  writeLineEx(0,1,"Read the configuration comment for further information on how to operate this demo.");
+  writeLineEx(0,1,"");
+}
+
+on *
+{
+  // forward all frames
+  output(this);
+}
+
+long GetIdxFromAddress (long address)
+{
+  long idx;
+
+  if (!mAddressMap.containsKey(address))
+    mAddressMap[address]= mAddressMap.size();
+
+  idx = mAddressMap[address];
+  return idx;
+}

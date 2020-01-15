@@ -1,0 +1,281 @@
+/*@!Encoding:1252*/
+includes
+{
+
+}
+
+variables
+{
+  // GeoPosition where the Road Hazard is located
+  float gLatRCHA = 0.0;
+  float gLonRCHA = 0.0;
+  int   gDistanceToRCHA = 0;
+  
+  int   gFirstRCHArun = 1;
+  long  gMapHdlRCHA = 0;
+  int   gObDir;
+  int   gObDist;
+}
+
+/****************************************************************/
+// Called on simulation start
+/****************************************************************/
+on start
+{
+  // Clear the panel in case there are screens visible from the last simulation run
+  ResetPanel();
+}
+
+float CalculateLat(float currentLat, int offsetMeters)
+{
+  //Earth’s radius, sphere
+  float R=6378137.0;
+  float deltaLat;
+  float newLat;
+  
+  deltaLat = offsetMeters / R;
+
+  // new offset position in decimal degrees
+  newLat = currentLat + deltaLat * 180 / pi;
+  
+  return newLat;
+}
+
+float CalculateLon(float currentLon, float currentLat, int offsetMeters)
+{
+  //Earth’s radius, sphere
+  float R=6378137.0;
+  float deltaLon;
+  float newLon;
+  
+  deltaLon = offsetMeters / ( R * cos(pi*currentLat/180) );
+  
+  // new offset position in decimal degrees
+  newLon = currentLon + deltaLon * 180 / pi;
+  
+  return newLon;
+}
+
+/****************************************************************/
+// Process Road Condition Hazard messages. If trigger conditions
+// are reached, call the function which visualizes parameters on 
+// the Dashboard panel
+// 
+// param lat:     Latitude of the SimCar sending the message
+// param lon:     Longitude of the SimCar sending the message
+// param head:    Heading of the SimCar sending the message
+// param obDir:   Direction to the object/hazard
+// param obDist:  Distance the object/hazard
+/****************************************************************/
+void ProcessRCHA(float lat, float lon, float head, int obDir, int obDist)
+{
+  int headingDiff                    = 0;
+  int distanceBetweenVehicles        = 0;
+  int dutDistanceToHazardousLocation = 0;
+  float firstLat                     = 0;
+  float firstLon                     = 0;
+  
+  // Store the first latitude and longitude of simCar2 as the distance
+  // to the object/hazard is calculated from this position
+  if(gFirstRCHArun == 1)
+  {
+    firstLat = lat / gMultiplier;
+    firstLon = lon / gMultiplier;
+    gDistanceToRCHA = obDist;
+    gFirstRCHArun = 0;
+    
+    gLatRCHA = CalculateLat(firstLat, 50);
+    gLonRCHA = CalculateLon(firstLon, firstLat, 0);
+  }
+  
+  dutDistanceToHazardousLocation = API_PosCalcDistance ( gLatDuT, gLonDuT, gLatRCHA, gLonRCHA);
+  
+  visualizeUsecase("Road Condition Hazard Ahead", dutDistanceToHazardousLocation, "..\\PANELS\\BMP\\RCHA.jpg");
+}
+
+/****************************************************************/
+// Process Cross Traffic messages. If trigger conditions
+// are reached, call the function which visualizes parameters on 
+// the Dashboard panel
+// 
+// param lat:     Latitude of the SimCar sending the message
+// param lon:     Longitude of the SimCar sending the message
+// param head:    Heading of the SimCar sending the message
+/****************************************************************/
+void ProcessCTA(float lat, float lon, float head)
+{
+  int headingDiff             = 0;
+  int distanceBetweenVehicles = 0;
+  
+  lat = lat / gMultiplier;
+  lon = lon / gMultiplier;
+  
+  // calculate the distance and the heading difference between the vehicles
+  distanceBetweenVehicles = API_PosCalcDistance (gLatDuT, gLonDuT, lat, lon);
+  headingDiff = abs(gHeadDuT - BSMValueToHeading(head));
+    
+  // If true, the vehicles can cross each other
+  if(headingDiff > 70 && headingDiff < 120) 
+  {
+    // Call the function which visualizes usecases on the Dashboard panel
+    visualizeUsecase("Cross Traffic Assistant", distanceBetweenVehicles, "..\\PANELS\\BMP\\CTA.jpg");
+  }
+  else
+  {
+    // Clear the Dashboard panel
+    ResetPanel();
+  }
+}
+
+/***************************************************************************/
+// Process Electronic Emergency Brake Light messages. If trigger conditions
+// are reached, call the function which visualizes parameters on 
+// the Dashboard panel
+// 
+// param lat:     Latitude of the SimCar sending the message
+// param lon:     Longitude of the SimCar sending the message
+// param head:    Heading of the SimCar sending the message
+// param event:   EventCode of the message
+/***************************************************************************/
+void ProcessEEBL(float lat, float lon, float head, int event)
+{
+  int headingDiff             = 0;
+  int distanceBetweenVehicles = 0;
+    
+  lat = lat / gMultiplier;
+  lon = lon / gMultiplier;
+  
+  // calculate the distance and the heading difference between the vehicles
+  distanceBetweenVehicles = API_PosCalcDistance (gLatDuT, gLonDuT, lat, lon); 
+  headingDiff = abs(gHeadDuT - BSMValueToHeading(head));
+  
+  // Vehicle is driving the same direction
+  if(headingDiff > 0 && headingDiff < 25) 
+  {
+    // If true, the DuT is in front of the SimCar: Stop processesing and reset the panel
+    if( abs(gLatDuT) > abs(lat) )
+    {
+      // Clear the Dashboard panel
+      ResetPanel();
+    }
+    // DuT is behind the SimCar. Check its event code for "Electronic Emergency Brake Light"
+    else if(event) 
+    {
+      // Call the function which visualizes usecases on the Dashboard panel
+      visualizeUsecase("Electronic Emergency Brake Light", distanceBetweenVehicles, "..\\PANELS\\BMP\\EEBL.jpg");
+    } 
+  }
+  else
+  {
+    // Clear the Dashboard panel
+    ResetPanel();
+  }
+}
+
+/***************************************************************************/
+// Process Stationary Vehicle Ahead messages. If trigger conditions
+// are reached, call the function which visualizes parameters on 
+// the Dashboard panel
+// 
+// param lat:     Latitude of the SimCar sending the message
+// param lon:     Longitude of the SimCar sending the message
+// param head:    Heading of the SimCar sending the message
+// param event:   EventCode of the message
+/***************************************************************************/
+void ProcessSVA(float lat, float lon, float head, int event)
+{
+  int headingDiff             = 0;
+  int distanceBetweenVehicles = 0;
+    
+  lat = lat / gMultiplier;
+  lon = lon / gMultiplier;
+  
+  // calculate the distance and the heading difference between the vehicles
+  distanceBetweenVehicles = API_PosCalcDistance (gLatDuT, gLonDuT, lat, lon); 
+  headingDiff = abs( (gHeadDuT) - BSMValueToHeading(head) );
+  
+  // Vehicle stays in the same direction
+  if(headingDiff > 0 && headingDiff < 25)
+  {
+    // If true, the DuT is in front of the SimCar: Stop processesing and reset the panel
+    if( abs(gLonDuT) > abs(lon) )
+    {
+      // Clear the Dashboard panel
+      ResetPanel();
+    }
+    // DuT is behind the SimCar. Check its event code for "Disabled Vehicle"
+    else if(event) 
+    {
+      // Call the function which visualizes usecases on the Dashboard panel
+      visualizeUsecase("Stationary Vehicle Ahead", distanceBetweenVehicles, "..\\PANELS\\BMP\\SVA.jpg");
+    } 
+  }
+  else
+  {
+    // Clear the Dashboard panel
+    ResetPanel();
+  }
+}
+
+/***************************************************************************/
+// Visualizes Usecases on the Dashboard Panel. 
+// 
+// param usecaseName:       Name of the usecase which shall be presented,
+//                          mapped to a sysvar
+// param distance:          Distance to the event, mapped to a sysvar
+// param dashboardPicture:  Path to the picture which shall be presented
+/***************************************************************************/
+void visualizeUsecase(char usecaseName[], int distance, char dashboardPicture[])
+{
+  if(distance >= 0)
+  {
+    @sysvar::Usecases::DistanceToEvent = distance;
+    SysSetVariableString("Usecases",  "UsecaseName", usecaseName);
+    setPictureBoxImage  ("Head Unit", "pbUsecases", dashboardPicture);
+    SetControlVisibility("Head Unit", "progressBarDistance", 1);
+    SetControlVisibility("Head Unit", "stDistanceBar", 1);
+    SetControlVisibility("Head Unit", "pbUsecases", 1);
+    SetControlVisibility("Head Unit", "pbDefault", 0);
+    SetControlVisibility("Head Unit", "ioDistance", 1);
+      
+    // If the usecase is RCHA, draw a icon in the map to show where the RCH is
+    if( strncmp(usecaseName, "Road Condition Hazard Ahead", strlen(usecaseName)) == 0)
+    {
+      if(gMapHdlRCHA == 0)
+      {
+        gMapHdlRCHA = C2xCreateMapObject( 7 ); // 7=Bitmap
+        C2xSetMapObjectBmpFilePath( gMapHdlRCHA, "PANELS\\BMP\\Attention.bmp");
+        C2xSetMapObjectPosition   ( gMapHdlRCHA, gLatRCHA, gLonRCHA);
+        C2xSetMapObjectSize       ( gMapHdlRCHA, 75, 70);
+        C2xDrawMapObject          ( gMapHdlRCHA);
+      }
+    }
+  }
+  else
+  {
+    // Clear the Dashboard panel
+    ResetPanel();
+  }
+}
+
+/***************************************************************************/
+// Clears the Dashboard Panel and sets it back to its default values
+/***************************************************************************/
+void ResetPanel()
+{
+  @sysvar::Usecases::DistanceToEvent = 0;
+  SysSetVariableString("Usecases", "UsecaseName", "");
+  SetControlVisibility("Head Unit", "pbUsecases", 0);
+  SetControlVisibility("Head Unit", "pbDefault", 1);
+  SetControlVisibility("Head Unit", "progressBarDistance", 0);
+  SetControlVisibility("Head Unit", "stDistanceBar", 0);
+  SetControlVisibility("Head Unit", "ioDistance", 0);
+  
+  // Delete the icon showing where the RCH is
+  if(gMapHdlRCHA != 0)
+  {
+    C2xDeleteMapObject(gMapHdlRCHA);
+    gMapHdlRCHA = 0;  
+  }
+}
+

@@ -1,0 +1,253 @@
+/*@!Encoding:1252*/
+variables
+{
+    //timers for cyclic 8 byte DM1 via TP
+    msTimer DM1_8Byte_TPDT_1_Timer;
+    msTimer DM1_8Byte_TPDT_2_Timer;
+    msTimer RQST_FF07_40ms_Timer;
+    msTimer GoOnlineTimer;
+}
+
+on envVar EnvEBS_Powercycle
+{
+    @sysvar::Powertrain::EBS::ILEnable = 0; 
+    cancelTimer(GoOnlineTimer);
+    setTimer(GoOnlineTimer, 2000);
+}
+
+on envVar EnvEBS_Powercycle_1s
+{
+  @sysvar::Powertrain::EBS::ILEnable = 0;
+  cancelTimer(GoOnlineTimer);
+  setTimer(GoOnlineTimer, 1000);
+  
+}
+on envVar EnvEBS_RequestACL
+{
+  pg RQST_EBS aclRequest;
+  aclRequest.ParameterGroupNumber = 0xEE00;
+  aclRequest.DA = 0xFF;
+  output(aclRequest);
+}
+
+on envVar EnvEBS_SendACL
+{
+  pg ACL_EBS acl;
+  acl.byte(0) = 0x4B;
+  acl.byte(1) = 0x34;
+  acl.byte(2) = 0xA9;
+  acl.byte(3) = 0xE8;
+  acl.byte(4) = 0x00;
+  acl.byte(5) = 0x09;
+  acl.byte(6) = 0x00;
+  acl.byte(7) = 0x00;
+  acl.DA = 0xFF;
+  output(acl);
+}
+
+on envVar EnvEBS_CannotClaimACL
+{
+  pg ACL_EBS acl;
+  acl.byte(0) = 0x4B;
+  acl.byte(1) = 0x34;
+  acl.byte(2) = 0xA9;
+  acl.byte(3) = 0xE8;
+  acl.byte(4) = 0x00;
+  acl.byte(5) = 0x09;
+  acl.byte(6) = 0x00;
+  acl.byte(7) = 0x00;
+  acl.SA = 0xFE;
+  acl.DA = 0xFF;
+  output(acl);
+  
+}
+
+/*
+*  Callback function can return: 
+*
+*  0 - do not respond to the request
+*  1 - request with the message from the TX list of the node
+*  2 - send a negative acknowledgement (NACK)
+*  3 - send a positive acknowledgement (ACK)
+*/ 
+
+LONG J1939ILOnRequest( LONG rqPGN, LONG sourceAddr, LONG destinationAddr)
+{
+  
+  //switch the pgn of the 0xFF01 message when checkbox in panel is checked.
+  if(@EnvEnable_Bug_Table03_Row01 == 1){
+
+    if(rqPGN == 0xFF01){
+        PG 0x01FF switchedPG = { DLC=8, PRIO=6 };
+        switchedPG.sa = EBS.NmStationAddress;
+        switchedPG.da = 0xFF;
+        output(switchedPG);
+        return 0;
+    }
+    
+  } 
+
+  //send pg 0xFF02 with edp bit set to 1 when checkbox in panel is checked.
+  if(@EnvEnable_Bug_Table03_Row02 == 1){
+
+    if(rqPGN == 0xFF02){
+        PG 0x2FF02 EDP_FF02= { DLC=8, PRIO=6 };
+        EDP_FF02.sa = EBS.NmStationAddress;
+        output(EDP_FF02);
+        return 0;
+    }
+    
+  } 
+
+
+  //send pg 0xFF03 with dp bit set to 1 when checkbox in panel is checked.
+  if(@EnvEnable_Bug_Table03_Row03 == 1){
+
+    if(rqPGN == 0xFF03){
+        PG 0x1FF03 DP_FF03= { DLC=8, PRIO=6 };
+        DP_FF03.sa = EBS.NmStationAddress;
+        output(DP_FF03);
+        return 0;
+    }
+    
+  } 
+
+  
+  //send pg 0xFD78 with dlc = 7 when checkbox in panel is checked.
+  if(@EnvEnable_Bug_Table03_Row04 == 1){
+
+    if(rqPGN == 0xFD78){
+        PG 0xFD78 FD78= { DLC=7, PRIO=6 };
+        FD78.sa = EBS.NmStationAddress;
+        output(FD78);
+        return 0;
+    }
+    
+  } 
+
+  //send pg ACL with byteswapped manufacturer code when checkbox in panel is checked.
+  if(@EnvEnable_Bug_Table03_Row05 == 1){
+
+    if(rqPGN == 0xEE00){
+        PG ACL_EBS addrClaimed;
+      pg ACL_EBS acl;
+        addrClaimed.byte(0) = 0x4B;
+        addrClaimed.byte(1) = 0x34;
+        addrClaimed.Byte(2) = 0xE9;
+        addrClaimed.Byte(3) = 0xA0;
+        addrClaimed.byte(4) = 0x00;
+        addrClaimed.byte(5) = 0x09;
+        addrClaimed.byte(6) = 0x00;
+        addrClaimed.byte(7) = 0x00;
+        addrClaimed.da = 0xFF;
+        output(addrClaimed);
+        return 0;
+    }
+    
+  }
+
+
+
+  return 1; 
+} 
+ 
+
+on timer GoOnlineTimer
+{
+    @sysvar::Powertrain::EBS::ILEnable = 1;
+}
+
+on timer DM1_8Byte_TPDT_1_Timer
+{
+    //create first TP.DT message for 0xFECA
+    PG TPDT_EBS tpdt;
+    tpdt.Byte(0) = 0x1;
+    tpdt.Byte(1) = 0x2;
+    tpdt.Byte(2) = 0x3;
+    tpdt.Byte(3) = 0x4;
+    tpdt.Byte(4) = 0x5;
+    tpdt.Byte(5) = 0x6;
+    tpdt.Byte(6) = 0x7;
+    tpdt.Byte(7) = 0x8; 
+    tpdt.da = 0xFF;
+
+    //send TP.DT
+    output(tpdt);
+    
+    //set timer for the second TP.DT message
+    cancelTimer(DM1_8Byte_TPDT_2_Timer);
+    setTimer(DM1_8Byte_TPDT_2_Timer, 60);
+
+}
+
+on timer RQST_FF07_40ms_Timer
+{
+    //setup request
+    PG RQST_EBS rq;
+    rq.ParameterGroupNumber = 0xFF07;
+    rq.da = TPMS.NmStationAddress;
+    output(rq);
+
+    //setup timer.
+    cancelTimer(RQST_FF07_40ms_Timer);
+    setTimer(RQST_FF07_40ms_Timer, 40);
+}
+
+on envVar EnvEnable_Bug_Table03_Row07
+{
+    if(@EnvEnable_Bug_Table03_Row07 == 1){
+        //start cyclic sending
+        cancelTimer(RQST_FF07_40ms_Timer);
+        setTimer(RQST_FF07_40ms_Timer, 40);
+    }
+    else if(@EnvEnable_Bug_Table03_Row07 == 0){
+        //stop cyclic sending
+        cancelTimer(RQST_FF07_40ms_Timer);
+    }
+}
+
+on pg 0xFECA
+{
+    //send 8 byte DM1 after 22 byte DM1 via TP if enabled in panel.
+    if( (this.dlc == 22) && (@EnvEnable_Bug_Table03_Row06 == 1) ){
+         PG TPCM_EBS tpcm;
+
+        //setup TP.CM_BAM message for 0xFECA with 8 Byte
+        tpcm.Byte(0) = 0x20;
+        tpcm.Byte(1) = 0x8;
+        tpcm.Byte(2) = 0x0;
+        tpcm.Byte(3) = 0x2;
+        tpcm.Byte(4) = 0xFF;
+        tpcm.Byte(5) = 0xCA;
+        tpcm.Byte(6) = 0xFE;
+        tpcm.Byte(7) = 0x0; 
+        tpcm.da = 0xFF;
+
+        //send TP.CM_BAM message
+        output(tpcm);
+
+        //set timer for TP.DT message
+        cancelTimer(DM1_8Byte_TPDT_1_Timer);
+        setTimer(DM1_8Byte_TPDT_1_Timer, 60);
+    }
+}
+
+on timer DM1_8Byte_TPDT_2_Timer
+{
+    //create second TP.DT message for 0xFECA
+    PG TPDT_EBS tpdt;
+    tpdt.Byte(0) = 0x2;
+    tpdt.Byte(1) = 0x9;
+    tpdt.Byte(2) = 0xFF;
+    tpdt.Byte(3) = 0xFF;
+    tpdt.Byte(4) = 0xFF;
+    tpdt.Byte(5) = 0xFF;
+    tpdt.Byte(6) = 0xFF;
+    tpdt.Byte(7) = 0xFF; 
+    tpdt.da = 0xFF;
+
+    //send TP.DT
+    output(tpdt);
+
+}
+

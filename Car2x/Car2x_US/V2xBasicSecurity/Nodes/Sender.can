@@ -1,0 +1,108 @@
+/*@!Encoding:1252*/
+includes
+{
+  
+}
+
+variables
+{
+  long pktBsmHdl;      // BSM message
+  long pktTimHdl;      // TIM message
+  
+  long certValidHdl;   // valid certificate
+  long certInvalidHdl; // invalid certificate
+
+  char wssPcolDesc[16] ; // either "wss2011d9" , "wss2013"  or "wssv3"
+  char wssPcolAttr[16] ; // either "WSS_2011D9", "WSS_2013" or "WSS_V3"
+}
+
+void evalWssVersion()
+{
+  // the configuration contains three root certificates, "Demo Root CAC 2011d9", "Demo Root CAC 2013" and "Demo Root CAC v3"
+  // depending on the version configured in CANoe one of them is visible.
+  if (C2xSecCertificateGetHandle("Vector Demo Root CAC v3") != 0)
+  {
+    strncpy(wssPcolDesc, "wssv3", elcount(wssPcolDesc)) ;
+    strncpy(wssPcolAttr, "WSS_V3", elcount(wssPcolAttr)) ;
+    SysSetVariableString(sysvar::WssVersion, "IEEE 1609.2-2016") ;
+  }
+  else if (C2xSecCertificateGetHandle("Vector Demo Root CAC 2013") != 0)
+  {
+    strncpy(wssPcolDesc, "wss2013", elcount(wssPcolDesc)) ;
+    strncpy(wssPcolAttr, "WSS_2013", elcount(wssPcolAttr)) ;
+    SysSetVariableString(sysvar::WssVersion, "IEEE 1609.2-2013") ;
+  }
+  else if (C2xSecCertificateGetHandle("Vector Demo Root CAC 2011d9") != 0)
+  {
+    strncpy(wssPcolDesc, "wss2011d9", elcount(wssPcolDesc)) ;
+    strncpy(wssPcolAttr, "WSS_2011D9", elcount(wssPcolAttr)) ;
+    SysSetVariableString(sysvar::WssVersion, "IEEE 1609.2-2011d9") ;
+  }
+}
+
+on start
+{
+  evalWssVersion() ;
+
+  // initialize BSM
+  pktBsmHdl = C2xInitPacket("BasicSafetyMessage", wssPcolAttr);
+  C2xSetTokenInt(pktBsmHdl, "wsmp", "version", 2) ;
+  C2xSetTokenInt(pktBsmHdl, "wsmp", "psID", 32) ;
+  C2xSetTokenInt(pktBsmHdl, wssPcolDesc, "psid", 32);
+  
+  // initialize TIM
+  pktTimHdl = C2xInitPacket("TravelerInformation", wssPcolAttr);
+  C2xSetTokenInt(pktTimHdl, "wsmp", "version", 2) ;
+  C2xResizeToken(pktTimHdl, "wsmp", "psID", 16) ;
+  C2xSetTokenInt(pktTimHdl, "wsmp", "psID", 0x8003) ;
+  C2xSetTokenInt(pktTimHdl, wssPcolDesc, "psid", 131);
+
+
+  // get certificates
+  certValidHdl   = C2xSecCertificateGetHandle("Vector Demo ITS PC Valid");
+  certInvalidHdl = C2xSecCertificateGetHandle("Vector Demo ITS PC Invalid");
+}
+
+
+on sysvar BSM::Send
+{
+  long certHdl;
+  
+  if (@this)
+  {
+    // set signer certificate and signer type
+    certHdl = (@BSM::Certificate == @BSM::Certificate::Valid) ? certValidHdl : certInvalidHdl ;
+    C2xSecPacketSetSignerHandle(pktBsmHdl, certHdl);
+    C2xSetTokenInt(pktBsmHdl, wssPcolDesc, "signerType", @BSM::Type);
+    C2xSetTokenInt64(pktBsmHdl, wssPcolDesc, "generationTime", C2xConvertTimeToMSSinceUTC(C2xGetITSTimestamp(), 0)*1000);
+
+    // set fields mandatory for BSM security profile
+    // ...
+    
+    // encode, sign and output message
+    C2xCompletePacket(pktBsmHdl);
+    C2xOutputPacket(pktBsmHdl);
+  }
+}
+
+
+on sysvar TIM::Send
+{
+  long certHdl;
+  
+  if (@this)
+  {
+    // set signer certificate and signer type
+    certHdl = (@TIM::Certificate == @TIM::Certificate::Valid) ? certValidHdl : certInvalidHdl ;
+    C2xSecPacketSetSignerHandle(pktTimHdl, certHdl);
+    C2xSetTokenInt(pktTimHdl, wssPcolDesc, "signerType", @TIM::Type);
+    C2xSetTokenInt64(pktTimHdl, wssPcolDesc, "generationTime", C2xConvertTimeToMSSinceUTC(C2xGetITSTimestamp(), 0)*1000);
+    
+    // set fields mandatory for TIM security profile
+    // ...
+    
+    // encode, sign and output message
+    C2xCompletePacket(pktTimHdl);
+    C2xOutputPacket(pktTimHdl);
+  }
+}

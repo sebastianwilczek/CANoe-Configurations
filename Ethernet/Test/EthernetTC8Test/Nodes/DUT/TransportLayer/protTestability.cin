@@ -1,0 +1,1306 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "protTestabilityETH.cin"
+  #include "protTestabilityUDP.cin"
+  #include "protTestabilityTCP.cin"
+  #include "protTestabilitySOMEIP.cin"
+  #include "protTestabilityDHCP.cin"
+}
+
+variables
+{
+  enum TestAbility_State gTestAbilityState = TestAbility_State_Invalid; 
+  dword dwUdpTestabilitySocketHandle = kINVALID_SOCKET; //UDP socket for Testability protocol
+  dword gdwTesterIPv4Addr;
+  dword gdwTesterIPv4Port;
+  byte  gbTesterIPv6Addr[kIPv6_ADDRESS_LENGTH_SIZE];
+  dword gdwTesterIPv6Port;
+  
+  byte gbICMP_Fwd_Enable = 0;
+  word gwICMPMaxFwd = 0;
+  word gwICMPMaxLen = 0xFFFF; //unlimit forward
+  word gwICMPFwdCnt = 0;
+}
+
+/// <initialize_close>
+// inititalization ASR testability protocol token data
+void initTestabilityTokenData(struct _Token_Testabilty data)
+{  
+  data.TestabilityMsg.Header.wSid = 0;
+  data.TestabilityMsg.Header.bEvb = 0;
+  data.TestabilityMsg.Header.gid = GID_Invalid;
+  data.TestabilityMsg.Header.pid = PID_Invalid;
+  data.TestabilityMsg.Header.rid = RID_Invalid;
+  data.TestabilityMsg.Header.dwLen = kTESTABILITY_HEADER_SIZE - kTESTABILITY_PARAMETER_SIZE_OFFSET;
+  data.TestabilityMsg.Header.tid = TID_Invalid;
+  
+  initEchoRequestData(data.Echo_Request);
+  initSendData(data.Send_Data);
+  initAddStaticArpEntry(data.Add_Static_Arp_Entry);
+  initDelStaticArpEntry(data.Del_Static_Arp_Entry);
+  initEndTest(data.End_Test);  
+  initSetDynamicArpChcheTimeout(data.Set_Dynamic_Arp_Chche_Timeout);
+}
+
+/// <SocketTestability>
+//
+// initialize UDP scoket for ASR testability protocol
+//
+void initTestabilityUDPSocket(void)
+{
+  long lResult;
+  char cDummyBuffer[1];
+  int i;
+  
+  if(dwUdpTestabilitySocketHandle != kINVALID_SOCKET)
+  {
+    clsoeTestabilityUDPSocket();
+  }
+  dwUdpTestabilitySocketHandle = udpOpen(0, @Internal::TestabilityServicesUpdPort);
+  gdwTesterIPv4Addr = 0;
+  gdwTesterIPv4Addr = 0;
+ 
+  if(@sysvar::TC8_DUT_Config::VerbosityTestability > (enum Testability_Verbosity_Level)TABIT_LV_DEBUG)
+    write("[%f] initTestabilityUDPSocket() TABIT socketH[%x]", timeNow()/100000.0, dwUdpTestabilitySocketHandle);
+  
+  for(i = 0; i < elCount(gbTesterIPv6Addr); i++)
+  {
+    gbTesterIPv6Addr[i] = 0x00;
+  }
+  if(dwUdpTestabilitySocketHandle == kINVALID_SOCKET)
+  {
+    writeLineEx(1, 3, "initTestabilitySocketUDP() IpGetLastError: %d", IpGetLastError());
+  }
+  else
+  {
+    startUdpReceive(dwUdpTestabilitySocketHandle);
+  }
+}
+
+/// <SocketTestability>
+//
+// close UDP scoket for ASR testability protocol
+//
+void clsoeTestabilityUDPSocket(void)
+{
+  long lResult;
+  int i;
+  
+  if(dwUdpTestabilitySocketHandle != kINVALID_SOCKET)
+  {
+    lResult = udpClose(dwUdpTestabilitySocketHandle);
+    if(lResult == -1)
+    {
+       writeLineEx(1, 3, "clsoeTestabilitySocketUDP() IpGetLastError: %d", IpGetLastError());
+    }
+    else if(lResult == 87)
+    {
+      writeLineEx(1, 3, "clsoeTestabilitySocketUDP() UdpClose() return: %s", "WSA_INVALID_PARAMETER");
+    }
+  }
+  gdwTesterIPv4Addr = 0;
+  gdwTesterIPv4Port = 0;  
+  gdwTesterIPv6Port = 0;
+  for(i = 0; i < elCount(gbTesterIPv6Addr); i++)
+  {
+    gbTesterIPv6Addr[i] = 0x00;
+  }  
+  dwUdpTestabilitySocketHandle = kINVALID_SOCKET;
+  if(@sysvar::TC8_DUT_Config::VerbosityTestability > (enum Testability_Verbosity_Level)TABIT_LV_DEBUG)
+    write("[%f] clsoeTestabilityUDPSocket() TABIT socketH[%x]", timeNow()/100000.0, dwUdpTestabilitySocketHandle);
+  
+}
+
+/// <SocketTestability>
+//
+// Send UDP packet throught ASR Testability socket IPv4
+//
+long sendPacketTestabilityUDPSocket(dword dwIPv4Addr, dword wDestPort, byte bData[], dword wLength)
+{
+  long lResult;
+  lResult = 0;
+  
+  if(dwUdpTestabilitySocketHandle != kINVALID_SOCKET)
+  {  
+    lResult = udpSendTo(dwUdpTestabilitySocketHandle, dwIPv4Addr, wDestPort, bData, wLength);
+  }
+  if(@sysvar::TC8_DUT_Config::VerbosityTestability > TABIT_LV_DEBUG)
+  {
+    if(lResult != 0)
+      outputSocketErrorInfo(dwUdpTestabilitySocketHandle);
+  }
+  
+  return lResult;
+}
+
+/// <SocketTestability>
+//
+// Send UDP packet throught ASR Testability socket IPv6
+//
+long sendPacketTestabilityUDPSocket(byte dwIPv6Addr[], dword wDestPort, byte bData[], dword wLength)
+{
+  long lResult;
+  lResult = 0;
+  
+  if(dwUdpTestabilitySocketHandle != kINVALID_SOCKET)
+  {  
+    lResult = udpSendTo(dwUdpTestabilitySocketHandle, dwIPv6Addr, wDestPort, bData, wLength);
+  }
+  if(@sysvar::TC8_DUT_Config::VerbosityTestability > TABIT_LV_DEBUG)
+  {
+    if(lResult != 0)
+      outputSocketErrorInfo(dwUdpTestabilitySocketHandle);
+  }
+  
+  return lResult;
+}
+
+/// <getPacketData>
+// set the ASR testability protocol token data from Ethernet packet
+int getTestAbilityPacket(struct _Token_Testabilty data, int offset)
+{ 
+  data.TestabilityMsg.Header.wSid = EthGetThisMotorolaValue16(offset);
+  
+  // check Service ID
+  if(data.TestabilityMsg.Header.wSid != kTESTABILITY_SERVICEID_DEFAULT)
+  {
+    // not Testability Protocol
+    return 0;
+  }
+  
+  data.TestabilityMsg.Header.bEvb = (EthGetThisValue8(offset + 2) & 0x80) >> 7;
+  data.TestabilityMsg.Header.gid = (enum Service_Group)(EthGetThisValue8(offset + 2) & 0x7F);
+  data.TestabilityMsg.Header.pid = (enum Service_Primitive)(EthGetThisValue8(offset + 3));
+  data.TestabilityMsg.Header.dwLen = EthGetThisMotorolaValue32(offset + 4);
+  data.TestabilityMsg.Header.bProtoVersion = (EthGetThisValue8(offset + 12));
+  data.TestabilityMsg.Header.bIfVersion = (EthGetThisValue8(offset + 13));
+  data.TestabilityMsg.Header.tid = (enum Message_Type)(EthGetThisValue8(offset + 14));
+  
+  return 1;
+}
+
+
+/// <getPacketData>
+// set the ASR testability protocol token data from Ethernet packet
+int getTestAbilityDetailPacket(struct _Token_Testabilty data, int offset)
+{
+  long lParamsLen;
+  
+  lParamsLen = data.TestabilityMsg.Header.dwLen - kTESTABILITY_PARAMETER_SIZE_OFFSET;
+  if(lParamsLen > 0)
+  {
+    long lDataLen;
+    lDataLen = EthGetThisData(offset+kTESTABILITY_HEADER_SIZE, 
+                   elCount(data.TestabilityMsg.bParameters),
+                   data.TestabilityMsg.bParameters);
+    if(lParamsLen != lDataLen)
+    {
+      WriteEx(1, 3, "##### NG getTestAbilityDetailPacket() lDataLen=%d", lParamsLen);
+      return 0;
+    }
+  }
+  // below switch sentence should be removed in the future
+  //#####
+  switch(data.TestabilityMsg.Header.gid)
+  {
+    case GID_General:
+      switch(data.TestabilityMsg.Header.pid)
+      {
+        case PID_START_TEST:
+          break;
+        case PID_END_TEST:
+          getEndTest(data.End_Test, offset + kTESTABILITY_HEADER_SIZE);
+          break;
+        default:
+          break;
+      }
+      break;
+      
+    case GID_TCP:
+    case GID_UDP:
+      switch(data.TestabilityMsg.Header.pid)
+        case PID_SEND_DATA:
+          // ##### vjttak
+          getSendData(data.Send_Data, offset + kTESTABILITY_HEADER_SIZE);
+          break;
+      break;
+      
+    case GID_ARP:
+      switch(data.TestabilityMsg.Header.pid)
+      {
+        case PID_CREAR_ARP_TABLE:
+          break;
+          
+        case PID_ADD_STATIC_ARP_ENTRY:
+          getAddStaticArpEntry(data.Add_Static_Arp_Entry, offset + kTESTABILITY_HEADER_SIZE);          
+          break;
+          
+        case PID_DEL_STATIC_ARP_ENTRY:
+          getDelStaticArpEntry(data.Del_Static_Arp_Entry, offset + kTESTABILITY_HEADER_SIZE);      
+          break;
+          
+        case PID_SET_DYNAMIC_ARP_CHCHE_TIMEOUT:
+          getSetDynamicArpChcheTimeout(data.Set_Dynamic_Arp_Chche_Timeout, offset + kTESTABILITY_HEADER_SIZE);
+          break;
+          
+        case PID_CLEAR_DYNAMIC_ARP_CHCHE_TIMEOUT:
+          break;
+
+        default:
+          break;
+      }          
+      break;
+      
+    case GID_ICMP:
+      switch(data.TestabilityMsg.Header.pid)
+      {
+        case PID_ECHO_REQUEST:
+          getEchoRequest(data.Echo_Request, offset + kTESTABILITY_HEADER_SIZE);
+          break;
+        default:
+          break;
+      }
+      break;
+    
+    default:
+      break;
+  }
+  
+  return 1;
+}
+
+/// <sendPacket/constructPacket/constructHeader>
+//
+void makeTestAbilityHeader(struct _Token_Testabilty data, byte command[])
+{    
+  makeSID(kTESTABILITY_SERVICEID_DEFAULT, command);
+  makeEVB(0, command);
+  makeGID(data.TestabilityMsg.Header.gid, command);
+  makePID(data.TestabilityMsg.Header.pid, command);
+  makeLEN(data.TestabilityMsg.Header.dwLen, command);
+  makeProtocolVersion(kTESTABILITY_PROTOCOL_VERSION, command);
+  makeInterfaceVersion(kTESTABILITY_INTERFACE_VERSION, command);
+  makeTID(TID_RESPONSE, command);
+  makeRID(data.TestabilityMsg.Header.rid, command);
+}
+
+/// <sendPacket/constructPacket/constructHeader>
+//
+void makeTestAbilityHeader(struct _Testabilty_Message_Header header, byte command[])
+{    
+  makeSID(header.wSid, command);
+  makeEVB(header.bEvb, command);
+  makeGID(header.gid, command);
+  makePID(header.pid, command);
+  makeLEN(header.dwLen, command);
+  makeProtocolVersion(header.bProtoVersion, command);
+  makeInterfaceVersion(header.bIfVersion, command);
+  makeTID(header.tid, command);
+  makeRID(header.rid, command);
+}
+
+/// <sendPacket/constructPacket/constructHeader>
+//
+void makeSID(word wSid, byte data[])
+{
+  if(elCount(data) < 2)
+  {
+    return;
+  }
+  data.word(0) = swapWord(wSid);
+}
+
+
+/// <sendPacket/constructPacket/constructHeader>
+//
+void makeEVB(byte evb, byte data[])
+{  
+  if(elCount(data) < 3)
+  {
+    return;
+  }
+  
+  data[2] = (evb << 7);
+}
+
+
+/// <sendPacket/constructPacket/constructHeader>
+//
+void makeGID(enum Service_Group gid, byte data[])
+{
+  if(elCount(data) < 3)
+  {
+    return;
+  }
+  
+  data[2] |= gid;
+}
+
+/// <sendPacket/constructPacket/constructHeader>
+//
+void makePID(enum Service_Primitive pid, byte data[])
+{
+  if(elCount(data) < 4)
+  {
+    return;
+  }
+  
+  data[3] = pid;
+}
+
+/// <sendPacket/constructPacket/constructHeader>
+//
+void makeLEN(dword len, byte data[])
+{
+  if(elCount(data) < 8)
+  {
+    return;
+  }
+  
+  data.dword(4) = swapDWord(len);
+}
+
+/// <sendPacket/constructPacket/constructHeader>
+//
+void makeProtocolVersion(byte bVer, byte data[])
+{
+  if(elCount(data) < 12)
+  {
+    return;
+  }
+  data[12] = bVer;
+}
+
+/// <sendPacket/constructPacket/constructHeader>
+//
+void makeInterfaceVersion(byte bVer ,byte data[])
+{
+  if(elCount(data) < 13)
+  {
+    return;
+  }
+  data[13] = bVer;
+}
+
+/// <sendPacket/constructPacket/constructHeader>
+//
+void makeTID(enum Message_Type tid, byte data[])
+{
+  if(elCount(data) < 14)
+  {
+    return;
+  }
+  
+  data[14] = tid;
+}
+
+/// <sendPacket/constructPacket/constructHeader>
+//
+void makeRID(enum Result_ID rid, byte data[])
+{
+  if(elCount(data) < 15)
+  {
+    return;
+  }
+  data[15] = rid;
+}
+
+/// <sendPacket/constructPacket/constructHeader>
+// set the ASR Testability protocol version
+int makeGetVersion(struct _Token_Testabilty data)
+{    
+  AddMessageParamsUint16(data.TestabilityMsg, kTABIT_MAJOR_VER);
+  AddMessageParamsUint16(data.TestabilityMsg, kTABIT_MINOR_VER);
+  AddMessageParamsUint16(data.TestabilityMsg, kTABIT_PATCH_VER);
+  return 1;
+}
+
+/// <getPacketData/getDetailData>
+//  set the Autosar Testability "Send data" data
+void getSendData(struct _SEND_DATA data, int offset)
+{
+  data.wSocketId = EthGetThisMotorolaValue16(offset);
+  data.wTotalLen = EthGetThisMotorolaValue16(offset + 2);
+  data.wDestPort = EthGetThisMotorolaValue16(offset + 4);
+  
+  setIpAddr(data.ipxaddr, offset + 6);
+  
+  //@@@@ bFlag exist for UDP send data ??? @@@@
+  data.bFlags = EthGetThisValue8(offset + 6 + data.ipxaddr.wAddrLength + SIZE_LENGTH);
+  setData(data.data, offset + 6 + data.ipxaddr.wAddrLength + SIZE_LENGTH + 1);
+}
+
+/// <getPacketData/getDetailData>
+//
+void getAddStaticArpEntry(struct _ADD_STATIC_ARP_ENTRY data, int offset)
+{
+  dword _mac1;
+  qword _mac2;
+  
+  // IPv4 Check
+  if(EthGetThisMotorolaValue16(offset) != 4)
+  {
+    return;
+  }
+  // mac address length check
+  if(EthGetThisMotorolaValue16(offset + 6) != 6)
+  {
+    return;
+  }
+  
+  setIpAddr(data.ip, offset);
+  _mac1 = EthGetThisValue32(offset + 8);
+  _mac2 = EthGetThisValue16(offset + 12);
+  
+  data.qwMac = _mac1 | (_mac2 << 32);
+}
+
+/// <getPacketData/getDetailData>
+//
+void getDelStaticArpEntry(struct _DEL_STATIC_ARP_ENTRY data, int offset)
+{
+  dword _mac1;
+  qword _mac2;
+  
+  // IPv4 Check
+  if(EthGetThisMotorolaValue16(offset) != 4)
+  {
+    return;
+  }
+  // mac address length check
+  if(EthGetThisMotorolaValue16(offset + 6) != 6)
+  {
+    return;
+  }
+  
+  setIpAddr(data.ip, offset);
+  _mac1 = EthGetThisValue32(offset + 8);
+  _mac2 = EthGetThisValue16(offset + 12);
+  
+  data.qwMac = _mac1 | (_mac2 << 32);
+}
+
+/// <getPacketData/getDetailData>
+//
+void getCreateAndBind(struct _CREATE_AND_BIND data, int offset)
+{
+  data.bDoBind = EthGetThisValue8(offset);
+  data.wLocalPort = EthGetThisValue16(offset + 1);
+  
+  setIpAddr(data.localAddr, offset + 3);
+}
+
+/// <getPacketData/getDetailData>
+//
+void getEchoRequest(struct _ECHO_REQUEST data, int offset)
+{
+  setText(data.ifName, offset);
+  setIpAddr(data.ipxaddr, offset + data.ifName.wTextLength + SIZE_LENGTH);
+  setData(data.data, offset + data.ifName.wTextLength + SIZE_LENGTH + data.ipxaddr.wAddrLength + SIZE_LENGTH);
+}
+
+/// <getPacketData/getDetailData>
+//
+void getEndTest(struct _END_TEST data, int offset)
+{
+  data.wTcId = EthGetThisMotorolaValue16(offset);
+  setText(data.tsName, offset + 2);
+}
+
+/// <getPacketData/getDetailData>
+//
+void getSetDynamicArpChcheTimeout(struct _SET_DYNAMIC_ARP_CHCHE_TIMEOUT data, int offset)
+{
+  word datalength;
+  
+  datalength = EthGetThisMotorolaValue16(offset);
+
+  switch(datalength)
+  {
+    case 1:
+      data.dwTime = EthGetThisValue8(offset + 2);
+      break;
+    case 2:
+      data.dwTime = EthGetThisMotorolaValue16(offset + 2);
+      break;
+    case 3:
+    case 4:
+      data.dwTime = EthGetThisMotorolaValue32(offset + 2);
+      break;
+    default:
+      break;
+  }
+}
+
+/// <getPacketData/getDetailData>
+//
+void getDHCPInitOrStopClient(struct _DHCP_INIT_CLIENT data, int offset)
+{
+  setText(data.ifName, offset);
+}
+
+/// <getPacketData/getDetailData>
+//
+void getDHCPSetOption(struct _DHCP_SET_OPTION data, int offset)
+{
+  setText(data.ifName, offset);
+  data.code = EthGetThisValue8(offset + data.ifName.wTextLength );
+}
+
+/// <getPacketData/getDetailData>
+//
+void getETHInterfaceUpDown(struct _ETH_INTERFACE_UP_DOWN data, int offset)
+{
+  setText(data.ifName, offset);
+}
+
+/// <checkTestAbilityProtocolFormat>
+//
+int IsTestAbilityProtocol(struct _Token_Eth_Packet data)
+{
+  // check testability protocol
+  // protocol
+  if(data.ipv4.protocol != IPv4_Prot_UDP)
+  {
+    return 0;
+  }
+  // TestAbility SID
+  if(data.testability.TestabilityMsg.header.wSid != kTESTABILITY_SERVICEID_DEFAULT)
+  {
+    return 0;
+  }
+  
+  return 1;
+}
+  
+  
+/// <checkTestAbilityProtocolFormat>
+// check testability protocol
+int IsTestAbilityProtocol(long lPacketHandle)
+{
+  // check testability protocol  
+  // protocol
+  if(EthGetTokenInt(lPacketHandle, "ipv4", "protocol") != IPv4_Prot_UDP)
+  {
+    return 0;
+  }
+  // TestAbility SID
+  if(EthGetTokenInt(lPacketHandle, "udp", "data", 0, 2, kBYTE_ORDER_MOT) != kTESTABILITY_SERVICEID_DEFAULT)
+  {
+    return 0;
+  }
+  // TestAbility port
+  if(EthGetTokenInt(lPacketHandle, "udp", "destination", 0, 2, kBYTE_ORDER_MOT) != @Internal::TestabilityServicesUpdPort)
+  {
+    return 0;
+  }
+  
+  
+  return 1;
+}
+
+/// <checkTestAbilityProtocolFormat>
+// check testability receive port
+int IsTestAbilityReceivePort(long lPacketHandle)
+{
+  // port
+  if(EthGetTokenInt(lPacketHandle, "udp", "destination") != @Internal::TestabilityServicesUpdPort)
+  {
+    return 0;
+  }
+  
+  return 1;
+}
+
+/// <checkTestAbilityProtocolFormat>
+// check testability receive port
+int IsPidStartTest(long lPacketHandle)
+{
+  enum Service_Group _gid;
+  enum Service_Primitive _pid;
+  
+    
+  // check testability protocol
+  if(IsTestAbilityProtocol(lPacketHandle) == 0)
+  {
+    return 0;
+  }
+  if(IsTestAbilityReceivePort(lPacketHandle) == 0)
+  {
+    return 0;
+  }
+  
+  // check pid
+  _gid = (enum Service_Group)(EthGetTokenInt(lPacketHandle, "udp", "data", 2, 1, kBYTE_ORDER_MOT) & 0x7F);
+  _pid = (enum Service_Primitive)(EthGetTokenInt(lPacketHandle, "udp", "data", 3, 1, kBYTE_ORDER_MOT));  
+  if(_gid != GID_General)
+  {
+    return 0;
+  }
+  if(_pid != PID_START_TEST)
+  {
+    return 0;
+  }
+  
+  return 1;
+}
+
+/// <checkTestAbilityProtocolFormat>
+//
+int IsPidEndTest(long lPacketHandle)
+{
+  enum Service_Group _gid;
+  enum Service_Primitive _pid;
+  
+  
+  // check testability protocol
+  if(IsTestAbilityProtocol(lPacketHandle) == 0)
+  {
+    return 0;
+  }
+  if(IsTestAbilityReceivePort(lPacketHandle) == 0)
+  {
+    return 0;
+  }
+  
+  // check pid
+  _gid = (enum Service_Group)(EthGetTokenInt(lPacketHandle, "udp", "data", 2, 1, kBYTE_ORDER_MOT) & 0x7F);
+  _pid = (enum Service_Primitive)(EthGetTokenInt(lPacketHandle, "udp", "data", 3, 1, kBYTE_ORDER_MOT));  
+  if(_gid != GID_General)
+  {
+    return 0;
+  }
+  if(_pid != PID_END_TEST)
+  {
+    return 0;
+  }
+  
+  return 1;
+}
+
+/// <makePacketData>
+// This should be move to procTestability
+// ToDo : check if this function is necessary...
+int makeTestAbilityPacket(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  if(recvData.TestabilityMsg.Header.gid != GID_UDP || 
+    recvData.TestabilityMsg.Header.gid  != GID_SOMEIP)
+  {
+    //###### Is this neccesary?
+    copyTestAbilityDetail(recvData, sendData);
+    //######
+  }
+  
+  return 1;
+}
+
+/// <makePacketData>
+//
+void copyTestAbilityDetail(struct _Token_Testabilty source, struct _Token_Testabilty destination)
+{ 
+  copyEchoRequestData(source.Echo_Request, destination.Echo_Request);
+  copySendData(source.Send_Data, destination.Send_Data);
+  copyAddStaticArpEntry(source.Add_Static_Arp_Entry, destination.Add_Static_Arp_Entry);
+  copyDelStaticArpEntry(source.Del_Static_Arp_Entry, destination.Del_Static_Arp_Entry);
+  copySetDynamicArpChcheTimeout(source.Set_Dynamic_Arp_Chche_Timeout, destination.Set_Dynamic_Arp_Chche_Timeout);
+}
+
+/// <processPacketData>
+// process when TestAbility protocol received
+// return code 1:respond 0:don't respond
+int procTestAbility(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  int iRet;
+  iRet = 0;
+    
+  //Prepare Testability Response Message Header
+  PrepareResMsgHeader(recvData.TestabilityMsg, sendData.TestabilityMsg);
+  
+  switch(recvData.TestabilityMsg.Header.gid)
+  {
+    case GID_General:
+      iRet = procGidGeneral(recvData, sendData);
+      setResultIDFromReturnVal(sendData, iRet);
+      iRet = 1; // set return code
+      break;
+    case GID_ETH:
+      iRet = procGidETH(recvData, sendData);
+      iRet = 1; // set return code
+      break;
+    case GID_UDP:
+      iRet = procGidUDP(recvData, sendData);
+      iRet = 1; // set return code
+      break;
+    case GID_TCP:
+      iRet = procGidTCP(recvData, sendData);
+      break;
+    case GID_ARP:
+      iRet = procGidARP(recvData);
+      setResultIDFromReturnVal(sendData, iRet);
+      iRet = 1; // set return code
+      break;
+    case GID_ICMP:
+      iRet = procGidICMPv4(recvData);
+      setResultIDFromReturnVal(sendData, iRet);
+      iRet = 1; // set return code
+    case GID_SOMEIP:
+      iRet = procGidSOMEIP(recvData, sendData);
+      iRet = 1; // set return code
+      break;
+    case GID_DHCP:
+      iRet = procGidDHCP(recvData, sendData);
+      iRet = 1; // set return code
+    default:
+      break;
+  }
+    
+  return iRet;
+}
+
+
+/// <processPacketData>
+// process when GID:UDP of TestAbility protocol received
+// ret 1:succeed 0:failed
+int procGidUDP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{ 
+  int iRet;
+  iRet = 0;
+  
+  switch(recvData.TestabilityMsg.Header.pid)
+  {
+    case PID_CLOSE_SOCKET:
+      iRet = closeSocketUDP(recvData, sendData);
+      break;
+    case PID_CREATE_AND_BIND:
+      iRet = createAndBindUDP(recvData, sendData);
+      break;
+    case PID_SEND_DATA:
+      if(@sysvar::TC8_DUT_Config::TestGroup == kArp)
+      {
+        iRet = configToSendUdp(0, recvData.Send_Data.ipxaddr.dwIpv4Addr, recvData.Send_Data.wDestPort, 
+                                        recvData.Send_Data.data.bData, recvData.Send_Data.data.wLength);
+        setResultIDFromReturnVal(sendData, iRet);
+      }
+      else 
+      {
+        iRet = sendDataUDP(recvData, sendData);
+      }
+      break;
+    case PID_RECEIVE_AND_FORWARD:
+      iRet = receiveAndForwardUDP(recvData, sendData);
+      break;
+    case PID_CONFIGURE_SOCKET:
+      iRet = configureSocketUDP(recvData, sendData);
+      break;
+    default:
+      break;
+  }
+  
+  return iRet;
+}
+
+/// <processPacketData>
+// process when GID:TCP of TestAbility protocol received
+// return code 1:respond 0:don't respond
+int procGidTCP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  int iRet;
+  iRet = 0;
+  
+  switch(recvData.TestabilityMsg.Header.pid)
+  {
+    case PID_CLOSE_SOCKET:
+      iRet = closeSocketTCP(recvData, sendData);
+      iRet = 1; // set return code
+      break;
+    case PID_CREATE_AND_BIND:
+      iRet = createAndBindTCP(recvData, sendData);
+      iRet = 1; // set return code
+      break;
+    case PID_SEND_DATA:
+      iRet = sendDataTcp(recvData, sendData);
+      iRet = 1; // set return code
+      break;
+    case PID_RECEIVE_AND_FORWARD:
+      iRet = receiveAndForwardTCP(recvData, sendData);
+      iRet = 1; // set return code
+      break;
+    case PID_LISTEN_AND_ACCEPT:
+      iRet = listenAndAcceptTCP(recvData, sendData);
+      iRet = 1; // set return code
+      break;
+    case PID_CONNECT:
+      iRet = connectTCP(recvData, sendData);
+      break;
+    case PID_CONFIGURE_SOCKET:
+      iRet = configureSocketTCP(recvData, sendData);
+      iRet = 1; // set return code
+      break;
+    case PID_SHUTDOWN:
+      iRet = shutdownTCP(recvData, sendData);
+      iRet = 1; // set return code
+      break;      
+    case PID_TCP_GET_STATE:
+      iRet = getStateTcp(recvData, sendData);
+      iRet = 1; // set return code
+      break;
+    case PID_CALL_RECEIVE:
+      iRet = callReceiveTCP(recvData, sendData);
+      break;
+    default:
+      sendData.TestabilityMsg.Header.rid = RID_E_NTF; // return "error:The requested service primitive was not found."
+      iRet = 1;
+      break;
+  }
+  
+  return iRet;
+}
+
+/// <processPacketData>
+// process when GID:ARP of TestAbility protocol received
+// ret 1:succeed 0:failed
+int procGidARP(struct _Token_Testabilty data)
+{ 
+  int iRet;
+  iRet = 0;
+  
+  switch(data.TestabilityMsg.Header.pid)
+  {
+    case PID_CREAR_ARP_TABLE:      
+      initArpTable();
+      iRet = 1;
+      break;
+      
+    case PID_ADD_STATIC_ARP_ENTRY:
+      iRet = setArpTable(data.Add_Static_Arp_Entry.ip.dwIpv4Addr, data.Add_Static_Arp_Entry.qwMac, static);
+      break;
+      
+    case PID_SET_DYNAMIC_ARP_CHCHE_TIMEOUT:
+      setArpTimerTime(data.Set_Dynamic_Arp_Chche_Timeout.dwTime);
+      iRet = 1;
+      break;
+
+    case PID_CLEAR_DYNAMIC_ARP_CHCHE_TIMEOUT:
+      initArpTimerTime();
+      iRet = 1;
+      break;
+      
+    case PID_DEL_STATIC_ARP_ENTRY:
+      clearArpTable(data.Del_Static_Arp_Entry.ip.dwIpv4Addr, data.Del_Static_Arp_Entry.qwMac);
+      iRet = 1;
+      break;
+
+    default:
+      break;
+  }       
+  
+  return iRet;
+}
+
+/// <processPacketData>
+// process when GID:ICMPv4 of TestAbility protocol received
+// ret 1:succeed 0:failed
+int procGidICMPv4(struct _Token_Testabilty data)
+{ 
+  int iRet;
+  iRet = 0;
+  
+  switch(data.TestabilityMsg.Header.pid)
+  {
+    case PID_ECHO_REQUEST:
+      iRet = configToSendIcmpv4(data.Echo_Request.ipxaddr.dwIpv4Addr, ICMPv4_Type_Echo_Request, data.Echo_Request.data.bData, data.Echo_Request.data.wLength);
+      break;
+    case PID_RECEIVE_AND_FORWARD:
+      iRet = recieveAndFowardICMP(data);
+    default:
+      break;
+  }        
+  
+  return iRet;
+}
+
+/// <processPacketData>
+// process when GID:General of TestAbility protocol received
+// ret 1:succeed 0:failed
+int procGidGeneral(struct _Token_Testabilty recvData , struct _Token_Testabilty sendData)
+{ 
+  int iRet;
+  iRet = 0;
+  
+  switch(recvData.TestabilityMsg.Header.pid)
+  {
+    case PID_START_TEST:
+      iRet = setTestAbilityState(TestAbility_State_Run);
+      if(iRet == 1)
+      {
+        initUDPSocketArray();
+        initTCPSocketArray();
+      }
+      initICMPv4Fwd();
+      break;
+    case PID_END_TEST:
+      iRet = setTestAbilityState(TestAbility_State_Idle);
+      if(iRet == 1)
+      {
+        closeUDPSocketArray();
+        closeTCPSocketArray();
+        initDUT();
+      initICMPv4Fwd();
+      }
+      break;
+    case PID_GET_VERSION:
+      iRet = makeGetVersion(sendData);
+      break;
+    default:
+      break;
+  }
+  
+  return iRet;
+}
+
+
+/// <processPacketData>
+// process when GID:ETH of TestAbility protocol received
+// ret 1:succeed 0:failed
+int procGidETH(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{ 
+  int iRet;
+  iRet = 0;
+  
+  switch(recvData.TestabilityMsg.Header.pid)
+  {
+    case PID_ETH_INTERFACE_UP:
+      iRet = interfaceUpETH(recvData, sendData);
+      break;
+    case PID_ETH_INTERFACE_DOWN:
+      iRet = interfaceDownETH(recvData, sendData);
+      break;
+    default:
+      break;
+  }
+
+  return iRet;
+}
+
+/// <sendPacket>
+// construct TestAbility responce packet handle
+// ret 1:succeed 0:failed
+// ##### vjttak
+// the default response packet length (data.TestabilityMsg.Header.dwLen) set by the function 
+// PrepareResMsgHeader()
+// #####
+int constructTestAbilityResPacket(struct _Token_Testabilty data, long lPacketHandle)
+{
+  long lParamsLen;
+  byte bTestabilityHeader[kTESTABILITY_HEADER_SIZE];
+  
+  //creat testability message header data and set the header to UDP payload
+  makeTestAbilityHeader(data, bTestabilityHeader);
+  constructUdpPayload(bTestabilityHeader, elCount(bTestabilityHeader), lPacketHandle);  
+  
+  // testability message response with parameters
+  lParamsLen = data.TestabilityMsg.Header.dwLen - kTESTABILITY_PARAMETER_SIZE_OFFSET;
+  if(lParamsLen > 0)
+  {
+    // Add parameters to UDP payload
+    constructUdpPayloadAdd(data.TestabilityMsg.bParameters, lParamsLen, 
+                            lPacketHandle, kTESTABILITY_HEADER_SIZE);
+  }
+  
+  return 1;
+}
+
+/// <TestAbilityState>
+// set testability state
+// ret 1:succeed 0:failed
+int setTestAbilityState(enum TestAbility_State state)
+{
+  // check invalid state
+  if(state == TestAbility_State_Invalid)
+  {
+    // testability state error
+    return 0;
+  } 
+    
+  // set
+  gTestAbilityState = state;
+  
+  return 1;
+}
+
+/// <HelperFunctions>
+// set the Result ID from the return value of functions
+void setResultIDFromReturnVal(struct _Token_Testabilty data, int iRet)
+{
+  if(iRet == 1)
+  {
+    data.TestabilityMsg.Header.rid = RID_E_OK;
+  }
+  else
+  {
+    data.TestabilityMsg.Header.rid = RID_E_NOK;
+  }
+}
+
+/// <HelperFunctions>
+void PrepareResMsgHeader(struct _Testabilty_Message recvMsg, struct _Testabilty_Message sendMsg)
+{
+  sendMsg.Header.wSid = recvMsg.Header.wSid;
+  sendMsg.Header.bEvb = 0;
+  sendMsg.Header.gid = recvMsg.Header.gid;
+  sendMsg.Header.pid = recvMsg.Header.pid;
+  sendMsg.Header.dwLen = (kTESTABILITY_HEADER_SIZE - kTESTABILITY_PARAMETER_SIZE_OFFSET); //default 8
+  sendMsg.Header.bProtoVersion = kTESTABILITY_PROTOCOL_VERSION;
+  sendMsg.Header.bIfVersion = kTESTABILITY_INTERFACE_VERSION;
+  sendMsg.Header.rid = RID_Invalid;
+  sendMsg.Header.tid = TID_RESPONSE;  
+}
+
+/// <HelperFunctions>
+void initResMsgHeader(struct _Testabilty_Message_Header header, enum Service_Group gID, enum Service_Primitive pID, enum Result_ID rID)
+{
+  // init header
+  initMsgHeader(header);
+  
+  // set response parameter
+  header.gid = (enum Service_Group)gID;
+  header.pid = (enum Service_Primitive)pID;
+  header.rid = (enum Result_ID)rID;
+  header.tid = TID_RESPONSE;  
+}
+
+/// <HelperFunctions>
+void initMsgHeader(struct _Testabilty_Message_Header header)
+{
+  header.wSid = kTESTABILITY_SERVICEID_DEFAULT;
+  header.bEvb = 0;
+  header.gid = GID_Invalid;
+  header.pid = PID_Invalid;
+  header.dwLen = (kTESTABILITY_HEADER_SIZE - kTESTABILITY_PARAMETER_SIZE_OFFSET); //default 8
+  header.bProtoVersion = kTESTABILITY_PROTOCOL_VERSION;
+  header.bIfVersion = kTESTABILITY_INTERFACE_VERSION;
+  header.rid = RID_E_NOK;
+  header.tid = TID_Invalid;  
+}
+
+/// <HelperFunctions>
+void InitEventMsgHeader(struct _Testabilty_Message_Header header, enum Service_Group gID, enum Service_Primitive pID, enum Result_ID rID)
+{
+  header.wSid = kTESTABILITY_SERVICEID_DEFAULT;
+  header.bEvb = 1;
+  header.gid = (enum Service_Group)gID;
+  header.pid = (enum Service_Primitive)pID;
+  header.dwLen = (kTESTABILITY_HEADER_SIZE - kTESTABILITY_PARAMETER_SIZE_OFFSET); //default 8
+  header.bProtoVersion = kTESTABILITY_PROTOCOL_VERSION;
+  header.bIfVersion = kTESTABILITY_INTERFACE_VERSION;
+  header.rid = (enum Result_ID)rID;
+  header.tid = TID_EVENT;  
+}
+
+/// <sendPacket/constructPacket>
+//
+// write RECEIVE_AND_FORWARD parameters to buffer
+// 
+void makeTestabilityForwardParams(struct _EVENT_RECV_FWD evRecvFwd, byte bBuffer[], dword dwOffset, enum IPv4_Protocol protocol)
+{
+ 
+  //write full len, source port and IP address length
+  bBuffer.word(dwOffset) = swapWord(evRecvFwd.wFullLen);
+  dwOffset += 2;
+  
+  if(protocol == IPv4_Prot_UDP) // source port and source IP are only contained in UDP Receive and Forward event
+  {  
+    bBuffer.word(dwOffset) = swapWord(evRecvFwd.wSrcPort);
+    dwOffset += 2;
+    bBuffer.word(dwOffset) = swapWord(evRecvFwd.ip.wAddrLength);
+    dwOffset += 2;
+    
+    //write IP address
+    if(evRecvFwd.ip.wAddrLength == kIPv4_ADDRESS_LENGTH_SIZE)
+    {
+      //bBuffer.dword(dwOffset) = swapDWord(evRecvFwd.ip.dwIpv4Addr);
+      bBuffer.dword(dwOffset) = evRecvFwd.ip.dwIpv4Addr;
+      dwOffset += kIPv4_ADDRESS_LENGTH_SIZE;
+    }
+    else if(evRecvFwd.ip.wAddrLength == kIPv6_ADDRESS_LENGTH_SIZE)
+    {
+      memcpy_off(bBuffer, dwOffset, evRecvFwd.ip.ipv6Addr, 0, kIPv6_ADDRESS_LENGTH_SIZE);
+      dwOffset += kIPv6_ADDRESS_LENGTH_SIZE;
+    }
+  }
+  
+  // write Payload length and data
+  bBuffer.word(dwOffset) = swapWord(evRecvFwd.payload.wLength);
+  dwOffset += 2;
+  
+  memcpy_off(bBuffer, dwOffset, evRecvFwd.payload.bData, 0, evRecvFwd.payload.wLength);
+  
+}
+
+/// <sendPacket/constructPacket>
+//
+// write RECEIVE_AND_FORWARD parameters to buffer
+// 
+void makeTestabilityForwardICMPv4Params(struct _EVENT_RECV_FWD_ICMPv4 evRecvFwd, byte bBuffer[], dword dwOffset)
+{
+  long lIdx;;
+  
+  //write source IP address length
+  bBuffer.word(dwOffset) = swapWord(evRecvFwd.srcip.wAddrLength);
+  dwOffset += 2;
+  
+  //write source IP address
+  bBuffer.dword(dwOffset) = evRecvFwd.srcip.dwIpv4Addr;
+  dwOffset += kIPv4_ADDRESS_LENGTH_SIZE;
+  
+  //write destination IP address length
+  bBuffer.word(dwOffset) = swapWord(evRecvFwd.dstip.wAddrLength);
+  dwOffset += 2;
+  //write destination IP address
+  bBuffer.dword(dwOffset) = evRecvFwd.dstip.dwIpv4Addr;
+  dwOffset += kIPv4_ADDRESS_LENGTH_SIZE;
+
+  // write ICMP type
+  bBuffer.byte(dwOffset) = evRecvFwd.bType;
+  dwOffset++;
+  // write ICMP code
+  bBuffer.byte(dwOffset) = evRecvFwd.bCode;
+  dwOffset++;
+  
+  // write ICMP checksum
+  bBuffer.word(dwOffset) = swapword(evRecvFwd.wCheckSum);
+  dwOffset += 2;
+  
+  // write ICMP data
+  for(lIdx = 0; lIdx < evRecvFwd.payload.wLength; lIdx++)
+  {
+    bBuffer.byte(dwOffset + lIdx) = evRecvFwd.payload.bData[lIdx];
+  }
+  
+}
+
+
+/// <sendPacket/constructPacket>
+//
+// write LISTEN_AND_ACCEPT parameters to buffer
+// 
+void makeTestabilityLisAndAccParams(struct _EVENT_PARAMS_LISTEN_ACCEPT data, byte bBuffer[], dword dwOffset)
+{
+  //write data, source port and IP address length
+  bBuffer.word(dwOffset) = swapWord(data.wListenSocket);
+  dwOffset += 2;
+  bBuffer.word(dwOffset) = swapWord(data.wNewSocketId);
+  dwOffset += 2;
+  bBuffer.word(dwOffset) = swapWord(data.wPort);
+  dwOffset += 2;
+  bBuffer.word(dwOffset) = swapWord(data.ip.wAddrLength);
+  dwOffset += 2;
+  
+  //write IP address
+  if(data.ip.wAddrLength == kIPv4_ADDRESS_LENGTH_SIZE)
+  {
+    bBuffer.dword(dwOffset) = /*swapDWord(data.ip.dwIpv4Addr)*/data.ip.dwIpv4Addr;
+  }
+  else if(data.ip.wAddrLength == kIPv6_ADDRESS_LENGTH_SIZE)
+  {
+    memcpy_off(bBuffer, dwOffset, data.ip.ipv6Addr, 0, kIPv6_ADDRESS_LENGTH_SIZE);
+    dwOffset += kIPv6_ADDRESS_LENGTH_SIZE;
+  }
+}
+
+/// <processPacketData>
+// process when GID:SOMEIP of TestAbility protocol received
+// ret 1:succeed 0:failed
+int procGidSOMEIP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{ 
+  int iRet;
+  iRet = 0;
+  
+  switch(recvData.TestabilityMsg.Header.pid)
+  {
+    case PID_SOMEIP_START_SERVICE:
+      iRet = startServiceSOMEIP(recvData, sendData);
+      break;
+    case PID_SOMEIP_STOP_SERVICE:
+      iRet = stopServiceSOMEIP(recvData, sendData);
+      break;
+    case PID_SOMEIP_TRIGGER_EVENT:
+      iRet = triggerEventSOMEIP(recvData, sendData);
+      break;
+    default:
+      break;
+  }
+  
+  return iRet;
+}
+
+/// <processPacketData>
+// process when GID:DHCP of TestAbility protocol received
+// ret 1:succeed 0:failed
+int procGidDHCP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{ 
+  int iRet;
+  iRet = 0;
+  
+  switch(recvData.TestabilityMsg.Header.pid)
+  {
+    case PID_DHCP_INIT_CLIENT:
+      iRet = initClientDHCP(recvData, sendData);
+      break;
+    case PID_DHCP_STOP_CLIENT:
+      iRet = stopClientDHCP(recvData, sendData);
+      break;
+    case PID_DHCP_SETOPTION:
+      iRet = setOptionDHCP(recvData, sendData);
+      break;
+    default:
+      break;
+  }
+
+  return iRet;
+}
+
+/// <sendPacket/constructPacket>
+//
+// write parameters to buffer
+// 
+void makeTestabilityCallReceiveParams(struct _RES_CALL_RECEIVE res, byte bBuffer[], dword dwOffset)
+{
+//  int i;
+  
+  //write full len, source port and IP address length
+  bBuffer.word(dwOffset) = swapWord(res.wSocketId);
+  dwOffset += 2;
+    
+  // write Payload length
+  bBuffer.word(dwOffset) = swapWord(res.data.wLength);
+  dwOffset += 2;
+  
+  // write Payload data
+  memcpy_off(bBuffer, dwOffset, res.data.bData, 0, res.data.wLength);  
+  dwOffset += res.data.wLength;
+}

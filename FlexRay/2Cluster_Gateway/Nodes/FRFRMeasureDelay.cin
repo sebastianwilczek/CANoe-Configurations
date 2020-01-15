@@ -1,0 +1,220 @@
+/*@@includes:*/
+includes
+{
+#include "Symbol_POC_Error_Write.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  int gMeasureDelayDebugLevel = 1; // 0 - 3
+
+  word frame1_idx = 1;
+  byte frame1_chanIdx = 0;
+  char frame1_name[50] = "Routing Delay 'EngineData':";
+  word frame2_idx = 2;
+  byte frame2_chanIdx = 1;
+  char frame2_name[50] = "Routing Delay 'GearBoxInfo':";
+
+  struct tFrameTime {
+    qword   mRcvTime_1;
+    byte    mCycle_1;
+    qword   mRcvTime_2;
+    byte    mCycle_2;
+    qword   mSndTime;
+    dword   mCnt;
+    qword   mRoutingDelaySum;
+  };
+
+  int gClusterPOCNormal[2] = { 0, 0 };
+
+  const int cMaxMeasureFrames = 4;
+  struct tFrameTime frameTimes[2][cMaxMeasureFrames];
+
+  msTimer updateDisplayTimer;
+  const int cUpdateDisplayTime = 500; // [ms]
+
+  const dword cNS2S  = 1000000000;
+  const dword cNS2MS = 1000000;
+  const dword cNS2US = 1000;
+  const dword cUS2MS = 1000;
+}
+/*@@end*/
+
+/*@@caplFunc:LogFrame(byte,word,byte,byte,qword,byte):*///function
+void LogFrame (byte srcChan, word slot, byte cycle, byte chanMask, qword frameTime, byte dataCycle)
+{
+  int i;
+  byte dstChan;
+  qword delay;
+  srcChan -= 1;
+  if ((srcChan < 0) || (srcChan > 1))
+    return;
+  dstChan = (1 - srcChan);
+  for (i=0; (i<cMaxRcvFrames)&&(i<cMaxMeasureFrames); i++)
+  {
+    if(    (slot == rcvTable[srcChan][i].mSlotID)
+        && (chanMask == rcvTable[srcChan][i].mChannelMask)
+        && ((cycle % rcvTable[srcChan][i].mCycleRepetition) == rcvTable[srcChan][i].mCycleOffset)
+        && (gClusterPOCNormal[srcChan] != 0) )
+    {
+      // this is the original source frame:
+
+      if (gMeasureDelayDebugLevel >= 3)
+        write("%.6f: ##### Fr%d.(%2d,%2d)[%c]: org logged.", (double)frameTime/cNS2S, srcChan+1, slot, cycle, (chanMask == 1 ? 'A' : 'B'));
+
+      if (255 == frameTimes[srcChan][i].mCycle_1)
+      {
+        frameTimes[srcChan][i].mRcvTime_1 = frameTime;
+        frameTimes[srcChan][i].mCycle_1 = cycle;
+      }
+      else if (255 == frameTimes[srcChan][i].mCycle_2)
+      {
+        frameTimes[srcChan][i].mRcvTime_2 = frameTime;
+        frameTimes[srcChan][i].mCycle_2 = cycle;
+      }
+      else
+      {
+        if (gMeasureDelayDebugLevel >= 2)
+          write("%.6f: ##### Fr%d.(%2d,%2d)[%c]: frame not yet forwarded!", (double)frameTime/cNS2S, srcChan+1, slot, cycle, (chanMask == 1 ? 'A' : 'B'));
+      }
+      break;
+    }
+    if(    (slot == rcvTable[dstChan][i].mSlotID)
+        && (chanMask == rcvTable[dstChan][i].mChannelMask)
+        && ((cycle % rcvTable[dstChan][i].mCycleRepetition) == rcvTable[dstChan][i].mCycleOffset)
+        && (gClusterPOCNormal[dstChan] != 0) )
+    {
+      // this is the forwarded destination frame:
+
+      if (gMeasureDelayDebugLevel >= 3)
+        write("%.6f: ##### Fr%d.(%2d,%2d)[%c]: fwd logged.", (double)frameTime/cNS2S, srcChan+1, slot, cycle, (chanMask == 1 ? 'A' : 'B'));
+
+      if (dataCycle == frameTimes[dstChan][i].mCycle_1)
+      {
+        frameTimes[dstChan][i].mSndTime = frameTime;
+        frameTimes[dstChan][i].mCnt++;
+        delay = (frameTimes[dstChan][i].mSndTime - frameTimes[dstChan][i].mRcvTime_1) / cNS2US;
+        frameTimes[dstChan][i].mRoutingDelaySum += delay;
+        frameTimes[dstChan][i].mCycle_1 = 255;
+
+        if ((srcChan == frame1_chanIdx) && (i == frame1_idx))
+           @sysvar::FRFRDelay::RoutingDelay_1_2 = (double)delay / cUS2MS;
+        if ((srcChan == frame2_chanIdx) && (i == frame2_idx))
+           @sysvar::FRFRDelay::RoutingDelay_2_1 = (double)delay / cUS2MS;
+      }
+      else if (dataCycle == frameTimes[dstChan][i].mCycle_2)
+      {
+        frameTimes[dstChan][i].mSndTime = frameTime;
+        frameTimes[dstChan][i].mCnt++;
+        delay = (frameTimes[dstChan][i].mSndTime - frameTimes[dstChan][i].mRcvTime_2) / cNS2US;
+        frameTimes[dstChan][i].mRoutingDelaySum += delay;
+        frameTimes[dstChan][i].mCycle_2 = 255;
+
+        if ((srcChan == frame1_chanIdx) && (i == frame1_idx))
+           @sysvar::FRFRDelay::RoutingDelay_1_2 = (double)delay / cUS2MS;
+        if ((srcChan == frame2_chanIdx) && (i == frame2_idx))
+           @sysvar::FRFRDelay::RoutingDelay_2_1 = (double)delay / cUS2MS;
+      }
+      else
+      {
+        if (gMeasureDelayDebugLevel >= 2)
+          write("%.6f: ##### Fr%d.(%2d,%2d)[%c]: data cycle %2d, expected %2d or %2d", (double)frameTime/cNS2S, srcChan+1, slot, cycle, (chanMask == 1 ? 'A' : 'B'), dataCycle, frameTimes[dstChan][i].mCycle_1, frameTimes[dstChan][i].mCycle_2);
+        //stop();
+      }
+      break;
+    }
+  }
+}
+/*@@end*/
+
+/*@@timer:updateDisplayTimer:*/
+on timer updateDisplayTimer
+{
+  if (1)
+  {
+    // show average delays:
+
+    if (frameTimes[frame1_chanIdx][frame1_idx].mCnt > 0)
+      @sysvar::FRFRDelay::AvgRoutingDelay_1_2 = (double)frameTimes[frame1_chanIdx][frame1_idx].mRoutingDelaySum / (frameTimes[frame1_chanIdx][frame1_idx].mCnt * cUS2MS);
+
+    if (frameTimes[frame2_chanIdx][frame2_idx].mCnt > 0)
+      @sysvar::FRFRDelay::AvgRoutingDelay_2_1 = (double)frameTimes[frame2_chanIdx][frame2_idx].mRoutingDelaySum / (frameTimes[frame2_chanIdx][frame2_idx].mCnt * cUS2MS);
+  }
+  else
+  {
+    // show current delays:
+
+    @sysvar::FRFRDelay::AvgRoutingDelay_1_2 = @sysvar::FRFRDelay::RoutingDelay_1_2;
+    @sysvar::FRFRDelay::AvgRoutingDelay_2_1 = @sysvar::FRFRDelay::RoutingDelay_2_1;
+  }
+
+  setTimer(updateDisplayTimer, cUpdateDisplayTime);
+}
+/*@@end*/
+
+/*@@caplFunc:InitFrameDelayMeasurement():*///function
+void InitFrameDelayMeasurement ()
+{
+  int i;
+
+  SysSetVariableString(sysvar::FRFRDelay::ObservedFrame_1_2, frame1_name);
+  SysSetVariableString(sysvar::FRFRDelay::ObservedFrame_2_1, frame2_name);
+
+  for (i=0; i<cMaxMeasureFrames; i++)
+  {
+    frameTimes[0][i].mCycle_1 = 255;
+    frameTimes[0][i].mCycle_2 = 255;
+    frameTimes[0][i].mCnt = 0;
+    frameTimes[0][i].mRoutingDelaySum = 0;
+
+    frameTimes[1][i].mCycle_1 = 255;
+    frameTimes[1][i].mCycle_2 = 255;
+    frameTimes[1][i].mCnt = 0;
+    frameTimes[1][i].mRoutingDelaySum = 0;
+  }
+
+  setTimer(updateDisplayTimer, cUpdateDisplayTime);
+}
+/*@@end*/
+
+/*@@caplFunc:POCChanged(int,int,int):*///callback
+void POCChanged(int channel, int POCstate, int isOffline)
+{
+  int i, j, k;
+
+  if (gMeasureDelayDebugLevel >= 1)
+  {
+    if (isOffline == 1)
+      write("%.6f: ##### FR Cluster %d offline!", (double)TimeNowNS()/cNS2S, channel);
+    else
+      write("%.6f: ##### FR Cluster %d online!", (double)TimeNowNS()/cNS2S, channel);
+  }
+
+  k = channel - 1;
+  if ((k<0) || (k>=2)) return;
+  gClusterPOCNormal[k] = (isOffline == 1) ? 0 : 1;
+
+  for (j=0; j<2; j++)
+  {
+    if (isOffline == 1)
+    {
+      for (i=0; (i<cMaxMeasureFrames); i++)
+      {
+        frameTimes[j][i].mCycle_1 = 255;
+        frameTimes[j][i].mCycle_2 = 255;
+        frameTimes[j][i].mCnt = 0;
+        frameTimes[j][i].mRoutingDelaySum = 0;
+
+        @sysvar::FRFRDelay::RoutingDelay_1_2 = 0;
+        @sysvar::FRFRDelay::RoutingDelay_2_1 = 0;
+
+        @sysvar::FRFRDelay::AvgRoutingDelay_1_2 = 0;
+        @sysvar::FRFRDelay::AvgRoutingDelay_2_1 = 0;
+      }
+    }
+  }
+}
+/*@@end*/
+

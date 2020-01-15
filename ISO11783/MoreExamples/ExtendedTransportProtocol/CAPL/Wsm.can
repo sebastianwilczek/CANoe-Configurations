@@ -1,0 +1,318 @@
+/*@@var:*/
+variables
+{
+  //
+  // Working set master for the loader
+  //
+  // (c) 2001-2007 Vector Informatik GmbH
+  //
+
+  //
+  // Global variables for the 
+  //
+  int gLoaderPos = 0;     // Position of the loader
+  int gLoaderInc = 10;    // Increase/decrease loader position by this value
+  int gBucketPos = 0;     // Position of the bucket
+  int gBucketInc = 10;    // Increase/decrease bucket position by this value
+
+  //
+  // Global variables for communication
+  //
+  int     gAddress;                // Address of the WSM
+  char    gBus[20] = "ISO Bus 1";
+  dword   gECUHandle;              // ECU handle
+  char    gECULabel[32] = "Loader";
+  char    gECUName[8];             // Device name of this ECU
+  msTimer gChangeLocationTimer;    // Timer to change object location
+  dword   gMoveCounter;            // Counter for the move operations      
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  ecuInit(); // initialize global variables
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  ecuStartUp();
+}
+/*@@end*/
+
+/*@@caplFunc:ecuInit():*/
+//
+// Initiaialize all global variables in this function.
+//
+void ecuInit()
+{
+  //
+  // Initialize the global variables
+  //
+  gAddress        = WSM.NmStationAddress;
+  gECUHandle      = 0;
+
+  // set working set master name
+  Iso11783MakeName( gECUName,
+                    WSM.NmJ1939AAC,
+                    WSM.NmJ1939IndustryGroup,
+                    WSM.NmJ1939SystemInstance,
+                    WSM.NmJ1939System,
+                    WSM.NmJ1939Function,
+                    WSM.NmJ1939FunctionInstance,
+                    WSM.NmJ1939ECUInstance,
+                    WSM.NmJ1939ManufacturerCode,
+                    WSM.NmJ1939IdentityNumber
+                  );
+
+  // reset counter
+  gMoveCounter = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:ecuStartUp():*/
+//
+// Call this function to connect the node to the bus
+//
+void ecuStartUp()
+{
+  if (gECUHandle == 0) {
+    // create ECU handle
+    gECUHandle = Iso11783CreateECU( gBus, gECUName );
+
+    // load object pool
+    Iso11783OPSetProperty( gECUHandle, "Version", 3 );
+    Iso11783OPSetProperty( gECUHandle, "DebugLevel", 1 );
+    if (Iso11783OPLoad( gECUHandle, "IOP\\ISOBusMask.iop" ) != 0) {
+      writeDbgLevel( 1, "<%s> Error while loading Object Pool 'ISOBusMask.iop'", gECULabel );
+      stop();
+    }
+    Iso11783OPActivate( gECUHandle, 0x00 );
+
+    // start claiming
+    Iso11783ECUGoOnline( gECUHandle, gAddress );
+
+  }
+  else {
+    Write( "<%s> function 'ConnectToBus' failed, already connected", gECULabel );
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ecuShutDown():*/
+//
+// Call this function to disconnect the node from the bus
+//
+void ecuShutDown()
+{
+  if (gECUHandle != 0) {
+    Iso11783DestroyECU( gECUHandle );
+    gECUHandle = 0;
+  }
+
+}
+/*@@end*/
+
+/*@@caplFunc:utilCopyDataToPG(pg*,char[],long):*/
+//
+// Copies the data of an array to a parameter group.
+//
+utilCopyDataToPG( pg * _pg, char data[], long length )
+{
+  int i;
+
+  for( i = 0; i < length; i++ ) {
+    _pg.byte(i) = data[i];
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ecuLostAddress():*/
+//
+// The ECU lost its address. It tries to find a new address in the range
+// of 128..238. 
+//
+void ecuLostAddress()
+{
+  dword result;
+
+  // calculate new address
+  if ((gAddress < 128) || (gAddress > 238)) {
+    gAddress = 128;
+  }
+  else {
+    gAddress++;
+	if (gAddress > 238) {
+	  return;
+	}
+  }
+
+  // ecu(s) going online
+  result = Iso11783EcuGoOnline( gECUHandle, gAddress );
+  if (result) {
+    write( "<%s> GoOnline failed, result=%d", gECULabel, result );
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:Iso11783OPOnAuxiliaryInput(dword,dword,dword,dword):*///callback
+void Iso11783OPOnAuxiliaryInput( DWORD handle, DWORD objectID, DWORD value1, DWORD value2 )
+{
+}
+/*@@end*/
+
+/*@@caplFunc:Iso11783AppTxIndication(long,long,long,long):*///callback
+//
+// This function is called, if a PG is successfully sent.
+//
+DWORD Iso11783AppTxIndication(long ecuhdl, long TxPgn, long source, long dest) 
+{
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:Iso11783AppRxIndication(long,long,long,long,long):*///callback
+//
+// This function is called, if a PG is received.
+//
+dword Iso11783AppRxIndication( long ecuHandle, long src, long dst, long length, long _pgn )
+{
+  return 1;
+}
+/*@@end*/
+
+/*@@caplFunc:Iso11783AppRequestIndication(long,long,long,long,long):*///callback
+//
+// A request PGN was received
+//
+DWORD Iso11783AppRequestIndication(long ecuHdl, long source, long dest, long page, long pgNum)
+{
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:Iso11783AppErrorIndication(long,long,long,long):*///callback
+//
+// If an error occured, this function is called.
+//
+DWORD Iso11783AppErrorIndication (long ecuhdl, long errorClass, long errorCode, long addCode )
+{
+	Write( "<%s> Error 0x%x, addCode=0x%x", gECULabel, errorCode, addCode );
+
+	switch(errorCode) {
+		//
+		// Timeout errors
+		//
+		case 0x1:		// Missing CTS after RTS
+			break;
+		case 0x2:		// Peer to peer data received after timeout
+			break;
+		case 0x3:		// Broadcast data received after timeout
+			break;
+		case 0x4:		// Acknowledge missing
+			break;
+		//
+		// CAN transmission errors
+		//
+
+		//
+		// Address claiming errors
+		//
+		case 0x10:	// cannot claim address
+		  ecuLostAddress();
+		  break;
+		//
+		// misc errors
+		//
+		case 0x20:	// init error while start command
+			break;
+		case 0x30:	// to many data for non segemented transfer
+			break;
+		case 0x40:	// transmission buffer full
+			break;
+    //
+    // Transport protocol errors
+    //
+    case 0x70:  // transmission with transport protocol is aborted by receiver
+      break;
+    case 0x71:  // transmission with transport protocol is aborted by sender
+      break;
+	};
+
+	return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:Iso11783AppCmdAddrIndication(long,long):*///callback
+//
+// A commanded address PG was received.
+//
+DWORD Iso11783AppCmdAddrIndication(long ecuHdl, long length)
+{
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:Iso11783AppAddrClaimed(long):*///callback
+//
+// This function is called, if the address is successfully claimed.
+//
+DWORD Iso11783AppAddrClaimed( long ecuHandle )
+{
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:Iso11783OPOnValueChange(dword,dword):*///callback
+void Iso11783OPOnValueChange( DWORD handle, DWORD objectID )
+{
+}
+/*@@end*/
+
+/*@@caplFunc:Iso11783OPOnKeyActivation(dword,dword,dword,dword,dword):*///callback
+void Iso11783OPOnKeyActivation( DWORD handle, DWORD objectID, DWORD parentID, DWORD keyCode, DWORD activation )
+{
+}
+/*@@end*/
+
+/*@@caplFunc:Iso11783AppNmtIndication(long,long,long):*///callback
+/*
+ * A node has changed its address or claimed an address successfully
+ */
+DWORD Iso11783AppNmtIndication( LONG busHandle, LONG address, LONG state )
+{
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:Iso11783OPOnStateChange(dword,dword):*///callback
+void Iso11783OPOnStateChange ( DWORD handle, DWORD state )
+{
+  if ((gECUHandle == handle) && (state == 5)) {
+    setTimer( gChangeLocationTimer, 200 );
+  }
+}
+/*@@end*/
+
+/*@@timer:gChangeLocationTimer:*/
+on timer gChangeLocationTimer
+{
+  if (gMoveCounter < 30) {
+    Iso11783OPChangeChildLocation( gECUHandle, 10, 11,  1, 0 );
+    Iso11783OPChangeChildLocation( gECUHandle, 10, 12, -1, 0 );
+  }
+  else {
+    Iso11783OPChangeChildLocation( gECUHandle, 10, 11, -1, 0 );
+    Iso11783OPChangeChildLocation( gECUHandle, 10, 12,  1, 0 ); 
+ 
+  }  
+  gMoveCounter = gMoveCounter + 1;
+  if (gMoveCounter >= 60) {
+    gMoveCounter = 0;
+  }
+  setTimer( gChangeLocationTimer, 150 );
+}
+/*@@end*/
+

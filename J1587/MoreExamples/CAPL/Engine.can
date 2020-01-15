@@ -1,0 +1,131 @@
+/*@@var:*/
+/*
+ * Engine                                          Version 1.0
+ *
+ * Copyright 2005, Vector Informatik GmbH - All right reserved
+ *
+ * This CAPL programm demonstrates how several J1587 parameters
+ * can be transmitted with one J1587 message.
+ *
+ * History:
+ * 1.0 (Jr) Created 
+ */
+ variables
+{
+  const LONG kTxTime = 100;
+
+  J1587Param EngineSpeed              TX_EngineSpeed;
+  J1587Param EngineCoolantTemperature TX_EngineTemp;
+  J1587Param EngineOilPressure        TX_EngineOilPress;
+
+  LONG TX_EngineSpeedDelay;
+  LONG TX_EngineTempDelay;
+  LONG TX_EngineOilPressDelay;
+
+  msTimer TxTimer;
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  TX_EngineSpeed.J1587_MID    = Engine1.NmStationAddress;
+  TX_EngineTemp.J1587_MID     = Engine1.NmStationAddress;
+  TX_EngineOilPress.J1587_MID = Engine1.NmStationAddress;
+
+  TX_EngineSpeedDelay    = TX_EngineSpeed.J1587CycleTime;
+  TX_EngineTempDelay     = TX_EngineTemp.J1587CycleTime;
+  TX_EngineOilPressDelay = TX_EngineOilPress.J1587CycleTime;
+
+}
+/*@@end*/
+
+/*@@timer:TxTimer:*/
+on timer TxTimer
+{
+  J1587Param 0 txParam;
+
+  txParam.J1587_MID = Engine1.NmStationAddress;
+  txParam.DLC       = 0;
+
+  TX_EngineSpeedDelay    -= kTxTime;
+  TX_EngineTempDelay     -= kTxTime;
+  TX_EngineOilPressDelay -= kTxTime;
+
+  if (TX_EngineSpeedDelay <= 0) {
+    TX_EngineSpeed.EngineSpeed += 1;
+    TX_EngineSpeedDelay = TX_EngineSpeed.J1587CycleTime;
+    AppendParam( txParam, TX_EngineSpeed );
+  }
+
+  if (TX_EngineTempDelay <= 0) {
+    TX_EngineTemp.EngineCoolantTemperature += 1;
+    TX_EngineTempDelay = TX_EngineTemp.J1587CycleTime;
+    AppendParam( txParam, TX_EngineTemp );
+  }
+
+  if (TX_EngineOilPressDelay <= 0) {
+    TX_EngineOilPress.EngineOilPressure += 1;
+    TX_EngineOilPressDelay = TX_EngineOilPress.J1587CycleTime;
+    AppendParam( txParam, TX_EngineOilPress );
+  }
+
+  if (txParam.DLC > 0) {
+    output( txParam );
+  }
+
+  SetTimer( TxTimer, kTxTime );
+}
+/*@@end*/
+
+/*@@caplFunc:AppendParam(j1587param*,j1587param*):*///function
+/*
+ * !!! Note: This function is a workaround !!!
+ *
+ * In future a CAPL structure will be available to assemble
+ * some J1587 Parameters to a J1587 message.
+ */
+void AppendParam( J1587Param * txParam, J1587Param * param )
+{
+  int i;
+
+  if (txParam.DLC == 0) {
+    txParam.J1587_PID = param.J1587_PID;
+    txParam.DLC       = param.DLC;
+
+    for( i = 0; i < txParam.DLC; i++ ) {
+      txParam.BYTE(i) = param.BYTE(i);
+    }
+  }
+  else {
+    if (param.J1587_PID < 192) {
+      txParam.BYTE(txParam.DLC) = param.J1587_PID;
+      txParam.DLC++;
+    }
+    else if (param.J1587_PID < 254) {
+      txParam.BYTE(txParam.DLC) = param.J1587_PID;
+      txParam.DLC++;
+      txParam.BYTE(txParam.DLC) = param.DLC;
+      txParam.DLC++;
+    }
+    else {
+      return;
+    }
+
+    // copy data bytes
+    for( i = 0; i < param.DLC; i++ ) {
+      txParam.BYTE(txParam.DLC+i) = param.BYTE(i);
+    }
+
+    txParam.DLC = txParam.DLC + param.DLC;
+  }
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  SetTimer( TxTimer, kTxTime );
+}
+/*@@end*/
+

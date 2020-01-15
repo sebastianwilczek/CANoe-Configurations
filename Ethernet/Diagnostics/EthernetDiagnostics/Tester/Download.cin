@@ -1,0 +1,165 @@
+variables
+{
+  char                                                   target[32];
+  char                                                   tester[32];
+  diagRequest ExtendedDiagnosticSession_Start            sessionExtended;
+  diagRequest SeedLevel1_Request                         securitySeed;
+  diagRequest KeyLevel1_Send                             securityKey;
+  diagRequest Download_Request                           downloadRequest;
+  diagRequest Download_Transmit                          downloadTransmit;
+  diagRequest Download_Stop                              downloadStop;
+
+  long                                                   waitResult;
+
+  byte                                                   memorySpecification[8];
+  long                                                   maxBlockSize;
+  dword                                                  transmittedSize;
+
+  dword                                                  downloadSize = 0x00100000;
+  byte                                                   downloadBuffer[64 * 1024];
+  byte                                                   downloadCounter;
+  
+  // This timeout is used just to force CANoe to continue, i.e. normally a TestWaitForDiag..
+  // function will return much earlier due to diagnostic level timing!
+  const                                                  cApplicationTimeout = 5000;
+}
+
+on diagResponse Download_Request
+{
+  byte  lengthFormatIdentifier;
+  dword blockSpecSize;
+  byte  blockSpec[4];
+  long  i;
+
+  if ( DiagIsNegativeResponse( this))
+  {
+    TestCaseFail();
+    return;
+  }
+  
+  lengthFormatIdentifier = DiagGetParameter( this, "lengthFormatIdentifier");
+  blockSpecSize = ( lengthFormatIdentifier & 0xF0) >> 4;
+  
+  if ( blockSpecSize > 4)
+  {
+    TestCaseFail();
+    return;
+  }
+  
+  if ( DiagGetParameterRaw( this, "maxNumberOfBlockLength", blockSpec, elcount( blockSpec)) != 0)
+  {
+    TestCaseFail();
+    return;
+  }
+  
+  maxBlockSize = 0;
+  for ( i = 0; i < blockSpecSize; ++i)
+  {
+    maxBlockSize <<= 8;
+    maxBlockSize += blockSpec[i];
+  }
+
+  writeLineEx( 0, 1, "%s: Received download response with max block size of 0x%08X bytes", tester, maxBlockSize);
+
+  if ( maxBlockSize > elcount( downloadBuffer))
+  {
+    maxBlockSize = elcount( downloadBuffer);
+  }
+
+  TestSupplyTextEvent( "maxBlockSizeAvail");
+}
+
+void Download()
+{
+  TestModuleTitle ("Download Tester");
+  TestModuleDescription ("Test the diagnostic download services.");
+
+  TCDownload();
+}
+
+testcase TCDownload()
+{
+   long ret;
+   
+  TestCaseTitle("Download", "Download data to an ECU");
+
+  ret=DiagSetTarget( target);
+  if (0 !=ret) {
+    write("DiagSetTarget(""%s"") failed with error: %ld", target, ret);
+  }
+  else {
+    write("DiagSetTarget(""%s"") success!", target);
+  }
+  ret=DiagStopTesterPresent();
+  if (0 !=ret) {
+    write("DiagStopTesterPresent() failed with error: %ld", ret);
+  }
+  else {
+    write("DiagStopTesterPresent() success!");
+  }
+  
+  TestStep( "Test Step", "Start extended programming session");
+  DiagSendRequest( sessionExtended);
+  if ( TestWaitForDiagResponse( sessionExtended, cApplicationTimeout) <= 0)    { TestCaseFail(); return;}
+  if ( DiagGetLastResponseCode( sessionExtended) != -1)                       { TestCaseFail(); return;}
+  TestStepPass( "Test Step", "Extended programming session started.");
+
+  TestStep( "Test Step", "Request security seed");
+  DiagSendRequest( securitySeed);
+  if ( TestWaitForDiagResponse( securitySeed, cApplicationTimeout) <= 0)       { TestCaseFail(); return;}
+  if ( DiagGetLastResponseCode( securitySeed) != -1)                          { TestCaseFail(); return;}
+  TestStepPass( "Test Step", "Got security seed.");
+
+  TestStep( "Test Step", "Write security key");
+  DiagSetParameter( securityKey, "SecurityKey", 0xb7f5);
+  DiagSendRequest( securityKey);
+  if ( TestWaitForDiagResponse( securityKey, cApplicationTimeout) <= 0)        { TestCaseFail(); return;}
+  if ( DiagGetLastResponseCode( securityKey) != -1)                           { TestCaseFail(); return;}
+  TestStepPass( "Test Step", "Security key written");
+
+  TestStep( "Test Step", "Request download session");
+  maxBlockSize = 0;
+  memorySpecification[7] = ( byte)( ( downloadSize & 0x000000FF) >>  0);
+  memorySpecification[6] = ( byte)( ( downloadSize & 0x0000FF00) >>  8);
+  memorySpecification[5] = ( byte)( ( downloadSize & 0x00FF0000) >> 16);
+  memorySpecification[4] = ( byte)( ( downloadSize & 0xFF000000) >> 24);
+  DiagSetParameter( downloadRequest, "dataFormatIdentifier", 0);
+  DiagSetParameter( downloadRequest, "addressAndLengthFormatIdentifier", 0x44);
+  DiagSetParameterRaw( downloadRequest, "memoryAddressAndSize", memorySpecification, elcount( memorySpecification));
+  DiagSendRequest( downloadRequest);
+  if ( TestWaitForDiagResponse( downloadRequest, cApplicationTimeout) <= 0)    { TestCaseFail(); return;}
+  if ( TestWaitForTextEvent( "maxBlockSizeAvail", cApplicationTimeout) <= 0)   { TestCaseFail(); return;}
+  if ( DiagGetLastResponseCode( downloadRequest) != -1)                       { TestCaseFail(); return;}
+  maxBlockSize -= 3;
+  if ( 0 > maxBlockSize)                                                      { TestCaseFail(); return;}
+  TestStepPass( "Test Step", "Download session activated.");
+
+  writeLineEx( 0, 1, "%s: Using block size %d bytes", tester, maxBlockSize);
+
+  TestStep( "Test Step", "Download data");
+  transmittedSize = 0;
+  downloadCounter = 0;
+  while ( transmittedSize < downloadSize)
+  {
+    if ( downloadSize - transmittedSize < maxBlockSize)
+    {
+      maxBlockSize = downloadSize - transmittedSize;
+    }
+    ++downloadCounter;
+    DiagSetParameter( downloadTransmit, "blockSequenceCounter", downloadCounter);
+    DiagSetParameterRaw( downloadTransmit, "transferRequestParameterRecord", downloadBuffer, maxBlockSize);
+    DiagSendRequest( downloadTransmit);
+    if ( TestWaitForDiagResponse( downloadTransmit, cApplicationTimeout) <= 0) { TestCaseFail(); return;}
+    if ( DiagGetLastResponseCode( downloadTransmit) != -1)                    { TestCaseFail(); return;}
+    transmittedSize += maxBlockSize;
+  }
+  TestStepPass( "Test Step", "Download data completed.");
+
+  TestStep( "Test Step", "Request download stop");
+  DiagSendRequest( downloadStop);
+  if ( TestWaitForDiagResponse( downloadStop, cApplicationTimeout) <= 0)       { TestCaseFail(); return;}
+  if ( DiagGetLastResponseCode( downloadStop) != -1)                          { TestCaseFail(); return;}
+  TestStepPass( "Test Step", "Download stopped.");
+
+  writeLineEx( 0, 1, "%s: Flashed %d bytes", tester, downloadSize);
+}

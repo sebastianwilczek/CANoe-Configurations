@@ -1,0 +1,371 @@
+/*@!Encoding:1252*/
+includes
+{
+#include "C2x_Basics.cin"
+}
+
+variables
+{
+  msTimer tim_DelayStart;
+  msTimer tim_SendSimpleMsg;
+  msTimer tim_TrafficLightStateCheck;
+  
+  const kCAM_CycleTime = 500; // 500 ms
+  int   gSendSpatFlag          = 1;   // activate/deactivate sending Spat
+
+  long gSpatPacketHandle;
+
+  struct WLANData gWlanData = { durationId=0, address1={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, address2={0,0,0,0,0,0}, address3={0,0,0,0,0,0},
+                                address4={0,0,0,0,0,0}, sequenceControl=0,qos=0 };
+  struct EthData           gEthData = { source={0,0,0,0,0,9}, dest={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, ethType=0x0707 };
+  struct CnhData           gCnhData;
+  struct GeoNetworkingData gGeoData;
+
+  int gTrafficLightActState  = 0;
+  int gTrafficLightNextState = 1;
+  int gTimeToSwitchState     = 8000;
+
+  enum SignalTypes { gStateRed=2, gStateYellow=1, gStateGreen=0 } gSignalType;
+
+  float gRSULatitude  = 48.825366;
+  float gRSULongitude = 9.095848;
+  
+  int64 gItsTimeStamp         = 0; // UNIX time since 1970
+  dword gUTCsince1970Mod32    = 0;
+}
+
+
+on key '0'
+{
+	if (gSendSpatFlag == 0)
+  {
+    gSendSpatFlag = 1;
+  }
+  else
+  {
+    gSendSpatFlag = 0;
+  }
+  write ("gSendSpatFlag: %i",gSendSpatFlag);
+}
+on start
+{
+  // register the receive callback
+  C2xRegisterCallback(0, "OnC2xPacket");
+
+  // init application
+  ApplInit();
+
+  // delay start because of initialization of hardware
+  setTimer(tim_DelayStart,500);
+}
+
+on timer tim_DelayStart
+{
+  StartRSU();
+}
+
+void OnC2xPacket (LONG channel, LONG dir, LONG radioChannel, LONG signalStrength, LONG sigQuality, LONG packet)
+{
+  BYTE rx_data[300];
+  LONG rxLength;
+
+  float latitude;
+  float longitude;
+
+  rxLength = C2xGetThisData (0,elCount(rx_data),rx_data);
+
+  // add code here to work with received message
+
+}
+
+/****************************************************/
+//
+// call this function to start the RSU
+//
+/****************************************************/
+void StartRSU ()
+{
+  // init traffic light state
+  @sysvar::TrafficLightState = 0;
+
+  // check the state of the traffic light
+  setTimer(tim_TrafficLightStateCheck, 0);
+
+  // start sending traffic light info
+  setTimer(tim_SendSimpleMsg, 10);
+}
+
+on timer tim_SendSimpleMsg
+{
+  // send the simple message cyclic
+  SendSpat();
+
+  setTimer (tim_SendSimpleMsg,kCAM_CycleTime);
+
+}
+
+/****************************************************/
+//
+// functions sets the internal data of the 
+// Common Network Header protocol
+//
+/****************************************************/
+void SetCnhData ()
+{
+  DWORD actTime;
+  gCnhData.version          = 0;
+  gCnhData.nextHeader       = 2; // BTP-B
+  gCnhData.ht               = 5; // 4=Topologically scoped broadcast
+  gCnhData.hst              = 0;
+  gCnhData.reserved         = 0;
+  gCnhData.flags            = 2;
+  gCnhData.payloadLength    = 0;
+  gCnhData.tc_Reserved      = 0;
+  gCnhData.tc_Relevance     = 1;
+  gCnhData.tc_Reliability   = 1;
+  gCnhData.tc_Latency       = 1;
+  gCnhData.hopLimit         = 1;
+
+  gCnhData.lpv.lpvNetAddr.manuallyFlag   = 0;
+  gCnhData.lpv.lpvNetAddr.stationType    = 8; // RSU traffic light
+  gCnhData.lpv.lpvNetAddr.stationSubType = 0;
+  gCnhData.lpv.lpvNetAddr.countryCode    = 49;
+  gCnhData.lpv.lpvNetAddr.addr[5]        = gEthData.source[5]; // use the MAC Id
+  gCnhData.lpv.timeStamp        = gUTCsince1970Mod32;
+
+  gCnhData.lpv.latitude         = gRSULatitude  * 10 * 1000000;
+  gCnhData.lpv.longitude        = gRSULongitude * 10 * 1000000;
+  gCnhData.lpv.speed            = 0;
+  gCnhData.lpv.heading          = 90*10;
+  gCnhData.lpv.altitude         = 0;
+  gCnhData.lpv.timeAccuracy     = 0;
+  gCnhData.lpv.positionAccuracy = 0;
+  gCnhData.lpv.speedAccuracy    = 0;
+  gCnhData.lpv.headingAccuracy  = 0;
+  gCnhData.lpv.altitudeAccuracy = 0;
+
+}
+
+on timer tim_TrafficLightStateCheck
+{
+  gTimeToSwitchState -= 500;
+  @sysvar::TrafficLightTimeToSwitch = (float)gTimeToSwitchState/1000;
+
+  if (gTimeToSwitchState <= 0)
+  {
+    CalcNewLightState();
+  }
+
+  setTimer (tim_TrafficLightStateCheck, 500);
+}
+
+/***************************************************/
+//
+// function calculates the next traffic light state
+//
+/***************************************************/
+void CalcNewLightState ()
+{
+  if (gTrafficLightNextState == gStateRed)
+  {
+    gTimeToSwitchState = 6000;
+    gTrafficLightActState  = gStateRed;
+    gTrafficLightNextState = gStateYellow;
+  }
+  else if (gTrafficLightNextState == gStateGreen)
+  {
+    gTimeToSwitchState = 8000;
+    gTrafficLightActState  = gStateGreen;
+    gTrafficLightNextState = gStateYellow;
+  }
+  else if (gTrafficLightNextState == gStateYellow)
+  {
+    gTimeToSwitchState = 2000;    
+    if (gTrafficLightActState == gStateGreen)
+    {
+      // turn to red
+      gTrafficLightActState  = gStateYellow;
+      gTrafficLightNextState = gStateRed;  
+    }
+    else if (gTrafficLightActState == gStateRed)
+    {
+      // turn to green
+      gTrafficLightActState  = gStateYellow;
+      gTrafficLightNextState = gStateGreen;  
+    }
+  }
+  
+  @sysvar::TrafficLightState = gTrafficLightActState;
+
+  gSignalType = (enum SignalTypes)gTrafficLightActState;
+}
+
+/***************************************************/
+//
+// create the simple message packet and sends it
+//
+/***************************************************/
+int SetFrameData ()
+{
+  BYTE data[100];
+  BYTE payloadLength;
+  long errCode;
+  char gErrorString[1024];
+
+  if (gSpatPacketHandle)
+  {
+    // set the packet data in data structs
+    SetWLANData();
+    SetCnhData();
+
+    // set WLAN data from struct to packet
+    if (SetPacketData_WLAN(gSpatPacketHandle, gWlanData) != 0)
+    {
+      return 1;
+    }
+    // set data from struct to packet
+    if (SetPacketData_ETH(gSpatPacketHandle, gEthData) != 0)
+    {
+      return 1;
+    }
+    if (SetPacketData_CNH(gSpatPacketHandle, gCnhData) != 0)
+    {
+      return 1;
+    }
+
+    if (SetPacketData_BTP(gSpatPacketHandle, 6002,1,0) != 0)
+    {
+      return 1;
+    }
+
+    if (SetSpatMessageParams(gSpatPacketHandle) != 0)
+    {
+      C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+      write("SetToken failed %s for Spat message", gErrorString);  
+      return 1;  
+    }
+  }
+  else
+  {
+    write ("packet cannot be initialized: stopping measurement");
+    stop();
+    return 1;
+  }
+
+  return 0;
+}
+
+/****************************************************/
+//
+// functions sets the internal data of the 
+// WLAN header
+//
+/****************************************************/
+void SetWLANData ()
+{
+  gWlanData.durationId   = 0;
+  //gWlanData.address1[5]; // not used
+  gWlanData.address2[5]  = gEthData.source[5];
+  //gWlanData.address3[5]; // not used
+  //gWlanData.address4[5]; // not used
+  gWlanData.sequenceControl =0;
+  gWlanData.qos = 0;
+}
+
+/****************************************************/
+//
+// 
+//
+/****************************************************/
+void SendSpat ()
+{
+  gItsTimeStamp      = C2xGetITSTimestamp();
+  gUTCsince1970Mod32 = gItsTimeStamp & 0xFFFFFFFF; // UNIX TST Mod32
+  
+  SetFrameData();
+
+  if (gSendSpatFlag == 1)
+  {
+    // send the packet
+    if (C2xCompletePacket(gSpatPacketHandle) == 0)
+    {
+      C2xOutputPacket(gSpatPacketHandle) ;
+    }
+    else
+    {
+      write ("C2xCompletePacket failed for Spat message");
+    }
+  }
+}
+
+void ApplInit ()
+{
+  LONG errCode;
+
+  /********************************/
+  // init the SpatPacket
+  
+  // first init btp with GeoNetworking protocol
+  gSpatPacketHandle = C2xInitPacket("btp", "btpOverCnh");
+  C2xInitProtocol(gSpatPacketHandle, "SpatMessage");
+  
+  if (gSpatPacketHandle == 0)
+  {
+    write ("Spat packet cannot be initialized: stopping measurement");
+    stop();
+  }
+}
+
+/***************************************************/
+//
+// set data of the Spat message
+//
+/***************************************************/
+LONG SetSpatMessageParams(LONG packetHandle)
+{
+  LONG result;
+  INT64 tempValue;
+
+  if (packetHandle)
+  {
+    //nexts ASN.1 data type is ENUMERATED 
+    if ((result = C2xSetTokenInt64(packetHandle, "SpatMessage", "trafficLightInfo.trafficLightState", gTrafficLightActState)) != 0) 
+    { 
+      return result;
+    }
+    //nexts ASN.1 data type is INTEGER 
+    if ((result = C2xSetTokenInt64(packetHandle, "SpatMessage", "trafficLightInfo.timeToChange", gTimeToSwitchState)) != 0) 
+    { 
+      return result;
+    }
+    //nexts ASN.1 data type is ENUMERATED 
+    if ((result = C2xSetTokenInt64(packetHandle, "SpatMessage", "position.latitude.hemisphere", 0)) != 0) 
+    { 
+      return result;
+    }
+    //nexts ASN.1 data type is INTEGER 
+    tempValue = gRSULatitude  * 10 * 1000000;
+    if ((result = C2xSetTokenInt64(packetHandle, "SpatMessage", "position.latitude.degree", tempValue)) != 0) 
+    { 
+      return result;
+    }
+    //nexts ASN.1 data type is ENUMERATED 
+    if ((result = C2xSetTokenInt64(packetHandle, "SpatMessage", "position.longitude.hemisphere", 0)) != 0) 
+    { 
+      return result;
+    }
+    //nexts ASN.1 data type is INTEGER 
+    tempValue = gRSULongitude * 10 * 1000000;
+    if ((result = C2xSetTokenInt64(packetHandle, "SpatMessage", "position.longitude.degree", tempValue)) != 0) 
+    { 
+      return result;
+    }
+  }
+  else
+  {
+    return 1;
+  }
+
+  return 0;
+}
+

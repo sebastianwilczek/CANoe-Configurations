@@ -1,0 +1,325 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+}
+
+variables
+{  
+  // Testability Protocol Header format
+  _align(1) struct TestabilityMessageHeader
+  {
+    word  serviceId;
+    byte  groupId;
+    byte  servicePrimitiveId;
+    dword length;
+    dword reserved;
+    byte  protocolVersion;
+    byte  interfaceVersion;
+    byte  typeId;
+    byte  resultId;
+  };
+  
+  // Constant header values  
+  const word  kTestabilityMessageServiceId                        = 0x0105;
+  const byte  kTestabilityMessageProtocolVersion                  = 1;
+  const byte  kTestabilityMessageInterfaceVersion                 = 1;
+  const dword kTestabilityMessageHeaderByteLength                 = 16;
+//  const dword kTestabilityMessageMaxPayloadByteLength             = 1456; // 1500 (Ethernet payload) - 20 (IP header) - 8 (UDP header) - 16 (Testability header)
+  const dword kTestabilityMessageMaxPayloadByteLength             = 1512; // 1500 + kTestabilityMessageUdpMinFwdAndRcvParamLength;
+  
+  
+  // Minim payload size of Events
+  const dword kTestabilityMessageUdpMinFwdAndRcvParamLength       = 12;   // 2 (param 'fullLen') + 2 (param 'srcPort') + 6 (min length of param 'srcAddress') + 2 (min length of param 'payload')
+  const dword kTestabilityMessageUdpMinFwdAndRcvICMPParamLength   = 18;   // 6 (min length of param 'srcAddress') + 6 (min length of param 'dstAddress')+ 1(Type) + 1(Code) + 2 (checksum) + 2 (min length of param 'payload')
+  const dword kTestabilityMessageTcpMinFwdAndRcvParamLength       = 4;    // 2 (param 'fullLen') + 2 (min length of param 'payload')
+  const dword kTestabilityMessageTcpMinListenAndAcceptParamLength = 12;    // 2 (param 'listenSocketId') + 2 (param 'newSocketId') + 2 (param 'port') + 6 (min length of param 'address')
+  
+  // Testability Protocol Message Format
+  _align(1) struct TestabilityMessage
+  {
+    struct TestabilityMessageHeader header;
+    byte                            params[kTestabilityMessageMaxPayloadByteLength];
+  };
+  
+  // Testability Protocol - Type IDs
+  enum TestabilityMessageTypeIds
+  {
+    kTestabilityTypeRequest   = 0,
+    kTestabilityTypeResponse  = 0x80,
+    kTestabilityTypeEvent     = 2
+  };
+  
+  // Testability Protocol - Result IDs
+  enum TestabilityMessageResultIds
+  {
+    E_OK      = 0,    // The service primitive has performed successfully
+    E_NOK     = 1,    // General error
+    E_NTF     = 0xFF, // The requested service primitive was not found 
+    E_PEN     = 0xFE, // The Upper Tester or a service primitive is pending 
+    E_ISB     = 0xFD, // Insufficient buffer size 
+    E_INV     = 0xFC, // Invalid Input or Parameter 
+    E_ISD     = 0xEF, // Invalid socket ID 
+    E_UCS     = 0xEE, // Unable to create socket or no free socket 
+    E_UBS     = 0xED, // Unable to bind socket, port taken 
+    E_IIF     = 0xEC, // Invalid network or virtual interface 
+    E_TCP_PNA = 0xEB, // TCP error: “precedence not allowed”
+    E_TCP_FSU = 0xEA, // TCP error: “foreign socket unspecified” 
+    E_TCP_ILP = 0xE9, // TCP error: “connection illegal for this process"
+    E_TCP_INR = 0xE8, // TCP error: “insufficient resources"
+    E_TCP_CAE = 0xE7, // TCP error: “connection already exists"
+    E_TCP_COC = 0xE6, // TCP error: “connection closing"
+    E_TCP_CNE = 0xE5, // TCP error: “connection does not exist"
+    E_TCP_CRE = 0xE4, // TCP error: “connection reset" 
+    E_TCP_CAT = 0xE3, // TCP error: “connection aborted due to user timeout"
+    E_TCP_COR = 0xE2  // TCP Error: “connection refused”
+  };
+  
+  // Testability Protocol - Group IDs
+  enum TestabilityMessageGroupIds
+  {
+   kTestabilityGroupGeneral = 0x00,  
+   kTestabilityGroupUDP     = 0x01,  
+   kTestabilityGroupTCP     = 0x02,  
+   kTestabilityGroupICMP    = 0x03, 
+   kTestabilityGroupICMPv6  = 0x04, 
+   kTestabilityGroupIP      = 0x05,
+   kTestabilityGroupIPv6    = 0x06,
+   kTestabilityGroupDHCP    = 0x07,
+   kTestabilityGroupDHCPv6  = 0x08,
+   kTestabilityGroupARP     = 0x09,
+   kTestabilityGroupNDP     = 0x0A,
+   kTestabilityGroupETH     = 0x0B,
+   kTestabilityGroupPHY     = 0x0C,
+   kTestabilityGroupSOMEIP  = 0x7F
+  };
+  
+  // Testability Protocol - Group General Service Primitives
+  enum TestabilityMessageServicePrimitivesGeneral
+  {
+   kTestabilityGroupGeneralGetVersion = 0x01,
+   kTestabilityGroupGeneralStartTest  = 0x02,
+   kTestabilityGroupGeneralEndTest    = 0x03
+  };
+  
+  // Testability Protocol - Group UDP Service Primitives
+  enum TestabilityMessageServicePrimitivesUdp
+  {
+   kTestabilityGroupUDPCloseSocket     = 0x00,
+   kTestabilityGroupUDPCreateAndBind   = 0x01,
+   kTestabilityGroupUDPSendData        = 0x02,
+   kTestabilityGroupUDPReceiveAndFwd   = 0x03,
+   kTestabilityGroupUDPConfigureSocket = 0x06,
+   kTestabilityGroupUDPShutdown        = 0x07
+  };
+  
+  // Testability Protocol - Group TCP Service Primitives
+  enum TestabilityMessageServicePrimitivesTcp
+  {
+   kTestabilityGroupTCPCloseSocket     = 0x00,
+   kTestabilityGroupTCPCreateAndBind   = 0x01,
+   kTestabilityGroupTCPSendData        = 0x02,
+   kTestabilityGroupTCPReceiveAndFwd   = 0x03,
+   kTestabilityGroupTCPListenAndAccept = 0x04,
+   kTestabilityGroupTCPConnect         = 0x05,
+   kTestabilityGroupTCPConfigureSocket = 0x06,
+   kTestabilityGroupTCPShutdown        = 0x07,
+    
+   kTestabilityGroupTCPCallReceive     = 0xF4,
+   kTestabilityGroupTCPGetState        = 0xF5
+  };
+  
+  enum TestabilityGroupUDPTCPParameterID
+  {
+   kTestabilityGroupUDPTCPParamTTLHopLimit  = 0x00,
+   kTestabilityGroupUDPTCPParamPriority     = 0x01,
+   kTestabilityGroupUDPTCPParamIPDF         = 0x02,
+   kTestabilityGroupUDPTCPParamIPTimOpt     = 0x03,
+   kTestabilityGroupUDPTCPParamIPTOS        = 0x04,
+   kTestabilityGroupUDPTCPParamMSS          = 0x05,
+   kTestabilityGroupUDPTCPParamNagleAlgo    = 0x06,
+   kTestabilityGroupUDPTCPParamUDPCheckSum  = 0x07,
+
+   // non-standard extensions
+   kTestabilityGroupUDPTCPParamSocketTxBuff  = 0xFFFE,
+   kTestabilityGroupUDPTCPParamSocketRxBuff  = 0xFFFF
+  };
+  
+  // Testability Protocol - Group ARP Service Primitives
+  enum kTestabilityGroupARP
+  {
+   //non-standard Service Primitives
+   kTestabilityGroupARPClearArpTable       = 0xFF,
+   kTestabilityGroupARPAddStaticEntry      = 0xFD,
+   kTestabilityGroupARPDeleteStaticEntry   = 0xFC,
+   kTestabilityGroupARPSetTimeOut          = 0xFB,
+   kTestabilityGroupARPClearTimeOut        = 0xFA
+  };
+  
+  // Testability Protocol - Group Eth Service Primitives
+  enum kTestabilityGroupEth
+  {
+   kTestabilityGroupEthInterfaceUp   = 0x00,
+   kTestabilityGroupEthInterfaceDown = 0x01
+  };
+  
+  // Testability Protocol - Group Phy Service Primitives
+  enum kTestabilityGroupPhy
+  {
+   //non-standard Service Primitives
+   kTestabilityGroupPhyReadSignalQuality = 0x00,
+   kTestabilityGroupPhyReadDiagResult    = 0x01,
+   kTestabilityGroupPhyActivateTestMode  = 0x02,
+   kTestabilityGroupPhySetPhyTxMode      = 0x03
+  };
+  
+  
+  // Testability Protocol - Group SOMEIP Service Primitives
+  enum TestabilityMessageServicePrimitivesSomeIp
+  {
+   kTestabilityGroupSOMEIPStartService  = 0xF8,
+   kTestabilityGroupSOMEIPStopService   = 0xF7,
+   kTestabilityGroupSOMEIPTriggerEvent  = 0xF6
+  };
+  
+  // Testability Protocol - Group ICMPv4 Service Primitives
+  enum TestabilityMessageServicePrimitivesICMPv4
+  {
+   kTestabilityGroupICMPv4EchoRequest   = 0x00,
+   kTestabilityGroupICMPv4ReceiveAndFwd = 0x03
+  };
+  
+  enum TestabilityMessageServicePrimitivesDhcp
+  {
+    kTestabilityGroupDhcpInitialiazeClient = 0x00,
+    kTestabilityGroupDhcpStopClient        = 0x01,
+    kTestabilityGroupDhcpSetOption         = 0x02
+  };
+  
+  
+  // Response Parameters of the Service Primitive Get Version
+  struct TestabilityMessage_SP_Get_Version_Response
+  {
+    word majorVersion;
+    word minorVersion;
+  };
+
+  // Response Parameters of the Service Primitive Create and Bind
+  struct TestabilityMessage_SP_Create_and_Bind_Response
+  {
+    word socketId;
+  };
+  
+  // Response Parameters of the Service Primitive Receive and Forward
+  struct TestabilityMessage_SP_Receive_and_Forward_Response
+  {
+    word dropCnt;
+  };
+  
+  // Response Parameters of the Service Primitive Read Signal Quality
+  struct TestabilityMessage_SP_Phy_Read_Signal_Quality
+  {
+    byte sigQuality;
+  };
+  
+  // Response Parameters of the Service Primitive Read Cable Diagnostics Result 
+  struct TestabilityMessage_SP_Phy_Read_Cable_Diagnostics_Result 
+  {
+    byte diagResult;
+  };
+  
+  // Response Parameters of the Service Primitive TCP Get State
+  struct TestabilityMessage_SP_Tcp_Get_State_Response
+  {
+    byte tcpState;
+  };
+  
+  // Event of the Service Primitive Receive and Forward (UDP)
+  struct TestabilityMessage_SP_Receive_and_Forward_UDP_Event
+  {
+    // convenient access to Result ID of header
+    byte resultId;
+    
+    // actual header fields
+    word  fullLen;
+    word  srcPort;
+    byte  srcIpAddress[16];
+    byte  payload[kTestabilityMessageMaxPayloadByteLength - kTestabilityMessageUdpMinFwdAndRcvParamLength];
+    
+    // helper variables
+    byte  ipAddressByteLength;
+    dword payloadByteLength;
+  };
+  
+  // Event of the Service Primitive Receive and Forward (UDP)
+  struct TestabilityMessage_SP_Receive_and_Forward_ICMP_Event
+  {
+    // convenient access to Result ID of header
+    byte resultId;
+    
+    // actual header fields
+    byte  bSrcIpAddress[16];
+    byte  bDstIpAddress[16];
+    byte  bType;
+    byte  bCode;
+    word  wChecksum;
+    byte  payload[kTestabilityMessageMaxPayloadByteLength - kTestabilityMessageUdpMinFwdAndRcvICMPParamLength];
+    
+    // helper variables
+    byte  ipAddressByteLength;
+    dword payloadByteLength;
+  };
+  
+  
+    // Event of the Service Primitive Receive and Forward (TCP)
+  struct TestabilityMessage_SP_Receive_and_Forward_TCP_Event
+  {
+    // convenient access to Result ID of header
+    byte resultId;
+    
+    // actual header fields
+    word  fullLen;
+    byte  payload[kTestabilityMessageMaxPayloadByteLength - kTestabilityMessageTcpMinFwdAndRcvParamLength];
+    
+    // helper variables
+    dword payloadByteLength;
+  };
+  
+  // Event of the Service Primitive Listen and Accept (TCP)
+  struct TestabilityMessage_SP_Listen_and_Accept_TCP_Event
+  {
+    // convenient access to Result ID of header
+    byte resultId;
+    
+    // actual header fields
+    word  listenSocketId;
+    word  newSocketId;
+    word  port;
+    byte  address[16];
+    
+    // helper variables
+    byte  ipAddressByteLength;
+  };
+}

@@ -1,0 +1,236 @@
+/*@!Encoding:1252*/
+includes
+{
+}
+
+variables
+{
+  int gOnEthPacketRegistered = 0;
+  dword gPeakLevelTime = 0;
+  byte gFirstPeakLevel = 0;
+}
+
+testcase TC_Observe()
+{
+  dword ret;
+  
+  if (gOnEthPacketRegistered == 0)
+  {
+    ret = EthReceivePacket("OnEthPacket");
+    
+    if (ret != 0)
+    {
+      write("EthReceivePacket failed with error code %d", ret);
+      return;
+    }
+    
+    gOnEthPacketRegistered = 1;
+  }
+  
+  testWaitForMeasurementEnd(0xFFFFFFFF);
+}
+
+//receive multicast packets 
+void OnEthPacket(LONG channel, LONG dir, LONG packet)
+{
+  DWORD size;
+  DWORD rxdstaddress;
+  BYTE cBuffer[1500];
+  
+  rxdstaddress = EthGetTokenInt(packet, "ipv4", "destination");  
+  
+  if (EthGetLastError() != 0)
+  {
+    return;
+  }
+  
+  size = EthGetTokenData(packet, "someip", "header", elcount(cBuffer), cBuffer);
+  
+  if (EthGetLastError() != 0 || size == 0)
+  {
+    return;
+  }
+  
+  OnPacket(cBuffer, size);
+}
+
+//call OnSomeIpMessage for each some/ip message of the passed packet's payload
+void OnPacket(byte buffer[], dword size)
+{
+  DWORD msgHandle;
+  DWORD msg_len, msgOffset;
+  DWORD offset;
+  DWORD entry_len;  
+  BYTE  tmpBuffer[1500];
+  INT   i;
+  DWORD ret;
+    
+  offset = 24;
+  msgOffset = 0;
+  entry_len = 0;  
+      
+  while (size >= 16 + msgOffset)  // SOME/IP message has at least a length of >= 16 bytes
+  {
+    msg_len   = buffer[msgOffset + 4] << 24 | buffer[msgOffset + 5] << 16 | buffer[msgOffset + 6] << 8 | buffer[msgOffset + 7];
+    msg_len += 8;
+             
+    for (i = 0; i < msg_len; i++)
+    {
+      tmpBuffer[i] = buffer[msgOffset + i];
+    }
+    
+    msgHandle = SomeIpCreateMessage(msg_len, tmpBuffer);
+    
+    if (msgHandle != 0)
+    {
+      OnSomeIpMessage(msgHandle);
+    }
+    else
+    {
+
+      testStepFail("OnPacket", "unable to create some/ip message");
+      return;
+    }
+    
+    ret = SomeIpReleaseMessage(msgHandle);
+    
+    if (ret != 0)
+    {
+      testStepFail("OnPacket", "SomeIpReleaseMessage failed with error code %d", ret);
+      return;
+    }
+    
+    msgOffset += msg_len; //may be there is one more some ip message after this one
+  }
+}
+
+void OnSomeIpMessage(dword msgHandle)
+{  
+  dword msgId, returnCode, ret, time;
+  byte data[1500];
+  
+  ret = SomeIpGetData(msgHandle, elCount(data), data);
+    
+  if (ret == 0)
+  {
+    ret = SomeIpGetLastError();
+    
+    if (ret != 0)
+    {
+      testStepFail("OnSomeIpMessage", "SomeIpGetData failed, last error: %d", ret);
+      return;
+    }
+  }
+  
+  msgId = SomeIpGetMessageId(msgHandle);
+  
+  if (msgId == 0)
+  {
+    ret = SomeIpGetLastError();
+    
+    if (ret != 0)
+    {
+      testStepFail("OnSomeIpMessage", "SomeIpGetMessageId failed, last error: %d", ret);
+      return;
+    }
+  }
+  
+  returnCode = SomeIpGetReturnCode(msgHandle);
+  
+  if (returnCode == 0)
+  {    
+    ret = SomeIpGetLastError();
+    
+    if (ret != 0)
+    {
+      testStepFail("OnSomeIpMessage", "SomeIpGetReturnCode failed, last error: %d", ret);
+      return;
+    }
+  }
+  
+  if ((msgId >> 16) == 10 /*Service ID == CD_Player*/ && returnCode != 0 /*ReturnCode != OK*/)
+  {
+    testStepFail("OnSomeIpMessage", "Service CD_Player returned error code %d", returnCode);
+    return;
+  }
+  
+  if ((msgId >> 16) == 10 /*Service ID == CD_Player*/ && (msgId & 0x0000FFFF) == 41 /*MethodId == Unknown*/)
+  {
+    testStepFail("OnSomeIpMessage", "Service CD_Player: non existing setter (method ID %d) called!", msgId & 0x0000FFFF);
+    return;
+  }
+  
+  if ((msgId >> 16) == 10 /*Service ID == CD_Player*/ && (msgId & 0x0000FFFF) == 51 /*MethodId == TrackPosition*/)
+  {
+    // Reset peak level reference time on track change
+    gPeakLevelTime = 0;
+  }
+  
+  if ((msgId >> 16) == 10 /*Service ID == CD_Player*/ && (msgId & 0x0000FFFF) == 45 /*MethodId == PeakLevel*/)
+  {
+    time = timeNow();
+    
+    if (gFirstPeakLevel != 0 && time - gPeakLevelTime < 25000)
+    {
+      testStepFail("OnSomeIpMessage", "Service CD_Player: Peak level cycle time too low: %d ms!", (time - gPeakLevelTime) / 100);
+    }
+    
+    gPeakLevelTime = time;
+    gFirstPeakLevel = 1;
+  }
+  
+  if (msgId == 0xFFFF8100)
+  {
+//      if (ret > 16 && (data[8] == 0 /*Type == FindService*/ || data[8] == 1 /*Type == OfferService*/) && data[16] != 1 /*MajorVersion != 1*/)
+//  {
+//    if (data[8] == 0)
+//    {
+//      testStepFail("OnSomeIpMessage", "FindService looks for wrong major version: %d", data[16]);
+//    }
+//    else
+//    {
+//      testStepFail("OnSomeIpMessage", "OfferService offers wrong major version: %d", data[16]);
+//    }
+//    
+//    return;
+//  }
+    ret = SomeIpGetValueDword(msgHandle, "Entry[0]");
+  
+    if (ret == 1 /*OfferService*/)
+    {
+      ret = SomeIpGetValueDword(msgHandle, "Entry[0].OfferService.ServiceID");
+      
+      if (ret != 10 /*Service ID == CDPlayer*/ && ret != 11 /*Service ID == Navigation*/ && ret != 12 /*Service ID == TCReceiver*/)
+      {       
+        testStepFail("Error: OnSomeIpMessage", "Unknown service ID %d offered", ret);
+        return;
+      }
+      
+      ret = SomeIpGetValueDword(msgHandle, "Entry[0].OfferService.MinorVersion");
+            
+      if (ret != 0)
+      {       
+        testStepFail("Error: OnSomeIpMessage", "OfferService offers wrong minor version: %d", ret);
+        return;
+      }
+    }
+    else if (ret == 0 /*FindService*/)
+    {
+      ret = SomeIpGetValueDword(msgHandle, "Entry[0].FindService.ServiceID");
+      
+      if (ret != 10 /*Service ID == CDPlayer*/ && ret != 11 /*Service ID == Navigation*/)
+      {       
+        testStepFail("Error: OnSomeIpMessage", "Unknown service ID %d required", ret);
+        return;
+      }
+      
+      ret = SomeIpGetValueDword(msgHandle, "Entry[0].FindService.MinorVersion");
+            write("MinorVersion: %d", ret);
+      if (ret != 0)
+      {       
+        testStepFail("Error: OnSomeIpMessage", "FindService looks for wrong minor version: %d", ret);
+        return;
+      }
+    }
+  }
+}

@@ -1,0 +1,67 @@
+/*@!Encoding:1252*/
+variables 
+{
+  int groupId = 1;
+  int counter = 0;
+  int keyCounter = 0;
+  int64 presharedKey = 84364362;
+  int64 generatedKey;
+  int64 randomValue;
+  message BrakeState msg_BrakeState;
+  message KeyRenew msg_KeyRenew;
+}
+
+on preStart
+{
+  generatedKey = generateKey(presharedKey, 0);
+  write("ENGINE: First generated key: %d", generatedKey);
+}
+
+on start
+{
+  
+}
+
+on key 'r'
+{
+  write("ENGINE: Signaling new key generation");
+  renewKey();
+  write("ENGINE: New key is %d", generatedKey);
+}
+
+on sysvar sysvar::Brakes::BrakePressure
+{
+  msg_BrakeState.BrakePressure = @this;
+  msg_BrakeState.Hash = hash(@this);
+  output(msg_BrakeState);
+  counter++;
+}
+
+int64 hash(int64 data)
+{
+  return (groupId + generatedKey + counter + data) * 5325 % 16777216;
+}
+
+int64 keyRenewHash(int64 genKey, int64 rValue, int c)
+{
+  return (genKey + rValue + c) * 5325 % 16777216;
+}
+
+renewKey()
+{
+  keyCounter++;
+  randomValue = random(65536);
+  write("ENGINE: Sending new message for key generation: C=%d", keyCounter);
+  write("ENGINE: Sending new message for key generation: R=%d", randomValue);
+  write("ENGINE: Sending new message for key generation: K=%d", generatedKey);
+  msg_KeyRenew.Counter = keyCounter;
+  msg_KeyRenew.RandomValue = randomValue;
+  msg_KeyRenew.Hash = keyRenewHash(generatedKey, randomValue, keyCounter);
+  output(msg_KeyRenew);
+  generatedKey = generateKey(generatedKey, randomValue);
+}
+
+int64 generateKey(int64 previousKey, int64 randomValue)
+{
+  return (previousKey + randomValue + keyCounter) % 100000000;
+}

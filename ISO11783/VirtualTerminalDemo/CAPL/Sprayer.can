@@ -1,0 +1,333 @@
+/*@!Encoding:1252*/
+variables
+{
+  //
+  // Working set master for the sprayer
+  //
+  // (c) 2001-2012 Vector Informatik GmbH
+  //
+
+  //
+  // Global variables for the sprayer
+  //
+  int gSprayerOn       = 0;      // Enable/disable sprayer
+
+  //
+  // Global variables for communication
+  //
+  char  gECULabel[32] = "Sprayer";
+
+  msTimer gPressureTimer;        // Timer for pressure  
+  msTimer gSprayerTimer;         // Timer for sprayer level  
+}
+
+on preStart
+{
+}
+
+on start
+{
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00012_numberVariable::value = 60;     //Target pressure
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00013_numberVariable::value = 2;      //Sprayer width
+}
+
+//
+// Send sprayer level value
+//
+on timer gSprayerTimer
+{
+  int sprayerLevel, targetPressure, sprayerWidth;
+
+  if (gSprayerOn == 1) 
+  {
+    sprayerLevel = @sysvarInt::ISO11783Bus::Sprayer::OP::OBJ00010_numberVariable::value;
+    if (sprayerLevel > 0) 
+    {
+      targetPressure = @sysvarInt::ISO11783Bus::Sprayer::OP::OBJ00012_numberVariable::value;
+      sprayerWidth = @sysvarInt::ISO11783Bus::Sprayer::OP::OBJ00013_numberVariable::value;
+      
+      sprayerLevel -= ((sprayerWidth+1)*(targetPressure/30.0));
+      if (sprayerLevel <= 0) 
+      {
+        //reset level
+        sprayerLevel = 100;
+        //stop sprayer
+        SprayerOff();
+        // show alarm mask
+        Iso11783IL_OPChangeActiveMask(200);
+      }
+      else
+      {
+        SetTimer( gSprayerTimer, 600 );
+      }
+      @sysvarInt::ISO11783Bus::Sprayer::OP::OBJ00010_numberVariable::value = sprayerLevel;
+    }
+  }
+}
+
+//
+// Timer for sprayer pressue
+//
+on timer gPressureTimer
+{
+  int i, currentPressure, targetPressure;
+
+  currentPressure = @sysvar::ISO11783Bus::Sprayer::OP::OBJ00011_numberVariable::value;
+  targetPressure = @sysvar::ISO11783Bus::Sprayer::OP::OBJ00012_numberVariable::value;
+
+  if (Iso11783IL_OPGetState() == 5) {
+    if (gSprayerOn == 1) {
+      i = (targetPressure - currentPressure) / 2 + (random(4) - 2);
+      currentPressure += i;
+    }
+    else {
+      currentPressure -= currentPressure / 8 + 2;
+    }
+
+    if (currentPressure < 0) {
+      currentPressure = 0;
+    }
+    if (currentPressure > 100) {
+      currentPressure = 100;
+    }
+
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00011_numberVariable::value = currentPressure;
+
+    SetTimer( gPressureTimer, 300 );
+  }
+}
+
+//
+// Switch sprayer on
+//
+SprayerOn()
+{
+  if (gSprayerOn == 0) 
+  {
+    gSprayerOn = 1;
+
+    // line Attribute
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00070_lineAttribute::width = 2;
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00070_lineAttribute::color = 13;
+
+    // line width
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00111_line::width = 16;
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00112_line::width = 2;
+
+    setTimer( gSprayerTimer, 500 );
+    setTimer( gPressureTimer,500 );
+
+    updateSprayerBarAndBitmap();
+  }
+}
+
+//
+// Switch sprayer off
+//
+SprayerOff()
+{
+  if (gSprayerOn == 1) 
+  {
+    gSprayerOn = 0;
+
+    cancelTimer( gSprayerTimer );
+    cancelTimer( gPressureTimer );
+
+    // line attribute
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00070_lineAttribute::width = 1;
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00070_lineAttribute::color = 44;
+    // line width
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00111_line::width = 15;
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00112_line::width = 1;
+
+    updateSprayerBarAndBitmap();
+  }
+}
+
+//
+// Update sprayer bar and bitmap
+//
+void updateSprayerBarAndBitmap()
+{
+    int sprayerWidth;
+    sprayerWidth = @sysvar::ISO11783Bus::Sprayer::OP::OBJ00013_numberVariable::value;
+
+    //Sprayer bitmap  
+    if (sprayerWidth > 1) 
+        @sysvar::ISO11783Bus::Sprayer::OP::OBJ00109_container::hidden = 0;
+    else 
+        @sysvar::ISO11783Bus::Sprayer::OP::OBJ00109_container::hidden = 1;
+
+    if (sprayerWidth > 2) 
+        @sysvar::ISO11783Bus::Sprayer::OP::OBJ00119_container::hidden = 0;
+    else 
+        @sysvar::ISO11783Bus::Sprayer::OP::OBJ00119_container::hidden = 1;
+
+
+    //Sprayer bar
+    if ((gSprayerOn == 1) && (sprayerWidth <= 3) && (sprayerWidth >= 1))
+        @ISO11783Bus::Sprayer::svSprayerBitmap = sprayerWidth;
+    else 
+        @ISO11783Bus::Sprayer::svSprayerBitmap = 0;
+}
+
+void Iso11783IL_OPOnKeyActivation( DWORD objectID, DWORD parentID, DWORD keyCode, DWORD activation )
+{
+  if (activation > 0) 
+  {
+    switch(keyCode) 
+    {
+      //
+      // Acknowledge
+      //
+      case 0:
+        Iso11783IL_OPChangeActiveMask(100);
+        break;
+      //
+      // Sprayer on
+      //
+      case 1:
+        SprayerOn();
+        break;
+      //
+      // Sprayer off
+      //
+      case 2:
+        SprayerOff();
+        break;
+      //
+      // Inc sprayer width
+      //
+      case 3:
+        IncSprayerWidth();
+        break;
+      //
+      // Dec Sprayer width
+      //
+      case 4:
+        DecSprayerWidth();
+        break;
+      //
+      // Inc target pressure
+      //
+      case 5:
+        IncTargetPressure();
+        break;
+      //
+      // Dec target pressure
+      //
+      case 6:
+        DecTargetPressure();
+        break;
+    }
+    UpdateSprayerBarAndBitmap();  
+  }
+}
+
+void Iso11783IL_OPOnStateChange ( DWORD state )
+{
+  if (state == 5)
+    updateSprayerBarAndBitmap();
+}
+
+on stopMeasurement
+{
+}
+
+IncTargetPressure ()
+{
+    int targetPressure;
+    targetPressure = @sysvar::ISO11783Bus::Sprayer::OP::OBJ00012_numberVariable::value;
+    targetPressure += 5;
+    if (targetPressure > 100) {
+      targetPressure = 100;
+    }
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00012_numberVariable::value = targetPressure;
+}
+
+DecTargetPressure ()
+{
+    int targetPressure;
+    targetPressure = @sysvar::ISO11783Bus::Sprayer::OP::OBJ00012_numberVariable::value;
+    targetPressure -= 5;
+    if (targetPressure < 0) {
+      targetPressure = 0;
+    }
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00012_numberVariable::value = targetPressure;
+}
+
+IncSprayerWidth()
+{
+    int sprayerWidth;
+    sprayerWidth = @sysvar::ISO11783Bus::Sprayer::OP::OBJ00013_numberVariable::value;
+    if(sprayerWidth < 3)
+        sprayerWidth = sprayerWidth + 1;
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00013_numberVariable::value = sprayerWidth; 
+}
+
+DecSprayerWidth ()
+{
+    int sprayerWidth;
+    sprayerWidth = @sysvar::ISO11783Bus::Sprayer::OP::OBJ00013_numberVariable::value;
+    if(sprayerWidth > 1)
+        sprayerWidth = sprayerWidth - 1;
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00013_numberVariable::value = sprayerWidth; 
+}
+
+on sysvar_update sysvar::ISO11783Bus::Sprayer::OP::OBJ00012_numberVariable::value
+{
+    UpdateSprayerBarAndBitmap();
+}
+
+on sysvar_update sysvar::ISO11783Bus::Sprayer::OP::OBJ00013_numberVariable::value
+{
+    UpdateSprayerBarAndBitmap();
+}
+
+Iso11783IL_OPOnAuxiliaryInput( DWORD objectID, DWORD value1, DWORD value2 )
+{
+  if (value1) 
+  {
+    switch(objectID) 
+    {
+      //
+      // Sprayer on
+      //
+      case 1000:
+        SprayerOn();
+        break;
+      //
+      // Sprayer off
+      //
+      case 1001:
+        SprayerOff();
+        break;
+      //
+      // Inc target pressure
+      //
+      case 1002:
+        IncTargetPressure();
+        break;
+      //
+      // Dec target pressure
+      //
+      case 1003:
+        DecTargetPressure();
+        break;
+      //
+      // Inc sprayer width
+      //
+      case 1004:
+        IncSprayerWidth();
+        break;
+      //
+      // Dec Sprayer width
+      //
+      case 1005:
+        DecSprayerWidth();
+        break;        
+    }
+    updateSprayerBarAndBitmap();
+  }
+}
+

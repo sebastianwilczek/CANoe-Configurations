@@ -1,0 +1,221 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "MOST_Diag_Def.cin"
+}
+
+variables
+{
+  /* -----------------------------------------------------------------------
+  Diagnosis2.can
+
+  This is a dummy implementation of a MOST Diagnosis FBlock using the
+  MOST High Protocol for data exchange. It supports reading and writing the
+  serial number via diagnostics requests. All other diagnostics requests
+  are handled by a default pattern.
+  -----------------------------------------------------------------------*/
+  char gNodeName[20] = "Diagnosis2";
+
+  long gSerialNumber;
+
+  // Only necessary if functional requests should be received!
+  long  cConfigureFunctionalRequests = 1; // Set to 1 in ECU simulation!
+  DWORD gFunctionalRequestId = 0;
+  DWORD gFunctionalRequestIdMask = 0;
+  long  gFunctionalRequestExt = -1;
+  long  gCANchannel = -1;
+
+  long gSentResponse = 0; // Set in CCI to indicate that a response was sent
+  
+  //MOST High specific variables
+  long gMHPTxPort;
+  long gMHPRxPort;
+  BYTE gMHPTxBuffer[4095 + DAP_HEADER_SIZE];
+  BYTE gMHPRxBuffer[4095 + DAP_HEADER_SIZE];
+  long gDestAdr;
+}
+
+on start
+{
+  //Set a default value for the internal number
+  gSerialNumber = 123;
+
+  setWriteDbgLevel( 0);
+}
+
+on diagRequest CDChanger2.*
+{
+  diagResponse this resp;
+  BYTE serviceCode;
+
+  if( DiagIsRaw(this))
+  {
+    SendNegResFormat( DiagGetPrimitiveByte( this, 0));
+    return;
+  }
+
+  if( 1 == DiagCheckValidPrimitive( this))
+  {
+    if( 1 == diagGetSuppressResp(this))
+    {
+      gSentResponse = 1; // No response has to be sent
+      return; // Do not send a positive response!
+    }
+
+    DiagSendResponse( resp);
+
+  } else
+  {
+    diagSendNegativeResponse( this, 0x12);
+  }
+}
+
+SendNegResFormat( BYTE serviceId)
+{
+  BYTE negResponse[3] = { 0x7f, 0, 0x12 };
+  writeDbgLevel(0,"%s: Sending TP level NR(%02x)", gNodeName, serviceId);
+  negResponse[1] = serviceId;
+
+  gSentResponse = 1;
+  _Diag_DataRequest( negResponse, 3, 0);
+}
+
+on diagRequest CDChanger2.SerialNumber_Read
+{
+  diagResponse this resp;
+
+  DiagSetParameter( resp, "SerialNumber", gSerialNumber);
+
+  DiagSendResponse( resp);
+}
+
+on diagRequest CDChanger2.SerialNumber_Write
+{
+  diagResponse this resp;
+
+  gSerialNumber = DiagGetParameter( this, "SerialNumber");
+
+  write("SERIAL %d", gSerialNumber);
+  DiagSendResponse( resp);
+}
+
+on preStart
+{
+  // React on node messages from connected channel only; ignore spy messages
+  mostApplicationNode();
+
+  // CAPL node is registered as MOST FBlock through the DB node 'Diagnosis2'
+  // alternative: mostApRegisterEx(MD_FBLOCKID, gMDP2.instID);
+
+  MH_SetVerbose(0);
+
+  gMHPTxPort = MH_CreateTxPort("");
+  MH_SetTxTranspMode(gMHPTxPort, 2); //use asynchronous channel
+  MH_SetTxFrameSize(gMHPTxPort, MD_MHP_FRAME_SIZE);
+  MH_SetTxPriority(gMHPTxPort, MD_MHP_PRIO);
+  MH_SetTxBlockAck(gMHPTxPort, 1); //use block acknowledge
+  
+  gMHPRxPort = MH_CreateRxPort("");
+  MH_SetRxCapacity(gMHPRxPort, MD_MHP_FRAMES_PER_BLOCK, MD_MHP_FRAME_SIZE, MD_MHP_AIR, MD_MHP_PRIO);
+}
+
+void MH_IndRequestConnection(dword dsoDevice, dword fblockID, dword instanceID, dword fktID,
+  dword opType, dword prio, dword frameSize)
+{
+  if((MD_FBLOCKID == fblockID) && // check addressing ...
+     (gMDP2.instID == instanceID) &&
+     (MD_FUNCTIONID == fktID) &&
+     (MD_OPTYPE_REQ == opType) &&
+     (MH_GetRxPortState(gMHPRxPort) == 0)) // ... and port state
+  {
+    writeDbgLevel(1, "%s: Accepted MHP connection", gNodeName);
+    MH_AcceptConnection(gMHPRxPort);
+    gDestAdr = dsoDevice;
+  }
+  else if (MD_OPTYPE_REQ == opType)
+  {
+    writeDbgLevel(1, "%s: Denied MHP connection", gNodeName);
+    MH_DenyConnection(MD_MHP_PRIO + 1);
+  }
+}
+
+MH_IndRxBufferFinished(dword handle, long sizeFilled, long reason)
+{
+  byte diagData[4095];
+  long i;
+
+  if (sizeFilled < DAP_HEADER_SIZE)
+  return;
+
+  for (i = sizeFilled - DAP_HEADER_SIZE; i-- > 0; )
+    diagData[i] = gMHPRxBuffer[i + DAP_HEADER_SIZE];
+  // Forward data to the diagnostics layer
+  Diag_DataInd(diagData , sizeFilled - DAP_HEADER_SIZE, 0); // Sender address is ignored at the moment
+}
+
+MH_IndRxBufferRequested(dword handle, long isPacketBegin)
+{
+  if (handle == gMHPRxPort)
+    MH_SetRxBuffer(handle, gMHPRxBuffer, elcount(gMHPRxBuffer));
+}
+
+MH_IndRxConnectionClosed(dword handle, long result)
+{
+  writeDbgLevel(1, "%s: Rx Connection closed. Result: %d",
+    gNodeName, result);
+}
+
+void MH_IndTxPktFinished(dword handle, long packetSize)
+{
+  diag_DataCon(packetSize);
+}
+
+_Diag_DataRequest( BYTE data[], DWORD count, long furtherSegments)
+{
+  long i;
+  long portState;
+
+  writeDbgLevel(1, "%s: DataRequest %d byte: %02x ...",
+    gNodeName, count, data[0]);
+
+  portState = MH_GetTxPortState(gMHPTxPort);
+
+  if (portState == 1) //Port is busy
+    return;
+
+  FillDAPHeader(gMHPTxBuffer, count, DAP_DEFAULT_TESTER_ADR);
+
+  for( i = count; i-- > 0; )
+    gMHPTxBuffer[i + DAP_HEADER_SIZE] = data[i];
+
+  // Send data on MOST TP
+  if (portState == 2)
+  {
+    //Resuse connection
+    MH_SetTxBuffer(gMHPTxPort, gMHPTxBuffer, count + DAP_HEADER_SIZE, 0);
+  }
+  else
+  {
+    //Create a new connection
+    MH_ReqTrans(gMHPTxPort, 
+                gDestAdr,
+                MD_FBLOCKID,
+                gMDP2.instID,
+                MD_FUNCTIONID,
+                MD_OPTYPE_RES,
+                gMHPTxBuffer,
+                count + DAP_HEADER_SIZE);
+  }
+}
+
+_Diag_SetChannelParameters()
+{
+  // Since the MOST MHP parameters are hard-coded, nothing has to be configured here!
+}
+
+_Diag_SetupChannelReq()
+{
+  // This callback function is only necessary in tester nodes!
+  Diag_SetupChannelCon();
+}
+

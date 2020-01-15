@@ -1,0 +1,205 @@
+/*@!Encoding:1252*/
+includes
+{
+#include "ECL.cin"
+#if CANALYZER
+  // forward all messages to next node in CANalyzer node chain 
+  #include "PassAll.cin"
+#endif
+}
+
+//
+// AppECL_STI.can:
+//  Simulation of a MOST150 Electrical Control Line (ECL) System Test Initiator (STI).
+//
+//  This program is connected to the "ECL SystemTestInitiator"-Panel and executes
+//  the startup of the System-Test (see on sysvar ECL_ST_Initiator::DoSendStartSequence)
+//  and receives the results fo the system test afterwards.
+//
+//  Electrical Wakeup (EWU) is supported as well (see on sysvar ECL_ST_Initiator::DoSendElectricalWakeup).
+// 
+//
+variables
+{
+  msTimer _tAfterStart;
+  char STI_Panel[256] = "ECL SystemTestInitiator";
+  char STI_PanelControl[256] = "TestOutputField";
+  long STI_ShowSignalOnLED = 0;
+
+  enum STI_LEDState
+  {
+    LEDState_Working = 0, // red/orange
+    LEDState_Ok = 1, // green
+    LEDState_Waiting = 2 // yellow
+  };
+}
+
+void ECL_STI_CB_OnSystemTestResultsReceived(long testParameter, long electricalStates[], long opticalStates[], long numResults)
+{
+  int i, deviceClass;
+  char tmpStr1[256], tmpStr2[256];
+
+  write("%FILE_NAME%: ECL_STI_CB_OnSystemTestResultsReceived: testParameter: %d, numResults: %d", testParameter, numResults);
+
+  ECL_GetStringForSystemTestParameter(testParameter, tmpStr1);
+  snprintf(tmpStr2, elCount(tmpStr2), "------------\nreceiving results for system test: %d (%s) ...\n", testParameter, tmpStr1);
+  putValueToControl(STI_Panel, STI_PanelControl, tmpStr2);
+
+  for(i = 0; i < numResults; i++) {
+    deviceClass = i+1;
+    //if (gECL_Verbose >= ECL_Verbose_Default) write("%FILE_NAME%: \tE%d: %d, O%d: %d", deviceClass, electricalStates[i], i, opticalStates[i]);
+
+    // write to panel
+    ECL_GetStringForSystemTestResult(testParameter,  electricalStates[i], opticalStates[i], tmpStr1, tmpStr2);
+    snprintf(tmpStr1, elCount(tmpStr1), "STP dev. class %d: electr. state: %d (%s) opt. state: %d (%s)\n",
+        deviceClass, electricalStates[i], tmpStr1, opticalStates[i], tmpStr2);
+    putValueToControl(STI_Panel, STI_PanelControl, tmpStr1);
+  }
+
+  Reset_LED();
+}
+
+void ECL_STI_CB_OnSystemTestStartupError(char msg[])
+{
+  write("%FILE_NAME%: ECL_STI_CB_OnSystemTestStartupError: %s", msg);
+  putValueToControl(STI_Panel, STI_PanelControl, "------------\nSystem Test error detected:\n\t");
+  putValueToControl(STI_Panel, STI_PanelControl, msg);
+
+  Reset_LED();
+}
+
+void ECL_STP_CB_OnSystemTestParameterReceived(long testParameter)
+{
+  write("%FILE_NAME%: ECL_STP_CB_OnSystemTestParameterReceived: Error: this callback should not be called for system test initiator!");
+}
+
+void ECL_STP_CB_OnStartupSequenceReceived()
+{
+  write("%FILE_NAME%: ECL_STP_CB_OnStartupSequenceReceived: Error: this callback should not be called for system test initiator!");
+}
+
+void ECL_WP_CB_OnElectricalWakeupReceived()
+{
+  write("%FILE_NAME%: ECL_WP_CB_OnElectricalWakeupReceived");
+  putValueToControl(STI_Panel, STI_PanelControl, "------------\nelectrical wakeup signal received! ...\n");
+
+  Reset_LED();
+}
+
+on sysvar ECL_ST_Initiator::DoSendStartSequence
+{
+  long _numRetries, _startupTime, _testParameter, _testPauseTime, _numParticipants, ret;
+
+  if (!@this)
+    return;
+
+  /* get state from panel ... */
+  _testParameter = @sysvar::ECL_ST_Initiator::TestParameter;
+  _numRetries = @sysvar::ECL_ST_Initiator::StartseqNumRetries;
+  _startupTime = @sysvar::ECL_ST_Initiator::tStartUp;
+  _testPauseTime = @sysvar::ECL_ST_Initiator::tTestPause;
+  _numParticipants = @sysvar::ECL_ST_Initiator::NumParticipants;
+
+  STI_ShowSignalOnLED = 1;
+
+  ret = ECL_STI_StartSystemTest(_numRetries, _startupTime, _testParameter,
+                _testPauseTime, _numParticipants);
+  if (ret != 0) {
+    write("%FILE_NAME%: ECL_ST_Initiator::DoSendStartSequence: error occurred in ECL_STI_StartSystemTest: %d", ret);
+  }
+}
+
+on sysvar ECL_ST_Initiator::DoSendElectricalWakeup
+{
+  long ret;
+
+  if (!@this)
+    return;
+
+  STI_ShowSignalOnLED = 1;
+
+  ret = ECL_WI_SendElectricalWakeup();
+
+  if (ret != 0) {
+    write("%FILE_NAME%: ECL_WI_SendElectricalWakeup failed - returned %d", ret);
+  }
+}
+
+on preStart
+{
+#if CANALYZER
+  // set the MOST channel manually for the intitiator when using CANalyzer
+  ECL_SetMostChannel(1);
+#endif
+
+  ECL_SetECLVerbose(@sysvar::DoSetECLVerbose ? ECL_Verbose_Default : ECL_Verbose_Off);
+
+  ECL_SetSysVarNamesSpace("ECL_ST_Initiator");
+  ECL_SetSignalLevelSysVarName("ECLSignalLevel");
+
+  // receive electrical wakeup signals ...
+  ECL_WP_Start();
+}
+
+on sysvar ECL_ST_Initiator::DoSetEclTermination
+{
+  mostSetEclTermination(ECL_GetMostChannel(), @this);
+  if (gECL_Verbose >= ECL_Verbose_Default)
+    write("%FILE_NAME% ECL_ST_Initiator::DoSetEclTermination: %d", @this);
+}
+
+on start
+{
+  // init correct ECL termination state from device (using a timer)
+  setTimer(_tAfterStart, cECL_DEVICE_STARTUP);
+
+  Reset_LED();
+}
+
+on timer _tAfterStart
+{
+  @sysvar::ECL_ST_Initiator::DoSetEclTermination = mostGetEclTermination(ECL_GetMostChannel());
+}
+
+on sysvar DoSetECLVerbose
+{
+  ECL_SetECLVerbose(/*(enum eECL_VerboseLevel)(@this)*/ @this ? ECL_Verbose_Default : ECL_Verbose_Off);
+}
+
+void ECL_CB_OnECLError (char msg[])
+{
+  write("%FILE_NAME%: ECL_CB_OnECLError: %s", msg);
+  putValueToControl(STI_Panel, STI_PanelControl, "------------\nECL error detected:\n");
+  putValueToControl(STI_Panel, STI_PanelControl, msg);
+
+  Reset_LED();
+}
+
+void ECL_CB_OnECLStateChanged (long newState)
+{
+  // this callback indicates every state change of the ecl 
+  //write("%FILE_NAME%: ECL_CB_OnECLStateChanged: new state %d", newState);
+}
+
+// we use the signal level variable to flash the LED
+on sysvar ECL_ST_Initiator::ECLSignalLevel
+{
+  if (STI_ShowSignalOnLED)
+  {
+    @sysvar::ECL_ST_Initiator::ECLSignalLevelLED = (@this == 0) ? LEDState_Working : LEDState_Waiting;
+  }
+}
+
+void Reset_LED ()
+{
+  /* reset LED */
+  STI_ShowSignalOnLED = 0;
+  @sysvar::ECL_ST_Initiator::ECLSignalLevelLED = LEDState_Ok;
+}
+
+void ECL_STP_CB_OnSystemTestSendResults(long testParameter, long classID)
+{
+  write("%FILE_NAME%: ECL_STP_CB_OnSystemTestSendResults: Error: this callback should not be called for system test initiator!");
+}
+
+

@@ -1,0 +1,406 @@
+/*@!Encoding:1252*/
+// *************************************************************************************
+//
+//  Builds, configures and sends a DENM with the CauseCode of a Roadworks Warning
+//
+// *************************************************************************************
+
+includes
+{
+  #include "C2x_Basics.cin"
+  #include "..\DataSources\ASNV_Template_BaseDatatypes.cin"
+  #include "..\DataSources\ASNV_Template_DENM.cin"
+}
+
+// *************************************************************************************
+//  Area for variable declaration
+// *************************************************************************************
+variables
+{
+	msTimer     timer_SendRWW;                            // timer variables
+	int         gTimRWWCycleTime                = 500;    // cycle time of RWW message
+	LONG        gRWWHdl                         = 0;      // Handle for RWW packet (data)
+  int         gFlagRwwActive                  = 0;
+  const float cMultiplier = 10000000.0;
+  
+  // Position of the RSU sending the Roadworks warning
+  const float gITSPosLat     = 48.823353;
+  const float gITSPosLong    = 9.099838;   
+
+  // Position of the Roadworks warning
+  const float gEventPosLat   = 48.823438;
+  const float gEventPosLong  = 9.098304;
+  
+  struct  EthData gEthData = { source={0,0,0,0,0,8}, dest={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, ethType=0x0707 };  // Network data
+  struct  CnhData gCnhData;     
+  struct  GeoNetworkingData gGeoData;
+  struct  WLANData gWlanData = { durationId=0, address1={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, address2={0,0,0,0,0,0}, address3={0,0,0,0,0,0},
+                                 address4={0,0,0,0,0,0}, sequenceControl=0,qos=0 };
+
+  
+  int64     gItsTimeStamp  = 0; // UNIX time since 1970
+  dword     gUTCsince1970Mod32  = 0;
+  int64     gUTCsince2004       = 0;
+  
+  msTimer   timRWWIllusion;
+  
+  enum  enumRefTime{en2004 = 0, en2010 = 1}; 
+}
+
+on start
+{
+  long errCode;
+  setTimer(timer_SendRWW, 5);       // Start sending RWWs
+  
+  gRWWHdl = C2xInitPacket("btp","btpOverGeo");
+  if (gRWWHdl)
+  {
+    // init the RWW message on BTP with GeoNetworking
+    errCode = C2xInitProtocol(gRWWHdl, "DENM");
+    if (errCode != 0)
+    {
+      write ("RWW packet cannot be initialized: stopping measurement. Error Code %i",errCode);
+    }
+  }
+  
+  setTimer (timRWWIllusion,10);
+}
+
+on sysvar sysvar::ActivateRWW
+{
+  if (@ActivateRWW == 1)
+  {
+    setTimer (timRWWIllusion,150);
+  }
+}
+
+// *************************************************************************************
+// timer handels the animation of sending RWWs
+// *************************************************************************************
+on timer timRWWIllusion
+{
+  if (@ActivateRWW == 1)
+  {
+    @sysvar::RWWIllusionCtrl++;
+    if (@sysvar::RWWIllusionCtrl == 1)
+    {
+      setTimer (timRWWIllusion,150);
+    }
+    else if (@sysvar::RWWIllusionCtrl > 6)
+    {
+      @sysvar::RWWIllusionCtrl = 0;
+      setTimer (timRWWIllusion,1500);
+    }
+    else
+    {
+      setTimer (timRWWIllusion,150);
+    }
+  }
+  else
+  {
+    @sysvar::RWWIllusionCtrl = 0;
+  }
+}
+
+// *************************************************************************************
+//  Creates on call a RWW DENM
+// *************************************************************************************
+on timer timer_SendRWW
+{
+  int i = 0;
+  int errCode = 0;
+  
+  gFlagRwwActive = @sysvar::ActivateRWW;
+  
+  // The user has activated the RWW in the RWW_Configuration Panel
+  if(gFlagRwwActive==1)
+  {    
+    // If there is no DENM Handle, create it.
+    if(gRWWHdl == 0)
+    { 
+      gRWWHdl = C2xInitPacket("btp","btpOverGeo");
+      if (gRWWHdl)
+      {
+        // init the RWW message on BTP with GeoNetworking
+        errCode = C2xInitProtocol(gRWWHdl, "DENM");
+        if (errCode != 0)
+        {
+          write ("RWW packet cannot be initialized: stopping measurement. Error Code %i",errCode);
+        }
+      }
+    }
+    
+    // get the time base for the message
+    gItsTimeStamp = C2xGetITSTimestamp();
+    gUTCsince1970Mod32 = gItsTimeStamp & 0xFFFFFFFF; // UNIX TST Mod32
+    gUTCsince2004 = C2xConvertTimeToMSSinceUTC (gItsTimeStamp, en2004);
+    
+    
+    SetDenmData();  // Sets the DENM data
+    SetWLANData();  // Sets the WLAN data
+    SetCnhData();   // Sets the Common Network Header data
+    SetGeoData();   // Sets the extended Header data
+    SendRWWDenm();  // Send the DENM
+  }
+  else
+  {
+    // Reset Message Handle
+    if(gRWWHdl != 0)
+    {
+      gRWWHdl = 0;
+    }
+  }
+
+  setTimer(timer_SendRWW, gTimRWWCycleTime);
+}
+
+// *************************************************************************************
+//  Sets important values in the DENM ASN1 Container in order to 
+//  create a Roadworks Warning DENM
+// *************************************************************************************
+void SetDenmData() 
+{
+  // data-structur for the DENM
+  struct DENM denmPdu;
+   
+  // *** ITS PDU header ***
+  denmPdu.header.protocolVersion = 1;
+  denmPdu.header.messageID = 1;
+  denmPdu.header.isValidFlag = 1;
+  denmPdu.header.stationID = gEthData.source[5];
+  
+  denmPdu.denm.isValidFlag = 1;
+  
+  // *** Location container ***
+  
+  // Trace-points: We have on ath-history with 5 tracepoints
+  denmPdu.denm.location.isValidFlag = 1;
+  denmPdu.denm.location.traces.length = 1;
+  denmPdu.denm.location.traces.isValidFlag = 1;
+  denmPdu.denm.location.traces.arrayValue[0].isValidFlag = 1;
+  denmPdu.denm.location.traces.arrayValue[0].length = 5;
+  
+  // PathPoints
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[0].isValidFlag = 1;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[0].pathPosition.isValidFlag = 1;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[0].pathPosition.deltaLongitude = 0.0005 * cMultiplier;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[0].pathPosition.deltaLatitude = 0.000050 * cMultiplier;
+
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[1].isValidFlag = 1;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[1].pathPosition.isValidFlag = 1;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[1].pathPosition.deltaLongitude = 0.00095 * cMultiplier;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[1].pathPosition.deltaLatitude = 0.00007 * cMultiplier;
+
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[2].isValidFlag = 1;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[2].pathPosition.isValidFlag = 1;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[2].pathPosition.deltaLongitude = 0.00130 * cMultiplier;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[2].pathPosition.deltaLatitude = 0.00009 * cMultiplier;
+  
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[3].isValidFlag = 1;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[3].pathPosition.isValidFlag = 1;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[3].pathPosition.deltaLongitude = 0.00160 * cMultiplier;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[3].pathPosition.deltaLatitude = 0.00015 * cMultiplier;
+  
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[4].isValidFlag = 1;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[4].pathPosition.isValidFlag = 1;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[4].pathPosition.deltaLongitude = 0.00190 * cMultiplier;
+  denmPdu.denm.location.traces.arrayValue[0].arrayValue[4].pathPosition.deltaLatitude = 0.000260 * cMultiplier;
+     
+  denmPdu.denm.location.eventPositionHeading.isValidFlag = 1;
+  denmPdu.denm.location.eventPositionHeading.directionValue = 2700;
+  denmPdu.denm.location.eventPositionHeading.directionConfidence = 1;
+  
+  // *** Situation Container: OPTIONAL ***
+  denmPdu.denm.situation.isValidFlag = 1;
+  
+  // lowest (1) to highest (7)
+  denmPdu.denm.situation.informationQuality = 6;
+  
+  // RWW = 3
+  denmPdu.denm.situation.eventType.causeCode = 3;
+  
+  // Streetcleaning = 5
+  denmPdu.denm.situation.eventType.subCauseCode = @sysvar::SubCauseCode;
+    
+  // *** Management Container *** 
+  denmPdu.denm.management.isValidFlag = 1;
+  denmPdu.denm.management.actionID.isValidFlag = 1;
+  denmPdu.denm.management.eventPosition.latitude = gEventPosLat * cMultiplier;
+  denmPdu.denm.management.eventPosition.longitude = gEventPosLong * cMultiplier;
+  denmPdu.denm.management.referenceTime = gUTCsince2004;
+  denmPdu.denm.management.detectionTime = gUTCsince2004;
+  
+  denmPdu.denm.management.eventPosition.positionConfidenceEllipse.semiMajorOrientation.directionConfidence = 1;
+  denmPdu.denm.management.eventPosition.elevation.elevationConfidence = 1; 
+  
+  // lessThan50m(0), lessThan100m(1), lessThan200m(2), lessThan500m(3), lessThan1000m(4), lessThan5km(5), lessThan10km(6), over10km(7)
+  denmPdu.denm.management.relevanceDistance = @sysvar::RelevanceDistance;
+  
+  // unavailable(0), upstreamTraffic(1), downstreamTraffic(2), allTrafficDirection(3)
+  denmPdu.denm.management.relevanceTrafficDirection = @sysvar::RelevanceDirection;
+  
+  API_SetDENMParams(gRWWHdl, denmPdu);      // Create the message
+}
+
+// ******************************************************
+//  function sends a RWW message
+// ******************************************************
+void SendRWWDenm()
+{
+	int errFlag = 0;
+  
+  // Sets the WLAN data for RWW packet
+  if (SetPacketData_WLAN(gRWWHdl, gWlanData) != 0) 
+  {
+    errFlag = 1;
+  }
+  // Sets the Ethernet data for a RWW-packet
+  if( SetPacketData_ETH(gRWWHdl, gEthData) != 0) 
+  {
+    errFlag = 1;
+  }
+  
+  // Sets the Common Network Header data for a RWW-packet
+  if( SetPacketData_CNH (gRWWHdl, gCnhData) != 0) 
+  {
+    errFlag = 1;
+  }
+  
+  if (SetPacketData_GeoNetworking(gRWWHdl, gGeoData) != 0)
+  {
+    errFlag = 1;
+  }
+  
+  // 1002 is the BTP destination port that is defined in ASN.1-import
+  if (SetPacketData_BTP(gRWWHdl, 2002, 0, 0) != 0) 
+  {
+	  errFlag=1;
+	}
+  
+  // If everything worked... 
+	if (errFlag == 0)
+	{
+    // ... and the packet could be completed...
+	  if (C2xCompletePacket(gRWWHdl) != 0) 
+    {
+		  write ("C2xCompletePacket error: cannot encode DENM message");
+	  }
+    // ...send it!
+	  else 
+    {
+		  C2xOutputPacket(gRWWHdl);
+	  }
+	}	
+}
+
+/****************************************************/
+//
+// functions sets the internal data of the 
+// WLAN header
+//
+/****************************************************/
+void SetWLANData ()
+{
+  gWlanData.durationId   = 0;
+  //gWlanData.address1[5]; // not used
+  gWlanData.address2[5]  = gEthData.source[5];
+  //gWlanData.address3[5]; // not used
+  //gWlanData.address4[5]; // not used
+  gWlanData.sequenceControl =0;
+  gWlanData.qos = 0;
+}
+
+
+// *****************************************************
+//  function sends a RWW message
+// *****************************************************
+void SetCnhData ()
+{
+  gCnhData.version          = 0;
+  
+  // any
+  gCnhData.nextHeader       = 2;
+  
+  gCnhData.ht               = 4;  // GeoBroadcast
+  
+  // resize the header because of changing the header type (ht)
+  if (C2xResizeToken(gRWWHdl, "geo_ext", "header", 48*8) != 0)
+  {
+    write ("Resize token for genNetworking header failed");
+  }
+
+  gCnhData.hst              = 0;  // circular area
+  gCnhData.reserved         = 0;
+  gCnhData.flags            = 2;
+  gCnhData.payloadLength    = 0;
+  gCnhData.tc_Reserved      = 0;
+  gCnhData.tc_Relevance     = 1;
+  gCnhData.tc_Reliability   = 1;
+  gCnhData.tc_Latency       = 1;
+  gCnhData.hopLimit         = 1;
+
+  gCnhData.lpv.lpvNetAddr.manuallyFlag   = 0;
+  
+  // stationType 9 = RSU
+  gCnhData.lpv.lpvNetAddr.stationType    = 9; 
+  gCnhData.lpv.lpvNetAddr.stationSubType = 0;
+  gCnhData.lpv.lpvNetAddr.countryCode    = 49;
+  
+  // use the MAC Id
+  gCnhData.lpv.lpvNetAddr.addr[5]        = gEthData.source[5]; 
+  
+  gCnhData.lpv.timeStamp        = gUTCsince1970Mod32;
+  
+  gCnhData.lpv.latitude         = gITSPosLat  * cMultiplier;
+  gCnhData.lpv.longitude        = gITSPosLong * cMultiplier;
+  gCnhData.lpv.timeAccuracy     = 0;
+  gCnhData.lpv.positionAccuracy = 0;
+  gCnhData.lpv.speedAccuracy    = 0;
+  gCnhData.lpv.headingAccuracy  = 0;
+  gCnhData.lpv.altitudeAccuracy = 0;
+}
+
+/****************************************************/
+//
+// functions sets the internal data of the 
+// GeoNetworking protocol
+//
+/****************************************************/
+void SetGeoData ()
+{
+  gGeoData.seqNumb = 1;
+  gGeoData.lifeTime = 0x1A;
+  gGeoData.reserved = 0;
+
+  gGeoData.lpv.lpvNetAddr.addr[5] = gEthData.source[5];
+  gGeoData.lpv.timeStamp          = gUTCsince1970Mod32;
+  gGeoData.lpv.latitude           = gITSPosLat  * cMultiplier;
+  gGeoData.lpv.longitude          = gITSPosLong * cMultiplier;
+  gGeoData.lpv.speed              = 0;
+  gGeoData.lpv.heading            = 0;
+  gGeoData.lpv.altitude           = 0;
+  gGeoData.lpv.timeAccuracy       = 0;
+  gGeoData.lpv.positionAccuracy   = 0;
+  gGeoData.lpv.speedAccuracy      = 0;
+  gGeoData.lpv.headingAccuracy    = 0;
+  gGeoData.lpv.altitudeAccuracy   = 0;
+
+  gGeoData.geoAreaPosLat  = gEventPosLat * cMultiplier;
+  gGeoData.geoAreaPosLong = gEventPosLong * cMultiplier;
+  
+  // lessThan50m(0), lessThan100m(1), lessThan200m(2), lessThan500m(3), lessThan1000m(4), lessThan5km(5), lessThan10km(6), over10km(7)
+  switch (@sysvar::RelevanceDistance)
+  {
+    case 0: gGeoData.distanceA = 50; break;
+    case 1: gGeoData.distanceA = 100; break;
+    case 2: gGeoData.distanceA = 200; break;
+    case 3: gGeoData.distanceA = 500; break;
+    case 4: gGeoData.distanceA = 1000; break;
+    case 5: gGeoData.distanceA = 5000; break;
+    case 6: gGeoData.distanceA = 10000; break;      
+    default: gGeoData.distanceA = 10000;
+  }
+  
+  gGeoData.distanceB      = 0;
+  gGeoData.angle          = 0;
+}

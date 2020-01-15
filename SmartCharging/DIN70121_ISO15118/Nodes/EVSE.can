@@ -1,0 +1,612 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "EVSE_MsgCallbacks.cin"
+  #include "EV_Sendfunctions.cin"
+  #include "EVSE_Sendfunctions.cin"
+  #include "Sendfunctions_Common.cin"
+  #include "Util.cin"
+}
+
+variables
+{  
+  dword writeTab;  // Sink identifier
+  
+  long lTemp;
+  char strBuffer1[100], strBuffer2[100], strBuffer3[100];
+  
+  int DCMode = 0;
+  int isDIN = 0;
+  int isISO_IS = 0;
+  int isPncMode = 0;
+
+  byte SessionId2[8];
+
+  char gPanelName[5] = "EVSE";
+  char gProtocolPanelName[12] = "Protocol";
+    
+  long isSimulationStarted = 0;
+  int isPassiveMode = 0;
+
+  char evseConnections[256];
+   
+  msTimer tProcessingTime;
+  msTimer tPreCharge;
+  msTimer tMessageTx; 
+  msTimer tInvalidMessage;
+  msTimer tVerification;
+  msTimer tRestartAfterReset;
+  
+  const int processingTimeForContractAuthentication = 3000;
+  const int processingTimeForCableCheck = 2500;
+  const int processingTimeForChargeParameterDiscovery = 4000;
+  const int processingTimeForPowerDelivery = 3000;
+  const int processingTimeMaxJitter = 2000;
+  
+  const int tPreChargeTime = 75;   // [ms]
+  float fPreChargeTargetVoltage = 0;
+   
+  msTimer tChipResetSimulation;  
+  const int cChipResetTime = 3000;
+    
+  int processing = 0;
+  int processingFinished = 0;
+
+  int chargeLoopCount = 0;
+    
+  char errorCode[10] = "FAILED";
+}
+
+// ==========================================================================================
+//   Initialization
+// ==========================================================================================
+
+on preStart
+{
+  if (@sysVar::Common::SysVerboseWrite)
+    SCC_SetVerbosity(5);
+  else
+    SCC_SetVerbosity(2);
+
+  @sysVar::EVSE::Control::SysEVSE_WaitResume = 0;
+  @sysVar::Test::SysTestApplyControlMode = 0;
+  @sysVar::SLAC_Test::SysStartSLACTest = 0;
+  
+  UpdateSimState();
+}
+
+on start
+{
+  writeTab = WriteCreate("SCC EVSE");    // same name as tab created by nodelayer
+
+  @sysvar::Test::SysErrorIndEVSE = 0;
+  
+  PrintEthernetSettings("EVSE");
+  StartSimulation();
+    
+  // Apply test function schema
+  enableControl("Send functions EVSE", "BMeteringReceiptDC", @sysVar::Test::SysTestSchema);
+  
+  SCC_SetTLSEnabled(@sysvar::Common::SysTLSEnabled);    
+  
+  // Apply "chip present" (which is off by default)
+  SCC_SLAC_SetChipPresent(@sysvar::Common::VT_Access::ChipPresent);
+  
+  // Reset power
+  @sysVar::EVSE::SysEVSE_PresentVoltage = 0;
+  @sysVar::EVSE::SysEVSE_PresentCurrent = 0;
+}
+
+void StartSimulation()
+{  
+  SCC_StartSimulation();
+  isSimulationStarted = 1;
+  
+  // Update link state polling mode 
+  if (@sysVar::Common::SysLinkStatusSimulation)
+    @sysVar::EVSE::SysEVSE_LinkStatus = 0;
+    
+  ApplyLinkStatusMode();
+  ApplyMessageDelay();
+  
+  @sysvar::EVSE::SysEVSE_Processing = 0;
+  SetProcessing(0, 0);
+
+  SetControlForeColor(gPanelName, "TEnabled", MakeRGB(72, 72, 72));  
+
+  strncpy(evseConnections, "", 256);
+  SysSetVariableString(sysVar::EVSE::SysEVSE_Connections, evseConnections);
+  
+  UpdateSimState();
+}
+
+// ==========================================================================================
+//   Status callbacks from simulation DLL
+// ==========================================================================================
+
+SCC_LinkStatusChangeInd( dword OldStatus, dword NewStatus)
+{
+  // Note: this indication is only received when polling is enabled
+  WriteLineEx(writeTab, 1, "EVSE: Link state changed from %i to %i", OldStatus, NewStatus);
+  @sysVar::EVSE::SysEVSE_LinkStatus = NewStatus;
+}
+
+SCC_ProtocolFinishedInd( byte SessionId[])
+{
+  WriteLineEx(writeTab, 1, "EVSE: Protocol finished!");
+}
+
+SCC_ConnectionTimeoutInd( byte SessionId[])
+{  
+  WriteLineEx(writeTab, 2, "EVSE: Connection closed due to inactivity");
+}
+
+SCC_MessageTxInd( byte SessionID[], dword messageId, long error)
+{
+  /*
+  WriteHex(strBuffer, SessionID);
+  WriteLineEx(writeTab, 0, "EVSE: Message Tx: Session Id = %s, result = %i", strBuffer1, error);
+  */   
+  
+  @Sysvar::EVSE::SysEVSE_MessageTx = 1;
+  setTimer(tMessageTx, 150);
+    
+  if (error > 0)
+    WriteLineEx(writeTab, 2, "EVSE: Message sending of type %0x failed: %i", messageId, error); 
+}
+
+SCC_SLACFinishedInd( dword Result )
+{
+  if (Result)
+    WriteLineEx(writeTab, 1, "EVSE: SLAC finished, result : OK");
+  else
+    WriteLineEx(writeTab, 1, "EVSE: SLAC finished, result : FAILED");
+  
+  if (@sysVar::Common::SysLinkStatusSimulation)
+  {
+    // Simulate chip reset
+    SCC_SLAC_SetLinkStatus(2);   // unkown state - "chip not responding"
+    @sysVar::EVSE::SysEVSE_LinkStatus = SCC_SLAC_GetLinkStatus(); 
+    
+    setTimer(tChipResetSimulation, cChipResetTime);
+    WriteLineEx(writeTab, 1, "EVSE: Waiting for link state = 1");
+  }
+}
+
+SCC_PreSendInd( byte SessionId[], dword MessageId, char ResponseCode[] )
+{
+  if (ShallWrite())
+    WriteLineEx(writeTab, 0, "Pre Send Ind: Message ID = %i, Response Code = %s", MessageId, ResponseCode);  
+}
+
+SCC_SchemaSelectionInd( char SchemaNamespace[], dword VersionMajor, dword VersionMinor)
+{
+  int targetConfig = 0;
+  
+  isDIN = 0;
+  isISO_IS = 0;
+  
+  WriteLineEx(writeTab, 1, "Schema Selected: %s, %i.%i", SchemaNamespace, VersionMajor, VersionMinor);
+  
+  // There is no session ID assigned yet so we cannot address the connection.
+  // Set the schema namespace for all active connections.
+
+  // Switch config dependent on protocol version
+  if (strncmp(SchemaNamespace, "urn:iso:15118:2:2013:MsgDef", strlen("urn:iso:15118:2:2013:MsgDef")) == 0
+    && VersionMajor == 2)
+  {
+    targetConfig = 0;
+    isISO_IS = 1;
+  }
+  else if (strncmp(SchemaNamespace, "urn:din:70121:2012:MsgDef", strlen("urn:din:70121:2012:MsgDef")) == 0)
+  {
+    targetConfig = 1;
+    isDIN = 1;
+  }  
+
+  if (SCC_LoadV2GConfig(targetConfig))     // session ID = 0
+    WriteLineEx(writeTab, 1, "Switching to config %i", targetConfig);  
+}
+
+SCC_TCPConnectInd( dword Port, long isSender)
+{
+  if (isSender)    // cannot happen here
+    WriteLineEx(writeTab, 1, "EVSE: TCP connection established on port %i", Port);
+  else
+    WriteLineEx(writeTab, 1, "EVSE: TCP client connected to port %i", Port);
+}
+
+SCC_TCPShutdownInd( dword Port, long isSender)
+{
+  if (isSender)
+    WriteLineEx(writeTab, 1, "EVSE: TCP connection on port %i closed", Port);
+  else
+    WriteLineEx(writeTab, 1, "EVSE: TCP connection on port %i was closed by remote station", Port);
+}
+
+SCC_InvalidMessageInd ( long MessageType, long ErrorCode)
+{
+  @Sysvar::Test::SysErrorIndEVSE = 1;
+  setTimer(tInvalidMessage, 3000);    
+  
+  if (ErrorCode == 0)    
+    WriteLineEx(writeTab, 1, "EVSE: Invalid message received - wrong version number or format!");
+  else if (ErrorCode == 1)
+    WriteLineEx(writeTab, 1, "EVSE: Invalid message received - unknown payload type!");
+  else if (ErrorCode == 2)
+    WriteLineEx(writeTab, 1, "EVSE: Invalid message received - invalid payload length!");
+  else if (ErrorCode == 3)
+    WriteLineEx(writeTab, 1, "EVSE: Invalid message received - decoding error");
+}  
+
+SCC_SignaturePreSendInd( byte SessionID[], byte Signature[], dword& SignatureLength)
+{  
+  WriteLineEx(writeTab, 1, "EVSE: Signature of length %i created", SignatureLength); 
+}
+
+SCC_SignatureVerificationInd( dword MessageID, dword Result)
+{
+  setControlVisibility(gPanelName, "Verification", 1);
+  setTimer(tVerification, 1000);
+}
+
+// ==========================================================================================
+//   Helper functions
+// ==========================================================================================
+
+void ApplyPaymentOptions()
+{
+  if (@sysvar::EVSE::Control::SysEVSE_PaymentOptions == 0)
+  {
+    SCC_SetExternalPaymentAllowed(1);
+    SCC_SetContractPaymentAllowed(0);
+  }
+  else if (@sysvar::EVSE::Control::SysEVSE_PaymentOptions == 1)
+  {
+    SCC_SetExternalPaymentAllowed(0);
+    SCC_SetContractPaymentAllowed(1);
+  }
+  else
+  {
+    SCC_SetExternalPaymentAllowed(1);
+    SCC_SetContractPaymentAllowed(1);
+  }
+}
+
+void GenerateNMK()
+{ 
+  byte nmk[16];
+  byte nid[7];
+  
+  SCC_SLAC_GetKeyData(nid, nmk);
+  
+  WriteHex(strBuffer1, nmk); 
+  WriteHex(strBuffer2, nid); 
+  
+  // read NMK and NID from chip, before new key is set
+  WriteLineEx(writeTab, 0, "Generating key, old key is: %s (NID: %s)", strBuffer1, strBuffer2);
+  
+  SCC_SLAC_GenerateApplyKey();  
+  SCC_SLAC_GetKeyData(nid, nmk);
+  
+  WriteHex(strBuffer1, nmk); 
+  WriteHex(strBuffer2, nid); 
+  
+  // read new NMK and NID from chip
+  WriteLineEx(writeTab, 0, "Generated new key: %s (NID: %s)", strBuffer1, strBuffer2);
+}
+
+void UpdateSimState()
+{
+  lTemp = SCC_GetSimulationState();
+    
+  if (lTemp == 2)
+    @sysvar::EVSE::SysEVSE_SimState = 0;
+  else if (lTemp == 3)
+    @sysvar::EVSE::SysEVSE_SimState = 1;
+  else
+    @sysvar::EVSE::SysEVSE_SimState = 2;    
+}
+
+void UpdateConnections()
+{  
+  long connectionCount;
+  byte sessionIdTemp[8];
+  char sessionIdTempChar[17];
+  
+  // Note: this functions works only in active mode!
+  if (@sysvar::Test::SysTestApplyControlMode)
+    return;
+  
+  connectionCount = SCC_GetConnectionCount();
+  @sysVar::EVSE::SysEVSE_ConnectionCount = connectionCount;
+
+  if (connectionCount == 0)
+    SetControlForeColor(gPanelName, "TEnabled", MakeRGB(72, 72, 72));
+  else
+    SetControlForeColor(gPanelName, "TEnabled", MakeRGB(192, 0, 0));
+
+  strncpy(evseConnections, "", 256);
+  
+  for (lTemp = 0; lTemp < connectionCount; ++lTemp)
+  {
+    SCC_GetSessionId(lTemp, sessionIdTemp);
+
+    // Remember IDs of current sessions
+    //  (store only the newest connections, as sometimes old connections stay open)
+    if (lTemp == connectionCount - 2)
+      memcpy(SessionId2, sessionIdTemp, 8);      
+    else if (lTemp == connectionCount - 1)
+      memcpy(SessionId, sessionIdTemp, 8);
+    
+    WriteHex(sessionIdTempChar, sessionIdTemp);
+    sessionIdTempChar[16] = '\0';
+    strncat(evseConnections, sessionIdTempChar, 256);
+
+    SysSetVariableString(sysVar::EVSE::SysEVSE_Connections, evseConnections);
+  } 
+}
+
+void SetProcessing( int isProcessing, int avgTime)
+{  
+  dword jitterTime;  
+  jitterTime = random(processingTimeMaxJitter) - processingTimeMaxJitter/2;
+    
+  processing = isProcessing;    // remember if the timer is running
+  
+  @sysvar::EVSE::SysEVSE_Processing = isProcessing;
+  
+  if (0 == isProcessing)
+  { 
+    SCC_SetProcessing(0);
+    SetControlForeColor(gPanelName, "TProcessing",  MakeRGB(255, 255, 255));  
+  }
+  else
+  {
+    processingFinished = 0;
+    SCC_SetProcessing(1);
+    SetControlForeColor(gPanelName, "TProcessing",  MakeRGB(0, 0, 255)); 
+      
+    setTimer(tProcessingTime, _max(avgTime + jitterTime, 1)); 
+  }  
+}
+
+// ==========================================================================================
+//   Timers
+// ==========================================================================================
+
+on timer tMessageTx
+{  
+  @Sysvar::EVSE::SysEVSE_MessageTx = 0;
+}
+
+on timer tInvalidMessage
+{  
+  @Sysvar::Test::SysErrorIndEVSE = 0;
+}
+
+on timer tVerification
+{
+  setControlVisibility(gPanelName, "Verification", 0);
+}
+
+on timer tPreCharge
+{	
+  // Adapt voltage until requested voltage is matched
+  if (fPreChargeTargetVoltage >= (@sysVar::EVSE::SysEVSE_PresentVoltage + 5))
+    @sysVar::EVSE::SysEVSE_PresentVoltage += 5;
+  else if (fPreChargeTargetVoltage <= (@sysVar::EVSE::SysEVSE_PresentVoltage - 5))
+    @sysVar::EVSE::SysEVSE_PresentVoltage -= 5;
+  
+  if (abs(fPreChargeTargetVoltage - @sysVar::EVSE::SysEVSE_PresentVoltage) >= 5)   // +=5 is not yet applied!
+    setTimer(tPreCharge, tPreChargeTime);
+}
+
+on timer tProcessingTime
+{ 
+  processingFinished = 1;
+  SetProcessing(0, 0);
+}
+
+on timer tChipResetSimulation
+{ 
+  SCC_SLAC_SetLinkStatus(1);
+  @sysVar::EVSE::SysEVSE_LinkStatus = SCC_SLAC_GetLinkStatus(); 
+}
+
+on timer tRestartAfterReset
+{
+  StartSimulation();
+ 
+  @sysVar::EVSE::Control::SysEVSE_WaitResume = 0;
+}
+
+// ==========================================================================================
+//   System variable handlers (simulation <-> GUI)
+// ==========================================================================================
+
+on sysVar EVSE::SysEVSE_StopCharging
+{ 
+  SCC_SetShutdownRequest(@this);
+}
+
+on sysVar EVSE::Control::SysEVSE_ReturnFailed
+{  
+  if (@this == 1)
+    SCC_SetResponseCode(errorCode);
+}
+
+on sysVar EVSE::Control::SysEVSE_AbortConnection
+{
+  if (@this == 1)
+    SCC_StopSession(1 /* close TCP */);
+}
+
+on sysvar EVSE::Control::SysEVSE_NewNMK
+{
+  if (@this == 1)
+  {
+    GenerateNMK();
+    
+    @EVSE::Control::SysEVSE_NewNMK = 0;
+  }
+}
+
+on sysVar EVSE::Control::SysEVSE_WaitResume
+{
+  if(@this == 0)
+    SCC_SimulationResume();
+  else
+    SCC_SimulationWait();
+  
+  UpdateSimState();
+}
+
+on sysVar EVSE::SysEVSE_MinVoltage
+{
+  SCC_SetMinVoltage(@this);
+}
+
+on sysVar EVSE::SysEVSE_MaxVoltage
+{
+  SCC_SetMaxVoltage(@this);
+}
+
+on sysVar EVSE::SysEVSE_NominalVoltage
+{
+  SCC_SetNominalVoltage(@this);
+}
+
+on sysVar EVSE::SysEVSE_MinCurrent
+{
+  SCC_SetMinCurrent(@this);
+}
+
+on sysVar EVSE::SysEVSE_MaxCurrent
+{
+  SCC_SetMaxCurrent(@this);
+}
+
+on sysVar EVSE::SysEVSE_MaxPower
+{
+  SCC_SetMaxPower(@this * 1000);    // variable in [kW]
+}
+
+on sysVar EVSE::SysEVSE_CurrentRegulationTolerance
+{
+  SCC_SetCurrentRegulationTolerance(@this);
+}
+
+on sysVar EVSE::SysEVSE_PeakCurrentRipple
+{
+  SCC_SetPeakCurrentRipple(@this);
+}
+
+on sysVar EVSE::SysEVSE_PresentCurrent
+{
+  SCC_SetPresentCurrent(@this);
+}
+
+on sysVar EVSE::SysEVSE_PresentVoltage
+{
+  SCC_SetPresentVoltage(@this);
+}
+
+on sysvar EVSE::Control::SysEVSE_Reset
+{
+  if (@this == 0)
+    return;
+  
+  SCC_SimulationReset();
+  
+  // allow TCP shutdown to take place before restarting and setting new key
+  setTimer(tRestartAfterReset, 100);
+}
+
+on sysvar EVSE::Control::SysEVSE_Renegotiate
+{
+  if (@this == 1)
+	  SCC_SetEVSENotification("ReNegotiation");
+}
+
+on sysvar EVSE::Control::SysEVSE_PaymentOptions
+{
+  ApplyPaymentOptions();
+}
+
+on sysVar Test::SysTestApplyControlMode
+{
+  if (@this == 1)
+  {    
+    SCC_SimulationReset();
+    
+    if (@sysVar::Test::SysTestControlledEntity != 0)
+    {      
+      isPassiveMode = 1;
+      SCC_StartPassive();
+    }
+    else
+    {
+      SCC_StartSimulation();
+    }
+  
+    // apply "chip present" (which is off by default)
+    SCC_SLAC_SetChipPresent(@sysvar::Common::VT_Access::ChipPresent);
+  }  
+}
+
+on sysVar SLAC_Test::SysStartSLACTest
+{  
+  if (@this == 1)
+  {
+    SCC_SimulationReset();    
+    isPassiveMode = 1;
+    SCC_StartPassive(0 /* start with manual SLAC */);    
+  }
+}
+
+on sysVar Common::SysMessageDelay
+{
+  ApplyMessageDelay();
+}
+
+on sysVar Common::SysMessageDelayJitter
+{
+  ApplyMessageDelay();
+}
+
+on sysvar Common::SysLinkStatusSimulation
+{
+  ApplyLinkStatusMode();   // only works when simulation is started!
+}
+
+on sysvar Common::SysVerboseWrite
+{  
+  if (@this)
+    SCC_SetVerbosity(5);
+  else
+    SCC_SetVerbosity(2);
+}
+
+on sysvar Common::SysTLSEnabled
+{
+  SCC_SetTLSEnabled(@this);
+}
+
+on sysvar Common::VT_Access::ChipPresent
+{
+  // toggled from VT_EVSE node to disable simulated attenuation
+  SCC_SLAC_SetChipPresent(@this);
+}
+
+// Functions to switch sender roles in Test
+
+int IsEVRoleActive()
+{
+  return @sysvar::Test::SysTestSwitchRoles == 1;
+}
+
+int IsEVSERoleActive()
+{
+  return @sysvar::Test::SysTestSwitchRoles == 0;
+}

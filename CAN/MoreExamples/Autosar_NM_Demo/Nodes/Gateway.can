@@ -1,0 +1,156 @@
+/*@!Encoding:1252*/
+variables
+{   
+   char gECU[10]       = "Gateway";
+   char gPanelName[10] = "Gateway";
+
+   BYTE sUserData[8] = {0xFF, 0xFF, 0, 0, 0, 0, 0, 0};
+   msTimer tWakeupReq;
+
+   BYTE reqBitsPn1[2] = {0x02, 0x00};
+   BYTE reqBitsPn2[2] = {0x04, 0x00};
+   BYTE reqBitsAll[2] = {0xFF, 0xFF};
+   
+   const cBusSleepState = 1;
+   const cRepeatMessageState = 5;
+   const cNormalOperationState = 4; 
+   const cReadySleepState = 3; 
+
+   int pn1Requested;
+   int pn2Requested;
+   BYTE reqBits[2];
+}
+
+on timer tWakeupReq
+{
+  @sysvar::NetworkManagement::SendCarWakeUp = 0;
+}
+
+Nm_StateChangeNotification( long previousState, long currentState)
+{
+  char line[50];
+  long status;
+  snprintf( line, elcount(line), "Transition from %d to %d"
+    , previousState, currentState);
+  Trace( "Nm_StateChangeNotification", "", line);
+}
+
+void Trace( char functionName[], char info[])
+{
+  Trace( functionName, info, "");
+}
+
+void Trace( char functionName[], char info[], char verbose[])
+{
+  char sep[2] = "/";
+  sep[0] = functionName[0] ? '/' : 0;
+  if( verbose[0])
+  {
+    write( "[%.3f]%s%s%s: %s", timeNow()/100000.0, gECU
+           , sep
+           , functionName
+           , verbose
+           );
+  } else
+  {
+    write( "[%.3f]%s%s%s: %s", timeNow()/100000.0, gECU
+           , sep
+           , functionName
+           , info
+           );
+  }
+  //if( info[0])
+  //  putValue(E_NetworkStateC, info);  
+}
+
+void Trace( char functionName[], char info[], char verbose[], long argument)
+{
+  char line[100];
+  snprintf( line, elcount(line), verbose, argument);
+  Trace( functionName, info, line);
+}
+
+int UpdatePnRequestBits ()
+{
+  pn1Requested = @sysvar::NetworkManagement::GatewayReqPn1;
+  pn2Requested = @sysvar::NetworkManagement::GatewayReqPn2;
+
+  reqBits[0] = 0x00;
+  reqBits[1] = 0x00;
+
+  if (pn1Requested == 1)
+  {
+    reqBits[0] |= reqBitsPn1[0];
+    reqBits[1] |= reqBitsPn1[1];
+  }
+  if (pn2Requested == 1)
+  {
+    reqBits[0] |= reqBitsPn2[0];
+    reqBits[1] |= reqBitsPn2[1];
+  }
+
+  if (pn1Requested == 1 || pn2Requested == 1)
+  {
+    Nm_SetPnRequestBits(reqBits);
+    return 1;
+  }
+  return 0;
+}
+
+on start
+{
+  Nm_SetVerbosity(3);
+}
+
+on sysvar_update NetworkManagement::GatewayReqPn1
+{
+  // Start sending if a network is requested
+  if (1 == UpdatePnRequestBits())        
+    Nm_NetworkRequest();
+  else
+    Nm_NetworkRelease();
+        
+}
+
+on sysvar_update NetworkManagement::GatewayReqPn2
+{
+  // Start sending if a network is requested
+  if (1 == UpdatePnRequestBits())        
+    Nm_NetworkRequest();
+  else
+    Nm_NetworkRelease();        
+}
+
+on sysvar_update NetworkManagement::SendCarWakeUp
+{
+  if ( @this == 1 )
+  { 
+    Nm_SetCarWakeUpBit(1);
+    Nm_SetPnRequestBits(reqBitsAll);	// make sure all PNs are requested
+    NM_NetworkRequest();
+    setTimer(tWakeupReq, 500);
+  } else {
+    // Stop sending and clear wakeup bit
+    Nm_SetCarWakeUpBit(0);
+    UpdatePnRequestBits();	// reset bits to user definition
+    Nm_SetPnRequestBits(reqBits);
+    if( pn1Requested == 0 && pn2Requested == 0) {
+      Nm_NetworkRelease();
+    }   
+  }
+}
+
+on key 'r'
+{
+  Nm_SetCarWakeUpBit(1);
+  NM_NetworkRequest();
+  setTimer(tWakeupReq, 500);
+}
+
+on key 'f'
+{
+	Nm_SetCarWakeUpBit(0);
+  NM_NetworkRequest();
+  setTimer(tWakeupReq, 500);
+}
+

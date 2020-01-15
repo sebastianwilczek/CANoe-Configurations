@@ -1,0 +1,1408 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "..\CAPL_Includes\DiagDefinitions.cin"
+  #include "..\CAPL_Includes\FaultMemory_Sim.cin"
+  #include "..\CAPL_Includes\Download_Sim.cin"
+}
+
+variables
+{
+  long gCANFDavailable = 0;        // set to 1 if the bus supports CAN FD
+  
+  // Default serial number as long as not overwritten via variant coding
+  const cDefaultSerialNumber=1397051953;
+
+  // Fall into default session if not request was received for this long
+  const word cSessionTimeout=15000;
+  mstimer tSessionTimer;
+  
+  word gS3ServerTimeout;
+  msTimer tS3ServerTimer;
+  
+  long gP2ClientTimeout;
+  long gP2extClientTimeout;
+  
+  enum eSessionType {DefaultSession=1, ProgrammingSession=2, ExtendedSession=3};
+  
+  enum eSecurityStatus {Locked=0, Unlocked=1};
+  enum eSecurityLevel {Locked_Level_1=0, Unlocked_Level_1=1, Locked_Level_17=2, Unlocked_Level_17=3};
+  word gLastSecuritySeedLevel1;
+  dword gLastSecuritySeedLevel17;
+  
+  word gSelectorValue;
+  const cMaxMuxDataSize = 14;
+  byte gMuxData[cMaxMuxDataSize];
+  char gTextTableEntryStr[30];
+  
+  enum eVoltageRange {VoltageTooLow, VoltageNormal, VoltageTooHigh} gVoltageRange;
+  msTimer tVoltageTooHigh;
+  msTimer tVoltageTooLow;
+  
+  msTimer tUpdateInternalValues;
+
+  msTimer tDIDSendFast;
+  msTimer tDIDSendMedium;
+  msTimer tDIDSendSlow;
+  msTimer tDelayedResponse;
+  
+  enum eDIDSendMode gSineSendMode;
+  enum eDIDSendMode gSawtoothSendMode;
+  enum eDIDSendMode gDDDIDSendMode;
+
+  word gNumberOfDDDIDs;
+  const cMaxNumberOfDDDIDs = 7;
+  word gDDDID[cMaxNumberOfDDDIDs];
+  struct sDIDInfo {
+    word DID;
+    word sizeInBytes;
+  };
+  struct sDIDInfo gSupportedDIDs[cMaxNumberOfDDDIDs] = {
+    {0x0000, 4},  // Sine Wave
+    {0x0001, 2},  // Sawtooth
+    {0x0010, 1},  // Door Contact
+    {0x0107, 2},  // Voltage
+    {0x0108, 4},  // Odometer Value
+    {0x0201, 1},  // Window Rough Position
+    {0x0202, 8}   // Window Fine Position
+  };
+  
+  double gTargetWindowLiftPosition;
+  const cWindowPositionDeltaPerUpdateInterval=1.6;
+}
+
+on start
+{
+  long value;
+
+  setWriteDbgLevel(0);
+  
+  value = DiagGetCommParameter( "CANoe.BusContext");
+  writeDbgLevel(1, "(CanTP) %NODE_NAME%: Setting bus context %x", value);
+  SetBusContext( value);
+  {
+    // check if CAN FD is available at all
+    CANSettings arbitration;
+    CANSettings data;
+    canFdGetConfiguration( (WORD) value, arbitration, data);
+    gCANFDavailable = (arbitration.flags & 0x100 ? 1 : 0);
+    if( gCANFDavailable)
+      writeDbgLevel(1, "(CanTP) %NODE_NAME%: CAN FD is available");
+  }
+  
+  InitECU();
+}
+on timer tVoltageTooLow
+{
+  AddFault(1, 0x09 );  // Status bits: Test failed | Confirmed DTC
+}
+
+on timer tVoltageTooHigh
+{
+  AddFault(2, 0x09 );  // Status bits: Test failed | Confirmed DTC
+}
+
+on timer tUpdateInternalValues
+{
+  double currentPos;
+  
+  // Update waveform values (for demo purposes)
+  @sysvarMember::%NODE_NAME%::InternalData.SineWave=sin(timeNowFloat()/1000000);
+  @sysvarMember::%NODE_NAME%::InternalData.Sawtooth=((double)((timeNow()%2000000)))/2000000;
+  
+  // Move the window from the current towards the target position
+  currentPos=@sysvarMember::%NODE_NAME%::InternalData.WindowFinePosition;
+  if (currentPos < gTargetWindowLiftPosition) {
+    currentPos=((currentPos+cWindowPositionDeltaPerUpdateInterval)<gTargetWindowLiftPosition)? currentPos+cWindowPositionDeltaPerUpdateInterval : gTargetWindowLiftPosition;
+  }
+  if (currentPos > gTargetWindowLiftPosition) {
+    currentPos=((currentPos-cWindowPositionDeltaPerUpdateInterval)>gTargetWindowLiftPosition)? currentPos-cWindowPositionDeltaPerUpdateInterval : gTargetWindowLiftPosition;
+  }
+  @sysvarMember::%NODE_NAME%::InternalData.WindowFinePosition=currentPos;
+  @sysvarMember::%NODE_NAME%::InternalData.WindowRoughPosition=(dword)((@sysvarMember::%NODE_NAME%::InternalData.WindowFinePosition)/100*16);
+}
+
+on timer tDIDSendFast
+{
+  sendPeriodicDIDs(Fast);
+}
+
+on timer tDIDSendMedium
+{
+  sendPeriodicDIDs(Medium);
+}
+
+on timer tDIDSendSlow
+{
+  sendPeriodicDIDs(Slow);
+}
+
+sendPeriodicDIDs(enum eDIDSendMode sendMode)
+{
+  diagResponse DoorFL.SineWave_Send_fast respSine;
+  diagResponse DoorFL.Sawtooth_Send_fast respSawtooth;
+  diagResponse DoorFL.Dynamically_Define_Periodic_Data_Send_fast respDDDID;
+  byte buffer[100];
+  word bufLenUsed;  
+  
+  if (gSineSendMode==sendMode) {
+    diagSetParameter(respSine, cParamAccessPhysical, "SineValue", @sysvarMember::%NODE_NAME%::InternalData.SineWave);
+    SendUUDT(respSine);
+  }
+  if (gSawtoothSendMode==sendMode) {
+    diagSetParameter(respSawtooth, cParamAccessPhysical, "SawtoothValue", @sysvarMember::%NODE_NAME%::InternalData.Sawtooth);
+    SendUUDT(respSawtooth);
+  }
+  if (gDDDIDSendMode==sendMode) {
+    diagResize(respDDDID, 100);
+    buffer[0]=0xF0;
+    bufLenUsed=PrepareDDDIDParameters(buffer, 1);
+    diagResize(respDDDID, bufLenUsed);
+    diagSetPrimitiveData(respDDDID, buffer, bufLenUsed);       
+    sendUUDT(respDDDID);
+  }
+}
+
+// Prepare response payload for Dynamic Data Identifiers
+word PrepareDDDIDParameters(byte buffer[], word offset)
+{
+  word k;
+  struct sWrapLong {
+    dword lw;
+  } longWrapper;  
+  struct sWrapWord {
+    word w;
+  } wordWrapper;
+  struct sWrapDword {
+    dword dw;
+  } dwordWrapper;
+  struct sQword {
+    qword value;
+  } rawQWord;
+
+  for (k=0; k<gNumberOfDDDIDs; k++) {
+    switch (gDDDID[k]) {
+      case 0x00: // SineWave (raw: long, i.e. 4 byte signed, Motorola format, encoding float/double)
+        longWrapper.lw=(long)(@sysvarMember::%NODE_NAME%::InternalData.SineWave * 2147483647.0);  // Datatype in diagnostic description is normalized!
+        memcpy_h2n(buffer, offset, longWrapper); // Motorola format ==> h2n
+        offset+=4; 
+        break;
+      case 0x01: // Sawtooth (raw: word, i.e. 2 byte unsigned, Intel format, encoding float/single)
+        wordWrapper.w=(word)(@sysvarMember::%NODE_NAME%::InternalData.Sawtooth * 65535.0);        // Datatype in diagnostic description is normalized!
+        memcpy(buffer, offset, wordWrapper); // Intel format
+        offset+=2; 
+        break;
+      case 0x107: // Voltage (2 x 1 byte unsigned, encoding float/double)
+        buffer[offset++]=(byte)((@sysvar::ExternalSignals::SupplyVoltage)*10.0);
+        buffer[offset++]=(byte)(InternalVoltage(@sysvar::ExternalSignals::SupplyVoltage)*10.0);
+        break;
+      case 0x108: // OdometerValue (4 byte unsigned, encoding unsigned)
+        dwordWrapper.dw=interpretAsDword(@sysvar::ExternalSignals::OdometerValue);
+        memcpy(buffer, offset, dwordWrapper);
+        offset+=4; 
+        break;
+      case 0x201: // WindowLiftRoughPosition (1 byte texttable, encoding unsigned)
+        buffer[offset++]=@sysvarMember::%NODE_NAME%::InternalData.WindowRoughPosition;
+        break;
+      case 0x202: // WindowLiftFinePosition (Basic Diagnostics 64bit double, Intel format)
+        rawQWord.value=interpretAsQword(@sysvarMember::%NODE_NAME%::InternalData.WindowFinePosition);
+        memcpy(buffer, offset, rawQWord);
+        offset+=8; // 64bit ==> 8 byte
+        break;
+      default:
+        write("%NODE_NAME%: Error: Unknown Data Identifier!");
+        break;
+    }
+  }
+  return(offset);
+}
+
+on timer tSessionTimer
+{
+  write("%NODE_NAME%: Session timed out (session timeout=%d ms), falling back to default.", cSessionTimeout);
+
+  ResetSession();
+}
+
+on timer tS3ServerTimer
+{
+  write("%NODE_NAME%: Session timed out (S3 server timeout=%d ms), falling back to default.", gS3ServerTimeout);
+  @%NODE_NAME%::TesterPresent=0;
+  ResetDIDs();  
+  ResetSession();  
+}
+
+On timer tDelayedResponse
+{
+  diagResponse DoorFL.Hard_Reset_Reset resp;
+  diagSendPositiveResponse(resp);
+}
+
+on sysvar sysvarMember::%NODE_NAME%::FaultMemoryGui.BtnStoreDTC
+{
+  byte status;
+  
+  if (@this) { // only when button was pressed (not when released)
+    status =   (@sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[7] << 7)
+             | (@sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[6] << 6)
+             | (@sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[5] << 5)
+             | (@sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[4] << 4)
+             | (@sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[3] << 3)
+             | (@sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[2] << 2)
+             | (@sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[1] << 1)
+             |  @sysvarMember::%NODE_NAME%::FaultMemoryGui.StatusByte[0];
+    
+    AddFault(@sysvarMember::%NODE_NAME%::FaultMemoryGui.DTC_ToStore, status);
+  }
+}
+
+on sysvar sysvarMember::%NODE_NAME%::FaultMemoryInternal.FaultMemoryActivated
+{
+  enableControl("%NODE_NAME%", "FaultMemoryGroup", @this);
+}
+
+on sysvar sysvar::ExternalSignals::SupplyVoltage
+{
+  @sysvarMember::%NODE_NAME%::InternalData.Current=@sysvar::ExternalSignals::SupplyVoltage / 10;
+  if (@this < 10) {
+    gVoltageRange=VoltageTooLow;
+    @sysvar::%NODE_NAME%::VoltageOutOfRange=1;
+    setTimer(tVoltageTooLow, 1000);   // store fault if error condition present for 1000 ms
+  }
+  else {
+    if (@this > 14) {
+      gVoltageRange=VoltageTooHigh;
+      @sysvar::%NODE_NAME%::VoltageOutOfRange=1;
+      setTimer(tVoltageTooHigh, 1000); // store fault if error condition present for 1000 ms
+    }
+    else {
+      gVoltageRange=VoltageNormal;
+      @sysvar::%NODE_NAME%::VoltageOutOfRange=0;
+      cancelTimer(tVoltageTooLow);
+      cancelTimer(tVoltageTooHigh);
+    }
+  }
+}
+
+on sysvar sysvar::%NODE_NAME%::DownloadInProgress
+{
+  if (@this) {
+    cancelTimer(tS3ServerTimer);
+  }
+  else {
+    setTimer(tS3ServerTimer, gS3ServerTimeout);
+  }
+}
+
+on sysvar sysvar::%NODE_NAME%::RewritableData.VariantCoding.WindowLiftSupport
+{
+  SetControlVisibility("%NODE_NAME%", "WindowPositionDisplay", @this);
+  SetControlVisibility("%NODE_NAME%", "WindowsFinePositionValue", @this);
+  SetControlVisibility("%NODE_NAME%", "WindowsFinePositionUnit", @this);
+}
+
+on key *
+{
+  if (this > '0' && this <'7') {
+    AddFaultByIndex(this-'1'); // store corresponding DTC in fault memory
+  }
+}
+
+// If not handled explicitly, send negative response with negative response code (NRC) "Service not supported"
+on diagRequest DoorFL.*
+{
+  ResetSession();
+  diagSendNegativeResponse(this, cNRC_ServiceNotSupported); 
+}
+
+
+// If Tester present is received, reply with positive response
+on diagRequest DoorFL.TesterPresent_Send
+{
+  diagResponse this resp;
+  
+  refreshS3Timer();
+  
+  if (0==diagGetSuppressResp(this)) {
+    diagSendPositiveResponse(resp);
+  }
+  else {
+    writeDbgLevel(1, "%NODE_NAME%: Suppressed TesterPresent response!");
+  }
+}
+
+// Use diagnostic class handler to save some identical lines of code
+on diagRequest DoorFL.Sessions::*
+{
+  diagResponse this resp;
+  word SessionType;
+  word errorFlag;
+  
+  errorFlag=0;
+  
+  refreshS3Timer();
+
+  SessionType=((word)diagGetParameter(this, "DiagSessionType")) & 0x7F; // Filter out SPRMIB
+  if (SessionType != @sysvar::%NODE_NAME%::CurrentSession) {
+    ResetLock();
+  }
+  switch(SessionType) {
+    case DefaultSession: 
+      @sysvar::%NODE_NAME%::CurrentSession=SessionType;
+      cancelTimer( tSessionTimer);
+      break;
+    case 0x02: 
+      if (ExtendedSession==@sysvar::%NODE_NAME%::CurrentSession) {
+        @sysvar::%NODE_NAME%::CurrentSession=ProgrammingSession;
+        refreshSessionTimer();
+      }
+      else {
+        errorFlag=1;
+      }
+      break;
+    case 0x03: 
+      @sysvar::%NODE_NAME%::CurrentSession=ExtendedSession;
+      refreshSessionTimer();
+      break;
+    default:
+      errorFlag=1;
+      break;
+  }
+  if (errorFlag) {
+    ResetSession();
+    diagSendNegativeResponse(resp, cNRC_SecurityAccessDenied); 
+    cancelTimer( tSessionTimer);
+  }
+  else {
+    if (diagGetSuppressResp(this)) {
+      writeDbgLevel(1, "%NODE_NAME%: Suppressed DoorFL.Sessions::* response!");
+    }
+    else {
+      diagSetParameter(resp, cParamAccessPhysical, "P2", gP2ClientTimeout);
+      diagSetParameter(resp, cParamAccessPhysical, "P2Ex", gP2extClientTimeout);
+      diagSendPositiveResponse(resp);
+    }
+  }
+}
+
+on diagRequest DoorFL.SeedLevel_0x01_Request
+{
+  diagResponse this resp;
+
+  refreshS3Timer();
+  if (ExtendedSession==@sysvar::%NODE_NAME%::CurrentSession || ProgrammingSession==@sysvar::%NODE_NAME%::CurrentSession) {
+    gLastSecuritySeedLevel1=random(0x10000);
+    diagSetParameter(resp, "SecuritySeed", gLastSecuritySeedLevel1); // Use 2-byte random value as seed
+    diagSendPositiveResponse(resp);
+  }
+  else {
+    ResetSession();
+    diagSendNegativeResponse(this, cNRC_ConditionsNotCorrectOrRequestSequenceError); 
+  }
+}
+
+on diagRequest DoorFL.KeyLevel_0x01_Send
+{
+  diagResponse this resp;
+  long securityKey, receivedKey;
+  byte seedArray[2];
+  byte keyArray[2];
+  dword keyArraySize;
+  
+  refreshS3Timer();
+  if (ExtendedSession==@sysvar::%NODE_NAME%::CurrentSession || ProgrammingSession==@sysvar::%NODE_NAME%::CurrentSession) {
+    seedArray[0]=(gLastSecuritySeedLevel1>>8)&0xFF;
+    seedArray[1]=gLastSecuritySeedLevel1&0xFF;
+    diagGenerateKeyFromSeed(seedArray, 2, 17, "", "", keyArray, 2, keyArraySize); // Use 2-byte random value as seed
+    securityKey=keyArray[0];
+    securityKey=(securityKey<<8) + keyArray[1];
+    receivedKey=diagGetParameter(this, "SecurityKey");
+    if (securityKey==receivedKey) {
+      @sysvar::%NODE_NAME%::SecurityStatus=Unlocked;
+      @sysvar::%NODE_NAME%::SecurityLevel=Unlocked_Level_1;
+      diagSendPositiveResponse(resp);
+      return;
+    }
+  }
+  ResetSession();
+  diagSendNegativeResponse(this, cNRC_InvalidKey); 
+}
+
+on diagRequest DoorFL.SeedLevel_0x11_Request
+{
+  diagResponse this resp;
+
+  refreshS3Timer();
+  if (ExtendedSession==@sysvar::%NODE_NAME%::CurrentSession || ProgrammingSession==@sysvar::%NODE_NAME%::CurrentSession) {
+    gLastSecuritySeedLevel17=random(0xFFFFFFFFLL);
+    diagSetParameter(resp, "SecuritySeed", gLastSecuritySeedLevel17); // Use 4-byte random value as seed
+    @sysvar::%NODE_NAME%::SecurityLevel=Locked_Level_17;
+    diagSendPositiveResponse(resp);
+  }
+  else {
+    ResetSession();
+    diagSendNegativeResponse(this, cNRC_ConditionsNotCorrectOrRequestSequenceError); 
+  }
+}
+
+on diagRequest DoorFL.KeyLevel_0x11_Send
+{
+  diagResponse this resp;
+  dword securityKey, receivedKey;
+  byte seedArray[4];
+  byte keyArray[4];
+  dword keyArraySize;
+  word k;
+  
+  refreshS3Timer();
+  if (ExtendedSession==@sysvar::%NODE_NAME%::CurrentSession || ProgrammingSession==@sysvar::%NODE_NAME%::CurrentSession) {
+    
+    for (k=0; k<4; k++) {
+      seedArray[k]=(gLastSecuritySeedLevel17>>(8*(3-k)))&0xFF;
+    }
+    diagGenerateKeyFromSeed(seedArray, 4, 17, "", "", keyArray, 4, keyArraySize); // Use 4-byte random value as seed
+    securityKey=0;
+    for (k=0; k<4; k++) {
+      securityKey=(securityKey<<8) + keyArray[k];
+    }
+    receivedKey=diagGetParameter(this, "SecurityKey");
+    if (securityKey==receivedKey) {
+      @sysvar::%NODE_NAME%::SecurityStatus=Unlocked;
+      @sysvar::%NODE_NAME%::SecurityLevel=Unlocked_Level_17;
+      diagSendPositiveResponse(resp);
+      return;
+    }
+  }
+  ResetSession();
+  diagSendNegativeResponse(this, cNRC_InvalidKey); 
+}
+
+double InternalVoltage(double SupplyVoltage)
+{
+  return (SupplyVoltage>5.0)?5.0:SupplyVoltage;
+}
+
+void SetWindowLiftPosition(double posInPercent)
+{
+  gTargetWindowLiftPosition=posInPercent;
+}
+
+SendUUDT( diagResponse * resp)
+{
+  BYTE data[64];
+  message * sUUDT;
+  long i;
+
+  i = DiagGetPrimitiveData( resp, data, elcount(data));
+  if( i < 0)
+    return;
+
+  if (!gCANFDavailable) {
+    if (i>8) {
+      write("%NODE_NAME%: Data too long to send as UUDT via CAN (max. 8 Byte)!");
+      return;
+    }
+  }
+  else {
+    if (i>64) {
+      write("%NODE_NAME%: Data too long to send as UUDT via CAN FD (max. 64 Byte)!");
+      return;
+    }
+  }
+
+  sUUDT.id = DiagGetCommParameter( "CANoe.UudtId");
+  if (i<=8) {  // Standard CAN
+     sUUDT.dlc = i;
+  }
+  else {       // CAN FD
+    sUUDT.FDF=1;
+    if (i<=12) {
+      sUUDT.dlc = 0x9;
+    }
+    else if (i<=16){
+      sUUDT.dlc = 0xA;
+    }
+    else if (i<=20){
+      sUUDT.dlc = 0xB;
+    }
+    else if (i<=24){
+      sUUDT.dlc = 0xC;
+    }
+    else if (i<=32){
+      sUUDT.dlc = 0xD;
+    }
+    else if (i<=48){
+      sUUDT.dlc = 0xE;
+    }
+    else if (i<=64){
+      sUUDT.dlc = 0xF;
+    }
+    else return;
+  }
+
+  while( i-- > 0)
+    sUUDT.byte(i) = data[i];
+
+//  gSentResponse = 1;
+  output( sUUDT);
+}
+
+// Simulate erroneous ECU not responding at all to this service
+on diagRequest DoorFL.Additional.UnimplementedServiceData_Read
+{
+  //gSentResponse=1; // Indicate to CCI reference implementation to send no response
+}
+
+on diagRequest DoorFL.DevelopmentData_Read
+{
+  diagResponse this resp;
+
+  refreshS3Timer();
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "OperatingSystemVersion", 1);
+  DiagSetParameter( resp, "CanDriverVersion", 5);
+  DiagSetParameter( resp, "NmVersion", 2);
+  DiagSetParameter( resp, "DiagnosticModuleVersion", 1);
+  DiagSetParameter( resp, "TransportLayerVersion", 4);
+  DiagSendResponse( resp);
+}
+
+
+// Example how to set a raw parameter value
+on diagRequest DoorFL.SerialNumber_Read
+{
+  diagResponse this resp;
+  byte rawSerialNumber[4];
+  
+  refreshS3Timer();
+  // Since the serial number here is only 4 bytes long, this could simply be done via 
+  // diagSetParameter(resp, "SerialNumber", @%NODE_NAME%::RewritableData.SerialNumber);
+  // But we want to demonstrate the setting of raw values:
+  rawSerialNumber[0]=@%NODE_NAME%::RewritableData.SerialNumber>>24;
+  rawSerialNumber[1]=(@%NODE_NAME%::RewritableData.SerialNumber>>16) & 0xFF;
+  rawSerialNumber[2]=(@%NODE_NAME%::RewritableData.SerialNumber>>8) & 0xFF;
+  rawSerialNumber[3]=@%NODE_NAME%::RewritableData.SerialNumber & 0xFF;
+  diagSetParameterRaw(resp, "SerialNumber", rawSerialNumber, elcount(rawSerialNumber));
+  diagSendPositiveResponse(resp);
+}
+
+on diagRequest DoorFL.SerialNumber_Write
+{
+  diagResponse this resp;
+  dword newSerialNumber;
+
+  refreshS3Timer();
+  if( @sysvar::%NODE_NAME%::CurrentSession < ProgrammingSession || @sysvar::%NODE_NAME%::SecurityStatus!=Unlocked)
+  {
+    ResetSession();
+    DiagSendNegativeResponse( this, cNRC_ConditionsNotCorrectOrRequestSequenceError); // Conditions not correct or request sequence error
+    return;
+  }
+  @sysvarMember::%NODE_NAME%::RewritableData.SerialNumber=diagGetParameter(this, "SerialNumber");
+  refreshSessionTimer();
+  diagSendPositiveResponse(resp);
+}
+
+on diagRequest DoorFL.Variant_Coding_Read
+{
+  diagResponse this resp;
+
+  refreshS3Timer();
+  if(DefaultSession==@sysvar::DoorFL::CurrentSession)
+  {
+    // The ECU was not unlocked, so deny access.
+    ResetSession();
+    DiagSendNegativeResponse( this, cNRC_SecurityAccessDenied);
+    return;
+  }
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "Codingstring.CountryType", @sysvarMember::%NODE_NAME%::RewritableData.VariantCoding.CountryCode);
+  DiagSetParameter( resp, "Codingstring.VehicleType", @sysvarMember::%NODE_NAME%::RewritableData.VariantCoding.VehicleType);
+  DiagSetParameter( resp, "Codingstring.WindowLift_Support", @sysvarMember::%NODE_NAME%::RewritableData.VariantCoding.WindowLiftSupport);
+  DiagSetParameter( resp, cParamAccessPhysical, "VehicleSpeedToLockDoor", @sysvarMember::%NODE_NAME%::RewritableData.VariantCoding.VehicleSpeedToLockDoor);
+  
+  DiagSendResponse( resp);
+}
+
+on diagRequest DoorFL.Variant_Coding_Write
+{
+  diagResponse this resp;
+  long CountryCode;
+  long VehicleType;
+  long WindowLiftSupport;
+  long VehicleSpeedToLockDoor;
+
+  refreshS3Timer();
+  if(Locked==@sysvar::%NODE_NAME%::SecurityStatus)
+  {
+    // The ECU was not unlocked, so deny access.
+    ResetSession();
+    DiagSendNegativeResponse( this, cNRC_SecurityAccessDenied);
+    return;
+  }
+
+  // Retrieve the parameters from the request.
+  CountryCode = DiagGetParameter( this, "Codingstring.CountryType");
+  VehicleType = DiagGetParameter( this, "Codingstring.VehicleType");
+  WindowLiftSupport = DiagGetParameter( this, "Codingstring.WindowLift_Support");
+  VehicleSpeedToLockDoor = DiagGetParameter( this, cParamAccessPhysical, "VehicleSpeedToLockDoor");
+
+  if(CountryCode>3 || CountryCode<0 || VehicleType>3 || VehicleType<0 ||
+     WindowLiftSupport>1 || WindowLiftSupport<0 || VehicleSpeedToLockDoor>50 || VehicleSpeedToLockDoor<0)
+  {
+    // The ECU was not unlocked, so deny access.
+    ResetSession();
+    DiagSendNegativeResponse( this, cNRC_RequestOutOfRange);
+    return;
+  }
+  @sysvarMember::%NODE_NAME%::RewritableData.VariantCoding.CountryCode = CountryCode;
+  @sysvarMember::%NODE_NAME%::RewritableData.VariantCoding.VehicleType = VehicleType;
+  @sysvarMember::%NODE_NAME%::RewritableData.VariantCoding.WindowLiftSupport = WindowLiftSupport;
+  @sysvarMember::%NODE_NAME%::RewritableData.VariantCoding.VehicleSpeedToLockDoor = VehicleSpeedToLockDoor;
+
+  refreshSessionTimer();
+  DiagSendResponse( resp);
+}
+
+int bufcmp(byte buf1[], byte buf2[])
+{
+  word k;
+  
+  for (k=0; k<elcount(buf1); k++) {
+    if (k>elcount(buf2)) return(1);
+    if (buf1[k]!=buf2[k]) return(-1);
+  }
+  return(0);
+}
+
+on diagRequest DoorFL.EcuIdentification_Read
+{
+  diagResponse this resp;
+  char buffer[30];  
+
+  refreshS3Timer();
+  sysGetVariableString(sysvar::%NODE_NAME%::ECUIdentification, buffer, elcount(buffer));
+  DiagSetParameter( resp, "Part_Number", buffer);
+  DiagSendPositiveResponse( resp);
+}
+
+on diagRequest DoorFL.EcuIdentification_Write
+{
+  diagResponse this resp;
+  char buffer[30];
+
+  refreshS3Timer();
+  
+  if( @sysvar::%NODE_NAME%::CurrentSession < ProgrammingSession || @sysvar::%NODE_NAME%::SecurityStatus!=Unlocked)
+  {
+    ResetSession();
+    DiagSendNegativeResponse( this, cNRC_ConditionsNotCorrectOrRequestSequenceError); // Conditions not correct or request sequence error
+    return;
+  }
+  
+  DiagGetParameter( this, "Part_Number", buffer, elcount(buffer));
+  sysSetVariableString(sysvar::%NODE_NAME%::ECUIdentification, buffer);
+
+  refreshSessionTimer();
+  DiagSendPositiveResponse( resp);
+}
+
+// Example how to set the numerical and physical value of a parameter 
+on diagRequest DoorFL.DID_Voltage_Read
+{
+  diagResponse this resp;
+  double physicalSupplyVoltage;
+  double numericalSupplyVoltage;
+  double physicalInternalVoltage;
+  
+  refreshS3Timer();
+  
+  physicalSupplyVoltage=@sysvar::ExternalSignals::SupplyVoltage;
+  numericalSupplyVoltage=physicalSupplyVoltage*10;
+  physicalInternalVoltage=InternalVoltage(physicalSupplyVoltage);
+  diagSetParameter(resp, cParamAccessNumerical, "SupplyVoltage", numericalSupplyVoltage); // Set numerical value (e.g.: 142 * 1/10 Volt = 14.2 Volt)
+  diagSetParameter(resp, cParamAccessPhysical, "InternalVoltage", physicalInternalVoltage);  
+  diagSendPositiveResponse(resp);
+}
+
+// Example how to set the coded value of a parameter (numerical access would also be possible here)
+on diagRequest DoorFL.DID_OdometerValue_Read
+{
+  diagResponse this resp;
+  
+  refreshS3Timer();
+  diagSetParameter(resp, cParamAccessCoded, "OdometerValue", @sysvar::ExternalSignals::OdometerValue);
+  diagSendPositiveResponse(resp);
+}
+
+on diagRequest DoorFL.DID_Fingerprint_Write
+{
+  diagResponse this resp;
+  byte fingerprint[9];
+
+  refreshS3Timer();  
+
+  diagGetParameterRaw(this, "Fingerprint", fingerprint, elcount(fingerprint));
+
+  // Ignore the fingerprint contents and always send a positive response (do not expect this from a real ECU!)
+  @sysvar::%NODE_NAME%::SecurityStatus=Unlocked;
+  @sysvar::%NODE_NAME%::SecurityLevel=Unlocked_Level_17;
+  refreshSessionTimer();
+  DiagSendPositiveResponse( resp);
+}
+
+on diagRequest DoorFL.DID_WindowLiftRoughPosition_Read
+{
+  diagResponse this resp;
+
+  if (@DoorFL::RewritableData.VariantCoding.WindowLiftSupport) {
+    refreshS3Timer();  
+
+    DiagSetParameter(resp, "WindowLiftRoughPosition", @sysvarMember::%NODE_NAME%::InternalData.WindowRoughPosition);
+
+    DiagSendResponse(resp);
+  }
+  else {
+    ResetSession();
+    diagSendNegativeResponse(resp, cNRC_ConditionsNotCorrectOrRequestSequenceError);
+  }
+}
+
+on diagRequest DoorFL.DID_WindowLiftRoughPosition_Write
+{
+  diagResponse this resp;
+  double targetPosition;
+
+  if (@DoorFL::RewritableData.VariantCoding.WindowLiftSupport) {
+    refreshS3Timer();
+    refreshSessionTimer();
+
+    targetPosition=this.GetParameter("WindowLiftRoughPosition")*6.25;
+    SetWindowLiftPosition(targetPosition);
+
+    DiagSendResponse(resp);
+  }
+  else {
+    ResetSession();
+    diagSendNegativeResponse(resp, cNRC_ConditionsNotCorrectOrRequestSequenceError);
+  }
+}
+
+on diagRequest DoorFL.Additional.WindowLiftFinePositionRead
+{
+  diagResponse this resp;
+
+  if (@DoorFL::RewritableData.VariantCoding.WindowLiftSupport) {
+    refreshS3Timer();  
+
+    diagSetParameter(resp, "WindowLiftFinePosition", @sysvarMember::%NODE_NAME%::InternalData.WindowFinePosition);
+    diagSendPositiveResponse(resp);
+    return;
+  }
+  else {
+    ResetSession();
+    diagSendNegativeResponse(resp, cNRC_ConditionsNotCorrectOrRequestSequenceError);
+  }
+}
+
+on diagRequest DoorFL.Additional.WindowLiftFinePositionWrite
+{
+  double dblTargetPositionInPercent;
+  diagResponse this resp;
+
+  if (@DoorFL::RewritableData.VariantCoding.WindowLiftSupport) {
+    refreshS3Timer();  
+    refreshSessionTimer();
+
+    dblTargetPositionInPercent=diagGetParameter(this, "TargetPosition");
+    if (dblTargetPositionInPercent<=100.0 && dblTargetPositionInPercent>=0.0) {
+      SetWindowLiftPosition(dblTargetPositionInPercent);
+      resp.sendPositiveResponse();
+    }
+    else {
+      ResetSession();
+      diagSendNegativeResponse(resp, cNRC_RequestOutOfRange);
+    }  
+  }
+  else {
+    diagSendNegativeResponse(resp, cNRC_ConditionsNotCorrectOrRequestSequenceError);
+  }
+}
+
+on diagRequest DoorFL.DID_MuxedTestData_Write
+{
+  diagResponse this resp;
+  dword dwData;
+  char SelectorIdentifier[30];
+  char DataBuffer[14];
+  long ret;
+  long tempSelectorValue;
+
+  {
+    int k;
+    for (k=0;k<elcount(DataBuffer); k++) {
+      DataBuffer[k]=0;
+    }
+  }
+  refreshS3Timer();
+  if ((ret=diagGetParameter(this, "Selector", SelectorIdentifier, elcount(SelectorIdentifier))) < 0) {
+    write("%NODE_NAME%: Error getting parameter ""Selector""!");
+  }
+  else {
+    writeDbgLevel(1, "%NODE_NAME%: Selector: %s", SelectorIdentifier);
+  }
+  
+  
+  if ((ret=diagGetParameter(this, cParamAccessNumerical, "Selector")) < 0) {
+    write("%NODE_NAME%: Error getting numerical parameter ""Selector""!");
+  }
+  else {
+    tempSelectorValue=ret;
+    switch (tempSelectorValue) {
+      case 0: // Identity (1 Byte)
+        if ((ret=diagGetParameter(this, "MuxedTestData.Identitaet")) < 0) { 
+          write("%NODE_NAME%: Error getting parameter ""MuxedTestData.Identitaet""!");
+        }
+        else {
+          gSelectorValue=tempSelectorValue;
+          gMuxData[0]=(byte)(ret & 0xFF);
+          writeDbgLevel(1, "%NODE_NAME%: diagGetParameter for ""MuxedTestData.Identitaet"" returns 0x%02X!", ret);
+        }
+        break;
+      case 1: // TextTable (1 Byte)
+        if ((ret=diagGetParameter(this, "MuxedTestData.Texttabelle", gTextTableEntryStr, elcount(gTextTableEntryStr))) < 0) { 
+          write("%NODE_NAME%: Error getting parameter ""MuxedTestData.Texttabelle""!");
+        }
+        else {
+          gSelectorValue=tempSelectorValue;
+          writeDbgLevel(1, "%NODE_NAME%: diagGetParameter for ""MuxedTestData.Texttabelle"" returns '%s'!", gTextTableEntryStr);
+        }
+        break;
+      case 2: // Linear (4 Byte)
+        if ((ret=diagGetParameterRaw(this, "MuxedTestData.Linear", gMuxData, 4)) < 0) { 
+          write("%NODE_NAME%: Error getting parameter ""MuxedTestData.Linear""!");
+        }
+        else {
+          gSelectorValue=tempSelectorValue;
+          writeDbgLevel(1, "%NODE_NAME%: Written MuxedTestData.Linear: 0x%02X 0x%02X 0x%02X 0x%02X", gMuxData[0], gMuxData[1], gMuxData[2], gMuxData[3]);
+        }
+        break;
+      case 3: // Characteristic Curve (x Byte)
+      case 4: // Piecewise linear (1 Byte)
+      case 5: // Substructure L1
+      case 6: // Substructure L2
+      case 7: // Substructure L3
+      default:
+        write("%NODE_NAME%: Selector value not implemented!");
+        ResetSession();
+        diagSendNegativeResponse(resp, cNRC_RequestOutOfRange);
+        return;
+    }
+  }
+  
+  diagSendPositiveResponse(resp);
+}
+
+on diagRequest DoorFL.DID_MuxedTestData_Read
+{
+  diagResponse this resp;
+  long ret;
+  
+  refreshS3Timer();  
+
+  diagSetParameter(resp, "Selector", gSelectorValue);
+
+  switch (gSelectorValue) {
+    case 0: // Identity (1 Byte)
+      if ((ret=diagSetParameter(resp, "MuxedTestData.Identitaet", gMuxData[0])) < 0) { 
+        write("%NODE_NAME%: Error setting parameter 'MuxedTestData.Identitaet'!");
+      }
+      else {
+        writeDbgLevel(1, "%NODE_NAME%: Parameter 'MuxedTestData.Identitaet' successfully set to %d!", gMuxData[0]);
+      }
+      break;
+    case 1: // TextTable (1 Byte)
+      if ((ret=diagSetParameter(resp, "MuxedTestData.Texttabelle", gTextTableEntryStr)) < 0) { 
+        write("%NODE_NAME%: Error setting parameter 'MuxedTestData.Texttabelle'!");
+      }
+      else {
+        writeDbgLevel(1, "%NODE_NAME%: Parameter 'MuxedTestData.Texttabelle' successfully set to '%s'!", gTextTableEntryStr);
+      }
+      break;
+    case 2: // Linear (4 Byte)
+      if ((ret=diagSetParameterRaw(resp, "MuxedTestData.Linear", gMuxData, 4)) < 0) { 
+        write("%NODE_NAME%: Error setting parameter 'MuxedTestData.Linear', ret=%d !", ret);
+      }
+      else {
+        writeDbgLevel(1, "%NODE_NAME%: Parameter 'MuxedTestData.Linear' set successfully (0x%02X 0x%02X 0x%02X 0x%02X)!", gMuxData[0], gMuxData[1], gMuxData[2], gMuxData[3]);
+      }
+      break;
+    case 3: // Characteristic Curve (x Byte)
+    case 4: // Piecewise linear (1 Byte)
+    case 5: // Substructure L1
+    case 6: // Substructure L2
+    case 7: // Substructure L3
+    default:
+      write("%NODE_NAME%: Selector value not implemented!");
+      ResetSession();
+      diagSendNegativeResponse(resp, cNRC_RequestOutOfRange);
+      return;
+  }
+  
+  diagSendPositiveResponse(resp);
+}
+
+// Use diagnostic class to save some lines of code
+on diagRequest DoorFL.Periodic_Data::*
+{
+  diagResponse this resp;
+  long DID;
+  long TransmissionMode;
+  long size;
+  
+  
+  refreshS3Timer();
+
+  TransmissionMode=diagGetParameter(this, "TransmissionMode");
+  size=DiagGetPrimitiveSize(this);
+  if (size==2) { // Sawtooth_Stop_all or SineWave_Stop_all or Dynamically_Define_Periodic_Data_Stop, containing no DID information
+    if (TransmissionMode==Off) {
+      gSineSendMode=Off;
+      gSawtoothSendMode=Off; 
+      gDDDIDSendMode=Off;
+
+      @sysvar::Tester_Display::BtnInternalsCyclicRead=0;
+      
+      diagSendPositiveResponse(resp);
+    }
+    else {
+      ResetSession();
+      diagSendNegativeResponse(resp, cNRC_RequestOutOfRange);
+    };
+    return;
+  }
+  
+  DID=diagGetParameter(this, "DataIdentifier");
+  writeDbgLevel(1, "%NODE_NAME%: DID=%d", DID);
+  
+  switch (TransmissionMode) {
+    case Once:
+      switch (DID) {
+        case 0x00: // SineWave
+          diagSetParameter(resp, cParamAccessPhysical, "SineValue", @sysvarMember::%NODE_NAME%::InternalData.SineWave);
+          gSineSendMode=Off;
+          @sysvar::Tester_Display::BtnInternalsCyclicRead=0;
+          break;
+        case 0x01: // Sawtooth
+          diagSetParameter(resp, cParamAccessPhysical, "SawtoothValue", @sysvarMember::%NODE_NAME%::InternalData.Sawtooth);
+          gSawtoothSendMode=Off;  
+          @sysvar::Tester_Display::BtnInternalsCyclicRead=0;
+          break;
+        default:
+          ResetSession();
+          diagSendNegativeResponse(resp, cNRC_RequestOutOfRange);
+          return;
+      }
+      break;
+      
+    case Fast:
+    case Medium:
+    case Slow:
+      switch (DID) {
+        case 0x00: // SineWave
+          gSineSendMode=(enum eDIDSendMode)TransmissionMode;
+          break;
+        case 0x01: // Sawtooth
+          gSawtoothSendMode=(enum eDIDSendMode)TransmissionMode;
+          break;
+        default:
+          ResetSession();
+          diagSendNegativeResponse(resp, cNRC_RequestOutOfRange);
+          return;
+      }
+      diagResize(resp,1);
+      DiagSetPrimitiveByte(resp,0,0x6A);
+      break;
+    case Off:
+      switch (DID) {
+        case 0x00: // SineWave
+          gSineSendMode=Off;
+          @sysvar::Tester_Display::BtnInternalsCyclicRead=0;
+          break;
+        case 0x01: // Sawtooth
+          gSawtoothSendMode=Off;  
+          @sysvar::Tester_Display::BtnInternalsCyclicRead=0;
+          break;
+        default:
+          ResetSession();
+          diagSendNegativeResponse(resp, cNRC_RequestOutOfRange);
+          return;
+      }
+      break;
+    default:
+      ResetSession();
+      diagSendNegativeResponse(resp, cNRC_RequestOutOfRange);
+      return;
+  }
+  diagSendPositiveResponse(resp);
+}
+
+word sizeOfDID(word DID)
+{
+  word DIDIndex;
+
+  for (DIDIndex=0; DIDIndex<cMaxNumberOfDDDIDs; DIDIndex++) {
+    if (DID==gSupportedDIDs[DIDIndex].DID) {
+      return(gSupportedDIDs[DIDIndex].sizeInBytes);
+    }
+  }
+  return(-1); // DID not supported
+}
+
+on diagRequest DoorFL.Dynamically_Define_Periodic_Data_Define_By_Identifier
+{
+  diagResponse this resp;
+  long sizeOfPrimitive;
+  long sizeOfDDDID;
+  word NumberOfDIDs;
+  word maxDataLength;
+  word DID;
+  word DIDPosition;
+  word DIDSizeRequested;
+  word DIDSize;
+
+  sizeOfDDDID=0;
+  maxDataLength=gCANFDavailable?63:7;
+  
+  refreshS3Timer();
+
+  sizeOfPrimitive=DiagGetPrimitiveSize(this);
+  if (((sizeOfPrimitive-4)%4)>0) {
+    DiagSendNegativeResponse(resp, cNRC_RequestOutOfRange);
+    ResetSession();
+    return;
+  }
+  else {
+    NumberOfDIDs=(sizeOfPrimitive-4)/4;
+    if (NumberOfDIDs>cMaxNumberOfDDDIDs) {
+      DiagSendNegativeResponse(resp, cNRC_RequestOutOfRange);
+      ResetSession();
+      return;
+    }
+    else {
+      for (gNumberOfDDDIDs=0; gNumberOfDDDIDs<NumberOfDIDs; gNumberOfDDDIDs++) {
+        DID=diagGetComplexParameter(this, "ListOfParameter", gNumberOfDDDIDs, "SourceDID");
+        DIDPosition=diagGetComplexParameter(this, "ListOfParameter", gNumberOfDDDIDs, "PositionInSourceDID");
+        DIDSizeRequested=diagGetComplexParameter(this, "ListOfParameter", gNumberOfDDDIDs, "MemorySize");
+        DIDSize=sizeOfDID(DID);
+        if (1!=DIDPosition || DIDSize<0 || DIDSizeRequested!=DIDSize) {
+          ResetSession();
+          DiagSendNegativeResponse(resp, cNRC_RequestOutOfRange);
+          gNumberOfDDDIDs=0;
+          return;
+        }
+        else {
+          if (sizeOfDDDID+DIDSize>maxDataLength) { // Length of DDDID too long for single frame
+            ResetSession();
+            DiagSendNegativeResponse(resp, cNRC_RequestOutOfRange); 
+            gNumberOfDDDIDs=0;
+            return;
+          }
+          else {
+            gDDDID[gNumberOfDDDIDs]=DID;
+            sizeOfDDDID+=DIDSize;
+            write("sizeOfDID=%d, sizeOfDDDID=%d, maxDataLength=%d",DIDSize, sizeOfDDDID, maxDataLength);
+          }
+        }
+      }
+      DiagSendPositiveResponse(resp);
+    }
+  }
+}
+
+on diagRequest DoorFL.Dynamically_Define_Periodic_Data_Read
+{
+  diagResponse this resp;
+  byte buffer[100];
+  word count;  
+  
+  refreshS3Timer();
+
+  if (0xF0 != diagGetParameter(this, "Identifier")) {
+    ResetSession();
+    diagSendNegativeResponse(resp, cNRC_RequestOutOfRange);
+  }
+  else {
+    buffer[0]=0x62;
+    buffer[1]=0xF2;
+    buffer[2]=0xF0;
+    count=PrepareDDDIDParameters(buffer,3);
+    diagResize(resp, count);
+    diagSetPrimitiveData(resp, buffer, count);        
+    diagSendPositiveResponse(resp);
+  };
+}
+
+on diagRequest DoorFL.Dynamically_Define_Periodic_Data_Clear
+{
+  diagResponse this resp;
+  
+  refreshS3Timer();
+
+  if (0xF0 != diagGetParameter(this, "DynamicallyDefinedIdentifier")) {
+    ResetSession();
+    diagSendNegativeResponse(resp, cNRC_RequestOutOfRange);
+  }
+  else {
+    gDDDIDSendMode=Off;
+    gNumberOfDDDIDs=0;
+    diagSendPositiveResponse(resp);
+  };
+}
+
+on diagRequest DoorFL.Dynamically_Define_Periodic_Data_ClearAll
+{
+  diagResponse this resp;
+  
+  refreshS3Timer();
+
+  gDDDIDSendMode=Off;
+  gNumberOfDDDIDs=0;
+  diagSendPositiveResponse(resp);
+}
+
+on diagRequest DoorFL.Dynamically_Define_Periodic_Data::*
+{
+  diagResponse this resp;
+  long TransmissionMode;
+  
+  refreshS3Timer();
+
+  TransmissionMode=diagGetParameter(this, "TransmissionMode");
+
+  switch (TransmissionMode) {
+    case Fast:
+    case Medium:
+    case Slow:
+      gDDDIDSendMode=(enum eDIDSendMode)TransmissionMode;
+      diagResize(resp,1);
+      DiagSetPrimitiveByte(resp,0,0x6A);
+      break;
+    case Off:
+      gDDDIDSendMode=Off;
+      diagResize(resp,1);
+      DiagSetPrimitiveByte(resp,0,0x6A);
+      break;
+    default:
+      ResetSession();
+      diagSendNegativeResponse(resp, cNRC_RequestOutOfRange);
+      return;
+  }
+  diagSendPositiveResponse(resp);
+}
+
+on diagRequest DoorFL.Door_Status_Read
+{
+  diagResponse this resp;
+  
+  refreshS3Timer();
+  
+  if (@sysvar::DoorFL::DoorContactStatusOverwritten==0) {
+    diagSetParameter(resp, "Door_Contact.Door_contact_front_left", @sysvarMember::ExternalSignals::OpenDoorContacts.FrontLeft);
+    diagSetParameter(resp, "Door_Contact.Door_contact_front_right", @sysvarMember::ExternalSignals::OpenDoorContacts.FrontRight);
+    diagSetParameter(resp, "Door_Contact.Door_contact_rear_left", @sysvarMember::ExternalSignals::OpenDoorContacts.RearLeft);
+    diagSetParameter(resp, "Door_Contact.Door_contact_rear_right", @sysvarMember::ExternalSignals::OpenDoorContacts.RearRight);
+  }
+  else {
+    diagSetParameter(resp, "Door_Contact.Door_contact_front_left", @sysvarMember::DoorFL::OverwrittenDoorContacts.FrontLeft);
+    diagSetParameter(resp, "Door_Contact.Door_contact_front_right", @sysvarMember::DoorFL::OverwrittenDoorContacts.FrontRight);
+    diagSetParameter(resp, "Door_Contact.Door_contact_rear_left", @sysvarMember::DoorFL::OverwrittenDoorContacts.RearLeft);
+    diagSetParameter(resp, "Door_Contact.Door_contact_rear_right", @sysvarMember::DoorFL::OverwrittenDoorContacts.RearRight);
+  }
+  
+  diagSendPositiveResponse(resp);  
+}
+
+on diagRequest DoorFL.Door_Status_Control
+{
+  diagResponse this resp;
+  long ret;
+  
+  refreshS3Timer();
+  
+  @sysvar::DoorFL::DoorContactStatusOverwritten=1;
+  
+  ret=diagGetParameter(this, "Door_Contact.Door_contact_front_left");
+  diagSetParameter(resp, "Door_Contact.Door_contact_front_left", ret);
+  @sysvarMember::DoorFL::OverwrittenDoorContacts.FrontLeft=ret;
+
+  ret=diagGetParameter(this, "Door_Contact.Door_contact_front_right");
+  diagSetParameter(resp, "Door_Contact.Door_contact_front_right", ret);
+  @sysvarMember::DoorFL::OverwrittenDoorContacts.FrontRight=ret;
+  
+  ret=diagGetParameter(this, "Door_Contact.Door_contact_rear_left");
+  diagSetParameter(resp, "Door_Contact.Door_contact_rear_left", ret);
+  @sysvarMember::DoorFL::OverwrittenDoorContacts.RearLeft=ret;
+
+  ret=diagGetParameter(this, "Door_Contact.Door_contact_rear_right");
+  diagSetParameter(resp, "Door_Contact.Door_contact_rear_right", ret);
+  @sysvarMember::DoorFL::OverwrittenDoorContacts.RearRight=ret;
+  
+  diagSendPositiveResponse(resp);  
+}
+
+on diagRequest DoorFL.Door_Status_ReturnControl
+{
+  diagResponse this resp;
+
+  refreshS3Timer();
+
+  @sysvar::DoorFL::DoorContactStatusOverwritten=0;
+
+  diagSetParameter(resp, "Door_Contact.Door_contact_front_left", @sysvarMember::ExternalSignals::OpenDoorContacts.FrontLeft);
+  diagSetParameter(resp, "Door_Contact.Door_contact_front_right", @sysvarMember::ExternalSignals::OpenDoorContacts.FrontRight );
+  diagSetParameter(resp, "Door_Contact.Door_contact_rear_left", @sysvarMember::ExternalSignals::OpenDoorContacts.RearLeft);
+  diagSetParameter(resp, "Door_Contact.Door_contact_rear_right", @sysvarMember::ExternalSignals::OpenDoorContacts.RearRight);
+
+  diagSendPositiveResponse(resp);
+}
+
+on diagRequest DoorFL.Door_Status_Reset
+{
+  diagResponse this resp;
+
+  refreshS3Timer();
+
+  diagSetParameter(resp, "Door_Contact.Door_contact_front_left", @sysvarMember::ExternalSignals::OpenDoorContacts.FrontLeft);
+  @sysvarMember::DoorFL::OverwrittenDoorContacts.FrontLeft=@sysvarMember::ExternalSignals::OpenDoorContacts.FrontLeft;
+  diagSetParameter(resp, "Door_Contact.Door_contact_front_right", @sysvarMember::ExternalSignals::OpenDoorContacts.FrontRight );
+  @sysvarMember::DoorFL::OverwrittenDoorContacts.FrontRight=@sysvarMember::ExternalSignals::OpenDoorContacts.FrontRight;
+  diagSetParameter(resp, "Door_Contact.Door_contact_rear_left", @sysvarMember::ExternalSignals::OpenDoorContacts.RearLeft);
+  @sysvarMember::DoorFL::OverwrittenDoorContacts.RearLeft=@sysvarMember::ExternalSignals::OpenDoorContacts.RearLeft;
+  diagSetParameter(resp, "Door_Contact.Door_contact_rear_right", @sysvarMember::ExternalSignals::OpenDoorContacts.RearRight);
+  @sysvarMember::DoorFL::OverwrittenDoorContacts.RearRight=@sysvarMember::ExternalSignals::OpenDoorContacts.RearRight;
+
+  diagSendPositiveResponse(resp);
+}
+
+// Dummy positive responses to satisfy flash tool requirements, use diagnostic class to save some lines of code
+on diagRequest DoorFL.Communication_Control::*
+{
+  diagResponse this resp;  
+
+  refreshS3Timer();
+  diagSendPositiveResponse(resp);
+}
+
+// Handle both Hard and soft reset within one function (i.e. handle all services within one class)
+on diagRequest DoorFL.Ecu_Reset::*
+{
+  diagResponse this resp;
+  byte subFunction;
+
+  subFunction=diagGetPrimitiveByte(this, 1);
+  
+  refreshS3Timer();
+  InitECU();
+  
+  if (subFunction==0x01) { // simulate HW Reset taking longer than SW reset
+    DiagSetPrimitiveByte(resp, 1, subFunction); // use global response obejct since object is used in another function
+    diagSendNegativeResponse(resp, cNRC_RequestCorrectlyReceivedResponsePending);
+    setTimer(tDelayedResponse, 1500); // positive response needs to be sent within P2ext after RP
+  }
+  else {
+    DiagSetPrimitiveByte(resp, 1, subFunction); // use global response obejct since object is used in another function
+    diagSendResponse(resp);
+  }
+}
+
+// Refresh timer to avoid falling back into default session
+void refreshS3Timer()
+{
+  if (!@sysvar::%NODE_NAME%::DownloadInProgress) setTimer(tS3ServerTimer, gS3ServerTimeout);
+  @%NODE_NAME%::TesterPresent=1;
+}
+
+void refreshSessionTimer()
+{
+  cancelTimer( tSessionTimer);
+  writeDbgLevel(1, "%NODE_NAME%: Session timer canceled");
+  setTimer( tSessionTimer, cSessionTimeout);
+}
+
+void ResetLock()
+{
+  @sysvar::%NODE_NAME%::SecurityStatus = Locked;  
+  @sysvar::%NODE_NAME%::SecurityLevel = Locked_L1;
+}
+
+void ResetSession()
+{
+  @sysvar::%NODE_NAME%::CurrentSession = DefaultSession;
+
+  ResetLock();
+  ResetDownload();
+}
+
+void ResetDIDs()
+{
+  InitDDDIDs();
+  gSineSendMode=Off;
+  gSawtoothSendMode=Off; 
+  gDDDIDSendMode=Off;
+
+  @sysvar::Tester_Display::BtnInternalsCyclicRead=0;
+}
+
+void ResetDownload()
+{
+  @sysvar::%NODE_NAME%::BlockSequenceCounter=0;
+  @sysvar::%NODE_NAME%::DownloadInProgress=0;
+}
+
+InitDDDIDs()
+{
+  word k;
+  
+  for (k=0; k<cMaxNumberOfDDDIDs; k++) {
+    gDDDID[k]=0;
+  }
+}
+
+InitVariantCoding()
+{
+  @sysvarMember::DoorFL::RewritableData.VariantCoding.VehicleType=1; // Coupe
+  @sysvarMember::DoorFL::RewritableData.VariantCoding.CountryCode=1; // Europe
+  @sysvarMember::%NODE_NAME%::RewritableData.VariantCoding.WindowLiftSupport=1; // on
+  @sysvarMember::%NODE_NAME%::RewritableData.VariantCoding.VehicleSpeedToLockDoor=20;
+}
+void InitECU()
+{
+  InitFaultmem(UDS);  
+  InitDDDIDs();
+  InitVariantCoding();
+
+  @sysvarMember::%NODE_NAME%::RewritableData.SerialNumber=cDefaultSerialNumber;
+
+  gS3ServerTimeout=diagGetCommParameter("CANoe.S3ServerTime");
+  gP2ClientTimeout=150;
+  gP2extClientTimeout=2000;
+
+  // Switch off sending of periodic Data Identifiers
+  gSineSendMode=Off;
+  gSawtoothSendMode=Off;
+  @sysvar::Tester_Display::BtnInternalsCyclicRead=0;
+  @sysvar::Tester_Display::BtnWindowPosCyclicRead=0;
+  gDDDIDSendMode=Off;
+
+  setTimerCyclic(tUpdateInternalValues, 100);  // Update internal values every 100 ms
+
+  // Set timers for periodic Data Identifiers
+  setTimerCyclic(tDIDSendSlow, 5000);  
+  setTimerCyclic(tDIDSendMedium, 1000);
+  setTimerCyclic(tDIDSendFast, 100);  
+  
+  ResetSession();
+  @sysvar::%NODE_NAME%::TesterPresent=0;
+}

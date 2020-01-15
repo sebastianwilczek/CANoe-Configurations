@@ -1,0 +1,1128 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "../StubFunctionLib/StubFunctions.cin"
+}
+
+variables
+{
+  enum TcpStateId gLastCheckedTcpState;
+}
+
+/**
+ * Closes a socket.
+ */
+export testfunction Stub_TcpCloseSockets()
+{
+  byte i;
+  dword startTime, currentTime, portNum, sourceportNum;
+  const dword maximumWaitMilliseconds = 3000;
+  long startValueExtract;
+  char portnumber[10];
+  char connectedPortNumber[10];
+  dword acknumber, seqnumber;
+  
+  write("Entering testfunction Stub_TcpCloseSockets");
+  
+  startValueExtract = gExtractingParametersCount;
+  
+  for(i = 0; i < elcount(gSocketId); i++)
+  {
+    write("socketId%d = %04X", i, gSocketId[i]);
+    if(gSocketId[i] != -1)
+    {
+      Internal_Stub_TcpCloseSocket(gSocketId[i], kTrue);
+    }
+  }
+  
+  gClosingSocket = kTrue;
+  InternalWaitforTcpMessage(
+    maximumWaitMilliseconds,
+    syspar::DIface0Ip, //destIP (only one DUT!) should be same for all connections
+    syspar::Host1Ip,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    0,
+    0,
+    0,
+    TcpFlagNone,
+    syspar::Wildcard,
+    0,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kFragDefault,
+    kIPv4,
+    kFalse,
+    kNotCheck,
+    kNotCheck,
+    kNotCheck,
+    kNotCheck,
+    kNotCheck,
+    kNotCheck,
+    kNotCheck,
+    kNotCheck,
+    kNotCheck,
+    kFalse,
+    0,
+    kFalse,
+    kWaitUntilTimeout
+    );
+  gClosingSocket = kFalse;
+}
+
+export testfunction Stub_TcpCloseSocket(enum Bool abort)
+{
+  long stubResult;
+  
+  write("Entering testfunction Stub_TcpCloseSocket");
+
+  stubResult = Internal_Stub_TcpCloseSocket(gSocketId[0], abort);
+
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_TcpCloseSocket", "Closing socket on DUT succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_TcpCloseSocket", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_TcpCloseSocket", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_TcpCloseSocket", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_TcpCloseSocket", "Unknown error.");
+    break;
+  }
+}
+
+export testfunction Stub_TcpCloseSocket(enum StubErrorCode expectedResult, enum Bool abort)
+{
+  long stubResult;
+  
+  write("Entering testfunction Stub_TcpCloseSocket");
+  
+  if( gSocketId[0] < 0)
+  {
+    testStepFail("Stub_TcpCloseSocket", "Invalid socket ID, please create socket first.");
+    return;
+  }
+
+  stubResult = Internal_Stub_TcpCloseSocket_WaitForResponse(gSocketId[0], abort);
+  
+  
+  if (stubResult == expectedResult)
+  {
+    testStepPass("Stub_TcpCloseSocket", "Close socket succeeded with expected result: %s", kStubErrorMessages[stubResult]);
+  }
+  else if (stubResult == -1)
+  {
+    testStepFail("Stub_TcpCloseSocket", "Internal stub function handling error.");
+  }
+  else if (stubResult == -2)
+  {
+    testStepFail("Stub_TcpCloseSocket", "Stub function parse error.");
+  }
+  else
+  {
+    if (kStubErrorMessages.containsKey(stubResult) && kStubErrorMessages.containsKey(expectedResult))
+      testStepFail("Stub_TcpConnect", "Close socket with unexpected result: %s (expected: %s)", kStubErrorMessages[stubResult], kStubErrorMessages[expectedResult]);
+    else
+      testStepFail("Stub_TcpCloseSocket", "Unknown error.");
+  }
+}
+
+/**
+ * Creates a socket and optionally binds this socket to a port and a local IP address.
+ * @param localPort Local port to bind.
+ */
+export Stub_TcpCreateAndBind(char dutPort[], enum Bool doBind)
+{
+  int i;
+  //Get first handle which is not used yet
+  for(i = 0; i < elCount(gSocketId); i++)
+  {
+    if(gSocketId[i] == -1)
+    {
+      Stub_TcpCreateAndBind(dutPort, doBind, i);
+      return;
+    }
+  }
+  testStepFail("Coud not Create And Bind new socket. All socket handles are already in use");
+}
+
+/**
+ * Creates a socket and optionally binds this socket to a port and a local IP address.
+ * @param localPort Local port to bind.
+ */
+export testfunction Stub_TcpCreateAndBind(char dutPort[], enum Bool doBind, word socketHandle)
+{
+  long stubResult;
+  word port;
+  word socketId;
+  
+  write("Entering testfunction Stub_TcpCreateAndBind");
+  
+  //convert local port
+  if(IsVariableDutPort(dutPort))
+  {
+    port = 0xFFFF;
+  }
+  else
+  {
+    port = atol(dutPort);
+  }
+ 
+  stubResult = Internal_Stub_TcpCreateAndBind(doBind, syspar::DIface0Ip, port, socketId);
+  
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_TcpCreateAndBind", "Creating and binding a TCP socket on DUT succeeded.");
+    write("Create and bind successful. Setting gSocketId[%d] = %d", socketHandle, socketId);
+    gSocketId[socketHandle] = socketId;
+    gSocketState[socketHandle] = TcpStateIdClosed;
+    gSocketPort[socketHandle] = port;
+    break;
+  case -1:
+    testStepFail("Stub_TcpCreateAndBind", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_TcpCreateAndBind", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_TcpCreateAndBind", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_TcpCreateAndBind", "Unknown error.");
+    break;
+  }
+}
+
+/**
+ * Connect a TCP socket to a remote destination.
+ * @param destPort Port of the remote destination.
+ */
+export Stub_TcpConnect(char destIpAddr[], char destPort[])
+{
+  Stub_TcpConnect (destIpAddr, destPort, 0);
+}
+
+/**
+ * Connect a TCP socket to a remote destination.
+ * @param destPort Port of the remote destination.
+ */
+export testfunction Stub_TcpConnect(char destIpAddr[], char destPort[], word socketHandle)
+{
+  long stubResult;
+  word port;
+  
+  write("Entering testfunction Stub_TcpConnect");
+  //convert local port
+  if(IsVariableTesterPort(destPort))
+  {
+    port = gVariableTesterPort;
+  }
+  else
+  {
+    port = atol(destPort);
+  }
+  
+   if( gSocketId[socketHandle] < 0)
+  {
+    testStepFail("Stub_TcpConnect", "Invalid socket ID, please create socket first.");
+    return;
+  }
+  
+  stubResult = Internal_Stub_TcpConnect(gSocketId[socketHandle], port, destIpAddr);
+  
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_TcpConnect", "Connecting to socket succeeded.");
+      gConnectedPort[socketHandle] = port;
+      strncpy(gConnectedIP[socketHandle], destIpAddr, elcount(destIpAddr));
+    break;
+  case -1:
+    testStepFail("Stub_TcpConnect", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_TcpConnect", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_TcpConnect", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_TcpConnect", "Unknown error.");
+    break;
+  }
+}
+
+/**
+ * Connect a TCP socket to a remote destination with wait for a response.
+ * @param destPort Port of the remote destination.
+ * @param expectedResult expected TCP error result.
+ */
+export testfunction Stub_TcpConnect(enum StubErrorCode expectedResult, char destIpAddr[], char destPort[])
+{
+  long stubResult;
+  word port;
+  write("Entering testfunction Stub_TcpConnect");
+  
+  //convert local port
+  port = atol(destPort);
+  
+   if( gSocketId[0] < 0)
+  {
+    testStepFail("Stub_TcpConnect", "Invalid socket ID, please create socket first.");
+    return;
+  }
+  
+  stubResult = Internal_Stub_TcpConnect_WaitForResponse(gSocketId[0], port, destIpAddr);
+  
+  if (stubResult == expectedResult)
+  {
+    testStepPass("Stub_TcpConnect", "Connecting to socket with expected result: %s", kStubErrorMessages[stubResult]);
+  }
+  else if (stubResult == -1)
+  {
+    testStepFail("Stub_TcpConnect", "Internal stub function handling error.");
+  }
+  else if (stubResult == -2)
+  {
+    testStepFail("Stub_TcpConnect", "Stub function parse error.");
+  }
+  else
+  {
+    if (kStubErrorMessages.containsKey(stubResult) && kStubErrorMessages.containsKey(expectedResult))
+      testStepFail("Stub_TcpConnect", "Connecting to socket with unexpected result: %s (expected: %s)", kStubErrorMessages[stubResult], kStubErrorMessages[expectedResult]);
+    else
+      testStepFail("Stub_TcpConnect", "Unknown error.");
+  }
+}
+  
+/**
+ * Sends data to a connected target.
+ * @param totalLength Total length: repeat data up to that length.
+ * @param flags Flags of the message.
+ * @param data Data to transmit.
+ */
+export Stub_TcpSendData(char totalLength[], enum TcpFlag flags, char data[])
+{
+  word length;
+  
+  // Convert total length and destinationPort
+  length = atol(totalLength);
+  
+  Stub_TcpSendData(length, flags, data);
+}
+
+/**
+ * Sends data to a connected target.
+ * @param totalLength Total length: repeat data up to that length.
+ * @param flags Flags of the message.
+ * @param data Data to transmit.
+ */
+export testfunction Stub_TcpSendData(word totalLength, enum TcpFlag flags, char data[])
+{
+  long stubResult;
+  write("Entering testfunction Stub_TcpSendData");
+
+   if( gSocketId[0] < 0)
+  {
+    testStepFail("Stub_TcpSendData", "Invalid socket ID, please create socket first.");
+    return;
+  }
+  
+  stubResult = Internal_Stub_TcpSendData(gSocketId[0], totalLength, flags, data);
+
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_TcpSendData", "Send TCP data from DUT succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_TcpSendData", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_TcpSendData", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_TcpSendData", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_TcpSendData", "Unknown error.");
+    break;
+  }
+}
+
+/**
+ * Sends data to a connected target and waiting for a response.
+ * @param totalLength Total length: repeat data up to that length.
+ * @param flags Flags of the message.
+ * @param data Data to transmit.
+ * @param expectedResult expected TCP error result
+ */
+export Stub_TcpSendData(enum StubErrorCode expectedResult, char totalLength[], enum TcpFlag flags, char data[])
+{
+  Stub_TcpSendData(expectedResult, totalLength, flags, data, 0);
+}
+
+/**
+ * Sends data to a connected target and waiting for a response.
+ * @param totalLength Total length: repeat data up to that length.
+ * @param flags Flags of the message.
+ * @param data Data to transmit.
+ * @param expectedResult expected TCP error result
+ * @param sockethandle The sockethandle
+ */
+export testfunction Stub_TcpSendData(enum StubErrorCode expectedResult, char totalLength[], enum TcpFlag flags, char data[], int sockethandle)
+{
+  long stubResult;
+  word length;
+  
+  write("Entering testfunction Stub_TcpSendData");
+  
+  // Convert total length and destinationPort
+  length = atol(totalLength);
+  
+   if( gSocketId[sockethandle] < 0)
+  {
+    testStepFail("Stub_TcpSendData", "Invalid socket ID, please create socket first.");
+    return;
+  }
+  
+  stubResult = Internal_Stub_TcpSendData_WaitForResponse(gSocketId[sockethandle], length, flags, data);
+
+  if (stubResult == expectedResult)
+  {
+    testStepPass("Stub_TcpSendData", "Send TCP data from DUT with expected result: %s", kStubErrorMessages[stubResult]);
+  }
+  else if(stubResult == -1)
+  {
+    testStepFail("Stub_TcpSendData", "Internal stub function handling error.");
+  }  
+  else if(stubResult == -2)
+  {
+    testStepFail("Stub_TcpSendData", "Stub function parse error.");
+  }  
+  else
+  {
+    if (kStubErrorMessages.containsKey(stubResult) && kStubErrorMessages.containsKey(expectedResult))
+      testStepFail("Stub_TcpConnect", "Send TCP data from DUT with unexpected result: %s (expected: %s)", kStubErrorMessages[stubResult], kStubErrorMessages[expectedResult]);
+    else
+      testStepFail("Stub_TcpSendData", "Unknown error.");
+  }
+}
+
+/**
+ * Data that will be received after the call of this SP will be forwarded to the test system.
+ */
+export testfunction Stub_TcpReceiveAndForward()
+{
+  write("Entering testfunction Stub_TcpReceiveAndForward");
+  Internal_TcpReceiveAndForward(Success, syspar::Wildcard);
+}
+
+/**
+ * Data that will be received after the call of this SP will be forwarded to the test system.
+ * @param expectedResult expected TCP error result.
+ */
+export testfunction Stub_TcpReceiveAndForward(enum StubErrorCode expectedResult)
+{
+  write("Entering testfunction Stub_TcpReceiveAndForward");
+  Internal_TcpReceiveAndForward(expectedResult, syspar::Wildcard);
+}
+/**
+ * Data that will be received after the call of this SP will be forwarded to the test system.
+ * @param expectedResult expected TCP error result.
+ */
+export testfunction Stub_TcpReceiveAndForward(enum StubErrorCode expectedResult, char expectedDropCnt[])
+{
+  write("Entering testfunction Stub_TcpReceiveAndForward");
+  Internal_TcpReceiveAndForward(expectedResult, expectedDropCnt);
+}
+
+/**
+ * Data that will be received after the call of this SP will be forwarded to the test system.
+ * @param expectedResult expected TCP error result.
+ * @param expectedDropCnt expected drop count.
+ */
+void Internal_TcpReceiveAndForward(enum StubErrorCode expectedResult, char expectedDropCnt[])
+{
+  long stubResult;
+  word dropCnt; //unused output
+  
+  if( gSocketId[0] < 0)
+  {
+    testStepFail("Stub_TcpReceiveAndForward", "Invalid socket ID, please create socket first.");
+    return;
+  }
+
+  stubResult = Internal_Stub_TcpReceiveAndForward(gSocketId[0], atol("0xFFFF"), atol("0xFFFF"), dropCnt); //0xFFFF: limitless length
+  write("stubResult=%X, expectedResult=%X", stubResult, expectedResult);
+  if(stubResult == expectedResult )
+  {
+    if(expectedResult != Success)
+    {
+      testStepPass("Stub_TcpReceiveAndForward", "Receive and check TCP data on DUT succeeded.");
+    }
+    else if(isWildcard(expectedDropCnt))
+    {
+      testStepPass("Stub_TcpReceiveAndForward", "Receive and forward TCP data on DUT succeeded.");
+    }
+    else if(atol(expectedDropCnt) == dropCnt)
+    {
+      testStepPass("Stub_TcpReceiveAndForward", "Receive and check TCP data on DUT succeeded.");
+    }
+    else
+    {
+      testStepFail("Stub_TcpReceiveAndForward", "Receive and check TCP data on DUT failed.");
+    }
+  }
+  else if(stubResult == -1)
+  {
+    testStepFail("Stub_TcpReceiveAndForward", "Internal stub function handling error.");
+  }
+   else if(stubResult == -2)
+  {
+    testStepFail("Stub_TcpReceiveAndForward", "Stub function parse error.");
+  }
+  else
+  {
+    if (kStubErrorMessages.containsKey(stubResult) && kStubErrorMessages.containsKey(expectedResult))
+      testStepFail("Stub_TcpConnect", "Receive and Forward with unexpected result: %s (expected: %s)", kStubErrorMessages[stubResult], kStubErrorMessages[expectedResult]);
+    else
+      testStepFail("Stub_TcpReceiveAndForward", "Unknown error.");
+  }
+}
+
+/**
+ * Data that will be received after the call of this SP will be forwarded to the test system.
+ * @param maxLength Maximum length of payload to be forwarded per event.
+ */
+export testfunction Stub_TcpReceiveAndForwardMaxLength(word maxLength)
+{
+  long stubResult;
+  word dropCnt; //unused output
+  
+  write("Entering testfunction Stub_TcpReceiveAndForwardMaxLength");
+  if( gSocketId[0] < 0)
+  {
+    testStepFail("Stub_TcpReceiveAndForward", "Invalid socket ID, please create socket first.");
+    return;
+  }
+
+  stubResult = Internal_Stub_TcpReceiveAndForward(gSocketId[0], atol("0xFFFF"), maxLength, dropCnt); //0xFFFF: limitless length
+  
+  write("Stub_TcpReceiveAndForwardMaxLength drop count: %d", dropCnt);
+
+  switch (stubResult){
+   case 0:
+      if (dropCnt != maxLength)
+      {
+        testStepFail("Stub_TcpReceiveAndForward", "The expected amount of bytes was not read");
+      }
+      else
+      {
+        testStepPass("Stub_TcpReceiveAndForward", "Receive and check TCP data on DUT succeeded.");
+      }
+      break;
+   case -1:
+    testStepFail("Stub_TcpReceiveAndForward", "Internal stub function handling error.");
+      break;
+   case -2:
+    testStepFail("Stub_TcpReceiveAndForward", "Stub function parse error.");
+      break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_TcpReceiveAndForward", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_TcpReceiveAndForward", "Unknown error.");
+    break;
+  }
+}
+
+/**
+ * This is not just a wrapper.
+ * Checks the data that returns after Stub_TcpReceiveAndForward according to various parameters.
+ * @param timeoutMilliseconds Listen timeout in milliseconds.
+ * @param fullLen Compares with the full length of available data in bytes.
+ * @param payload Compares with the payload that was received.
+ */
+export testfunction Stub_TcpReceiveAndForwardEvent(
+  long timeoutMilliseconds, 
+  char fullLen[],
+  char payload[]
+  )
+{
+  write("Entering testfunction Stub_TcpReceiveAndForwardEvent");
+  Internal_TcpReceiveAndForwardEvent(
+    timeoutMilliseconds, 
+    fullLen,
+    payload,
+    strlen(payload),
+    kTrue);
+}
+  
+/**
+ * This is not just a wrapper.
+ * Checks the data that returns after Stub_TcpReceiveAndForward according to various parameters.
+ * @param timeoutMilliseconds Listen timeout in milliseconds.
+ * @param fullLen Compares with the full length of available data in bytes.
+ * @param payload Compares with the payload that was received.
+ */
+export testfunction Stub_TcpReceiveAndForwardEvent(
+  long timeoutMilliseconds, 
+  word fullLen,
+  char payload[]
+  )
+{ 
+  char length[7];
+  
+  write("Entering testfunction Stub_TcpReceiveAndForwardEvent");
+  snprintf(length, elcount(length), "%d", fullLen); 
+  write("length = %s, fullLen = %d", length, fullLen);
+  Internal_TcpReceiveAndForwardEvent(
+    timeoutMilliseconds, 
+    length,
+    payload,
+    strlen(payload),
+    kTrue);
+}
+
+/**
+ * This is not just a wrapper.
+ * Checks the data that returns after Stub_TcpReceiveAndForward according to various parameters.
+ * @param timeoutMilliseconds Listen timeout in milliseconds.
+ * @param fullLen Compares with the full length of available data in bytes.
+ * @param payload Compares with the payload that was received.
+ */
+export testfunction Stub_UnexpectedTcpReceiveAndForwardEvent(
+  long timeoutMilliseconds, 
+  char fullLen[],
+  char payload[]
+  )
+{
+  write("Entering testfunction Stub_UnexpectedTcpReceiveAndForwardEvent");
+  Internal_TcpReceiveAndForwardEvent(
+    timeoutMilliseconds, 
+    fullLen,
+    payload,
+    strlen(payload),
+    kFalse);
+}
+
+void Internal_TcpReceiveAndForwardEvent(
+  long timeoutMilliseconds, 
+  char fullLen[],
+  char payload[],
+  word payloadLength,
+  enum Bool expectedMessage
+  )
+{
+  long stubResult;
+  word outFullLen;
+  byte outPayload[0xFFFF];
+  word outPayloadLength;
+  int i;
+
+  stubResult = Internal_Stub_TcpReceiveAndForwardEvent(timeoutMilliseconds, outFullLen, outPayload, outPayloadLength);
+  switch (stubResult) {
+  case 0:
+      CheckTcpReceiveAndForwardEventParameters(
+        fullLen,
+        outFullLen,
+        payload,
+        payloadLength,
+        outPayload,
+        outPayloadLength,
+        expectedMessage);
+    break;
+  case -1:
+    //timeout
+    if(expectedMessage == kTrue)
+    {
+      testStepFail("Stub_TcpReceiveAndForwardEvent", "Internal stub function handling error.");
+    }
+    else
+    {
+      testStepPass("Stub_TcpReceiveAndForwardEvent", "Did not receive unexpected TCP data.");
+    }
+    break;
+  case -2:
+    testStepFail("Stub_TcpReceiveAndForwardEvent", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_TcpReceiveAndForwardEvent", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_TcpReceiveAndForwardEvent", "Unknown error.");
+    break;
+  }
+}
+
+/**
+ * This is not just a wrapper.
+ * Checks the data that returns after Stub_TcpReceiveAndForward according to various parameters.
+ * @param timeoutMilliseconds Listen timeout in milliseconds.
+ * @param expectedResult expected TCP error result.
+ */
+export testfunction Stub_TcpReceiveAndForwardEvent(
+  long timeoutMilliseconds, 
+  enum StubErrorCode expectedResult
+  )
+{
+  long stubResult;
+  word outFullLen;
+  byte outPayload[0xFFFF];
+  word outPayloadLength;
+
+  write("Entering testfunction Stub_TcpReceiveAndForwardEvent");
+  stubResult = Internal_Stub_TcpReceiveAndForwardEvent(timeoutMilliseconds, outFullLen, outPayload, outPayloadLength);
+
+  if (stubResult == expectedResult)
+  {
+      testStepPass("Stub_TcpReceiveAndForwardEvent", "Receive and Forward Event on DUT succeeded.");
+  }
+  else if(stubResult == -1)
+  {
+    testStepFail("Stub_TcpReceiveAndForwardEvent", "Internal stub function handling error.");
+  }
+   else if(stubResult == -2)
+  {
+    testStepFail("Stub_TcpReceiveAndForwardEvent", "Stub function parse error.");
+  }
+  else
+  {
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_TcpReceiveAndForwardEvent", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_TcpReceiveAndForwardEvent", "Unknown error.");
+  }
+}
+
+void CheckTcpReceiveAndForwardEventParameters(
+  char fullLen[],
+  word outFullLen,
+  char payload[],
+  word payloadLength,
+  byte outPayload[],
+  word outPayloadLength,
+  enum Bool expectedMessage)
+{
+  char parameterTemp[5], outPayloadString[0x1FFFF];
+  byte payloadBytes[0xFFFF], i;
+  
+  if(expectedMessage == kTrue)
+  {
+    //Check if received data matches expected values.
+    if(!isWildcard(fullLen) && atol(fullLen) != outFullLen)
+    {
+      testStepFail("Stub_TcpReceiveAndForwardEvent", "Receive and check TCP data on DUT failed. Full length mismatch.");
+      return;
+    }
+    if(!isWildcard(payload))
+    {
+      if(ComparePayload(payload, payloadLength, outPayload, outPayloadLength) != kTrue)
+      {
+        testStepFail("Stub_TcpReceiveAndForwardEvent", "Receive and check TCP data on DUT failed. Payload mismatch.");
+        return;
+      }
+    }
+    testStepPass("Stub_TcpReceiveAndForwardEvent", "TCP data have been received by DUT.");
+  }
+  else
+  {
+    testStepFail("Stub_TcpReceiveAndForwardEvent", "Received unexpected TCP data.");
+  }
+}
+
+/**
+ * Move Socket on dut to listen State
+ * @param maxCon Maximum number of connections allowed to establish
+ */
+export Stub_TcpListenAndAccept(word maxCon)
+{
+  Stub_TcpListenAndAccept(maxCon, 0);
+}
+
+/**
+ * Move Specific Socket on dut to listen State
+ * @param maxCon Maximum number of connections allowed to establish
+ */
+export testfunction Stub_TcpListenAndAccept(word maxCon, word socketHandle)
+{
+  long stubResult;
+  int i;
+  
+  write("Entering testfunction Stub_TcpListenAndAccept");
+  if( gSocketId[socketHandle] < 0)
+  {
+    testStepFail("Stub_TcpListenAndAccept", "Invalid socket ID, please create socket first.");
+    return;
+  }
+  //Move listen socket information to the end of the array
+  for(i = 9; i >= 0; i--)
+  {
+    if(gSocketId[i] < 0)
+    {
+      gSequenceNumber[i] = gSequenceNumber[socketHandle];
+      gSequenceNumber[socketHandle] = 0;
+      
+      gAcknowledgement[i] = gAcknowledgement[socketHandle];
+      gAcknowledgement[socketHandle] = 0;
+      
+      gSocketPort[i] = gSocketPort[socketHandle];
+      gSocketPort[socketHandle] = 0;
+      
+      gSocketState[i] = gSocketState[socketHandle];
+      gSocketState[socketHandle] = TcpStateIdInvalid;
+      
+      gConnectedPort[i] = gConnectedPort[socketHandle];
+      gConnectedPort[socketHandle] = 0;
+      
+      strncpy(gConnectedIP[i], gConnectedIP[socketHandle], elcount(gConnectedIP[socketHandle]));
+      strncpy(gConnectedIP[socketHandle], "0.0", elcount("0.0"));
+      
+      gSocketId[i] = gSocketId[socketHandle];
+      gSocketId[socketHandle] = -1;
+      break;
+    }
+  }
+  
+  stubResult = Internal_Stub_TcpListenAndAccept(gSocketId[i], maxCon);
+
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_TcpListenAndAccept", "Move Socket to Listen State on DUT succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_TcpListenAndAccept", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_TcpListenAndAccept", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_TcpListenAndAccept", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_TcpListenAndAccept", "Unknown error.");
+    break;
+  }
+}
+  
+/**
+ * Validate new Connection established
+ * @param timeoutMilliseconds timeout
+ */
+export testfunction Stub_TcpListenAndAcceptEvent(long timeoutMilliseconds)
+{
+  long stubResult;
+  word port;
+  char address[16];
+  word listenSocketId, connectionSocketId;
+  int i;
+  
+  write("Entering testfunction Stub_TcpListenAndAcceptEvent");
+  stubResult = Internal_Stub_TcpListenAndAcceptEvent(timeoutMilliseconds, listenSocketId, connectionSocketId, port, address);
+  
+  for(i = 0; i < 10; i++)
+  {
+    if(gSocketId[i] < 0)
+    {
+      gSocketId[i] = connectionSocketId;
+      gSocketState[i] = TcpStateIdListen;
+      break;
+    }
+  }
+  
+  write("listenSocketId = %04X", gSocketId[1]);
+  write("newSocketId = %04X", gSocketId[0]);
+
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_TcpListenAndAcceptEvent", "New connection created on DUT.");
+    break;
+  case -1:
+    testStepFail("Stub_TcpListenAndAcceptEvent", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_TcpListenAndAcceptEvent", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_TcpListenAndAcceptEvent", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_TcpListenAndAcceptEvent", "Unknown error.");
+    break;
+  }
+}
+
+/**
+ * This SP is used to select and set parameters that can be configured on a socket basis.
+ * @param paramId Selects the parameter to be configured
+ * @param paramVal The value of the selected parameter that must match the corresponding length.
+ */
+export testfunction Stub_TcpConfigureSocket(enum TcpParameterId paramId, word paramVal)
+{
+  char paramStr[5];
+  
+  write("Entering testfunction Stub_TcpConfigureSocket");
+  switch(paramId)
+  {
+    case 0:
+    case 1:
+    case 2:
+    case 4:
+    case 6:
+    case 7:
+      snprintf(paramStr, 3, "%02X", paramVal);
+      Internal_TcpConfigureSocket(paramId, paramStr, (word) 2);
+      break;
+    case 5:
+      snprintf(paramStr, 5, "%04X", paramVal);
+      Internal_TcpConfigureSocket(paramId, paramStr, (word) 4);
+      break;
+    case 65534:
+    case 65535:
+      snprintf(paramStr, 5, "%04X", paramVal);
+      Internal_TcpConfigureSocket(paramId, paramStr, (word) 4);
+      break;
+    default:
+      testStepFail("Stub_TcpConfigureSocket", "Unexpected paramId.");
+      break;
+  }
+}
+  
+/**
+ * This SP is used to select and set parameters that can be configured on a socket basis.
+ * @param paramId Selects the parameter to be configured
+ * @param paramVal The value of the selected parameter that must match the corresponding length.
+ */
+export testfunction Stub_TcpConfigureSocket(enum TcpParameterId paramId, char paramVal[])
+{
+  write("Entering testfunction Stub_TcpConfigureSocket");
+  Internal_TcpConfigureSocket(paramId, paramVal, strlen(paramVal));
+}
+
+void Internal_TcpConfigureSocket(enum TcpParameterId paramId, char paramVal[], word paramLength)
+{
+  long stubResult;
+  char parameterTemp[5];
+  byte parameterValue[0xFFFF], i;
+  
+  // Convert paramVal
+  strncpy(parameterTemp, "0x", 3);
+  
+  for (i = 0; (i * 2) < paramLength; i++)
+  {
+    substr_cpy_off(parameterTemp, 2, paramVal, i * 2, 2, 5);
+    parameterValue[i] = atol(parameterTemp);
+  }
+  
+   if( gSocketId[0] < 0)
+  {
+    testStepFail("Stub_TcpConfigureSocket", "Invalid socket ID, please create socket first.");
+    return;
+  }
+  
+  stubResult = Internal_Stub_TcpConfigureSocket(gSocketId[0], paramId, parameterValue, paramLength / 2);
+
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_TcpConfigureSocket", "Receive and check TCP data on DUT succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_TcpConfigureSocket", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_TcpConfigureSocket", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_TcpConfigureSocket", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_TcpConfigureSocket", "Unknown error.");
+    break;
+  }
+}
+
+/**
+ * Shutdown socket.
+ * @param typeId Type ID to control shutdown
+ */
+export testfunction Stub_TcpShutdown(char typeId[])
+{
+  long stubResult;
+  
+  write("Entering testfunction Stub_TcpShutdown");
+  stubResult = Internal_Stub_TcpShutdown(gSocketId[0], atol(typeId));
+  
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_TcpShutdown", "Connecting to socket succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_TcpShutdown", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_TcpShutdown", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_TcpShutdown", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_TcpShutdown", "Unknown error.");
+    break;
+  }
+}
+
+/**
+ * Shutdown socket.
+ * @param typeId Type ID to control shutdown
+ */
+export testfunction Stub_TcpShutdown(enum StubErrorCode expectedResult, char typeId[])
+{
+  long stubResult;
+ 
+  write("Entering testfunction Stub_TcpShutdown");
+  if( gSocketId[0] < 0)
+  {
+    testStepFail("Stub_TcpShutdown", "Invalid socket ID, please create socket first.");
+    return;
+  }
+  
+  stubResult = Internal_Stub_TcpShutdown(gSocketId[0], atol(typeId));
+  
+  if (stubResult == expectedResult)
+  {
+    testStepPass("Stub_TcpShutdown", "Shutdown socket with expected result: %s", kStubErrorMessages[stubResult]);
+  }
+  else if (stubResult == -1)
+  {
+    testStepFail("Stub_TcpShutdown", "Internal stub function handling error.");
+  }
+  else if (stubResult == -2)
+  {
+    testStepFail("Stub_TcpShutdown", "Stub function parse error.");
+  }
+  else
+  {
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_TcpShutdown", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_TcpShutdown", "Unknown error.");
+  }
+}
+/**
+ * Get the current Tcp State.
+ * @param tcpStateId Current Tcp State
+ */
+export Stub_GetTcpState(enum TcpStateId tcpStateId)
+{
+  Stub_GetTcpState(tcpStateId, 0);
+}
+
+/**
+ * Get the current Tcp State.
+ * @param tcpStateId Current Tcp State
+ * @param socketHandle The socket handle
+ */
+export testfunction Stub_GetTcpState(enum TcpStateId tcpStateId, int socketHandle)
+{
+  long stubResult;
+  byte outTcpStateId;
+
+  write("Entering testfunction Stub_GetTcpState");
+  if( gSocketId[socketHandle] < 0)
+  {
+    testStepFail("Stub_GetTcpState", "Invalid socket ID, please create socket first.");
+    return;
+  }
+  gLastCheckedTcpState = TcpStateIdInvalid;
+  
+  stubResult = Internal_Stub_TcpGetTcpState(gSocketId[socketHandle], outTcpStateId);
+
+  switch (stubResult) {
+  case 0:
+      gLastCheckedTcpState = (enum TcpStateId)outTcpStateId;
+      if (outTcpStateId != tcpStateId)
+      {
+        testStepFail("Stub_GetTcpState", "State missmatch. Expected=%s, Observed=%s", tcpStateId.name(), ((enum TcpStateId)outTcpStateId).name());
+      }
+      else
+      {
+        testStepPass("Stub_GetTcpState", "Get the Tcp State on DUT succeeded.");
+      }
+    break;
+  case -1:
+    testStepFail("Stub_GetTcpState", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_GetTcpState", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_GetTcpState", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_GetTcpState", "Unknown error.");
+    break;
+  }
+}
+
+/**
+ * Check if the DUT has issued an urgent signal to its applications.
+ */
+export testfunction Stub_TcpCheckUrgentSignal()
+{
+  long stubResult;
+  word outHasIssued;
+  
+  write("Entering testfunction Stub_TcpCheckUrgentSignal");
+  stubResult = Internal_Stub_TcpCheckUrgentSignal(gSocketId[0], outHasIssued);
+
+  switch (stubResult) {
+  case 0:
+    if(outHasIssued != 0)
+      testStepPass("Stub_TcpCheckUrgentSignal", "DUT has issued an urgent signal.");
+    else
+      testStepFail("Stub_TcpCheckUrgentSignal", "DUT did not issue an urgent signal.");
+    break;
+  case -1:
+    testStepFail("Stub_TcpCheckUrgentSignal", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_TcpCheckUrgentSignal", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_TcpCheckUrgentSignal", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_TcpCheckUrgentSignal", "Unknown error.");
+    break;
+  }
+}

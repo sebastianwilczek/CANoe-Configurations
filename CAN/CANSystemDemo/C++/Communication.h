@@ -1,0 +1,30 @@
+///////////////////////////////////////////////////////////////////////////////
+// Header
+///////////////////////////////////////////////////////////////////////////////
+#if !defined (Communication_H ) 
+       #define Communication_H
+
+///////////////////////////////////////////////////////////////////////////////
+// Interface between Communication Thread and GUI
+///////////////////////////////////////////////////////////////////////////////
+struct CListOutput
+{
+  virtual void Output(LPCSTR text) = 0;
+};
+
+void SetOutput(CListOutput* output);
+
+BOOL IsConnected();
+BOOL Connect();
+BOOL Disconnect();
+
+BOOL IsStarted();
+BOOL Start();
+BOOL Stop();
+
+BOOL InitCommunication();
+BOOL ExitCommunication();
+
+BOOL ShowEnvironmentVariables();
+
+#endif // Communication_H

@@ -1,0 +1,131 @@
+/*@!Encoding:1252*/
+////////////////////////////////////////////////////////////////////////////////
+//
+// Visualize DUT
+//
+////////////////////////////////////////////////////////////////////////////////
+
+includes
+{
+  #include "Car2xAPI.cin"
+  #include "..\DataSources_Templates\ASNV_Template_BaseDatatypes.cin"
+  #include "..\DataSources_Templates\ASNV_Template_CAM.cin"
+}
+
+variables
+{
+  char DutDbName[4] = "DUT" ; // station's database name
+  
+  struct DUT
+  {
+    long horizontHandle;           // Handle to communication range
+    long waypointHandles[10];      // Handle array for drawing pathpoints to the DUT
+    long waypointTextHandles[10];  // handle array for drawing pathpoints to the DUT
+  };
+  struct DUT dut;
+  msTimer dutWatchDog;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// register rx callback
+////////////////////////////////////////////////////////////////////////////////
+on start
+{
+  C2xRegisterCallback(kRxIndication, "DutOnRxCAM", "CAM");
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Handle DENM
+////////////////////////////////////////////////////////////////////////////////
+void DutOnRxCAM(LONG channel, LONG dir, LONG radioChannel, LONG signalStrength, LONG sigQuality, LONG packet)
+{
+  struct CAM camPdu;
+  long stationHdl ;
+  char stationName[128] ;
+  int iWaypoint;
+  double latitude;
+  double longitude;
+
+  stationHdl = C2xGetStationHandle(packet) ;
+  C2xGetStationName(stationHdl, elcount(stationName), stationName) ;
+  if (!strncmp(stationName, DutDbName, elcount(stationName)) &&
+      !API_GetCAMParams(packet, camPdu))
+  {
+    dutWatchDog.set(1200) ;
+    
+    // draw communication range circle / horizont
+    latitude  = C2xGetTokenInt(packet, "geo_eh", "lpvLatitude") / 1e7;
+    longitude = C2xGetTokenInt(packet, "geo_eh", "lpvLongitude") / 1e7;
+    if (!dut.horizontHandle)
+    {
+      dut.horizontHandle = C2xCreateMapObject(3); // ellipse
+      C2xSetMapObjectPenStyle(dut.horizontHandle, 2);
+    }
+    C2xSetMapObjectPosition(dut.horizontHandle, latitude, longitude);
+    C2xSetMapObjectSize(dut.horizontHandle, 2*@sysVar::DUT::Horizont);
+    C2xDrawMapObject(dut.horizontHandle);
+
+    // draw way points
+    latitude  = camPdu.cam.camParameters.basicContainer.referencePosition.latitude  / 1e7;
+    longitude = camPdu.cam.camParameters.basicContainer.referencePosition.longitude / 1e7;
+    iWaypoint = 0 ;
+    if (camPdu.cam.camParameters.lowFrequencyContainer.isValidFlag)
+    {
+      for (iWaypoint = 0 ; (iWaypoint < elcount(dut.waypointHandles)) && (iWaypoint < camPdu.cam.camParameters.lowFrequencyContainer.basicVehicleContainerLowFrequency.pathHistory.length) ; ++iWaypoint)
+      {
+        if (!dut.waypointHandles[iWaypoint])
+        {
+          dut.waypointHandles[iWaypoint] = C2xCreateMapObject(kBitmap);
+          dut.waypointTextHandles[iWaypoint] = C2xCreateMapObject(kText);
+        }
+      
+        latitude  += camPdu.cam.camParameters.lowFrequencyContainer.basicVehicleContainerLowFrequency.pathHistory.arrayValue[iWaypoint].pathPosition.deltaLatitude  / 1e7;
+        longitude += camPdu.cam.camParameters.lowFrequencyContainer.basicVehicleContainerLowFrequency.pathHistory.arrayValue[iWaypoint].pathPosition.deltaLongitude / 1e7;
+
+        C2xSetMapObjectPosition(dut.waypointHandles[iWaypoint], latitude, longitude);
+        C2xSetMapObjectBmpFilePath(dut.waypointHandles[iWaypoint], "Bitmaps\\pathPoint.bmp");
+        C2xSetMapObjectSize(dut.waypointHandles[iWaypoint], 20, 20);
+        C2xDrawMapObject(dut.waypointHandles[iWaypoint]);
+
+        C2xSetMapObjectPosition(dut.waypointTextHandles[iWaypoint], latitude - 0.00009, longitude - 0.00004);
+        C2xSetMapObjectFillColor(dut.waypointTextHandles[iWaypoint], makeRGB(0,0,0));
+        C2xSetMapObjectText(dut.waypointTextHandles[iWaypoint], "%1.0f", (float)iWaypoint + 1);
+        C2xDrawMapObject(dut.waypointTextHandles[iWaypoint]);
+      }
+    }
+    // clear unused waypoints
+    for ( ; iWaypoint < elcount(dut.waypointHandles) ; ++iWaypoint)
+    {
+      if (dut.waypointHandles[iWaypoint])
+      {
+        //write("del %d", iWaypoint) ;
+        C2xDeleteMapObject(dut.waypointHandles[iWaypoint]) ;
+        C2xDeleteMapObject(dut.waypointTextHandles[iWaypoint]) ;
+        dut.waypointHandles[iWaypoint] = 0 ;
+        dut.waypointTextHandles[iWaypoint] = 0 ;
+      }
+    }
+  }
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Delete DUT from Map Window
+////////////////////////////////////////////////////////////////////////////////
+on timer dutWatchDog
+{
+  int iWaypoint ;
+  
+  C2xDeleteMapObject(dut.horizontHandle);
+  dut.horizontHandle = 0;
+
+  for (iWaypoint = 0 ; iWaypoint < elcount(dut.waypointHandles) ; ++iWaypoint)
+  {
+    C2xDeleteMapObject(dut.waypointHandles[iWaypoint]) ;
+    dut.waypointHandles[iWaypoint] = 0 ;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// EOF
+////////////////////////////////////////////////////////////////////////////////

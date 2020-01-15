@@ -1,0 +1,255 @@
+/*@@var:*/
+variables
+{
+  msTimer tSim_Restart;
+}
+/*@@end*/
+
+/*@@mainTest:MainTest():*/
+void MainTest()
+{
+  ChkConfig_Init("user");
+  SetupConditionsGeneral();
+
+//  SetupConditionsForNodeTrashCompactor();
+ // SetupConditionsForNodeBoiler();
+//  SetupConditionsForNodeCoffeeMaker();
+//  SetupConditionsForNodeSteamOven();
+//  SetupConditionsForNodeGalleyMaster();
+//  SetupConditionsForNodeDisplayPanel();
+
+  TestBoilerPowerUsage();
+  TestTotalConsumption(); 
+  
+}
+/*@@end*/
+
+/*@@caplFunc:SetupConditionsGeneral():*/
+//--- end generated part
+
+//--- begin generated part
+void SetupConditionsGeneral()
+{
+  TestAddCondition(ChkStart_ErrorFramesOccured());
+  SetupConditionsForTotalPower();
+}
+/*@@end*/
+
+/*@@caplFunc:SetupConditionsForNodeTrashCompactor():*/
+//--- end generated part
+
+//--- begin generated part
+void SetupConditionsForNodeTrashCompactor()
+{
+
+// cycle time supervision
+  TestAddCondition(ChkStart_NodeMsgsRelOccurrenceViolation(TrashCompactor, 0.95,1.1));
+
+// dlc supervision
+  TestAddCondition(ChkStart_InconsistentTxDlc(TrashCompactor));
+
+// check the signal values
+  TestAddCondition(ChkStart_MsgSignalValueRangeViolation(STA_GAIN_FromTrashCompactor::STA_GAIN_UsedPB, 0, 12750));
+}
+/*@@end*/
+
+/*@@caplFunc:SetupConditionsForNodeBoiler():*/
+//--- end generated part
+
+//--- begin generated part
+void SetupConditionsForNodeBoiler()
+{
+
+// cycle time supervision
+  TestAddCondition(ChkStart_NodeMsgsRelOccurrenceViolation(Boiler, 0.95,1.1));
+
+// dlc supervision
+  TestAddCondition(ChkStart_InconsistentTxDlc(Boiler));
+
+// check the signal values
+  TestAddCondition(ChkStart_MsgSignalValueRangeViolation(STA_GAIN_FromBoiler::STA_GAIN_UsedPB, 0, 12750));
+}
+/*@@end*/
+
+/*@@caplFunc:SetupConditionsForNodeCoffeeMaker():*/
+//--- end generated part
+
+//--- begin generated part
+void SetupConditionsForNodeCoffeeMaker()
+{
+
+// cycle time supervision
+  TestAddCondition(ChkStart_NodeMsgsRelOccurrenceViolation(CoffeeMaker, 0.95,1.1));
+
+// dlc supervision
+  TestAddCondition(ChkStart_InconsistentTxDlc(CoffeeMaker));
+
+// check the signal values
+  TestAddCondition(ChkStart_MsgSignalValueRangeViolation(STA_GAIN_FromCoffeeMaker::STA_GAIN_UsedPB, 0, 12750));
+}
+/*@@end*/
+
+/*@@caplFunc:SetupConditionsForNodeSteamOven():*/
+//--- end generated part
+
+//--- begin generated part
+void SetupConditionsForNodeSteamOven()
+{
+
+// cycle time supervision
+  TestAddCondition(ChkStart_NodeMsgsRelOccurrenceViolation(SteamOven, 0.95,1.1));
+
+// dlc supervision
+  TestAddCondition(ChkStart_InconsistentTxDlc(SteamOven));
+
+// check the signal values
+  TestAddCondition(ChkStart_MsgSignalValueRangeViolation(STA_GAIN_FromSteamOven::STA_GAIN_UsedPB, 0, 12750));
+}
+/*@@end*/
+
+/*@@caplFunc:SetupConditionsForNodeGalleyMaster():*/
+//--- end generated part
+
+//--- begin generated part
+void SetupConditionsForNodeGalleyMaster()
+{
+
+// cycle time supervision
+  TestAddCondition(ChkStart_NodeMsgsRelOccurrenceViolation(GalleyMaster, 0.95,1.1));
+
+// dlc supervision
+  TestAddCondition(ChkStart_InconsistentTxDlc(GalleyMaster));
+
+// check the signal values
+}
+/*@@end*/
+
+/*@@caplFunc:SetupConditionsForNodeDisplayPanel():*/
+//--- end generated part
+
+//--- begin generated part
+void SetupConditionsForNodeDisplayPanel()
+{
+
+// cycle time supervision
+  TestAddCondition(ChkStart_NodeMsgsRelOccurrenceViolation(DisplayPanel, 0.95,1.1));
+
+// dlc supervision
+  TestAddCondition(ChkStart_InconsistentTxDlc(DisplayPanel));
+
+// check the signal values
+  TestAddCondition(ChkStart_MsgSignalValueRangeViolation(STA_GAIN_FromDisplayPanel::STA_GAIN_UsedPB, 0, 12750));
+}
+/*@@end*/
+
+/*@@testcase:TestBoilerPowerUsage():*/
+testcase TestBoilerPowerUsage ()
+{
+  //testCaseTitle("Boiler test","Test Boiler Power Usage");
+  testCaseComment("Test the boilers behaviour on PBR and PBM messages");
+  
+  // switch off all GAINs and let them shut down, restart the MGCU
+
+  putValue(CoffeeMaker_Power,0);
+  putValue(SteamOven_Power,0);
+  putValue(TrashCompactor_Power,0);
+  putValue(Boiler_Power,0);
+  putValue(GalleyMaster_Power, 0);
+  testWaitForTimeout(100);
+  putValue(GalleyMaster_Power, 1);
+  testWaitForTimeout(500);
+
+  // switch on the boiler itself
+  testWaitForTimeout(10);
+  putValue(Boiler_Power,1);
+
+  // wait for the PBR and the answer from the MGCU
+  testCaseComment("wait for the PBR and the answer from the MGCU");
+  if(1!=testWaitForMessage(PBR_FromBoiler, 5000)) {
+  	testStepFail("Missing PBR from Boiler");
+	return;
+  }
+  if(1!=testWaitForMessage(0xA904219x, 5000)) {
+  	testStepFail("Missing PBM answer to Boiler");
+	return;
+  }
+
+  // expect temperature going up
+  testCaseComment("wait for the boiler temperature above 90 deg C");
+  if(1!=testWaitForSignalInRange(Boiler_WaterTemperature, 90, 105, 100000)) {
+  	testStepFail("temperature not reached");
+	return;
+  }
+
+
+  // when cooling down we expect that a new power request is fired
+  testCaseComment("wait for a new PBR");
+  if(1!=testWaitForMessage(PBR_FromBoiler, 100000)) {
+  	testStepFail("Missing PBR from Boiler");
+	return;
+  }
+
+}
+/*@@end*/
+
+/*@@testcase:TestTotalConsumption():*/
+testcase TestTotalConsumption ()
+{
+  testCaseComment("Test the total consumption of power");
+  
+  // switch off all GAINs and MGCU
+
+  putValue(CoffeeMaker_Power,0);
+  putValue(SteamOven_Power,0);
+  putValue(TrashCompactor_Power,0);
+  putValue(Boiler_Power,0);
+  putValue(GalleyMaster_Power, 0);
+  testWaitForTimeout(100);
+
+  putValue(GalleyMaster_Power, 1);
+
+  putValue(CoffeeMaker_Power,1);
+  putValue(CoffeeMaker_HotWater,1);
+
+  putValue(SteamOven_Power,1);
+  putValue(SteamOven_TargetTemp,95);
+  putValue(SteamOven_Engage,1);
+
+  putValue(TrashCompactor_Power,1);
+
+  putValue(Boiler_Power,1);
+
+  setTimer(tSim_Restart,300);
+
+  // let the system run freely and observe the total voltage, which is done by a global condition
+  if(1!=testWaitForTesterConfirmation("The test is running (and observing power ranges), until 'yes' or 'no' is pressed. The disstinction may be by an external event, such as: Is the fuse still ok")) {
+    testStepFail();
+  }
+
+  // shut down 
+  cancelTimer(tSim_Restart);
+  
+}
+/*@@end*/
+
+/*@@caplFunc:SetupConditionsForTotalPower():*///function
+SetupConditionsForTotalPower ()
+{
+  TestAddCondition(ChkCreate_MsgSignalValueRangeViolation(TotalSystem_RealUsedPower, 0.0, 3500.0));
+}
+/*@@end*/
+
+/*@@timer:tSim_Restart:*/
+on timer tSim_Restart
+{
+  int cycle;
+  cycle = (cycle+1) % 9;
+  setTimer(tSim_Restart,1000);
+  if(cycle>=8 && getvalue(SteamOven_Serve)>0) {
+    putValue(SteamOven_Engage,1);
+  }
+  putValue(CoffeeMaker_HotWater,1);
+
+}
+/*@@end*/
+

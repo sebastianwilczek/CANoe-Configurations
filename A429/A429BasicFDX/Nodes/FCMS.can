@@ -1,0 +1,295 @@
+/*@!Encoding:1252*/
+// -------------------------------------------------------------------------
+// Module: FCMS.can
+// Interfaces: -
+// -------------------------------------------------------------------------
+// example configuration: Fuel Control Management System
+// -------------------------------------------------------------------------
+// Copyright (c) Vector Informatik GmbH. All rights reserved.
+// -------------------------------------------------------------------------
+includes
+{
+  #include "A429/a429utils.cin"
+}
+
+variables
+{
+  struct TankStruct {
+    long maximumTankVolume;
+    long initTankVolume;
+    long actualTankVolume;
+  };
+  
+  byte engineFuelBurnStatus = 0;
+  byte tankOpen[8];
+  byte sumTankOpen;
+  word perTickFuelConsumption = 20;
+  word lastTickFuelConsumption = 0; 
+  
+  //  initialization if tank array
+  struct TankStruct TankArray[7] = { 
+  //      MAX,  INIT, ACTUAL
+      {  6315,     0,      0 },   // Inner 1
+      { 74033, 74033,      0 },   // Inner 2
+      { 71923, 71923,      0 },   // Center Tank
+      { 74033, 74033,      0 },   // Inner 3
+      {  6315,     0,      0 },   // Inner 4
+      { 12460, 12460,      0 },   // ACT 1
+      { 12460, 12460,      0 }};  // ACT 2
+  
+  //A429 message variables
+  a429Word Aircraft_Gross_Weight sndGrossWeight;
+  a429Word          Level_States sndLvlStates;
+  a429Word   Fuel_Pump_Contactor sndFuelPump;
+  
+  msTimer Update_Gross_Weight_Timer;
+  msTimer Update_Aircraft;
+  msTimer Update_OverheadPanel;
+}
+
+on preStart
+{
+  long weight = 0;
+  int i;
+  for(i = 0; i < elCount(TankArray); ++i)
+  {
+    TankArray[i].actualTankVolume = TankArray[i].initTankVolume;
+	//add the tank weight to the gross weight
+    weight += TankArray[i].actualTankVolume;
+  }
+  //reset Tank open states
+  for( i = 0; i < elCount(tankOpen); ++i)
+  {
+    tankOpen[i] = 0;
+  }
+  // addition of empty weight of the aircraft
+  $Gross_Weight = 277775 + weight;
+}
+
+on start
+{ 
+  // Disable all pumps on start of the simulation
+  InitPumpContactorStates();
+    
+  //send the scheduled messages to the driver
+  output(sndGrossWeight);
+  output(sndLvlStates);
+  output(sndFuelPump);
+  
+  //set the timers
+  setTimerCyclic(Update_Aircraft,            100);
+  setTimerCyclic(Update_Gross_Weight_Timer,  300);
+  setTimerCyclic(Update_OverheadPanel,      1000);
+}
+
+
+
+
+on preStop
+{
+  // Disable all pumps
+  InitPumpContactorStates();
+}
+
+
+
+// timer callback to update the FCMS status
+on timer Update_Aircraft
+{
+  int i;
+  long fuelLossPerTank;
+  long restFuelLoss;
+  
+  //reset all local used variables
+  fuelLossPerTank = 0;
+  restFuelLoss = 0;
+  sumTankOpen = 0;
+  
+  // check if main pumps are open
+  engineFuelBurnStatus = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[0];
+  engineFuelBurnStatus += @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[1];
+  engineFuelBurnStatus += @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[2];
+  engineFuelBurnStatus += @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[3];
+  
+  // check if fuel pumps are open and fuel is inside the tank
+  tankOpen[0] = (@A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[4] && TankArray[0].actualTankVolume > 0) ? 1 : 0;
+  tankOpen[1] = (@A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[5] && TankArray[1].actualTankVolume > 0) ? 1 : 0;
+  tankOpen[2] = (@A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[6] && TankArray[2].actualTankVolume > 0) ? 1 : 0;
+  tankOpen[3] = (@A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[7] && TankArray[2].actualTankVolume > 0) ? 1 : 0;
+  tankOpen[4] = (@A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[8] && TankArray[3].actualTankVolume > 0) ? 1 : 0;
+  tankOpen[5] = (@A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[9] && TankArray[4].actualTankVolume > 0) ? 1 : 0;
+  tankOpen[6] = (@A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[12] && TankArray[5].actualTankVolume > 0) ? 1 : 0;
+  tankOpen[7] = (@A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[13] && TankArray[6].actualTankVolume > 0) ? 1 : 0;
+  
+  //count the sum of open tanks
+  for( i = 0; i < elCount(tankOpen); ++i)
+  {
+    sumTankOpen += tankOpen[i];
+  }
+  
+  // if no tank is open and no main pump is active, do nothing
+  if(sumTankOpen == 0 || engineFuelBurnStatus == 0)
+  {
+    engineFuelBurnStatus = 0;
+  }
+  // calculates the the new tank volumes
+  else
+  {    
+    fuelLossPerTank = (perTickFuelConsumption * engineFuelBurnStatus) / sumTankOpen;
+	  //calculate the tank volume and disable the button when tank is empty
+    tankOpen[0] = tankOpen[0] ? calculateFuelConsumption(fuelLossPerTank, TankArray[0].actualTankVolume, restFuelLoss) : 0;
+    tankOpen[1] = tankOpen[1] ? calculateFuelConsumption(fuelLossPerTank, TankArray[1].actualTankVolume, restFuelLoss) : 0;
+    tankOpen[2] = tankOpen[2] ? calculateFuelConsumption(fuelLossPerTank, TankArray[2].actualTankVolume, restFuelLoss) : 0;
+    tankOpen[3] = tankOpen[3] ? calculateFuelConsumption(fuelLossPerTank, TankArray[2].actualTankVolume, restFuelLoss) : 0;
+    tankOpen[4] = tankOpen[4] = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[8] ? calculateFuelConsumption(fuelLossPerTank, TankArray[3].actualTankVolume, restFuelLoss) : 0;
+    tankOpen[5] = tankOpen[5] = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[9] ? calculateFuelConsumption(fuelLossPerTank, TankArray[4].actualTankVolume, restFuelLoss) : 0;
+    tankOpen[6] = tankOpen[6] = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[12] ? calculateFuelConsumption(fuelLossPerTank, TankArray[5].actualTankVolume, restFuelLoss) : 0;
+    tankOpen[7] = tankOpen[7] = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[13] ? calculateFuelConsumption(fuelLossPerTank, TankArray[6].actualTankVolume, restFuelLoss) : 0;
+    lastTickFuelConsumption += ((perTickFuelConsumption * engineFuelBurnStatus) - restFuelLoss);
+  }
+  
+  // calculate the high low states of tge tanks
+  CalculateHighLowStates(Inner_Tank_1_High_Level, Inner_Tank_1_Low_Level, TankArray[0].actualTankVolume, TankArray[0].maximumTankVolume);
+  CalculateHighLowStates(Inner_Tank_2_High_Level, Inner_Tank_2_Low_Level, TankArray[1].actualTankVolume, TankArray[1].maximumTankVolume);
+  CalculateHighLowStates(Center_Tank_High_Level, Center_Tank_Low_Level, TankArray[2].actualTankVolume, TankArray[2].maximumTankVolume);
+  CalculateHighLowStates(Inner_Tank_3_High_Level, Inner_Tank_3_Low_Level, TankArray[3].actualTankVolume, TankArray[3].maximumTankVolume);
+  CalculateHighLowStates(Inner_Tank_4_High_Level, Inner_Tank_4_Low_Level, TankArray[4].actualTankVolume, TankArray[4].maximumTankVolume);
+  CalculateHighLowStates(Act1_High_Level, Act1_Low_Level, TankArray[5].actualTankVolume, TankArray[5].maximumTankVolume);
+  CalculateHighLowStates(Act2_High_Level, Act2_Low_Level, TankArray[6].actualTankVolume, TankArray[6].maximumTankVolume);
+  
+  // set the actual pump status in the fuel computer
+  $Main_Pump_1 = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[0] ? 0 : 1;
+  $Main_Pump_2 = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[1] ? 0 : 1;
+  $Main_Pump_3 = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[2] ? 0 : 1;
+  $Main_Pump_4 = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[3] ? 0 : 1;
+  $Center_Tank_Left_Aft_Transfer_Pump = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[4] ? 0 : 1;
+  $Center_Tank_Left_Transfer_Pump = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[5] ? 0 : 1;
+  $Trim_Tank_Left_Transfer_Pump = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[6] ? 0 : 1;
+  $Trim_Tank_Right_Transfer_Pump = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[7] ? 0 : 1;
+  $Center_Tank_Right_Transfer_Pump = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[8] ? 0 : 1;
+  $Center_Tank_Right_Aft_Transfer_Pump = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[9] ? 0 : 1;
+  $Standby_Pump_1 = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[10] ? 0 : 1;
+  $Standby_Pump_2 = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[11] ? 0 : 1;
+  $Inner_1_Tank_Aft_Transfer_Pump = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[12] ? 0 : 1;
+  $Inner_2_Tank_Aft_Transfer_Pump = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[13] ? 0 : 1;
+  $Standby_Pump_3 = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[14] ? 0 : 1;
+  $Standby_Pump_4 = @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[15] ? 0 : 1;
+  $SSM_140 = 0;
+  
+} /* timer Update_Aircraft */
+
+
+
+// timer callback to update the gross weight signal
+on timer Update_Gross_Weight_Timer
+{
+  if( $Gross_Weight > 100 && engineFuelBurnStatus > 0 && lastTickFuelConsumption > 40)
+  {
+    $Gross_Weight = $Gross_Weight - lastTickFuelConsumption;
+    $SSM_075 = 0;
+    lastTickFuelConsumption = 0;
+  }
+} /* Update_Gross_Weight_Timer */
+
+
+
+// timer callback to update the overhead panel
+on timer Update_OverheadPanel
+{
+  @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[4] = tankOpen[0];
+  @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[5] = tankOpen[1];
+  @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[6] = tankOpen[2];
+  @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[7] = tankOpen[3];
+  @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[8] = tankOpen[4];
+  @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[9] = tankOpen[5];
+  @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[12] = tankOpen[6];
+  @A429::FCMS::OVHD_Fuel_Panel.Panel_Buttons[13] = tankOpen[7];
+} /* Update_OverheadPanel */
+
+
+
+// set the SSM to No Computed Data (NCD) when no new data is set, after new data is set
+on signal_change SSM_075
+{
+  $SSM_075 = 1;
+}
+
+
+
+// set the SSM to No Computed Data (NCD) when no new data is set, after new data is set
+on signal_change SSM_140
+{
+  $SSM_140 = 1;
+}
+
+
+
+// function to set the high/low signals
+void CalculateHighLowStates(signal *highSignal, signal *lowSignal, long actualCapacity, long maximumCapacity)
+{
+  long ThirdCap;
+  long TwoThirdCap;
+  
+  ThirdCap = maximumCapacity / 3;
+  TwoThirdCap = 2 * ThirdCap;
+  
+  //high signal: 0 means not high, 1 means high
+  //low signal: 0 means not low, 1 means low
+  if( actualCapacity > TwoThirdCap)
+  {
+    $highSignal = 1;
+    $lowSignal = 0;
+  }
+  else if (( actualCapacity <= TwoThirdCap) && ( actualCapacity >= ThirdCap))
+  {
+    $highSignal = 0;
+    $lowSignal = 0;
+  }
+  else
+  {
+    $highSignal = 0;
+    $lowSignal = 1;
+  }
+}
+
+
+
+// calculate the fuel consumption for a tank
+byte calculateFuelConsumption(long fuelLoss, long &fuel, long &restFuel)
+{
+  fuel -= (fuelLoss + restFuel);
+  if( fuel < 0)
+  {
+    restFuel = (fuel * (-1));
+    fuel = 0;
+    return 0;
+  }
+  restFuel = 0;
+  return 1;
+}
+
+
+
+// initialize the pump contactor states
+void InitPumpContactorStates()
+{
+  $Act_Transfer_Pump = 1;
+  $Center_Tank_Left_Aft_Transfer_Pump = 1;
+  $Center_Tank_Left_Transfer_Pump = 1;
+  $Center_Tank_Right_Aft_Transfer_Pump = 1;
+  $Center_Tank_Right_Transfer_Pump = 1;
+  $Inner_1_Tank_Aft_Transfer_Pump = 1;
+  $Inner_2_Tank_Aft_Transfer_Pump = 1;
+  $Inner_3_Tank_Aft_Transfer_Pump = 1;
+  $Inner_4_Tank_Aft_Transfer_Pump = 1;
+  $Main_Pump_1 = 1;
+  $Main_Pump_2 = 1;
+  $Main_Pump_3 = 1;
+  $Main_Pump_4 = 1;
+  $Standby_Pump_1 = 1;
+  $Standby_Pump_2 = 1;
+  $Standby_Pump_3 = 1;
+  $Standby_Pump_4 = 1;
+  $Trim_Tank_Left_Transfer_Pump = 1;
+  $Trim_Tank_Right_Transfer_Pump = 1;
+}

@@ -1,0 +1,241 @@
+/*@!Encoding:1252*/
+/*  
+    AUTOSAR GLOBAL TIME on CAN CAPL implementation
+
+    This include file implements the GLOBAL TIME on CAN
+    protocol for usage in a CANoe simulation. Master as
+    well as slave simulations are supported. It can be
+    used as a basis for own implementations.
+    
+    Restrictions:
+    - Offset messages are not implemented
+    - Overflow?
+*/
+variables
+{
+  /*
+  Required external GLOBAL TIME constants: Copy these constants in 
+  your CAPL programm and change them accordingly
+
+  const byte GT_MASTER  = 1;     //0 - Global Time Slave, 1 - Global Time Master
+  const byte GT_DOMAIN  = 1;     //ID of the time domain
+  const byte GT_SGW     = 0;     //0 - SyncToGTM, 1 - SyncToSubDomain
+  const byte GT_CRC     = 0;     //Use the CRC secured Global Time messages
+  const long GT_CAN_ID  = 0x123; //CAN identifier of the Global Time message
+  const byte GT_VERBOSE = 1;     //Usefule printout
+  */
+  
+  //Internal constants
+  const long _GT_SYNC_INTERVAL = 1000;
+  const long _GT_TYPE_SYNC     = 0x10;
+  const long _GT_TYPE_SYNC_CRC = 0x20;
+  const long _GT_TYPE_FUP      = 0x18;
+  const long _GT_TYPE_FUP_CRC  = 0x28;
+ 
+  //Internal global variables
+  message 0x0 _gtMsg = {DLC = 8};
+  mstimer _gtMasterTimer;
+  int64 _gtLastSyncTime;
+  int64 _gtLastMasterTimeOnSync;
+  int64 _gtCurrentSyncTime;
+  int64 _gtCurrentMasterTimeOnSync;
+  byte _gtSyncSent;
+  byte _gtSequenceCntr;
+}
+
+void GT_MASTER_START()
+{
+  _gtSequenceCntr = 0;
+  _gtSyncSent = 0;
+  _GT_SEND_SYNC();
+}
+
+void GT_MASTER_STOP()
+{
+  _gtMasterTimer.cancel();
+}
+
+int64 GT_SLAVE_TIME_TO_MASTER_TIME_NS(int64 localSlaveTime)
+{
+  return (_gtSyncSent) ? (localSlaveTime - _gtLastSyncTime + _gtLastMasterTimeOnSync) 
+                       : (localSlaveTime - _gtCurrentSyncTime + _gtCurrentMasterTimeOnSync);
+}
+
+/// <Internal>
+void _GT_SEND_SYNC()
+{
+  _gtLastSyncTime = timeNowInt64();
+  _gtMsg.byte(0) = (GT_CRC) ? _GT_TYPE_SYNC_CRC : _GT_TYPE_SYNC;
+  _gtMsg.byte(2) = (GT_DOMAIN << 4) + _gtSequenceCntr;
+  _gtMsg.byte(3) = 0; // User Byte
+  _gtMsg.dword(4) = swapDWord((dword)(_gtLastSyncTime / 1e9));
+  _gtMsg.byte(1) = (GT_CRC) ? _GT_CALC_CRC() : 0;
+  
+  output(_gtMsg);
+  
+  _gtSyncSent = 1;
+  _gtMasterTimer.set(_GT_SYNC_INTERVAL);
+  
+  if (GT_VERBOSE)
+  {
+    writeLineEx(-3, 0, "GT MASTER \"%NODE_NAME%\": Timestamp %fs will be sent",_gtLastSyncTime/1e9);
+  }
+}
+
+/// <Internal>
+void _GT_SEND_FUP(int64 curTime)
+{
+  int64 st0r;
+  double diff;
+  byte diffSeconds;
+  
+  st0r = (_gtLastSyncTime / 1e9);
+  st0r = st0r * 1e9;
+  diffSeconds = (curTime - st0r) / 1e9;
+  diff = (double)(curTime  //not timeNowNS in case this is not the time reference channel in CANoe
+         - st0r)           //subtract seconds portion of t0r
+         - (double)(diffSeconds * 1e9); //subtract second portion of the diff time
+  _gtMsg.byte(0) = (GT_CRC) ? _GT_TYPE_FUP_CRC : _GT_TYPE_FUP;
+  _gtMsg.byte(2) = (GT_DOMAIN << 4) + _gtSequenceCntr;
+  _gtMsg.byte(3) = ((GT_SGW) ? 4 : 0) + (diffSeconds & 3);
+  _gtMsg.dword(4) = swapDWord(diff);
+  _gtMsg.byte(1) = (GT_CRC) ? _GT_CALC_CRC() : 0;
+  
+  output(_gtMsg);
+  
+  _gtSyncSent = 0;
+}
+
+on start
+{
+  _gtMsg.id = GT_CAN_ID;
+}
+
+on timer _gtMasterTimer
+{
+  _GT_SEND_SYNC();
+}
+
+on message GT_CAN_ID
+{
+  byte gtDomain;
+  byte gtSequenceCntr;
+  
+  //Check message
+  gtDomain = this.byte(2) >> 4;
+  gtSequenceCntr = this.byte(2) & 0xF;
+  
+  if (gtDomain != GT_DOMAIN)
+  {
+    return;
+  }
+  
+  if (gtSequenceCntr != _gtSequenceCntr)
+  {
+    if (GT_VERBOSE)
+    {
+      writeLineEx(-3, 3, "GT NODE \"%NODE_NAME%\": Message with invalid sequence counter. Received %d, expected %d. Message is dropped.", gtSequenceCntr, _gtSequenceCntr);
+    }
+    return;
+  }
+  
+  _gtMsg.qword(0) = this.qword(0);
+  
+  if (GT_CRC)
+  {
+    if (this.byte(1) != _GT_CALC_CRC())
+    {
+      if (GT_VERBOSE)
+      {
+        writeLineEx(-3, 3, "GT NODE \"%NODE_NAME%\": Message with invalid CRC. Received 0x%2X, expected 0x%2X. Message is dropped.", this.byte(1), _GT_CALC_CRC());
+      }
+      return;
+    }
+  }
+  
+  if (GT_MASTER)
+  {
+    if (this.dir == Tx)
+    {
+      if (_gtSyncSent)
+      {
+        _GT_SEND_FUP(this.time_ns);
+      }
+      else
+      {
+        _gtSequenceCntr = (_gtSequenceCntr +1) & 0x0F;
+      }
+    }
+  }
+  else
+  {
+    if (this.dir == Rx)
+    {
+      _GT_HANDLE_MASTER_MSG(this.time_ns);
+    }
+  }
+}
+
+/// <Internal>
+void _GT_HANDLE_MASTER_MSG(int64 curTime)
+{
+  switch (_gtMsg.byte(0))
+  {
+    case _GT_TYPE_SYNC:
+    case _GT_TYPE_SYNC_CRC:
+      _gtLastMasterTimeOnSync = _gtCurrentMasterTimeOnSync;
+      _gtLastSyncTime = _gtCurrentSyncTime;
+      _gtCurrentMasterTimeOnSync = swapDWord(_gtMsg.dword(4)) * 1e9; //s(t0r)
+      _gtCurrentSyncTime = curTime; //t2r
+      _gtSyncSent = 1;
+      break;
+    case _GT_TYPE_FUP:
+    case _GT_TYPE_FUP_CRC:
+      _gtSequenceCntr = (_gtSequenceCntr +1) & 0x0F;
+      _gtCurrentMasterTimeOnSync = _gtCurrentMasterTimeOnSync + swapDWord(_gtMsg.dword(4)); // s(t0r)+t4r
+      _gtSyncSent = 0;
+      if (GT_VERBOSE)
+      {
+        writeLineEx(-3, 0, "GT SLAVE \"%NODE_NAME%\": Received timestamp %fs from Master",_gtCurrentMasterTimeOnSync / 1e9);
+      }
+      break;
+  }
+}
+
+/// <Internal>
+byte _GT_CALC_CRC()
+{
+  int idx_u16;
+  byte tmp_u8;
+  byte crc_u8;
+  
+  crc_u8 = 0xFF; //CRC start value
+  
+  //byte 2 to byte 7 are CRC protected with a CRC8H2F algorithm
+  for (idx_u16 = 2; idx_u16 < 8; idx_u16++)
+  {
+    tmp_u8 = _gtMsg.byte(idx_u16);
+    crc_u8 = _GT_2F_CRC8_ONE_BYTE(crc_u8 ^ tmp_u8);
+  }
+  
+  return ((byte) ~crc_u8);
+}
+
+/// <Internal>
+byte _GT_2F_CRC8_ONE_BYTE(byte data_u8)
+{
+  byte bit_u8;
+  byte msb_u8;
+  byte tmp_u8;
+
+  tmp_u8 = data_u8;
+  for (bit_u8=0; bit_u8 < 8; bit_u8++)
+  {   //get MSB
+      msb_u8   = (tmp_u8 >> 7) & 0x01;
+      //shift one bit to the left
+      tmp_u8 <<= 1;
+      //XOR with CRC polynom if MSB != 0
+      tmp_u8  ^= 0x2F * msb_u8;
+  }
+  return (tmp_u8);
+}

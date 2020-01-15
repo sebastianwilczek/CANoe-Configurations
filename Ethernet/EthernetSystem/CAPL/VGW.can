@@ -1,0 +1,158 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "include\PDU-NM-ASR_Eth.cin"
+  #include "include\VectorConceptCar_Grid.cin"
+  #include "include\VectorConceptCar_Track.cin"
+  #include "include\VectorConceptCar.cin"
+}
+
+/*
+ * Vehicle Gateway - VGW                                     Version 1.0
+ *
+ * Copyright Vector Informatik GmbH - All right reserved
+ *
+ * This node simulates a central vehicle gateway ECU between the powertrain of a car
+ * and the Ethernet backbone network. It is only a stub which calculates
+ * the engine and vehicle speed and transmits these signals on the
+ * Backbone network bus. In a more realistic simulation it could be a gateway
+ * between a CAN powertrain bus and the Vehicle backbone network.
+ *
+ */
+ variables
+{
+  const double kMaxVehicleSpeed   = 120.0; // km/h
+  const double kMotorPowerKw      =  80.0; // kW
+  const double kBatterCapacityKwh =  40.0; // kW/h
+  const double kVoltage           = 400.0; // V
+  const double kWheelToMotorRatio =  60.0;
+  const double kVehicleMassKg     =   900; // Vehicle mass [kg]
+  const double kAirFriction       =   0.4; // F = kFriction*v*v
+  const double kRollingFrictionN  = 100.0; // Newton
+  const double kMaxPowerN         =  36.0; // Newton
+        char   kIniFile[32]       = "EthernetSystemDemo.ini";
+}
+
+/*
+  Start of node.
+ */
+on start
+{
+  //
+  // Init Sysvars
+  //
+  
+  @sysvar::ConceptCar::Battery::RemainingCapacity   = kBatterCapacityKwh;
+  @sysvar::ConceptCar::Battery::Temperature         = @sysvar::ConceptCar::Environment::ExteriorTemperature;
+  @sysvar::ConceptCar::EMotor::Temperature          = @sysvar::ConceptCar::Environment::ExteriorTemperature;  
+
+  sysBeginVariableStructUpdate(sysvar::ConceptCar::Vehicle::Position);
+  @sysvarMember::ConceptCar::Vehicle::Position.Altitude  = 320;
+  @sysvarMember::ConceptCar::Vehicle::Position.Longitude = kVCC_LongitudeWest;
+  @sysvarMember::ConceptCar::Vehicle::Position.Latitude  = kVCC_LatitudeNorth;
+  @sysvarMember::ConceptCar::Vehicle::Position.RelativeX = 2026.0; // start at Vector Informatik building
+  @sysvarMember::ConceptCar::Vehicle::Position.RelativeY = 2702.0;
+  sysEndVariableStructUpdate(sysvar::ConceptCar::Vehicle::Position);
+}
+
+on stopMeasurement
+{
+  //
+  // Write total distance to ini file
+  //
+
+  writeProFileFloat( "%NODE_NAME%", "TotalDistance", @sysvar::ConceptCar::Vehicle::TotalDistance, kIniFile );
+}
+
+on sysvar sysvar::ConceptCar::Control::StartStop
+{
+  if (@this == 1)
+  {
+    if (@sysvar::_ILControl::Ignition) 
+    {
+      if (@sysvar::ConceptCar::Vehicle::Speed < 1)
+      {
+        @sysvar::_ILControl::Ignition = 0;
+        VCC_Ignition( 0 );
+      }
+    }
+    else
+    {
+      @sysvar::_ILControl::Ignition = 1;
+      VCC_Ignition( 1 );
+    }
+  }
+  
+  @this = 0;
+}
+
+on sysvar sysvar::ConceptCar::Environment::SelectMap
+{
+  char             symbols[16]       = "~3567810PpHhRr";
+  char             waypointSymbol[3] = "Xx";
+  struct VCC_Point waypoints[kVCC_MaxPointCount];
+  dword            waypointsCount;
+  struct VCC_Point objects[kVCC_MaxPointCount];
+  dword            objectsCount;
+  
+  switch(@this)
+  {
+    default:
+    case 1:
+      waypointsCount = VCC_ScanGridAndSortByDistance( VCC_TrackGrid1, waypointSymbol, waypoints );
+      objectsCount   = VCC_ScanGrid( VCC_TrackGrid1, symbols, objects );
+      break;
+    case 2:
+      waypointsCount = VCC_ScanGridAndSortByDistance( VCC_TrackGrid2, waypointSymbol, waypoints );
+      objectsCount   = VCC_ScanGrid( VCC_TrackGrid2, symbols, objects );
+      break;
+  }
+
+  VCC_Points2Waypoints( waypoints, waypointsCount );
+  VCC_Points2Environment( objects, objectsCount );
+}
+
+void OnVCC_UpdateSignals( dword ignition )
+{
+  double x;
+  double y;
+  long   tm[9];
+  
+  // update signals
+  if (ignition)
+  {
+    $VehicleSpeed     = @sysvar::ConceptCar::Vehicle::Speed;
+    $VehicleDirection = 1;
+    
+    $EMotorSpeed       = @sysvar::ConceptCar::EMotor::Speed;
+    $EMotorCurrent     = @sysvar::ConceptCar::EMotor::Current;
+    $EMotorTemperature = @sysvar::ConceptCar::EMotor::Temperature;
+    $EMotorPower       = @sysvar::ConceptCar::EMotor::Power;
+    
+    $VehicleTripDistance  = @sysvar::ConceptCar::Vehicle::TripDistance;
+    $VehicleTotalDistance = @sysvar::ConceptCar::Vehicle::TotalDistance;
+    
+    $ExteriorTemperature = @sysvar::ConceptCar::Environment::ExteriorTemperature;
+    
+    $BatteryTemperature = @sysvar::ConceptCar::Battery::Temperature;
+    $Capacity           = kBatterCapacityKwh;
+    $RemainingCapacity  = @sysvar::ConceptCar::Battery::RemainingCapacity;
+    
+    getLocalTime( tm );
+    
+    $Hour   = tm[2];
+    $Minute = tm[1];
+    $Second = tm[0];
+  }
+  
+  // update sys-vars
+  x = @sysvarMember::ConceptCar::Vehicle::Position.Longitude + (@sysvarMember::ConceptCar::Vehicle::Position.RelativeX * kVCC_ScaleLongitude);
+  y = @sysvarMember::ConceptCar::Vehicle::Position.Latitude  - (@sysvarMember::ConceptCar::Vehicle::Position.RelativeY * kVCC_ScaleLatitude);
+  
+  sysBeginVariableStructUpdate( sysvar::GPS::GPS1 );
+  @sysvarMember::GPS::GPS1.Direction = @sysvarMember::ConceptCar::Vehicle::Position.Heading;
+  @sysvarMember::GPS::GPS1.Longitude = x;
+  @sysvarMember::GPS::GPS1.Latitude  = y;
+  @sysvarMember::GPS::GPS1.Speed     = @sysvar::ConceptCar::Vehicle::Speed / 3.6;
+  sysEndVariableStructUpdate( sysvar::GPS::GPS1 );
+}

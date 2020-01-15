@@ -1,0 +1,114 @@
+/*@!Encoding:1252*/
+includes
+{
+}
+
+variables
+{
+  //
+  // Global variables
+  //
+  
+  ethernetPacket gStressTxPacket;
+}
+
+on start
+{
+  enableControl( "EthStress", "StartButton", 1 );
+  enableControl( "EthStress", "StopButton", 0 );
+}
+
+/// <EthStress_Control>
+on sysvar sysvar::EthStress::Start
+{
+  if (@this > 0)
+  {
+    StressStart();
+  }
+}
+
+/// <EthStress_Control>
+on sysvar sysvar::EthStress::Stop
+{
+  if (@this > 0)
+  {
+    StressStop();
+  }
+}
+
+/// <EthStress_Control>
+void StressStart()
+{
+  dword numberOfFrames;
+  long  result;
+  byte  data[1600];
+  long  dataLength, i;
+  char  sourceMacAddr[20];
+  char  destinationMacAddr[20];
+  
+  sysGetVariableData( sysvar::EthStress::EthData, data, dataLength );
+  sysGetVariableString( sysvar::EthStress::EthSourceMacAddress, sourceMacAddr, elcount(sourceMacAddr) );
+  sysGetVariableString( sysvar::EthStress::EthDestinationMacAddress, destinationMacAddr, elcount(destinationMacAddr) );
+  
+  // set Ethernet packet data
+  gStressTxPacket.msgChannel  = 1;
+  gStressTxPacket.source      = EthGetMacAddressAsNumber( sourceMacAddr );
+  gStressTxPacket.destination = EthGetMacAddressAsNumber( destinationMacAddr );
+  gStressTxPacket.Length      = dataLength;
+  gStressTxPacket.type        = @sysvar::EthStress::EthType;
+  
+  for( i = 0; i < dataLength; i++ )
+  {
+    gStressTxPacket.Byte(i) = data[i];
+  }
+  
+  Eth1.status;
+  
+  // set number of frames to send
+  if (@sysvar::EthStress::EnableNumberOfFrames > 0)
+  {
+    numberOfFrames = @sysvar::EthStress::NumberOfFrames;
+  }
+  else
+  {
+    numberOfFrames = 0xFFFFFFFF;
+  }
+  
+  // start sending with packet generator...
+  if (@sysvar::EthStress::EnableCounter == 0)
+  {
+    // ... without counter
+    result = EthStartPacketGenerator( gStressTxPacket
+                                    , @sysvar::EthStress::TransmissionRate
+                                    , numberOfFrames );
+  }
+  else if (@sysvar::EthStress::EnableCounter > 0)
+  {
+    // ... wit counter
+    result = EthStartPacketGenerator( gStressTxPacket
+                                    , @sysvar::EthStress::TransmissionRate
+                                    , numberOfFrames
+                                    , @sysvar::EthStress::CounterByteOffset );
+  }
+  
+  if (result == 0)
+  {
+    enableControl( "EthStress", "StartButton", 0 );
+    enableControl( "EthStress", "StopButton", 1 );
+  }
+  else
+  {
+    enableControl( "EthStress", "StartButton", 1 );
+    enableControl( "EthStress", "StopButton", 0 );
+  }
+}
+
+/// <EthStress_Control>
+void StressStop()
+{
+  EthStopPacketGenerator( gStressTxPacket );
+
+  enableControl( "EthStress", "StartButton", 1 );
+  enableControl( "EthStress", "StopButton", 0 );
+}
+

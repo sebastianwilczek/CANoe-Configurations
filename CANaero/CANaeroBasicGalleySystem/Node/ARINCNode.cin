@@ -1,0 +1,690 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "ARINCLib.cin"
+}
+
+/*
+ * ARINCNode - ARINC812 protocol implement  	   Version 1.0
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Pr) Created 
+ */
+variables
+{
+  // Globals
+
+  char gNode_FuncRO[32];
+  char gNode_FuncPC_CENTR[32];
+  char gNode_FuncPC_DECENTR[32];
+  char gNode_FuncDIAG[32];
+
+  byte gNode_FuncFlags;
+  byte gNode_LevelId;
+  byte gNode_DeviceId;
+  byte gNode_CodeExt;
+
+  int  gNode_CounterDeltaInc;
+  int  gNode_CounterDeltaDec;
+  int  gNode_CounterThreshold;
+
+  int  gNode_SequenceTimeoutMs;
+
+  const int kNode_NM_AvailabilityOffline = 0;
+  const int kNode_NM_AvailabilityOnline  = 1;
+
+  long    gNode_NM_STA_CycleTimeMs;
+  long    gNode_NM_STA_TimeoutTimeMs;
+
+  MsTimer gNode_NM_STA_Timer;
+  MsTimer gNode_NM_STA_TimeoutTimer;
+
+  message STA_GAIN gNode_NM_STA_GAIN_Buffer[kMaxGAINs];
+  word             gNode_NM_STA_GAIN_LevelDeviceIds[kMaxGAINs];
+  int              gNode_NM_STA_GAIN_BufferSize = 0;
+  long             gNode_NM_STA_GAIN_Counter[kMaxGAINs];
+  int              gNode_NM_STA_GAIN_Availability[kMaxGAINs];
+
+  message STA_MGCU gNode_NM_STA_MGCU_Buffer[kMaxMGCUs];
+  word             gNode_NM_STA_MGCU_LevelDeviceIds[kMaxMGCUs];
+  int              gNode_NM_STA_MGCU_BufferSize = 0;
+  long             gNode_NM_STA_MGCU_Counter[kMaxMGCUs];
+  int              gNode_NM_STA_MGCU_Availability[kMaxMGCUs];
+
+  MsTimer          gNode_NM_STA_MGCU_Timeout0;
+  MsTimer          gNode_NM_STA_MGCU_Timeout1;
+  MsTimer          gNode_NM_STA_MGCU_Timeout2;
+  MsTimer          gNode_NM_STA_MGCU_Timeout3;
+
+  MsTimer          gNode_NM_STA_GAIN_Timeout00;
+  MsTimer          gNode_NM_STA_GAIN_Timeout01;
+  MsTimer          gNode_NM_STA_GAIN_Timeout02;
+  MsTimer          gNode_NM_STA_GAIN_Timeout03;
+  MsTimer          gNode_NM_STA_GAIN_Timeout04;
+  MsTimer          gNode_NM_STA_GAIN_Timeout05;
+  MsTimer          gNode_NM_STA_GAIN_Timeout06;
+  MsTimer          gNode_NM_STA_GAIN_Timeout07;
+  MsTimer          gNode_NM_STA_GAIN_Timeout08;
+  MsTimer          gNode_NM_STA_GAIN_Timeout09;
+  MsTimer          gNode_NM_STA_GAIN_Timeout10;
+  MsTimer          gNode_NM_STA_GAIN_Timeout11;
+  MsTimer          gNode_NM_STA_GAIN_Timeout12;
+  MsTimer          gNode_NM_STA_GAIN_Timeout13;
+  MsTimer          gNode_NM_STA_GAIN_Timeout14;
+  MsTimer          gNode_NM_STA_GAIN_Timeout15;
+  MsTimer          gNode_NM_STA_GAIN_Timeout16;
+  MsTimer          gNode_NM_STA_GAIN_Timeout17;
+  MsTimer          gNode_NM_STA_GAIN_Timeout18;
+  MsTimer          gNode_NM_STA_GAIN_Timeout19;
+  MsTimer          gNode_NM_STA_GAIN_Timeout20;
+  MsTimer          gNode_NM_STA_GAIN_Timeout21;
+  MsTimer          gNode_NM_STA_GAIN_Timeout22;
+  MsTimer          gNode_NM_STA_GAIN_Timeout23;
+  MsTimer          gNode_NM_STA_GAIN_Timeout24;
+  MsTimer          gNode_NM_STA_GAIN_Timeout25;
+  MsTimer          gNode_NM_STA_GAIN_Timeout26;
+  MsTimer          gNode_NM_STA_GAIN_Timeout27;
+  MsTimer          gNode_NM_STA_GAIN_Timeout28;
+  MsTimer          gNode_NM_STA_GAIN_Timeout29;
+  MsTimer          gNode_NM_STA_GAIN_Timeout30;
+
+  BYTE  gNode_DTA[kDTAMaxBlocks][kDTAMaxParams][kDTAMaxSubParams];
+}
+
+long Node_NM_PutMessageToBuffer(byte levelId, byte deviceId, message STA_GAIN msg)
+{
+  long i;
+  for (i = 0; i < gNode_NM_STA_GAIN_BufferSize; i++) {
+    if (gNode_NM_STA_GAIN_LevelDeviceIds[i] == ((levelId << 8) | deviceId)) {
+      gNode_NM_STA_GAIN_Buffer[i] = msg;
+      return i;
+    }
+  }
+  gNode_NM_STA_GAIN_Buffer[i] = msg;
+  gNode_NM_STA_GAIN_LevelDeviceIds[i] = (levelId << 8) | deviceId;
+  gNode_NM_STA_GAIN_BufferSize++;
+  return i;
+}
+
+long Node_NM_PutMessageToBuffer(byte levelId, byte deviceId, message STA_MGCU msg)
+{
+  long i;
+  for (i = 0; i < gNode_NM_STA_MGCU_BufferSize; i++) {
+    if (gNode_NM_STA_MGCU_LevelDeviceIds[i] == ((levelId << 8) | deviceId)) {
+      gNode_NM_STA_MGCU_Buffer[i] = msg;
+      return i;
+    }
+  }
+  gNode_NM_STA_MGCU_Buffer[i] = msg;
+  gNode_NM_STA_MGCU_LevelDeviceIds[i] = (levelId << 8) | deviceId;
+  gNode_NM_STA_MGCU_BufferSize++;
+  return i;
+}
+
+void Node_NM_Handle_STA_GAIN(BYTE prio, BYTE levelId, BYTE deviceId, BYTE codeExt, BYTE sysId, message * msg)
+{
+  long index;
+
+  //if (levelId == gNode_LevelId) {
+    index = Node_NM_PutMessageToBuffer(levelId, deviceId, (message STA_GAIN)msg);
+
+    switch (index) {
+      case 0:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout00);
+        SetTimer(gNode_NM_STA_GAIN_Timeout00, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 1:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout01);
+        SetTimer(gNode_NM_STA_GAIN_Timeout01, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 2:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout02);
+        SetTimer(gNode_NM_STA_GAIN_Timeout02, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 3:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout03);
+        SetTimer(gNode_NM_STA_GAIN_Timeout03, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 4:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout04);
+        SetTimer(gNode_NM_STA_GAIN_Timeout04, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 5:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout05);
+        SetTimer(gNode_NM_STA_GAIN_Timeout05, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 6:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout06);
+        SetTimer(gNode_NM_STA_GAIN_Timeout06, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 7:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout07);
+        SetTimer(gNode_NM_STA_GAIN_Timeout07, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 8:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout08);
+        SetTimer(gNode_NM_STA_GAIN_Timeout08, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 9:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout09);
+        SetTimer(gNode_NM_STA_GAIN_Timeout09, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 10:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout10);
+        SetTimer(gNode_NM_STA_GAIN_Timeout10, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 11:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout11);
+        SetTimer(gNode_NM_STA_GAIN_Timeout11, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 12:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout12);
+        SetTimer(gNode_NM_STA_GAIN_Timeout12, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 13:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout13);
+        SetTimer(gNode_NM_STA_GAIN_Timeout13, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 14:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout14);
+        SetTimer(gNode_NM_STA_GAIN_Timeout14, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 15:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout15);
+        SetTimer(gNode_NM_STA_GAIN_Timeout15, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 16:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout16);
+        SetTimer(gNode_NM_STA_GAIN_Timeout16, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 17:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout17);
+        SetTimer(gNode_NM_STA_GAIN_Timeout17, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 18:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout18);
+        SetTimer(gNode_NM_STA_GAIN_Timeout18, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 19:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout19);
+        SetTimer(gNode_NM_STA_GAIN_Timeout19, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 20:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout20);
+        SetTimer(gNode_NM_STA_GAIN_Timeout20, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 21:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout21);
+        SetTimer(gNode_NM_STA_GAIN_Timeout21, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 22:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout22);
+        SetTimer(gNode_NM_STA_GAIN_Timeout22, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 23:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout23);
+        SetTimer(gNode_NM_STA_GAIN_Timeout23, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 24:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout24);
+        SetTimer(gNode_NM_STA_GAIN_Timeout24, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 25:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout25);
+        SetTimer(gNode_NM_STA_GAIN_Timeout25, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 26:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout26);
+        SetTimer(gNode_NM_STA_GAIN_Timeout26, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 27:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout27);
+        SetTimer(gNode_NM_STA_GAIN_Timeout27, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 28:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout28);
+        SetTimer(gNode_NM_STA_GAIN_Timeout28, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 29:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout29);
+        SetTimer(gNode_NM_STA_GAIN_Timeout29, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 30:
+        CancelTimer(gNode_NM_STA_GAIN_Timeout30);
+        SetTimer(gNode_NM_STA_GAIN_Timeout30, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      default:
+        return;
+    }
+
+    if (gNode_NM_STA_GAIN_Counter[index] >= 0) {
+      gNode_NM_STA_GAIN_Counter[index] -= gNode_CounterDeltaDec;
+      if (gNode_NM_STA_GAIN_Counter[index] <= gNode_CounterThreshold) {
+        if (gNode_NM_STA_GAIN_Availability[index] != kNode_NM_AvailabilityOnline) {
+          gNode_NM_STA_GAIN_Availability[index] = kNode_NM_AvailabilityOnline;
+          OnNode_NMAvailabilityChanged(gNode_NM_STA_GAIN_LevelDeviceIds[index] >> 8, gNode_NM_STA_GAIN_LevelDeviceIds[index] & 0xFF, kNode_NM_AvailabilityOnline); 
+        }
+      }
+    }
+}
+
+void Node_NM_Handle_STA_MGCU(BYTE prio, BYTE levelId, BYTE deviceId, BYTE codeExt, BYTE sysId, message * msg)
+{
+  long index;
+  //if (dir == RX && levelId == gNode_LevelId) {
+    index = Node_NM_PutMessageToBuffer(levelId, deviceId, (message STA_MGCU)msg);
+    
+    switch (index) {
+      case -1:
+        return;
+      case 0:
+        CancelTimer(gNode_NM_STA_MGCU_Timeout0);
+        SetTimer(gNode_NM_STA_MGCU_Timeout0, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 1:
+        CancelTimer(gNode_NM_STA_MGCU_Timeout1);
+        SetTimer(gNode_NM_STA_MGCU_Timeout1, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 2:
+        CancelTimer(gNode_NM_STA_MGCU_Timeout2);
+        SetTimer(gNode_NM_STA_MGCU_Timeout2, gNode_NM_STA_TimeoutTimeMs);
+        break;
+      case 3:
+        CancelTimer(gNode_NM_STA_MGCU_Timeout3);
+        SetTimer(gNode_NM_STA_MGCU_Timeout3, gNode_NM_STA_TimeoutTimeMs);
+        break;
+    }
+
+    if (gNode_NM_STA_MGCU_Counter[index] >= 0) {
+      gNode_NM_STA_MGCU_Counter[index] -= gNode_CounterDeltaDec;
+      if (gNode_NM_STA_MGCU_Counter[index] <= gNode_CounterThreshold) {
+        if (gNode_NM_STA_MGCU_Availability[index] != kNode_NM_AvailabilityOnline) {
+          gNode_NM_STA_MGCU_Availability[index] = kNode_NM_AvailabilityOnline;
+          OnNode_NMAvailabilityChanged(gNode_NM_STA_MGCU_LevelDeviceIds[index] >> 8, gNode_NM_STA_MGCU_LevelDeviceIds[index] & 0xFF, kNode_NM_AvailabilityOnline); 
+        }
+      }
+    }
+  //}
+}
+
+on timer gNode_NM_STA_MGCU_Timeout0
+{
+  Node_NM_STA_MGCU_Timeout(0);
+  if (gNode_NM_STA_MGCU_Availability[0] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_MGCU_Timeout0, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_MGCU_Timeout1
+{
+  Node_NM_STA_MGCU_Timeout(1);
+  if (gNode_NM_STA_MGCU_Availability[1] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_MGCU_Timeout1, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_MGCU_Timeout2
+{
+  Node_NM_STA_MGCU_Timeout(2);
+  if (gNode_NM_STA_MGCU_Availability[1] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_MGCU_Timeout2, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_MGCU_Timeout3
+{
+  Node_NM_STA_MGCU_Timeout(3);
+  if (gNode_NM_STA_MGCU_Availability[3] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_MGCU_Timeout3, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout00
+{
+  Node_NM_STA_GAIN_Timeout(0);
+  if (gNode_NM_STA_GAIN_Availability[0] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout00, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout01
+{
+  Node_NM_STA_GAIN_Timeout(1);
+  if (gNode_NM_STA_GAIN_Availability[1] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout01, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout02
+{
+  Node_NM_STA_GAIN_Timeout(2);
+  if (gNode_NM_STA_GAIN_Availability[2] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout02, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout03
+{
+  Node_NM_STA_GAIN_Timeout(3);
+  if (gNode_NM_STA_GAIN_Availability[3] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout03, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout04
+{
+  Node_NM_STA_GAIN_Timeout(4);
+  if (gNode_NM_STA_GAIN_Availability[4] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout04, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout05
+{
+  Node_NM_STA_GAIN_Timeout(5);
+  if (gNode_NM_STA_GAIN_Availability[5] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout05, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout06
+{
+  Node_NM_STA_GAIN_Timeout(6);
+  if (gNode_NM_STA_GAIN_Availability[6] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout06, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout07
+{
+  Node_NM_STA_GAIN_Timeout(7);
+  if (gNode_NM_STA_GAIN_Availability[7] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout07, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout08
+{
+  Node_NM_STA_GAIN_Timeout(8);
+  if (gNode_NM_STA_GAIN_Availability[8] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout08, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout09
+{
+  Node_NM_STA_GAIN_Timeout(9);
+  if (gNode_NM_STA_GAIN_Availability[9] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout09, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout10
+{
+  Node_NM_STA_GAIN_Timeout(10);
+  if (gNode_NM_STA_GAIN_Availability[10] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout10, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout11
+{
+  Node_NM_STA_GAIN_Timeout(11);
+  if (gNode_NM_STA_GAIN_Availability[11] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout11, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout12
+{
+  Node_NM_STA_GAIN_Timeout(12);
+  if (gNode_NM_STA_GAIN_Availability[12] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout12, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout13
+{
+  Node_NM_STA_GAIN_Timeout(13);
+  if (gNode_NM_STA_GAIN_Availability[13] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout13, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout14
+{
+  Node_NM_STA_GAIN_Timeout(14);
+  if (gNode_NM_STA_GAIN_Availability[14] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout14, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout15
+{
+  Node_NM_STA_GAIN_Timeout(15);
+  if (gNode_NM_STA_GAIN_Availability[15] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout15, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout16
+{
+  Node_NM_STA_GAIN_Timeout(16);
+  if (gNode_NM_STA_GAIN_Availability[16] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout16, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout17
+{
+  Node_NM_STA_GAIN_Timeout(17);
+  if (gNode_NM_STA_GAIN_Availability[17] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout17, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout18
+{
+  Node_NM_STA_GAIN_Timeout(18);
+  if (gNode_NM_STA_GAIN_Availability[18] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout18, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout19
+{
+  Node_NM_STA_GAIN_Timeout(19);
+  if (gNode_NM_STA_GAIN_Availability[19] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout19, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout20
+{
+  Node_NM_STA_GAIN_Timeout(20);
+  if (gNode_NM_STA_GAIN_Availability[20] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout20, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout21
+{
+  Node_NM_STA_GAIN_Timeout(21);
+  if (gNode_NM_STA_GAIN_Availability[21] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout21, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout22
+{
+  Node_NM_STA_GAIN_Timeout(22);
+  if (gNode_NM_STA_GAIN_Availability[22] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout22, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout23
+{
+  Node_NM_STA_GAIN_Timeout(23);
+  if (gNode_NM_STA_GAIN_Availability[23] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout23, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout24
+{
+  Node_NM_STA_GAIN_Timeout(24);
+  if (gNode_NM_STA_GAIN_Availability[24] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout24, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout25
+{
+  Node_NM_STA_GAIN_Timeout(25);
+  if (gNode_NM_STA_GAIN_Availability[25] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout25, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout26
+{
+  Node_NM_STA_GAIN_Timeout(26);
+  if (gNode_NM_STA_GAIN_Availability[26] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout26, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout27
+{
+  Node_NM_STA_GAIN_Timeout(27);
+  if (gNode_NM_STA_GAIN_Availability[27] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout27, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout28
+{
+  Node_NM_STA_GAIN_Timeout(28);
+  if (gNode_NM_STA_GAIN_Availability[28] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout28, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout29
+{
+  Node_NM_STA_GAIN_Timeout(29);
+  if (gNode_NM_STA_GAIN_Availability[29] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout29, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+on timer gNode_NM_STA_GAIN_Timeout30
+{
+  Node_NM_STA_GAIN_Timeout(30);
+  if (gNode_NM_STA_GAIN_Availability[30] == kNode_NM_AvailabilityOnline) {
+    SetTimer(gNode_NM_STA_GAIN_Timeout30, gNode_NM_STA_TimeoutTimeMs);
+  }
+}
+
+void Node_SendMessageTx(BYTE prio, BYTE msgCode, BYTE codeExt, BYTE dlc, BYTE data[])
+{
+  ARINC812_SendMessage(prio, msgCode, gNode_LevelId, gNode_DeviceId, codeExt, dlc, data);
+}
+
+void Node_SendMessageRx(BYTE prio, BYTE msgCode, BYTE levelId, BYTE deviceId, BYTE codeExt, BYTE dlc, BYTE data[])
+{
+  ARINC812_SendMessage(prio, msgCode, levelId, deviceId, codeExt, dlc, data);
+}
+
+void Node_NM_STA_GAIN_Timeout (BYTE index)
+{
+  if (gNode_NM_STA_GAIN_Counter[index] < gNode_CounterThreshold) {
+    gNode_NM_STA_GAIN_Counter[index] += gNode_CounterDeltaInc;
+  
+    if (gNode_NM_STA_GAIN_Counter[index] >= gNode_CounterThreshold) {
+      if (gNode_NM_STA_GAIN_Availability[index] != kNode_NM_AvailabilityOffline) {
+        gNode_NM_STA_GAIN_Availability[index] = kNode_NM_AvailabilityOffline;
+        OnNode_NMAvailabilityChanged(gNode_NM_STA_GAIN_LevelDeviceIds[index] >> 8, 0xFF & gNode_NM_STA_GAIN_LevelDeviceIds[index], kNode_NM_AvailabilityOffline); 
+      }
+    }
+  }
+}
+
+void Node_NM_STA_MGCU_Timeout (BYTE index)
+{
+  if (gNode_NM_STA_MGCU_Counter[index] < gNode_CounterThreshold) {
+    gNode_NM_STA_MGCU_Counter[index] += gNode_CounterDeltaInc;
+  
+    if (gNode_NM_STA_MGCU_Counter[index] >= gNode_CounterThreshold) {
+      if (gNode_NM_STA_MGCU_Availability[index] != kNode_NM_AvailabilityOffline) {
+        gNode_NM_STA_MGCU_Availability[index] = kNode_NM_AvailabilityOffline;
+        OnNode_NMAvailabilityChanged(gNode_NM_STA_MGCU_LevelDeviceIds[index] >> 8, 0xFF & gNode_NM_STA_MGCU_LevelDeviceIds[index], kNode_NM_AvailabilityOffline); 
+      }
+    }
+  }
+}
+
+on message *
+{
+  OnCAN_Message(this);
+}
+
+void OnCAN_Message (message * msg)
+{
+  BYTE prio, msgCode, levelId, deviceId, codeExt, sysId;
+
+  prio      = ARINC812_GetPrioFromId(msg.ID);
+  msgCode   = ARINC812_GetMsgCodeFromId(msg.ID);
+  levelId   = ARINC812_GetLevelIdFromId(msg.ID);
+  deviceId  = ARINC812_GetDeviceIdFromId(msg.ID);
+  codeExt   = ARINC812_GetCodeExtFromId(msg.ID);
+  sysId     = ARINC812_GetSysIdFromId(msg.ID);
+
+  OnNode_Message(msg.DIR, prio, msgCode, levelId, deviceId, codeExt, sysId, msg);
+}
+
+on preStart
+{
+  gNode_FuncFlags = 
+    ((strncmp(gNode_FuncPC_DECENTR, "yes", 3) == 0) << kFuncFlagPC_DECENTR) | 
+    ((strncmp(gNode_FuncPC_CENTR,   "yes", 3) == 0) << kFuncFlagPC_CENTR)   |
+    ((strncmp(gNode_FuncRO,         "yes", 3) == 0) << kFuncFlagRO)         |
+    ((strncmp(gNode_FuncDIAG,       "yes", 3) == 0) << kFuncFlagDIAG);
+}
+
+on timer gNode_NM_STA_Timer
+{
+  int i;
+  byte data[8];
+  message 0 msgSTA;
+
+  OnNode_GetSTA(msgSTA);
+
+  for (i = 0; i < msgSTA.dlc; i++) {
+    data[i] = msgSTA.byte(i);
+  }
+
+  Node_SendMessageTx(ARINC812_GetPrioFromId(msgSTA.ID), ARINC812_GetMsgCodeFromId(msgSTA.ID), ARINC812_GetCodeExtFromId(msgSTA.ID), (BYTE)msgSTA.dlc, data);
+  
+  SetTimer(gNode_NM_STA_Timer, gNode_NM_STA_CycleTimeMs);
+}
+
+on timer gNode_NM_STA_TimeoutTimer
+{
+}
+
+void Node_NM_STA_End()
+{ 
+  CancelTimer(gNode_NM_STA_Timer);
+  CancelTimer(gNode_NM_STA_TimeoutTimer);
+}
+
+void Node_NM_STA_Begin (long cycleTimeMs)
+{
+  gNode_NM_STA_CycleTimeMs = cycleTimeMs;
+  SetTimer(gNode_NM_STA_Timer, 0);
+}
+

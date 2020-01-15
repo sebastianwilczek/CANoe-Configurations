@@ -1,0 +1,124 @@
+/*@!Encoding:1252*/
+
+variables
+{  
+  // Parameters used by both SendFunctions - files
+  
+  byte SessionId[8];    // Session ID for first session, used throughout all CAPL functions
+  
+  // SLAC message parameters
+  byte MyRunId[8] =  { 0x1F, 0xF1, 0x2E, 0xE2, 0x3D, 0xD3, 0xC4, 0x4C };
+  byte NMK[16] =  { 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22 };
+  byte NID[7]  =  { 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70 };
+  byte SLACtestId[17] = { 0xFF, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22 };
+  byte SLACtestNonce[4] = { 0xF0, 0xE1, 0xD2, 0xC3 };
+  byte SLACtestPID[2] = { 0xFF, 0x22 };
+  byte SLACtestOUI[3] = { 0x11, 0x22, 0x33 };
+  
+  byte randomHeader[8];  
+}
+
+void SendMessage()
+{
+  if (0 != @sysvar::Test::SysTestDisturbHeader)
+  {
+    SCC_GenerateRandomData(randomHeader, 8);
+    SCC_SetPreparedMsgHeaderData(randomHeader);
+  }
+ 
+  SCC_SendPreparedMessage();
+}
+
+void SendSignedMessage()
+{
+  if (0 != @sysvar::Test::SysTestDisturbHeader)
+  {
+    SCC_GenerateRandomData(randomHeader, 8);
+    SCC_SetPreparedMsgHeaderData(randomHeader);
+  }
+  
+  SCC_SendPreparedMessage(GetTestConfigNumber());
+}
+
+// Messages sent by both participants simultaneously
+
+on sysVar SLAC_Test::SysSendCM_Set_Key_Req
+{
+  if (@this > 0)
+  {
+    SCC_CreateCM_Set_Key_Req( EVSEMacAddress, EVSETargetMacAddress, NID, NMK);
+       
+    if (@this == 2)
+    {
+      SCC_SLAC_SetAdditionalParameter(0, 0x04); 
+      SCC_SLAC_SetAdditionalParameter(1, SLACtestNonce);
+      SCC_SLAC_SetAdditionalParameter(2, SLACtestNonce);
+      SCC_SLAC_SetAdditionalParameter(3, 0x1F); 
+      SCC_SLAC_SetAdditionalParameter(4, SLACtestPID);
+      SCC_SLAC_SetAdditionalParameter(5, 0xF1);
+      SCC_SLAC_SetAdditionalParameter(6, 0x02); 
+      SCC_SLAC_SetAdditionalParameter(7, 0x01);
+    }
+   
+    SendMessage();
+  }  
+}
+
+on sysVar SLAC_Test::SysSendCM_Set_Key_Cnf
+{
+  if (@this > 0)
+  {
+    SCC_CreateCM_Set_Key_Cnf( EVSEMacAddress, EVSETargetMacAddress, 1);
+    
+    if (@this == 2)
+    {
+      SCC_SLAC_SetAdditionalParameter(0, SLACtestNonce);
+      SCC_SLAC_SetAdditionalParameter(1, SLACtestNonce);
+      SCC_SLAC_SetAdditionalParameter(2, 0x1F); 
+      SCC_SLAC_SetAdditionalParameter(3, SLACtestPID);
+      SCC_SLAC_SetAdditionalParameter(4, 0xF1);
+      SCC_SLAC_SetAdditionalParameter(5, 0x02); 
+    }
+   
+    SendMessage();
+  }  
+}
+
+on sysVar SLAC_Test::SysSendVS_PL_Link_Status_Req
+{
+  if (@this > 0)
+  {
+    SCC_CreateVS_PL_Lnk_Status_Req( EVSEMacAddress, EVSETargetMacAddress);    
+    
+    if (@this == 2)
+      SCC_SLAC_SetAdditionalParameter(0, SLACtestOUI);
+    
+    SendMessage();
+  }  
+}
+
+on sysVar SLAC_Test::SysSendVS_PL_Link_Status_Cnf
+{
+  if (@this > 0)
+  {
+    SCC_CreateVS_PL_Lnk_Status_Cnf( EVSEMacAddress, EVSEMacAddress, 0, 1);
+        
+    if (@this == 2)
+      SCC_SLAC_SetAdditionalParameter(0, SLACtestOUI); 
+   
+    SendMessage();
+  }  
+}
+
+on sysVar SLAC_Test::SysSendVS_Nw_Info_Req
+{
+  if (@this > 0)
+  {
+    SCC_CreateVS_Nw_Info_Req( EVSEMacAddress, EVSETargetMacAddress);  
+    
+    if (@this == 2)
+      SCC_SLAC_SetAdditionalParameter(0, SLACtestOUI);
+    
+    SendMessage();
+  }  
+}

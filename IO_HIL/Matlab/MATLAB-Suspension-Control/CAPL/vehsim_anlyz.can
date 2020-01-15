@@ -1,0 +1,120 @@
+/*@!Encoding:1252*/
+includes
+{
+#if X64
+  #pragma library ("..\Exec64\sendPosData.dll")
+#else
+  #pragma library ("..\Exec32\sendPosData.dll")
+#endif
+}
+
+variables
+{
+  dword gDllHandle = 0;
+
+  msTimer udpTimer;
+  // time between UDP packets [ms]
+  dword udpTimeBetweenPackets = 20;
+
+  struct
+  {
+    double dUdpData[16];
+  } udpDataStruct;
+}
+
+on sysvar sysvar::Visualization::StartVisualization
+{
+  if (@this == 1)
+  {
+    showVectorCarVis(1);
+  }
+}
+
+on sysvar sysvar::Visualization::StopVisualization
+{
+  if (@this == 1)
+  {
+    showVectorCarVis(0);
+  }
+}
+
+on frPDU *
+{
+  output(this);
+}
+
+on message *
+{
+  output(this);
+}
+
+void showVectorCarVis (int show)
+{
+  char configDir[2048];
+  char visPath[2048];
+  
+  if (show == 1)
+  {
+    getAbsFilePath("", configDir, elcount(configDir));
+    strncat(configDir, "3D-Visualization", elcount(configDir));
+    write("starting visualization in dir '%s' ...", configDir);
+
+    strncpy(visPath, configDir, elcount(visPath));
+    strncat(visPath, "\\VectorCarVis.exe", elcount(visPath));
+
+    sysExec(visPath, "", configDir);
+  }
+  else
+  {
+    write("stopping visualization ...");
+    sysExec("taskkill", "/IM VectorCarVis.exe /F");
+  }
+}
+
+on stopMeasurement
+{
+  cancelTimer( udpTimer );
+
+  //showVectorCarVis(0);
+
+  /* This function will release the CAPL function 
+     handle in the CAPLDLL */
+  dllEnd(gDllHandle);
+}
+
+on preStart
+{
+  gDllHandle = registerCAPLDLL();
+
+  //showVectorCarVis(1);
+}
+
+on start
+{
+  /* This function will initialize all callback 
+     functions in the CAPLDLL. The handle includes 
+     the registered ID number of the CAPL node. */
+  dllInit(gDllHandle);
+
+  // Start timer
+  setTimer( udpTimer, udpTimeBetweenPackets );
+}
+
+on timer udpTimer
+{
+  SysGetVariableFloatArray("ModelStates", "VehicleStates", udpDataStruct.dUdpData, 16);
+    
+  // Send data through socket by using the CAPLDLL
+
+  dllSetPosData1(gDllHandle, udpDataStruct.dUdpData[0], udpDataStruct.dUdpData[1], udpDataStruct.dUdpData[2], udpDataStruct.dUdpData[3], udpDataStruct.dUdpData[4], udpDataStruct.dUdpData[5], udpDataStruct.dUdpData[6], udpDataStruct.dUdpData[7]);
+  dllSetPosData2(gDllHandle, udpDataStruct.dUdpData[8], udpDataStruct.dUdpData[9], udpDataStruct.dUdpData[10], udpDataStruct.dUdpData[11], udpDataStruct.dUdpData[12], udpDataStruct.dUdpData[13], udpDataStruct.dUdpData[14], udpDataStruct.dUdpData[15]);
+  dllSendPosData(gDllHandle, 64000);
+
+  setTimer(udpTimer, udpTimeBetweenPackets);
+}
+
+void CALLBACK_InformAboutSocketError (long errorCode)
+{
+  write("SOCKET ERROR %d!", errorCode);
+}
+

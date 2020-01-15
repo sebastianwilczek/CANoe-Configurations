@@ -1,0 +1,370 @@
+/*@!Encoding:1252*/
+variables
+{
+  //
+  // GNSSReceiver
+  //
+  // You can use this CAPL programm to set single GNSS positions
+  //
+  // (c) 2002 Vector Informatik GmbH
+  //
+
+  // Constants
+  char kNodeLabel[32] = "GNSSReceiver";   // label of the node (for output to write window)  
+  int  kStateStopped  = 0; // simulation is started
+  int  kStateStarted  = 1; // simulation is stopped
+
+  // Error constants
+  int kErrorNo       = 0;
+  int kNoWaypointSet = 105;
+  int kSimRunnging   = 107;
+
+  // Global varibals
+  int  gECUState  = 0;                    // 0=Offline, 1=Online,  2=ShutingDown
+  long gNodeAddress= 3;                   // global address of this node
+  char gNodeName[8];                      // global name of this node
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int   gDbgLevel    = kDbgInfo; // Set debug level for output to write window}
+}
+
+on start
+{
+  StartUp();
+}
+
+on envVar evCmdAddNewPoint
+{
+  float lat, lon, alt, speed;
+ 
+  if( getValue( evCmdAddNewPoint ) == 1 ) {
+    lat = getValue( evLatitudeNew );
+    lon = getValue( evLongitudeNew );
+    alt = getValue( evAltitudeNew );
+    if( getValue( evAddSpeed ) == 1 ) {
+      speed = getValue( evSpeedNew );
+      GNSSAddWpS( lat, lon, alt, speed );
+      writeDbgLevel( kDbgInfo, "<%s> Add new point with speed", kNodeLabel);
+    } else {
+      GNSSAddWp( lat, lon, alt );
+      writeDbgLevel( kDbgInfo, "<%s> Add new point", kNodeLabel);
+    }
+  }
+}
+
+on envVar evCmdAddNewPointRef
+{
+  float lenLat, lenLon, lenAlt;
+  dword refType;
+  refType = getValue( evReferenceType );
+  
+  if( getValue( evCmdAddNewPointRef ) == 1 ) {
+    // set reference position
+    SetRefPos();
+    // add new position relative to the reference position
+    lenLat = getValue( evLengthLatitude );
+    lenLon = getValue( evLengthLongitude );
+    lenAlt = getValue( evLengthAltitude );
+    if( refType == 0 ) {  
+      writeDbgLevel( kDbgInfo, "<%s> Add waypoint ref: lenLat = %f, lenLon = %f, lenAlt = %f", kNodeLabel, lenLat, lenLon, lenAlt );	
+      GNSSAddWpRef( lenLat, lenLon, lenAlt );
+    } else {
+      writeDbgLevel( kDbgInfo, "<%s> Add waypoint rel: lenLat = %f, lenLon = %f, lenAlt = %f", kNodeLabel, lenLat, lenLon, lenAlt );
+      GNSSAddWpRel( lenLat, lenLon, lenAlt );
+    }
+  }
+}
+
+on envVar evSpeed
+{
+  GNSSSetSpeed( getValue( evSpeed ) );
+}
+
+on envVar evCmdStartReplay
+{
+  if( getValue( evCmdStartReplay ) == 1 ) {
+    StartSimulation();
+  }
+}
+
+on envVar evCmdStopReplay
+{
+  if( getValue( evCmdStopReplay ) == 1 ) {
+    StopSimulation();
+  }
+}
+
+on envVar evCmdPauseSpeed
+{
+  if( getValue( evCmdPauseSpeed ) == 1 ) {
+    GNSSPauseSpeed();
+  }
+}
+
+//
+// Error indication
+//
+void GNSSAppErrorIndication( long errorClass, long errorNumber, long addCode)
+{
+  char strErrClass[32];
+  char strErrInfo[64];
+
+  switch(errorClass) {
+    case 1: snprintf( strErrClass, elCount(strErrClass), "TimeOut" ); break;
+    case 2: snprintf( strErrClass, elCount(strErrClass), "AddressClaiming" ); break;
+    case 3: snprintf( strErrClass, elCount(strErrClass), "CAN Error" ); break;
+    case 4: snprintf( strErrClass, elCount(strErrClass), "System Error" ); break;
+	case 5: snprintf( strErrClass, elCount(strErrClass), "Transport Protocol Error Error" ); break;
+  }
+
+  switch( errorNumber ) {
+    case 0x1: snprintf( strErrInfo, elCount(strErrInfo), "cts error" ); break;
+    case 0x2: snprintf( strErrInfo, elCount(strErrInfo), "peer to peer data timeout" ); break;
+    case 0x3: snprintf( strErrInfo, elCount(strErrInfo), "BAM data timeout" ); break;
+    case 0x4: snprintf( strErrInfo, elCount(strErrInfo), "acknowledge timeout" ); break;
+	case 0x10: snprintf( strErrInfo, elCount(strErrInfo), "lost address claiming or received address claim with higher priority" ); break;
+    case 0x15: snprintf( strErrInfo, elCount(strErrInfo), "init error: node name detected two times" ); break;
+    case 0x17: snprintf( strErrInfo, elCount(strErrInfo), "init error: node address detected two times" ); break;
+    case 0x30: snprintf( strErrInfo, elCount(strErrInfo), "exeption while choosing protokoll BAM or CMDT" ); break;
+    case 0x40: snprintf( strErrInfo, elCount(strErrInfo), "internal data buffer full" ); break;
+    case 0x60: snprintf( strErrInfo, elCount(strErrInfo), "user sends system pg " ); break;
+    case 0x71: snprintf( strErrInfo, elCount(strErrInfo), "transmission abort by receiver" ); break;
+    case 0x72: snprintf( strErrInfo, elCount(strErrInfo), "transmission abort by sender" ); break;
+  }
+
+  writeDbgLevel( kDbgInfo, "<%s> ERROR(0x%x) %s, %s", kNodeLabel, errorNumber, strErrClass, strErrInfo );
+}
+
+on envVar evJitterAtl
+{
+  GNSSSetJitterAlt( getValue( evJitterAtl ) );
+}
+
+on envVar evJitterLonLat
+{
+  GNSSSetJitterLatLon( getValue( evJitterLonLat ) );
+}
+
+on envVar evCmdSetPGSettings
+{
+  if( getValue( evCmdSetPGSettings ) == 1 ) 
+  {
+    GNSSSetPGSettings( 
+      getValue( evPGN ),
+      getValue( evPGEnable ),
+      255,
+      getValue( evPGPriority ),
+      getValue( evPGUpateRate )  
+    );
+  }
+}
+
+on envVar evCmdRemoveWPs
+{
+  if( getValue( evCmdRemoveWPs ) == 1 ) {
+    RemoveWaypoints();
+  }
+}
+
+//
+// Called if the last waypoint is reached
+//
+void GNSSOnLastWpReached()
+{
+  writeDbgLevel( kDbgInfo,  "<%s> Last waypoint reached", kNodeLabel );
+}
+
+//
+// Adress Claimed
+//
+void GNSSAppAddrClaimed()
+{
+}
+
+//
+// Commanded address indication
+//
+void GNSSAppCmdAddrIndication( long dataLen )
+{
+}
+
+//
+// Called if the point before the last waypoint is reached
+//
+void GNSSOnWpBeforeLastReached()
+{
+  writeDbgLevel( kDbgInfo,  "<%s> Waypoint before last reached", kNodeLabel );
+}
+
+on envVar evCmdContinueSpeed
+{
+  if( getValue( evCmdContinueSpeed ) == 1 ) {
+    GNSSContinueSpeed();
+  }
+}
+
+on preStart
+{
+  setWriteDbgLevel( gDbgLevel );
+}
+
+//
+// Start nodelayer and set some default values
+//
+void StartUp()
+{
+  writeDbgLevel( kDbgInfo, "<%s> StartUp", kNodeLabel );
+
+  // init address of this node
+  gNodeAddress = GNSSReceiver.NmStationAddress; /* get node address */
+
+  // init deviece name
+  GNSSMakeName( gNodeName, 
+                GNSSReceiver.NmJ1939AAC,
+                GNSSReceiver.NmJ1939IndustryGroup,
+                GNSSReceiver.NmJ1939SystemInstance,
+                GNSSReceiver.NmJ1939System,
+                GNSSReceiver.NmJ1939Function,
+                GNSSReceiver.NmJ1939FunctionInstance,
+                GNSSReceiver.NmJ1939ECUInstance,
+                GNSSReceiver.NmJ1939ManufacturerCode,
+                GNSSReceiver.NmJ1939IdentityNumber );
+
+  GNSSStartUp( gNodeName, gNodeAddress );
+  
+  putValue( evSimulationState, 0 );
+
+  // set reference position
+  putValue( evLatitudeRef, 35.42 );
+  putValue( evLongitudeRef, 139.46 );
+  putValue( evAltitudeRef, 25 );
+
+  // set speed
+  putValue( evSpeed, 70 );
+
+  InitializePGs();
+}
+
+on stopMeasurement
+{
+  ShutDown();
+}
+
+//
+// Shut down GNSS nodelayer
+//
+void ShutDown()
+{
+  GNSSShutDown();
+}
+
+//
+// Stop GNSS nodelayer simulation
+//
+void StopSimulation()
+{
+  if( GNSSStopSimulation() == 0 ) {
+    putValue( evSimulationState, kStateStopped );
+  }
+}
+
+//
+// Start GNSS nodelayer simulation
+//
+void StartSimulation()
+{
+  dword res;
+  res = GNSSStartSimulation( 0 );
+  if (res == 0) {
+    putValue( evSimulationState, kStateStarted );
+  } 
+  else if (res == kNoWaypointSet) {
+    writeDbgLevel( kDbgWarning, "<%s> StartUp failed, because no waypoint is set", kNodeLabel ); 
+  }
+}
+
+void RemoveWaypoints()
+{
+  dword res;
+  res = GNSSRemoveWp();
+  if (res == kSimRunnging) {
+    writeDbgLevel( kDbgWarning, "<%s> GNSSRemoveWp faile because simulation is running", kNodeLabel);
+  }
+}
+
+on envVar evCmdSetGNSSPosDataValues
+{
+  dword refStation[253];
+  refStation[0] = 0x3333;
+  refStation[1] = 0x2222;
+
+  GNSSSetPosDataVal( getValue(evDataFixId),
+                     getValue(evDataSysAndMethod),
+                     getValue(evDataIntegrity),
+                     getValue(evDataNumOfSVs),
+                     getValue(evDataHDOP),
+                     getValue(evDataPDOP),
+                     getValue(evDataGeoSeparation),
+                     getValue(evDataNumOfRefStat),
+                     refStation );
+}
+
+on envVar evCmdOpenGNSSPosDataValues
+{
+  openPanel( "GNSSPositionDataValues" );
+}
+
+//
+// Set new reference position
+//
+void SetRefPos()
+{
+  float lat, lon, alt;
+  lat = getValue( evLatitudeRef );
+  lon = getValue( evLongitudeRef );
+  alt = getValue( evAltitudeRef );
+  GNSSSetRefPoint( lat, lon, alt );
+  // writeDbgLevel( kDbgInfo, "<%s> Add reference point: lat = %f, lon = %f, alt = %f", kNodeLabel, lat, lon, alt );
+}
+
+int InitializePGs()
+{
+  int res;
+  DWORD enable, disable;
+  enable  = 1;
+  disable = 0;
+
+
+  // GNSS Position Data
+  res = GNSSSetPGSettings( 129029, enable, 255, 6, 1000 );
+  if (res != kErrorNo) return res;
+  
+  // Position Rapid Update
+  res = GNSSSetPGSettings( 129025, enable, 255, 2, 100 );
+  if (res != kErrorNo) return res;
+
+  // COG&SOG RapidUpdate
+  res = GNSSSetPGSettings( 129026, enable, 255, 2, 250 );
+  if (res != kErrorNo) return res;
+
+  // Position delta, high precision rapid update
+  res = GNSSSetPGSettings( 129027, disable, 255, 2, 250 );
+  if (res != kErrorNo) return res;
+
+  // Vehcile Position (J1939)
+  res = GNSSSetPGSettings( 65267, disable, 255, 2, 250 );
+  if (res != kErrorNo) return res;
+
+  // Vehcile Direction Speed (J1939)
+  res = GNSSSetPGSettings( 65256, disable, 255, 2, 250 );
+  if (res != kErrorNo) return res;
+
+  return kErrorNo;
+}
+

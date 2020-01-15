@@ -1,0 +1,278 @@
+/*@!Encoding:1252*/
+variables
+{
+  pg PROB_2_EAS my_PROB_2_EAS;
+
+  char textBuffer[512];
+
+  dword gSourceAddr =0x3D;
+  dword gDestAddr   =0xFF;
+  float gMinSignalValue =10;
+  float gMaxSignalValue =100;
+
+  long  gChkSignalRangeViolationHandle;
+  int   gWait = 1;
+
+  int   gEngSpeed = 4000;
+  int   gActualEngPercentTorque = 100;
+
+  msTimer timEEC1;
+  msTimer gWaitTimer;
+  msTimer timPROA_1;
+}
+
+testcase CheckFluidTankLevel_RangeViolation()
+{
+  // write test case information to report file and set state of this test case
+  TestCaseTitle( "2.1", "Check fluid tank level");
+  TestCaseDescription("Check that value is >=10 and <=100");
+
+  startSendingEEC1Cyclic();
+  startSendingPropA1Cyclic();
+
+  eas_Check_SignalRangeViolation();
+
+  // add check
+  J1939TestChkControl_Start(gChkSignalRangeViolationHandle);
+  TestAddCondition(gChkSignalRangeViolationHandle);
+
+  TestWaitForTimeout(15000);
+
+  // remove the check
+  J1939TestChkControl_Stop(gChkSignalRangeViolationHandle);
+  TestRemoveCondition (gChkSignalRangeViolationHandle);
+
+  stopSendingPropA1Cyclic();
+  stopSendingEEC1Cyclic();
+}
+
+void eas_Check_SignalRangeViolation ()
+{
+  gChkSignalRangeViolationHandle = J1939TestChkCreate_SignalRangeViolation(   gSourceAddr, 
+                                                            gDestAddr, 
+                                                            PROB_2_EAS,
+                                                            PROB_2_EAS::ReductionFluidTankLevel,
+                                                            gMinSignalValue, 
+                                                            gMaxSignalValue);
+}
+
+void SignalCallback ()
+{
+}
+
+testcase CheckReactionOfEmptyFluidTank ()
+{
+  pg PROB_2_EAS pROB_2_EAS;
+  pg DM1 dM1 = {dlc = 22};
+  int testFailedFlag=1;
+  int i = 0;
+
+  setTimer(gWaitTimer,100000);
+
+  gEngSpeed = 4000; // set the needed engine speed
+  gActualEngPercentTorque = 100;
+  gWait = 1;
+
+  J1939TestChkControl_Start(gChkSignalRangeViolationHandle);
+  TestAddCondition(gChkSignalRangeViolationHandle);
+  
+  // start emulation of engine
+  //sendEMSAddressClaim();
+  startSendingEEC1Cyclic();
+  startSendingPropA1Cyclic();
+
+  while (gWait == 1)
+  {
+    if (TestWaitForJ1939PG(PROB_2_EAS.pgn, EAS.NmStationAddress,0xFF,2000) >= 0)
+    {
+      // PG received of timeout
+      TestGetWaitJ1939PGData(pROB_2_EAS);
+
+      //write ("pROB_2_EAS.ReductionFluidTankLevel: %f",pROB_2_EAS.ReductionFluidTankLevel.phys);
+
+      if (pROB_2_EAS.ReductionFluidTankLevel.phys <=20)
+      {
+        if (TestWaitForJ1939PG(DM1.pgn, EAS.NmStationAddress,0xFF,10000) > 0)
+        {
+          
+          TestGetWaitJ1939PGData(dM1);
+
+          // check if one of the DTCs is the right one
+          if ((dM1.SPN1 == 0xF004 && dM1.SPN1High == 0x7) ||
+              (dM1.SPN2 == 0xF004 && dM1.SPN2High == 0x7) ||
+              (dM1.SPN3 == 0xF004 && dM1.SPN3High == 0x7) ||
+              (dM1.SPN4 == 0xF004 && dM1.SPN4High == 0x7))
+          {
+            // check if there is at least on error
+            snprintf( textBuffer, elCount(textBuffer), "DM1 message received, DTC reported.");
+            TestStepPass( textBuffer );
+            gWait=0;
+            stopSendingPropA1Cyclic();
+            stopSendingEEC1Cyclic();
+            testFailedFlag = 0;
+          }
+          else
+          {
+            write ("data not ok");
+          }
+        }
+        else
+        {
+          // failed
+          snprintf( textBuffer, elCount(textBuffer), "DM1 PG not received");
+          TestStepFail( textBuffer );
+        }
+      }
+    }
+  }
+
+  if (testFailedFlag)
+  {
+    // check if there is at least on error
+    snprintf( textBuffer, elCount(textBuffer), "DM1 message received, but no DTC available");
+    TestStepFail( textBuffer );
+  }
+
+  J1939TestChkControl_Stop(gChkSignalRangeViolationHandle);
+  TestRemoveCondition (gChkSignalRangeViolationHandle);
+ 
+}
+
+void startSendingEEC1Cyclic ()
+{
+  pg EEC1_EMS eEC1_EMS;
+	eEC1_EMS.DWORD(0) = eEC1_EMS.DWORD(4) = 0xFFFFFFFF; //init datafield
+	
+  eEC1_EMS.SA = 0;
+ 
+  eEC1_EMS.EngDemandPercentTorque = 0xFF;
+  eEC1_EMS.EngStarterMode = 0x3;
+  eEC1_EMS.SrcAddrssOfCtrllngDvcForEngCtrl = 0xFF;
+  eEC1_EMS.EngSpeed.phys = gEngSpeed;//4000;//2800;
+  eEC1_EMS.ActualEngPercentTorque.phys = gActualEngPercentTorque;
+  eEC1_EMS.DriversDemandEngPercentTorque = 0xFF;
+  eEC1_EMS.EngTorqueMode = 0x3;
+
+  output(eEC1_EMS);
+
+  setTimer(timEEC1,20);
+}
+
+on timer timEEC1
+{
+  startSendingEEC1Cyclic();
+}
+
+void stopSendingEEC1Cyclic ()
+{
+  cancelTimer(timEEC1);
+}
+
+on timer gWaitTimer
+{
+  gWait = 0;
+}
+
+void startSendingPropA1Cyclic ()
+{
+  pg PROA_1 pROA_1;
+  pROA_1.SA = 0;
+  pROA_1.DA = 0x3D;
+
+
+  pROA_1.RequestedUreaQuantity = 6000;
+
+  output(pROA_1);
+
+  setTimer(timPROA_1,20);
+}
+
+on timer timPROA_1
+{
+  startSendingPropA1Cyclic();
+}
+
+void sendEMSAddressClaim ()
+{
+  pg ACL acl;
+
+  acl.SA = 0;
+  acl.DA = 0xFF;
+
+  acl.ManufacturerCode = 1861;
+  acl.IdentityNumber=2;
+
+  output(acl);
+}
+
+void stopSendingPropA1Cyclic ()
+{
+  cancelTimer(timPROA_1);
+}
+
+testcase CheckStopSendingDTC ()
+{
+  pg PROB_1_EAS pROB_1_EAS;
+  pg DM1 dM1 = { dlc = 22 };
+
+  setTimer(gWaitTimer,100000);
+
+  gEngSpeed = 500;
+  gActualEngPercentTorque=0;
+  gWait = 1;
+
+  startSendingEEC1Cyclic();
+  startSendingPropA1Cyclic();
+
+  while (gWait == 1)
+  {
+    if (TestWaitForJ1939PG(PROB_1_EAS.pgn, EAS.NmStationAddress,0xFF,2000) >= 0)
+    {
+      // PG received of timeout
+      TestGetWaitJ1939PGData(pROB_1_EAS);
+
+      if (pROB_1_EAS.CatalystUpstreamTemperature.phys < 149)
+      {
+        // DM1
+        if (TestWaitForJ1939PG(DM1.pgn,EAS.NmStationAddress,0xFF,10000) > 0)
+        {
+          TestGetWaitJ1939PGData(dM1);
+          if ((dM1.SPN1 == 0xF004 && dM1.SPN1High == 0x7) ||
+              (dM1.SPN2 == 0xF004 && dM1.SPN2High == 0x7) ||
+              (dM1.SPN3 == 0xF004 && dM1.SPN3High == 0x7) ||
+              (dM1.SPN1 == 0xF004 && dM1.SPN4High == 0x7))
+          {
+            // check if there is at least on error
+            snprintf( textBuffer, elCount(textBuffer), "DM1 message received and DTC is reported.");
+            TestStepPass( textBuffer );
+          }
+          else
+          {
+            // check if there is at least on error
+            snprintf( textBuffer, elCount(textBuffer), "DM1 message received, but DTC is not reported.");
+            TestStepFail( textBuffer );
+          }
+
+          // failed
+          //snprintf( textBuffer, elCount(textBuffer), "DM1 PG received although not temperature below 150");
+          //TestStepFail( textBuffer );
+        }
+        else
+        {
+          // PG received
+          snprintf( textBuffer, elCount(textBuffer), "DM1 PG not received -> OK.");
+          TestStepPass( textBuffer );
+        }
+        gWait=0;
+        stopSendingPropA1Cyclic();
+        stopSendingEEC1Cyclic();
+      }
+    }
+  }
+}
+
+testcase Test ()
+{
+TestStepFail("");
+}
+

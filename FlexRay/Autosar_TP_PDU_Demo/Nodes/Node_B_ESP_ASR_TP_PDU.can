@@ -1,0 +1,259 @@
+/*@@includes:*/
+includes
+{
+#include "..\CAPL\SetASRTP.cin"
+#include "TPDefinitions.cin"
+#include "..\CAPL\SysHandler_TP_B1_ASR_TP_PDU.cin"
+#include "..\CAPL\SysHandler_TP_B2_ASR_TP_PDU.cin"
+#include "..\CAPL\SysHandler_Panel_B1_ASR_TP_PDU.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables {
+
+  // ==============================================================================
+  // TP addresses used by this node:
+
+  word gMyTPAddress = cTPAddressESP;
+  word gECU1Address = cTPAddressTester;
+
+  // ==============================================================================
+  // General variables:
+
+  byte gClearData[10];
+}
+/*@@end*/
+
+/*@@caplFunc:FrTP_ErrorInd(long,dword):*///callback
+FrTP_ErrorInd(long connectionHdl, DWORD error)
+{
+  if ((connectionHdl == gConnectionHandle_B1) && (@sysvar::Panel_B1::UsedPDUPool == 0))
+  {
+    FrTP_ErrorInd_B1(connectionHdl, error);
+  }
+  else if ((connectionHdl == gConnectionHandle_B2) && (@sysvar::Panel_B1::UsedPDUPool == 1))
+  {
+    FrTP_ErrorInd_B1(connectionHdl, error);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:FrTP_FirstFrameInd(long,dword):*///callback
+FrTP_FirstFrameInd (long connectionHdl, dword dataLength)
+{
+  if ((connectionHdl == gConnectionHandle_B1) && (@sysvar::Panel_B1::UsedPDUPool == 0))
+  {
+    FrTP_FirstFrameInd_B1(connectionHdl, dataLength);
+  }
+  else if ((connectionHdl == gConnectionHandle_B2) && (@sysvar::Panel_B1::UsedPDUPool == 1))
+  {
+    FrTP_FirstFrameInd_B1(connectionHdl, dataLength);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:FrTP_ReceptionInd(long,byte[]):*///callback
+FrTP_ReceptionInd(long connectionHdl, BYTE data[])
+{
+  if ((connectionHdl == gConnectionHandle_B1) && (@sysvar::Panel_B1::UsedPDUPool == 0))
+  {
+    FrTP_ReceptionInd_B1(connectionHdl, data);
+  }
+  else if ((connectionHdl == gConnectionHandle_B2) && (@sysvar::Panel_B1::UsedPDUPool == 1))
+  {
+    FrTP_ReceptionInd_B1(connectionHdl, data);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:FrTP_TxConfirmationInd(long):*///callback
+FrTP_TxConfirmationInd (long connectionHdl)
+{
+  if ((connectionHdl == gConnectionHandle_B1) && (@sysvar::Panel_B1::UsedPDUPool == 0))
+  {
+    FrTP_TxConfirmationInd_B1(connectionHdl);
+  }
+  else if ((connectionHdl == gConnectionHandle_B2) && (@sysvar::Panel_B1::UsedPDUPool == 1))
+  {
+    FrTP_TxConfirmationInd_B1(connectionHdl);
+  }
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  InitTP(%CHANNEL%);
+
+  // Set the TP parameters for connection B1 (diagnostics from ECU Gateway):
+  InitConnSysTPVars_B1(); // is using the TX PDU pool from gPool2PDUArray and the RX PDU pool from gPool1PDUArray
+
+  // Set the TP parameters for connection B2 (flash data from ECU Gateway):
+  InitConnSysTPVars_B2(); // is using the TX PDU pool from gPool2PDUArray and the RX PDU pool from gPool3PDUArray
+
+  InitConnSysPanelVars_B1();
+
+  openPanel("ESP");
+}
+/*@@end*/
+
+/*@@caplFunc:CreateTPConnection_B1(int):*///function
+CreateTPConnection_B1 (int verbosityLevel)
+{
+  // Diagnostics channel from Tester/Gateway:
+
+  struct ASRTPParameter params = {
+    mProtocolVersion       = eUsedVersion,
+    mConnectionModeTx      = eUnicast,
+    mConnectionModeRx      = eUnicast,
+    mLengthModeTx          = eISO,
+    mLengthModeRx          = eISO,
+    mAddrType              = 2,
+    mLocalAddr             = 0x0000,
+    mRemoteAddr            = 0x0000,
+    mPadding               = eOn,
+    mFillByte              = 0x00,
+    mMaxTxPrioPDUs         = 0,
+    mBlockSize             = 0,
+    mStMin                 = 0,
+    mTxPriority            = cDefaultTxPriority,
+    mExclusiveTxUsage      = eOff,
+    mAbortRxOnNewTxStart   = eOn,
+    mMaxPDULength          = 254,
+    mTimeoutAs             = gkTimeoutAS,
+    mTimeoutAr             = gkTimeoutAR,
+    mTimeoutBs             = gkTimeoutBS,
+    mTimeBr                = gkTimeBR,
+    mTimeCs                = gkTimeCS,
+    mTimeoutCr             = gkTimeoutCR
+  };
+
+  params.mLocalAddr        = gMyTPAddress;
+  params.mRemoteAddr       = gECU1Address;
+  params.mMaxPDULength     = gPool2PDULength;
+  params.mMaxTxPrioPDUs    = 1;
+
+  CreateTPConnection_PDUs_B1(cNumPool2PDUs, gPool2PDUArray, cNumPool1PDUs, gPool1PDUArray, cPDUNameLength, params, verbosityLevel);
+
+  DisplayChannelReference_B1();
+}
+/*@@end*/
+
+/*@@caplFunc:CreateTPConnection_B2(int):*///function
+CreateTPConnection_B2 (int verbosityLevel)
+{
+  // Flash channel from Tester/Gateway:
+
+  struct ASRTPParameter params = {
+    mProtocolVersion       = eUsedVersion,
+    mConnectionModeTx      = eUnicast,
+    mConnectionModeRx      = eUnicast,
+    mLengthModeTx          = eISO,
+    mLengthModeRx          = eISO,
+    mAddrType              = 2,
+    mLocalAddr             = 0x0000,
+    mRemoteAddr            = 0x0000,
+    mPadding               = eOn,
+    mFillByte              = 0x00,
+    mMaxTxPrioPDUs         = 0,
+    mBlockSize             = 0,
+    mStMin                 = 0,
+    mTxPriority            = cDefaultTxPriority,
+    mExclusiveTxUsage      = eOff,
+    mAbortRxOnNewTxStart   = eOn,
+    mMaxPDULength          = 254,
+    mTimeoutAs             = gkTimeoutAS,
+    mTimeoutAr             = gkTimeoutAR,
+    mTimeoutBs             = gkTimeoutBS,
+    mTimeBr                = gkTimeBR,
+    mTimeCs                = gkTimeCS,
+    mTimeoutCr             = gkTimeoutCR
+  };
+
+  params.mLengthModeTx     = eL4G;
+  params.mLengthModeRx     = eL4G;
+  params.mLocalAddr        = gMyTPAddress;
+  params.mRemoteAddr       = gECU1Address;
+  params.mMaxPDULength     = gPool2PDULength;
+  params.mMaxTxPrioPDUs    = 1;
+
+  CreateTPConnection_PDUs_B2(cNumPool2PDUs, gPool2PDUArray, cNumPool3PDUs, gPool3PDUArray, cPDUNameLength, params, verbosityLevel);
+
+  DisplayChannelReference_B1();
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  FrPDU PDU_DIAG_ESP_1    pdu_0_01;
+
+  FrPDU PDU_TP_ESP_1      pdu_1_01;
+  FrPDU PDU_TP_ESP_2      pdu_1_02;
+
+  FrPDU PDU_TP2_ESP_1     pdu_2_01;
+  FrPDU PDU_TP2_ESP_2     pdu_2_02;
+
+  FrSetSendPDU(pdu_0_01);
+
+  FrSetSendPDU(pdu_1_01);
+  FrSetSendPDU(pdu_1_02);
+
+  FrSetSendPDU(pdu_2_01);
+  FrSetSendPDU(pdu_2_02);
+}
+/*@@end*/
+
+/*@@caplFunc:TPTransmit_B1(byte[],dword):*///function
+void TPTransmit_B1 (byte buffer[], dword bufferSize)
+{
+  long gConnectionHandle_B;
+
+  if (@sysvar::Panel_B1::UsedPDUPool == 0)
+    gConnectionHandle_B = gConnectionHandle_B1; // Diagnostics Pool 1 connection
+  else
+    gConnectionHandle_B = gConnectionHandle_B2; // Flash Pool 2 connection
+
+  if (0 == FrTP_DataRequest(gConnectionHandle_B, buffer, bufferSize))
+  {
+    if (@sysvar::TP_B1::VerbosityLevel > 1)
+    {
+      SetTPPrefixString(gConnectionHandle_B);
+      write("%sData are sent successful: %d Byte payload", gTPPrefix, bufferSize); 
+    }
+  }
+  else
+  {
+    if (@sysvar::TP_B1::VerbosityLevel > 0)
+    {
+      SetTPPrefixString(gConnectionHandle_B);
+      write("%sFAILURE! Data sending was not successful: %d Byte", gTPPrefix, bufferSize); 
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:DisplayChannelReference_B1():*///function
+void DisplayChannelReference_B1()
+{
+  if (@sysvar::Panel_B1::UsedPDUPool == 0)
+  {
+    @sysvar::Panel_B1::ConnectionHandle = gConnectionHandle_B1; // show connection reference of B1 in panel B1
+    @sysvar::Panel_B1::TxDataLength = 4;
+  }
+  else
+  {
+    @sysvar::Panel_B1::ConnectionHandle = gConnectionHandle_B2; // show connection reference of B2 in panel B1
+    @sysvar::Panel_B1::TxDataLength = 40;
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:Panel_B1::UsedPDUPool:*/
+on sysvar sysvar::Panel_B1::UsedPDUPool
+{
+  DisplayChannelReference_B1();
+}
+/*@@end*/
+

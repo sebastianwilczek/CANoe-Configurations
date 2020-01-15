@@ -1,0 +1,351 @@
+/*@!Encoding:1252*/
+includes
+{
+}
+
+/*
+ * Vehicle Gateway - VGW                                     Version 2.0
+ *
+ * Copyright Vector Informatik GmbH - All right reserved
+ *
+ * This node simulates a central vehicle gateway ECU between the powertrain of a car
+ * and the Ethernet backbone network. It is only a stub which calculates
+ * the engine and vehicle speed and transmits these signals on the
+ * Backbone network bus. In a more realistic simulation it could be a gateway
+ * between a CAN powertrain bus and the Vehicle backbone network.
+ *
+ * History:
+ * 1.0   (Jr) Created
+ * 2.0   (Jr) Adapted to AUTOSAR PDU
+ */
+ variables
+{
+  // simulation constants
+  const int    kQuiet           = 1;                            // 1 = suppress output to write window
+  const int    kSystemTime      = 100;                          // Cylce time for system timer in [ms]
+  const double kSystemTimeSec   = kSystemTime / 1000.0;         // system timer in [sec]
+  const double kSystemTimeHour  = kSystemTimeSec / 60.0 / 60.0; // system timer in [hour]
+  const int    kTurnLightTime   = 500;                          // Turn light time in [ms]
+
+  // Timer
+  msTimer gSystemTimer;    // System timer for the this node
+  msTimer gTurnLightTimer; // Timer for the turn light, which controls the panel bitmaps
+  
+  // Global variables
+  dword gVCC_SteeringByKey = 0;
+  dword gVCC_Ignition      = 0;
+}
+
+/*
+  Start of node.
+ */
+on start
+{
+  //
+  // Load total distance to ini file
+  //
+
+  @sysvar::ConceptCar::Vehicle::TotalDistance = getProfileFloat( "%NODE_NAME%", "TotalDistance", 0, kIniFile);
+  @sysvar::ConceptCar::Vehicle::TripDistance  = 0;
+
+  //
+  // Start timers
+  //
+
+  gSystemTimer.setCyclic( kSystemTime );
+  gTurnLightTimer.setCyclic( kTurnLightTime );
+}
+
+on key CursorUp
+{
+  if(@sysvar::ConceptCar::Control::PedalPosition < 100)
+  {
+    @sysvar::ConceptCar::Control::PedalPosition = @sysvar::ConceptCar::Control::PedalPosition + 1;
+  }
+}
+
+on key CursorDown
+{
+  if(@sysvar::ConceptCar::Control::PedalPosition > 0)
+  {
+    @sysvar::ConceptCar::Control::PedalPosition = @sysvar::ConceptCar::Control::PedalPosition - 1;
+  }
+}
+
+/*
+  Main function that calculates the simulated signal values.
+ */
+on timer gSystemTimer
+{
+  int    breakActive;
+  double vehicleSpeed;    // 0..kMaxVehicleSpeed [km/h]
+  double pedalPosition;   // 0..100
+  double motorTemp;       // °C
+  double motorPower;      // kW
+  double batteryCapacity; // kWh
+  double batteryTemp;     // °C
+  double exteriorTemp;    // °C
+
+  //
+  // get current values from sys-vars
+  //
+
+  vehicleSpeed    = @sysvar::ConceptCar::Vehicle::Speed;
+  breakActive     = @sysvar::ConceptCar::Control::BrakeActive;
+  motorTemp       = @sysvar::ConceptCar::EMotor::Temperature;
+  batteryCapacity = @sysvar::ConceptCar::Battery::RemainingCapacity;
+  batteryTemp     = @sysvar::ConceptCar::Battery::Temperature;
+  exteriorTemp    = @sysvar::ConceptCar::Environment::ExteriorTemperature;
+
+  if (gVCC_Ignition)
+  {
+    pedalPosition = @sysvar::ConceptCar::Control::PedalPosition;
+  }
+  else
+  {
+    pedalPosition = 0.0;
+  }
+
+  //
+  // calculate vehicle speed
+  //
+
+  vehicleSpeed = CalcVehicleSpeed( vehicleSpeed, breakActive, pedalPosition );
+
+  //
+  // calculate motor power and temperature
+  //
+  
+  motorPower = kMotorPowerKw * (pedalPosition / 100.0);
+  motorTemp += (((motorPower / 11.4) - (300 + vehicleSpeed * vehicleSpeed) / 2000 )  ) * kSystemTimeSec;
+  
+  //
+  // calculate battery
+  //
+  
+  batteryCapacity -= motorPower * kSystemTimeHour;
+  batteryTemp     += ((motorPower / 38) - 0.6) * kSystemTimeSec;
+  
+  //
+  // calc distances
+  //
+
+  @sysvar::ConceptCar::Vehicle::TotalDistance += ((vehicleSpeed / 3.6) * kSystemTimeSec);
+  @sysvar::ConceptCar::Vehicle::TripDistance  += ((vehicleSpeed / 3.6) * kSystemTimeSec);
+  
+  // set sys-vars
+  @sysvar::ConceptCar::Vehicle::Speed             = vehicleSpeed;
+  @sysvar::ConceptCar::EMotor::Speed              = vehicleSpeed * kWheelToMotorRatio;
+  @sysvar::ConceptCar::EMotor::Current            = motorPower * 1000 / kVoltage;
+  @sysvar::ConceptCar::EMotor::Power              = motorPower;
+  @sysvar::ConceptCar::EMotor::Temperature        = VCC_UtilRange( motorTemp, exteriorTemp, 300 );
+  @sysvar::ConceptCar::Battery::RemainingCapacity = VCC_UtilRange( batteryCapacity, 0, kBatterCapacityKwh );
+  @sysvar::ConceptCar::Battery::Temperature       = VCC_UtilRange( batteryTemp, exteriorTemp, 300 );
+
+  //
+  // Calculate position and heading
+  //
+  {
+    double headingRad;
+    double heading;
+    double steeringWheel;
+    
+    steeringWheel = @sysvar::ConceptCar::Control::SteeringWheel;
+    heading       = @sysvarMember::ConceptCar::Vehicle::Position.Heading;
+    
+    if (keyPressed() == CursorRight)
+    {
+      gVCC_SteeringByKey = 1;
+
+      if (steeringWheel < 1.0)
+      {
+        steeringWheel += kSystemTimeSec;
+      }
+    }
+    else if (keyPressed() == CursorLeft)
+    {
+      gVCC_SteeringByKey = 1;
+
+      if (steeringWheel > -1.0)
+      {
+        steeringWheel -= kSystemTimeSec;
+      }
+    }
+    else if (gVCC_SteeringByKey)
+    {
+      // if steering wheel is controller by key-stroke, 
+      // go slowly back to middle-position of steering wheel.
+      if (steeringWheel < -0.1)
+      {
+        steeringWheel += kSystemTimeSec;
+      }
+      else if (steeringWheel > 0.1)
+      {
+        steeringWheel -= kSystemTimeSec;
+      }
+      else
+      {
+        steeringWheel      = 0.0;
+        gVCC_SteeringByKey = 0;
+      }
+      
+      @sysvar::ConceptCar::Control::SteeringWheel = steeringWheel;
+    }
+    else
+    {
+      // steering is controller by way-points
+      double headingToWaypoint;
+      double distanceToWaypoint;
+      double currentDistance;
+
+      currentDistance     = @sysvarMember::ConceptCar::Vehicle::WaypointState.CurrentDistance;
+      distanceToWaypoint  = @sysvarMember::ConceptCar::Vehicle::WaypointState.DistanceToCurrentPoint;
+      distanceToWaypoint -= ((vehicleSpeed / 3.6) * kSystemTimeSec);
+      headingToWaypoint   = VCC_Heading( @sysvarMember::ConceptCar::Vehicle::Position.RelativeX,
+                                         @sysvarMember::ConceptCar::Vehicle::Position.RelativeY,
+                                         @sysvarMember::ConceptCar::Vehicle::WaypointState.CurrentX,
+                                         @sysvarMember::ConceptCar::Vehicle::WaypointState.CurrentY );
+
+      // if the distance to waypoint is small, we have reached the waypoint.
+      if (distanceToWaypoint < 1.0)
+      {
+        VCC_NextWaypoint( @sysvarMember::ConceptCar::Vehicle::Position.RelativeX, @sysvarMember::ConceptCar::Vehicle::Position.RelativeY );
+      }
+      else
+      {
+        double headingDelta;
+        headingDelta = VCC_HeadingDelta( heading, headingToWaypoint );
+        
+        // calculate the steering angle, by difference to next waypoint.
+        // as closer the vehicle get to the next waypoint, as stronger the steering angle will be.
+        if (headingDelta < 0)
+        {
+          steeringWheel = -1 * VCC_UtilRange( -headingDelta * 0.01 * (10.0 / distanceToWaypoint), 0, 1 );
+        }
+        else if (headingDelta)
+        {
+          steeringWheel = VCC_UtilRange( headingDelta * 0.01 * (10.0 / distanceToWaypoint), 0, 1 );
+        }
+        
+        // Update SysVar 'Track'
+        sysBeginVariableStructUpdate( sysvar::ConceptCar::Vehicle::WaypointState);
+        @sysvarMember::ConceptCar::Vehicle::WaypointState.DistanceToCurrentPoint = distanceToWaypoint;
+        @sysvarMember::ConceptCar::Vehicle::WaypointState.HeadingToCurrentPoint  = headingToWaypoint;
+        @sysvarMember::ConceptCar::Vehicle::WaypointState.CurrentDistance        = currentDistance + ((vehicleSpeed / 3.6) * kSystemTimeSec);
+        @sysvarMember::ConceptCar::Vehicle::WaypointState.HeadingDelta           = headingDelta;
+        sysEndVariableStructUpdate( sysvar::ConceptCar::Vehicle::WaypointState);
+      }
+    }
+
+    // rotate heading by steering wheel
+    heading = VCC_HeadingRange(heading + steeringWheel * vehicleSpeed * 15.0 * kSystemTimeSec);
+
+    // calculate relative position by speed and heading
+    headingRad = ((@sysvarMember::ConceptCar::Vehicle::Position.Heading - 90) / 360) * 2 * pi;
+    @sysvar::ConceptCar::Control::SteeringWheel       = steeringWheel;
+
+    sysBeginVariableStructUpdate( sysvar::ConceptCar::Vehicle::Position );
+    @sysvarMember::ConceptCar::Vehicle::Position.Heading   = heading;
+    @sysvarMember::ConceptCar::Vehicle::Position.RelativeX = @sysvarMember::ConceptCar::Vehicle::Position.RelativeX + cos( headingRad ) * (@sysvar::ConceptCar::Vehicle::Speed / 3.6) * kSystemTimeSec;
+    @sysvarMember::ConceptCar::Vehicle::Position.RelativeY = @sysvarMember::ConceptCar::Vehicle::Position.RelativeY + sin( headingRad ) * (@sysvar::ConceptCar::Vehicle::Speed / 3.6) * kSystemTimeSec;
+    sysEndVariableStructUpdate( sysvar::ConceptCar::Vehicle::Position );
+  }
+  
+  OnVCC_UpdateSignals(gVCC_Ignition);
+}
+
+on timer gTurnLightTimer
+{
+  int toggle = 0;
+  
+  toggle = (toggle == 0) ? 1 : 0;
+
+  //
+  // Set bitmap of left light unit
+  //
+  
+  if (@sysvar::ConceptCar::Control::Light == sysvar::ConceptCar::Control::Light::Pressed)
+  {
+    @sysvar::ConceptCar::PanelImage::LightLeft = 2;
+  }
+  else
+  {
+    @sysvar::ConceptCar::PanelImage::LightLeft = 0;
+  }
+
+  if (  (  (@sysvar::ConceptCar::Control::Hazard   == sysvar::ConceptCar::Control::Hazard::Pressed)
+       ||  (@sysvar::ConceptCar::Control::TurnLeft == sysvar::ConceptCar::Control::TurnLeft::Pressed)) 
+      && (toggle == 1))
+  {
+    @sysvar::ConceptCar::PanelImage::LightLeft += 1;
+  }
+
+  //
+  // Set bitmap of left right unit
+  //
+  
+  if (@sysvar::ConceptCar::Control::Light == sysvar::ConceptCar::Control::Light::Pressed)
+  {
+    @sysvar::ConceptCar::PanelImage::LightRight = 2;
+  }
+  else
+  {
+    @sysvar::ConceptCar::PanelImage::LightRight = 0;
+  }
+
+  if ( (  (@sysvar::ConceptCar::Control::Hazard    == sysvar::ConceptCar::Control::Light::Pressed)
+       || (@sysvar::ConceptCar::Control::TurnRight == sysvar::ConceptCar::Control::TurnRight::Pressed))
+      && (toggle == 1))
+  {
+    @sysvar::ConceptCar::PanelImage::LightRight += 1;
+  }
+}
+
+/*
+  Calculate the vehicle speed in [km/h].
+ */
+/// <ValueCalculation>
+double CalcVehicleSpeed( double vehicleSpeed, int breakActive, double pedalPosition )
+{
+  double force;
+  double accelarationForce;
+  double frictionForce;
+  double brakeForce;
+
+  //
+  // calculate forces
+  //
+  
+  force         = pedalPosition * kMotorPowerKw * 0.70;
+  frictionForce = (kAirFriction * vehicleSpeed * vehicleSpeed)
+                  + ( 1.0 * vehicleSpeed )
+                  + kRollingFrictionN ;
+
+  if (breakActive) 
+  {
+    brakeForce = 2000.0;
+  }
+  else 
+  {
+    brakeForce = 0.0;
+  }
+  
+  accelarationForce = force - frictionForce - brakeForce;
+ 
+
+  //
+  // increase/decrease vehicle speed
+  //
+
+  vehicleSpeed += (((accelarationForce / kVehicleMassKg) * kSystemTimeSec) * 3.6);
+
+
+  return VCC_UtilRange( vehicleSpeed, 0.0, kMaxVehicleSpeed );
+}
+
+/// <Control>
+void VCC_Ignition( dword enable )
+{
+  gVCC_Ignition = enable;
+}
+

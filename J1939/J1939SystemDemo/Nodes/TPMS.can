@@ -1,0 +1,522 @@
+/*@@includes:*/
+includes
+{
+  #include "J1939.can" 
+  #include "J1939DTC.can"
+}
+/*@@end*/
+
+/*@@var:*/
+/*
+ * TPMS - Tire Pressure Monitor System             Version 1.5
+ *
+ * Copyright 2007-2009, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Jr)  Created 
+ * 1.1 (Gw)  Support of memory access
+ * 1.2 (Jr)  Use J1939 Interaction Layer
+ * 1.3 (Jr)  Send DM1 always
+ * 1.3.1 (Wfk) Warning thresholds changed
+ * 1.4 (Wfk) Multiplexed signals with proprietary SPNs and extended freeze frame
+ * 1.5 (Wfk) ACKM with reserved bytes set to 0xFF
+ */
+variables
+{
+  // Constants
+  const BYTE kTireFrontLeft  = 0x00;
+  const BYTE kTireFrontRight = 0x01;
+  const BYTE kTireRear1Left  = 0x10;
+  const BYTE kTireRear1Right = 0x11;
+  const BYTE kTireRear2Left  = 0x20;
+  const BYTE kTireRear2Right = 0x21;
+
+  const int kPressState_LowCritical  = -2;
+  const int kPressState_LowWarning   = -1;
+  const int kPressState_ok           =  0;
+  const int kPressState_HighWarning  =  1;
+  const int kPressState_HighCritical =  2;
+  
+  const BYTE k_noDTC         = 0xff;
+
+  // proprietary SPNs
+  dword gTirePressSPN[3][2];
+
+  char gNodeName[32]      = "TPMS"; // Name of the node, is used for output to write window
+
+  // simulation variables
+  float gRefPressure[3][2] = {{0.0,0.0},{0.0,0.0},{0.0,0.0}};     // Reference tire pressue [kPa]
+  int   gPressState[3][2]  = {{kPressState_ok,kPressState_ok},{kPressState_ok,kPressState_ok},{kPressState_ok,kPressState_ok}};
+  float gTireTemp          = 20.0;    // Tire temperature for all tires [°C];
+  BYTE  gDM1State[3][2]    = {{k_noDTC,k_noDTC},{k_noDTC,k_noDTC},{k_noDTC,k_noDTC}};
+  int   gTIRERequestInProcess = 0;
+
+  // expanded freeze frame
+    _align(1) struct TPMS_expandedFreezeFrame
+  {
+    dword totalVehicleDistance;  // SPN 245
+    BYTE  timedate[5];           // SPN 960-964
+	word  vSpeed;                // SPN 84
+	BYTE  tirePressure;          // SPN 241
+	word  tireTemperature;       // SPN 242
+	BYTE  referenceTirePressure; // SPN 3191
+	word  ambientAirTemperature; // SPN 171
+  };
+  struct TPMS_expandedFreezeFrame gTPMS_expandedFreezeFrame;
+
+  // System timer
+  const int   kSystemTime    = 100;                  // System time in [ms]
+  const float kSystemTimeSec = kSystemTime / 1000.0; // System time in [sec]
+  msTimer     SystemTimer;                           // System timer
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  // get proprietary SPNs 
+  gTirePressSPN[0][0] = TIRE_TPMS::TirePress_00.SPN;
+  gTirePressSPN[0][1] = TIRE_TPMS::TirePress_01.SPN;
+  gTirePressSPN[1][0] = TIRE_TPMS::TirePress_10.SPN;
+  gTirePressSPN[1][1] = TIRE_TPMS::TirePress_11.SPN;
+  gTirePressSPN[2][0] = TIRE_TPMS::TirePress_20.SPN;
+  gTirePressSPN[2][1] = TIRE_TPMS::TirePress_21.SPN;
+
+  TPMSRecalibrate();
+
+  // init TIRE 
+  setSignal( TIRE_TPMS::TireLocation, kTireFrontLeft );
+  setSignal( TIRE_TPMS::TirePress_00   , getValue( EnvTPMS_FrontLeftPressure ) );
+
+  dtcActivate( 1 );
+
+  setTimer( SystemTimer, kSystemTime );
+}
+/*@@end*/
+
+/*@@timer:SystemTimer:*/
+/*
+ * This system timer calculates the simulated values.
+ */
+on timer SystemTimer
+{
+  float press[3][2];
+  float tirePress;
+  BYTE  tireLocation;
+  int   PressStateNew;
+  long  tm[9];
+  BYTE  x,y,i;
+
+  // get pressures from EnvVars
+  press[0][0] = getValue( EnvTPMS_FrontLeftPressure );
+  press[0][1] = getValue( EnvTPMS_FrontRightPressure );
+  press[1][0] = getValue( EnvTPMS_Rear1LeftPressure );
+  press[1][1] = getValue( EnvTPMS_Rear1RightPressure );
+  press[2][0] = getValue( EnvTPMS_Rear2LeftPressure );
+  press[2][1] = getValue( EnvTPMS_Rear2RightPressure );
+
+  // check tire pressures and reset/set DTCs
+  for (x=0;x<3;x++)
+  {
+  	for (y=0;y<2;y++)
+	{
+	  PressStateNew = utilGetState( gRefPressure[x][y] , press[x][y]  );
+	  if (gPressState[x][y] != PressStateNew) {   // only if state changed
+	  	if (gPressState[x][y] != kPressState_ok) {  // reset old DTC
+	  	  switch(gPressState[x][y]) {
+		    case kPressState_LowCritical:
+				dtcDeactivate( gTirePressSPN[x][y], kFMI_BelowNormalCritical);
+				break;
+		    case kPressState_LowWarning:
+				dtcDeactivate( gTirePressSPN[x][y], kFMI_BelowNormalWarn);
+				break;
+		    case kPressState_HighWarning:
+				dtcDeactivate( gTirePressSPN[x][y], kFMI_AboveNormalWarn);
+				break;
+		    case kPressState_HighCritical:
+				dtcDeactivate( gTirePressSPN[x][y], kFMI_AboveNormalCritical);
+				break;
+			default:
+				write("TPMS: invalid pressure state value");
+				break;
+		  }
+		}
+	  	if (PressStateNew != kPressState_ok) {  // set new DTC
+
+		  // fill expanded freeze frame
+		  gTPMS_expandedFreezeFrame.totalVehicleDistance = $VD_EMS::TotalVehicleDistance.Raw; // SPN 245
+		  getLocalTime(tm);
+		  gTPMS_expandedFreezeFrame.timedate[0]=tm[1];    // SPN 960 - minutes
+		  gTPMS_expandedFreezeFrame.timedate[1]=tm[2];    // SPN 961 - hours
+		  gTPMS_expandedFreezeFrame.timedate[2]=tm[3]*4;  // SPN 962 - day
+		  gTPMS_expandedFreezeFrame.timedate[3]=tm[4]+1;  // SPN 963 - month
+		  gTPMS_expandedFreezeFrame.timedate[4]=tm[5]-85; // SPN 964 - year
+		  gTPMS_expandedFreezeFrame.vSpeed = $CCVS_EMS::WheelBasedVehicleSpeed.Raw; // SPN 84
+		  gTPMS_expandedFreezeFrame.tirePressure = (BYTE)(press[x][y]/4); // SPN 241
+		  gTPMS_expandedFreezeFrame.tireTemperature = (word)((273+20+0.3*$CCVS_EMS::WheelBasedVehicleSpeed.Phys)/0.03125); // (just to get different values) SPN 241
+		  gTPMS_expandedFreezeFrame.referenceTirePressure = (BYTE)(gRefPressure[x][y]/8); // SPN 3191
+		  gTPMS_expandedFreezeFrame.ambientAirTemperature = 9376; // 20 degree Celcius   SPN 171
+
+		  // copy data in byte array for handover
+		  for (i=0;i<kExtFreezeFrameSizeTPMS;i++) {
+		    memcpy(gFreezeFrameEntry, 0, gTPMS_expandedFreezeFrame);
+		  }
+
+	  	  switch(PressStateNew) {
+		    case kPressState_LowCritical:
+				dtcActivate( gTirePressSPN[x][y], kFMI_BelowNormalCritical, k_Node_TPMS);
+				break;
+		    case kPressState_LowWarning:
+				dtcActivate( gTirePressSPN[x][y], kFMI_BelowNormalWarn, k_Node_TPMS);
+				break;
+		    case kPressState_HighWarning:
+				dtcActivate( gTirePressSPN[x][y], kFMI_AboveNormalWarn, k_Node_TPMS);
+				break;
+		    case kPressState_HighCritical:
+				dtcActivate( gTirePressSPN[x][y], kFMI_AboveNormalCritical, k_Node_TPMS);
+				break;
+			default:
+				write("TPMS: invalid new pressure state value");
+				break;
+		  }
+		}
+	  	gPressState[x][y] = PressStateNew;
+	  }
+	}
+  }
+
+  // update EnvVars
+  putValue( EnvTPMS_FrontLeftState       , gPressState[0][0]+2 );
+  putValue( EnvTPMS_FrontLeftWheelBitmap , utilGetBmpFromState(gPressState[0][0]) );
+  putValue( EnvTPMS_FrontRightState      , gPressState[0][1]+2 );
+  putValue( EnvTPMS_FrontRightWheelBitmap, utilGetBmpFromState(gPressState[0][1]) );
+  putValue( EnvTPMS_Rear1LeftState       , gPressState[1][0]+2 );
+  putValue( EnvTPMS_Rear1LeftWheelBitmap , utilGetBmpFromState(gPressState[1][0]) );
+  putValue( EnvTPMS_Rear1RightState      , gPressState[1][1]+2 );
+  putValue( EnvTPMS_Rear1RightWheelBitmap, utilGetBmpFromState(gPressState[1][1]) );
+  putValue( EnvTPMS_Rear2LeftState       , gPressState[2][0]+2 );
+  putValue( EnvTPMS_Rear2LeftWheelBitmap , utilGetBmpFromState(gPressState[2][0]) );
+  putValue( EnvTPMS_Rear2RightState      , gPressState[2][1]+2 );
+  putValue( EnvTPMS_Rear2RightWheelBitmap, utilGetBmpFromState(gPressState[2][1]) );
+
+  setTimer( SystemTimer, kSystemTime );
+}
+/*@@end*/
+
+/*@@errorFrameErrorFrame:ErrorFrame:*/
+/*
+ * Handle error frame
+ */
+on errorFrame
+{
+  
+}
+/*@@end*/
+
+/*@@caplFunc:TPMSRecalibrate():*///function
+/*
+ * Recalibrate the reference tire pressures.
+ */
+void TPMSRecalibrate()
+{
+  gRefPressure[0][0]  = getValue( EnvTPMS_FrontLeftPressure );
+  gRefPressure[0][1] = getValue( EnvTPMS_FrontRightPressure );
+  gRefPressure[1][0]  = getValue( EnvTPMS_Rear1LeftPressure );
+  gRefPressure[1][1] = getValue( EnvTPMS_Rear1RightPressure );
+  gRefPressure[2][0]  = getValue( EnvTPMS_Rear2LeftPressure );
+  gRefPressure[2][1] = getValue( EnvTPMS_Rear2RightPressure );
+}
+/*@@end*/
+
+/*@@pg:CAN1.Powertrain::TPRS (0x18AEFEFEX):*/
+/*
+ * Handle TPRS
+ */
+on pg TPRS
+{
+  pg TPRS RX_TPRS;
+  pg ACKM TX_ACKM;
+  int  i = 0;
+
+  // initialize PG with 0xFF
+  for (i=0; i<8; i++) TX_ACKM.Byte(i) = 0xFF;
+
+  if (!J1939ILAcceptRxPG( this )) return;
+
+  RX_TPRS.SA = this.SA;
+  RX_TPRS.DA = this.DA;
+  RX_TPRS.DWORD(0) = this.DWORD(0);
+  RX_TPRS.DWORD(4) = this.DWORD(4);
+
+  switch(RX_TPRS.TireLocation) {
+    case kTireFrontLeft:
+      gRefPressure[0][0]  = RX_TPRS.ReferenceTirePressSetting.phys;
+      break;
+    case kTireFrontRight:
+      gRefPressure[0][1] = RX_TPRS.ReferenceTirePressSetting.phys;
+      break;
+    case kTireRear1Left:
+      gRefPressure[1][0]  = RX_TPRS.ReferenceTirePressSetting.phys;
+      break;
+    case kTireRear1Right:
+      gRefPressure[1][1] = RX_TPRS.ReferenceTirePressSetting.phys;
+      break;
+    case kTireRear2Left:
+      gRefPressure[2][0]  = RX_TPRS.ReferenceTirePressSetting.phys;
+      break;
+    case kTireRear2Right:
+      gRefPressure[2][1] = RX_TPRS.ReferenceTirePressSetting.phys;
+      break;
+    default:
+      // unknow tire location, send NACK
+      TX_ACKM.DA          = kGlobalAddr;
+      TX_ACKM.SA          = J1939ILGetAddress();
+      TX_ACKM.ControlByte = 1;
+      TX_ACKM.AddressNegativeAcknowledgement = RX_TPRS.SA;
+      TX_ACKM.ParameterGroupNumber = RX_TPRS.PGN;
+      output( TX_ACKM );
+      break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:utilGetBmpFromState(int):*///function
+/*
+ * Get bitmap index form pressure state
+ */
+int utilGetBmpFromState( int state )
+{
+  switch(state) {
+    case -1:
+    case  1:
+      return 1;
+    case -2:
+    case  2:
+      return 2;
+    default:
+      return 0;
+
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:utilGetState(float,float):*///function
+/*
+ * Get state from tire pressure
+ */
+int utilGetState( float refPress, float press )
+{
+  float lowWarnLimit     = 0.90;
+  float lowCriticalLimit = 0.85;
+  float hiWarnLimit      = 1.10;
+  float hiCriticalLimit  = 1.15;
+
+  if (press < refPress * lowCriticalLimit) {
+    return kPressState_LowCritical;
+  }
+  else if (press < refPress * lowWarnLimit) {
+    return kPressState_LowWarning;
+  }
+  else if (press > refPress * hiCriticalLimit) {
+    return kPressState_HighCritical;
+  }
+  else if (press > refPress * hiWarnLimit) {
+    return kPressState_HighWarning;
+  }
+  else {
+    return kPressState_ok;
+  }
+}
+/*@@end*/
+
+/*@@envVar:EnvTPMS_Recalibrate:*/
+/*
+ * Recalibrate
+ */
+on envVar EnvTPMS_Recalibrate
+{
+  TPMSRecalibrate();
+}
+/*@@end*/
+
+/*@@caplFunc:J1939ILOnTxMessage(pg*):*///callback
+/*
+ * IL has sent a message
+ */
+void J1939ILOnTxMessage( pg * txPG )
+{
+  switch( txPG.PGN ) {
+    case 0xfef4: // TIRE
+      if (gTIRERequestInProcess == 0) {
+        switch((INT)getSignal( TIRE_TPMS::TireLocation ) ) {
+          case kTireFrontLeft:
+            setSignal( TIRE_TPMS::TireLocation, kTireFrontRight );
+            setSignal( TIRE_TPMS::TirePress_01, getValue( EnvTPMS_FrontRightPressure ) );
+            break;
+          case kTireFrontRight:
+            setSignal( TIRE_TPMS::TireLocation, kTireRear1Left );
+            setSignal( TIRE_TPMS::TirePress_10, getValue( EnvTPMS_Rear1LeftPressure ) );
+           break;
+          case kTireRear1Left:
+            setSignal( TIRE_TPMS::TireLocation, kTireRear1Right );
+            setSignal( TIRE_TPMS::TirePress_11, getValue( EnvTPMS_Rear1RightPressure ) );
+            break;
+          case kTireRear1Right:
+            setSignal( TIRE_TPMS::TireLocation, kTireRear2Left );
+            setSignal( TIRE_TPMS::TirePress_20, getValue( EnvTPMS_Rear2LeftPressure ) );
+            break;
+          case kTireRear2Left:
+            setSignal( TIRE_TPMS::TireLocation, kTireRear2Right );
+            setSignal( TIRE_TPMS::TirePress_21, getValue( EnvTPMS_Rear2RightPressure ) );
+           break;
+          default:
+          case kTireRear2Right:
+            setSignal( TIRE_TPMS::TireLocation, kTireFrontLeft );
+            setSignal( TIRE_TPMS::TirePress_00, getValue( EnvTPMS_FrontLeftPressure ) );
+            break;
+        }
+      }      
+      break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:J1939ILOnError(long,long):*///callback
+/*
+ * IL has sent a message
+ */
+void J1939ILOnError( LONG errorCode, LONG additionalParam )
+{
+  write( "<%s> Error %d, additional %d", gNodeName, errorCode, additionalParam );
+}
+/*@@end*/
+
+/*@@caplFunc:J1939ILOnChangedState(long):*///callback
+/*
+ * IL has changed its state
+ *
+ * state - 0 = Initialized
+ *         1 = Claiming
+ *         2 = Active
+ *         3 = Stopped
+ *         4 = Suspended
+ */
+void J1939ILOnChangedState( LONG state )
+{
+  switch( state ) {
+    case 1: // Claiming
+//      write( "<%s> Claiming", gNodeName );
+      break;
+    case 2: // Active
+//      write( "<%s> Active", gNodeName );
+      break;
+    case 3: // Stopped
+//      write( "<%s> Stopped", gNodeName );
+      break;
+    case 4: // Suspended
+//      write( "<%s> Suspended", gNodeName );
+      break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:J1939ILOnRequest(long,long):*///callback
+/*
+ * IL has sent received a request
+ *
+ * return 0 - do not respond
+ *        1 - answer the request
+ *        2 - answer with a NACK
+ *        3 - answer with positive ACK
+ *
+ *     _pgn - requested PGN
+ *     _sa  - sender address of the request
+ */
+LONG J1939ILOnRequest( LONG _pgn, LONG _sa )
+{
+  switch(_pgn) {
+    //
+    // TIRE
+    //
+    case 0xfef4:
+      gTIRERequestInProcess = 1;
+
+      setSignal ( TIRE_TPMS::TireLocation, kTireFrontLeft );
+      setSignal ( TIRE_TPMS::TirePress_00, getValue( EnvTPMS_FrontLeftPressure ) );
+      J1939ILSetMsgEvent( TIRE_TPMS );
+      setSignal ( TIRE_TPMS::TireLocation, kTireFrontRight );
+      setSignal ( TIRE_TPMS::TirePress_01, getValue( EnvTPMS_FrontRightPressure ) );
+      J1939ILSetMsgEvent( TIRE_TPMS );
+      setSignal ( TIRE_TPMS::TireLocation, kTireRear1Left );
+      setSignal ( TIRE_TPMS::TirePress_10, getValue( EnvTPMS_Rear1LeftPressure ) );
+      J1939ILSetMsgEvent( TIRE_TPMS );
+      setSignal ( TIRE_TPMS::TireLocation, kTireRear1Right );
+      setSignal ( TIRE_TPMS::TirePress_11, getValue( EnvTPMS_Rear1RightPressure ) );
+      J1939ILSetMsgEvent( TIRE_TPMS );
+      setSignal ( TIRE_TPMS::TireLocation, kTireRear2Left );
+      setSignal ( TIRE_TPMS::TirePress_20, getValue( EnvTPMS_Rear2LeftPressure ) );
+      J1939ILSetMsgEvent( TIRE_TPMS );
+      setSignal ( TIRE_TPMS::TireLocation, kTireRear2Right );
+      setSignal ( TIRE_TPMS::TirePress_21, getValue( EnvTPMS_Rear2RightPressure ) );
+      J1939ILSetMsgEvent( TIRE_TPMS );
+
+      gTIRERequestInProcess = 0;
+
+      return 0; // do not send response
+    //
+    // TPRI - Tire Pressure Reference Information
+    //
+    case 0xfdb9:
+      setSignal ( TPRI_TPMS::TireLocation      , kTireFrontRight );
+      setSignal ( TPRI_TPMS::ReferenceTirePress, gRefPressure[0][0] );
+      J1939ILSetMsgEvent( TPRI_TPMS );
+      setSignal ( TPRI_TPMS::TireLocation      , kTireFrontRight );
+      setSignal ( TPRI_TPMS::ReferenceTirePress, gRefPressure[0][1] );
+      J1939ILSetMsgEvent( TPRI_TPMS );
+      setSignal ( TPRI_TPMS::TireLocation      , kTireRear1Left );
+      setSignal ( TPRI_TPMS::ReferenceTirePress, gRefPressure[1][0]);
+      J1939ILSetMsgEvent( TPRI_TPMS );
+      setSignal ( TPRI_TPMS::TireLocation      , kTireRear1Right );
+      setSignal ( TPRI_TPMS::ReferenceTirePress, gRefPressure[1][1] );
+      J1939ILSetMsgEvent( TPRI_TPMS );
+      setSignal ( TPRI_TPMS::TireLocation      , kTireRear2Left );
+      setSignal ( TPRI_TPMS::ReferenceTirePress, gRefPressure[2][0] );
+      J1939ILSetMsgEvent( TPRI_TPMS );
+      setSignal ( TPRI_TPMS::TireLocation      , kTireRear2Right );
+      setSignal ( TPRI_TPMS::ReferenceTirePress, gRefPressure[2][1] );
+      J1939ILSetMsgEvent( TPRI_TPMS );
+
+      return 0; // do not send response
+    //
+    // DM3 - Diagnostic data clear/reset of previously active DTCs.
+    //
+    case 0xfecc:
+      dtcClear( gDTCPreviousTable );
+      return 3; // send positive ACK
+    //
+    // DM11 - Diagnostic data clear/Reset for active DTCs
+    //
+    case 0xfed3:
+      dtcClear( gDTCActiveTable );
+      return 3; // send positive ACK
+  }
+
+  return 1; // send response
+}
+/*@@end*/
+
+/*@@caplFunc:J1939ILOnTxPrepare(pg536870910x):*///callback
+/*
+ * IL will send a message
+ *
+ * Use this callback to update the data of the message
+ */
+LONG J1939ILOnTxPrepare( pg CAPL_MSG txPG )
+{
+  dtcCopyToPgBuffer( txPG, k_Node_TPMS );
+
+  return 1; // 1=send message, 0=suppress message
+
+}
+/*@@end*/
+

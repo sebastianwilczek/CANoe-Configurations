@@ -1,0 +1,216 @@
+/*@@var:*/
+/*------------------------------------------------------------------------
+|
+| Modulename : NM_Tester_PT.can
+| Exercise   : Network Management test and display node 
+|
+|-------------------------------------------------------------------------
+|*************************************************************************
+|-------------------------------------------------------------------------
+|                             COPYRIGHT
+|-------------------------------------------------------------------------
+|               Copyright (c) by Vector Informatik GmbH Abt. Support 2002
+|-------------------------------------------------------------------------
+|                     A U T H O R  I D E N T I T Y
+|-------------------------------------------------------------------------
+| Initials	      Name	            Company
+| --------        ----              -------
+|
+| Br	          Alexander Büttner Vector Informatik GmbH Stuttgart 
+|
+|-------------------------------------------------------------------------
+|                          REVISION HISTORY
+|-------------------------------------------------------------------------
+|  Date	     Ver     Author	       Description
+|  ----      ---     ------        ------------
+|
+| 30.08.02   1.0      Br           Creation
+| 24.02.04   1.1      Br           Modified 
+|
+| -------------------------------------------------------------------------
+*/
+
+variables
+{
+  int gNMStatus[64];
+  int gNMReceiver[64];
+  int gBusSleep;
+
+  message NMMessage  mnmNMMessage;
+  msTimer tWakeUpDsp;
+  msTimer tResetBusComActive;
+
+  const long gNodeAddGateway = 0x1A;
+  const long gNodeAddEngine  = 0x1B;
+
+  enum enumNM_State{ALIVE = 1, RING = 2, SLEEP_IND = 3, SLEEP_ACK = 4};
+}
+/*@@end*/
+
+/*@@msg:CAN2.0x500-0x540:*/
+on message CAN2.0x500-0x540
+{
+  int iSgNr;
+  int iBusSleep;
+
+  iSgNr = this.ID - 0x500;
+
+  if((iSgNr >= 0) && (iSgNr < 0x40))    // NM-ID
+  {
+    mnmNMMessage = (message NMMessage)this;
+    gNMReceiver[iSgNr] = mnmNMMessage.NM_CmdReceiver;
+
+    DisplayAllReceivers();
+
+    if      (mnmNMMessage.byte(1) == 0x01)   gNMStatus[iSgNr] = ALIVE; 
+    else if (mnmNMMessage.byte(1) == 0x02)   gNMStatus[iSgNr] = RING; 
+    else if (mnmNMMessage.byte(1) == 0x12)   gNMStatus[iSgNr] = SLEEP_IND; 
+    else if (mnmNMMessage.byte(1) == 0x32)   gNMStatus[iSgNr] = SLEEP_ACK; 
+    //--------------------------------------------------------
+
+    switch(iSgNr)
+    {
+      case gNodeAddGateway:  
+        if(gNMStatus[iSgNr] == SLEEP_IND)  
+        {
+          @sysvar::NMTester::NMSleepIndDsp26_PT = 1; 
+          @sysvar::NMTester::NMStatusDsp26_PT = 2;
+        }
+        else 
+        {
+          @sysvar::NMTester::NMSleepIndDsp26_PT = 0; 
+        }
+
+        if(gNMStatus[iSgNr] == SLEEP_ACK)  
+        {
+          @sysvar::NMTester::NMSleepAckDsp26_PT = 1; 
+          @sysvar::NMTester::NMStatusDsp26_PT = 2;
+        }
+        else 
+        {
+          @sysvar::NMTester::NMSleepAckDsp26_PT = 0;  
+        }
+
+        if(gNMStatus[iSgNr] == ALIVE || gNMStatus[iSgNr] == RING) 
+          @sysvar::NMTester::NMStatusDsp26_PT = gNMStatus[gNodeAddGateway];
+                     
+      break;
+      case gNodeAddEngine:	
+        if(gNMStatus[iSgNr] == SLEEP_IND)  
+        {
+          @sysvar::NMTester::NMSleepIndDsp27_PT = 1; 
+          @sysvar::NMTester::NMStatusDsp27_PT = 2;
+        }
+        else 
+        {
+          @sysvar::NMTester::NMSleepIndDsp27_PT = 0;
+        }
+
+        if(gNMStatus[iSgNr] == SLEEP_ACK)  
+        {
+          @sysvar::NMTester::NMSleepAckDsp27_PT = 1; 
+          @sysvar::NMTester::NMStatusDsp27_PT = 2;
+        }
+        else 
+        {
+          @sysvar::NMTester::NMSleepAckDsp27_PT = 0;  
+        }
+
+        if(gNMStatus[iSgNr] == ALIVE || gNMStatus[iSgNr] == RING) 
+          @sysvar::NMTester::NMStatusDsp27_PT = gNMStatus[gNodeAddEngine];                 
+        break;
+    }
+
+    // WakeUp 
+    if (gNMStatus[iSgNr] == 1) 
+    {	
+      if (iBusSleep == 1) 
+      {	
+        ResetLEDAfterWakeUp();
+        // Set the WakeUp-Dsp
+        switch(iSgNr)
+        {
+          case gNodeAddGateway:  @sysvar::NMTester::NMWakeUpDsp26_PT = 0;  break;
+          case gNodeAddEngine:	 @sysvar::NMTester::NMWakeUpDsp27_PT = 0;  break;
+        }
+        cancelTimer(tWakeUpDsp);
+        setTimer(tWakeUpDsp,1500); //reset wakeup display via this timer
+      }	
+      iBusSleep = 0;
+    }	
+
+    //SleepAcknowledge is used like a BusSleep
+    if (mnmNMMessage.NM_SleepAck && mnmNMMessage.NM_SleepInd)
+    {  
+      iBusSleep = 1;
+
+      //set mode display to grey 
+      @sysvar::NMTester::NMStatusDsp26_PT = 0;
+      @sysvar::NMTester::NMStatusDsp27_PT = 0;
+    }
+  } 
+}
+/*@@end*/
+
+/*@@timer:tWakeUpDsp:*/
+on timer tWakeUpDsp
+{
+  @sysvar::NMTester::NMWakeUpDsp26_PT = 0;
+  @sysvar::NMTester::NMWakeUpDsp27_PT = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:DisplayAllReceivers():*/
+DisplayAllReceivers ()
+{
+  @sysvar::NMTester::NMReceiver26_PT = gNMReceiver[gNodeAddGateway];
+  @sysvar::NMTester::NMReceiver27_PT = gNMReceiver[gNodeAddEngine];
+}
+/*@@end*/
+
+/*@@msg:CAN2.*:*/
+on message CAN2.*
+{
+  cancelTimer(tResetBusComActive);
+  @sysvar::NMTester::BusCommActiveDisplay_PT = 1;
+  setTimer(tResetBusComActive,100);
+}
+/*@@end*/
+
+/*@@timer:tResetBusComActive:*/
+on timer tResetBusComActive
+{
+  @sysvar::NMTester::BusCommActiveDisplay_PT = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:ResetLEDAfterWakeUp():*///function
+ResetLEDAfterWakeUp ()
+{
+  @sysvar::NMTester::NMSleepIndDsp27_PT = 0; 
+  @sysvar::NMTester::NMSleepAckDsp27_PT = 0;  
+  @sysvar::NMTester::NMSleepIndDsp26_PT = 0; 
+  @sysvar::NMTester::NMSleepAckDsp26_PT = 0;  
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NMTester::NMOnOff26_PT:*/
+on sysvar_update sysvar::NMTester::NMOnOff26_PT
+{
+  gNMStatus[gNodeAddGateway] = 0; 
+  @sysvar::NMTester::NMSleepIndDsp26_PT = 0; 
+  @sysvar::NMTester::NMSleepAckDsp26_PT = 0; 
+  @sysvar::NMTester::NMStatusDsp26_PT = 0;
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NMTester::NMOnOff27_PT:*/
+on sysvar_update sysvar::NMTester::NMOnOff27_PT
+{
+  gNMStatus[gNodeAddEngine] = 0; 
+  @sysvar::NMTester::NMSleepIndDsp27_PT = 0; 
+  @sysvar::NMTester::NMSleepAckDsp27_PT = 0; 
+  @sysvar::NMTester::NMStatusDsp27_PT = 0;
+}
+/*@@end*/
+

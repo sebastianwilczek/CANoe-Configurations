@@ -1,0 +1,553 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "J1939.can" 
+  #include "J1939DTC.can"
+}
+
+/*
+ * TECU - Transmission Electronic Control Unit     Version 1.4  
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Jr) Created 
+ * 1.1 (Jr) Use J1939 Interaction Layer now
+ * 1.2 (Jr) Send DM1 always
+ * 1.3 (Wfk) Parameter for gShiftState = kFitSpeed set to 0.7 (was 0.9)
+ * 1.4 (Wfk) ACKM with reserved bytes set to 0xFF
+ *           TSC1_TECU_EMS is sent cyclically at least with 1000ms
+ *           and uses ControlPurpose = Temporary Powertrain Control (P32) always 
+ *           TSC1 signal names shortened
+ *           J1939ILControlStop(1) suppresses 'Cannot Claim Address'
+ */
+variables
+{
+  // Shift states
+  const BYTE kShiftComplete      = 0;
+  const BYTE kReduceEngineTorque = 1;
+  const BYTE kClutchDisengaging  = 2;
+  const BYTE kShifting           = 3;
+  const BYTE kFitSpeed           = 4;
+  const BYTE kClutchEngaging     = 5;
+
+  const float kMaxEngineSpeed    = 2400;     // Max. engine speed
+  const int   kMaxGear           = 5;
+  float       kGearRation[6]     = { 0.0, 0.001, 0.003, 0.005, 0.006, 0.007 };
+
+  // ECU information
+  char gNodeName[32]     = "TECU";   // Name of the node, is used for output to write window
+  char gECUID[40]        = "V-TECU6-04*PON0609271*POWERTRAIN*TECU*";
+  char gSOFT[32]         = "\003V1.0*REV-A-CAPL*2006-09-27*";
+  char gVI[32]           = "VECTOR2006-09-27X*";
+
+  // communication variables
+  pg EEC1_EMS RX_EEC1;                       // RX Buffer: Electronic Engine Control #1
+  pg TC1      RX_TC1;                        // RX Buffer: Transmission Control
+
+  // simulation variables
+  int   gShiftState = kShiftComplete;
+  int   gActualGear = 0;                  // Actual selected gear;
+  float gClutchSlip = 1.0;                // Clutch slip in [%]
+
+  // 
+  const int   kSystemTime    = 100;                  // System time in [ms]
+  const float kSystemTimeSec = kSystemTime / 1000.0; // System time in [sec]
+  msTimer     SystemTimer;                           // System timer
+}
+
+/*
+ * Start up EMS
+ *
+ * Begin address claiming. After successfully claiming
+ * an address, start sending cyclic messages.
+ */
+void TECUStartUp()
+{
+  @sysvar::Powertrain::TECU::ILEnable = 1;
+
+  if(J1939ILGetState() != 2)//don'tstart if already 'Active'
+    J1939ILControlStart();
+
+  J1939ILSetMsgRawData( ECUID , strlen(gECUID), gECUID );
+  J1939ILSetMsgRawData( SOFT  , strlen(gSOFT) , gSOFT );
+
+  // Send DM1
+  dtcActivate( 1 );
+
+  // Send TSC1_TECU_EMS
+  sendTSC1( kShiftComplete );
+
+
+  UpdateControls();
+
+  cancelTimer( SystemTimer );
+  setTimer( SystemTimer, kSystemTime );
+}
+
+on start
+{
+  if ((@sysvar::Powertrain::TECU::ILEnable == 1) && (getValue(EnvIgnitionSwitch) >= 1)) {
+    TECUStartUp();
+  }
+}
+
+/*
+ * Shut down EMS
+ *
+ * Send cannot claim address and stop sending messages
+ */
+void TECUShutDown()
+{
+  J1939ILControlStop(1);
+
+  cancelTimer( SystemTimer );
+
+  @sysvar::Powertrain::TECU::ILEnable = 0;
+}
+
+on sysvar sysvar::Powertrain::TECU::ILEnable
+{
+  if (@sysvar::Powertrain::TECU::ILEnable == 1) {
+    TECUStartUp();
+  }
+  else {
+    TECUShutDown();
+  }
+}
+
+/*
+ * This system timer calculates the simulated values.
+ *
+ * Note: This is not a physically correct calcluation of an
+ *       Transmission. It just calculates some realistic looking values.
+ */
+on timer SystemTimer
+{
+  pg ACKM ackm;
+  float   ratio;
+  float   outputSpeed;
+  float   inputSpeed;
+  int     setGear;
+  int     resetCounter;
+  int  i = 0;
+
+  // initialize PG with 0xFF
+  for (i=0; i<8; i++) ackm.Byte(i) = 0xFF;
+
+  if (getValue(EnvTECU_SimulationMode) == EnvTECU_SimulationMode::SimulateValues) {
+    // handle Transmission Command
+    if (RX_TC1.SA != kNullAddr) {
+      // if an ECU has sent a shift request, do the shift.
+      if (   (gShiftState == kShiftComplete) 
+          && (RX_TC1.TransRqedGear < kMaxGear))
+      {
+        putValue( EnvTECU_Gear, RX_TC1.TransRqedGear );
+        putValue( EnvTECU_GearBitmap, 0 );
+      }
+      else {
+        // cannot do requested shift, send NACK
+        ackm.DA          = kGlobalAddr;
+        ackm.ControlByte = 1;
+        ackm.AddressNegativeAcknowledgement = RX_TC1.SA;
+        ackm.ParameterGroupNumber           = RX_TC1.PGN;
+        output( ackm );
+
+        RX_TC1.SA = kNullAddr;
+      }
+    }
+
+    // get EnvVar values
+    setGear     = getValue( EnvTECU_Gear );
+    outputSpeed = getValue( EnvTECU_OutputShaftSpeed );
+    inputSpeed  = getValue( EnvTECU_InputShaftSpeed );
+
+    // calculate simulated values
+    resetCounter++;
+    switch(gShiftState) {
+      case kShiftComplete:
+        ratio = kGearRation[gActualGear];
+
+        if (gActualGear != setGear) {
+          gShiftState  = kReduceEngineTorque;
+          resetCounter = 0;
+          sendTSC1( kReduceEngineTorque );
+        }
+        break;
+      case kReduceEngineTorque:
+        ratio = kGearRation[gActualGear];
+
+        if (RX_EEC1.ActualEngPercentTorque.phys <= 5.0) {
+          gShiftState = kClutchDisengaging;
+        }
+        break;
+      case kClutchDisengaging:
+        gClutchSlip -= 0.2;
+        if (gClutchSlip < 0.2) {
+          gShiftState = kShifting;
+        }
+
+        if (gClutchSlip > 0.5) {
+          ratio = kGearRation[gActualGear];
+        }
+        else {
+          ratio = 0;
+        }
+        break;
+      case kShifting:
+        gActualGear = setGear;
+
+        gShiftState = kFitSpeed;
+        sendTSC1( kFitSpeed );
+
+        break;
+      case kFitSpeed:
+        if (kGearRation[gActualGear] <= 0.0) {
+          gShiftState = kClutchEngaging;
+        }
+        else if (inputSpeed > 0.7*outputSpeed/kGearRation[gActualGear]) {
+          gShiftState = kClutchEngaging;
+        }
+        break;
+      case kClutchEngaging:
+        gClutchSlip += 0.2;
+        if (gClutchSlip > 0.8) {
+          gShiftState = kShiftComplete;
+          RX_TC1.SA   = kNullAddr;
+          sendTSC1( kShiftComplete );
+        }
+
+        if (gClutchSlip > 0.5) {
+          ratio = kGearRation[gActualGear];
+        }
+        else {
+          ratio = 0;
+        }
+        break;
+    }
+
+    // if automatic shifting does not set the gear after 2 sec. reset states.
+    if ((resetCounter > 20) && (gShiftState != kShiftComplete)) {
+      gShiftState = kShiftComplete;
+      gActualGear = setGear;
+      ratio       = kGearRation[gActualGear];
+      RX_TC1.SA   = kNullAddr;
+      sendTSC1( kShiftComplete );
+    }
+
+    // update EnvVars
+    putValue( EnvTECU_GearRatio, ratio );
+    putValue( EnvTECU_GearBitmap, (gShiftState == kShiftComplete) ? gActualGear+1 : 0 );
+
+    // update TX signals
+    setSignal( ETC1_TECU::TransInputShaftSpeed, inputSpeed );
+    setSignal( ETC1_TECU::TransInputShaftSpeed , RX_TC1.SA );
+    setSignal( ETC1_TECU::PercentClutchSlip    , gClutchSlip * 100.0 );
+    setSignal( ETC1_TECU::TransDrivelineEngaged, (ratio > 0) ? 1 : 0 );
+    setSignal( ETC1_TECU::TransOutputShaftSpeed, outputSpeed*100 );
+    setSignal( ETC1_TECU::TransShiftInProcess  , (gShiftState != kShiftComplete) ? 1 : 0 );
+    setSignal( ETC2_TECU::TransCurrentGear     , gActualGear );
+    setSignal( ETC2_TECU::TransSelectedGear    , setGear );
+    setSignal( ETC2_TECU::TransActualGearRatio , ratio );
+  }
+
+  setTimer( SystemTimer, kSystemTime );
+}
+
+/*
+ * Clip the value to the range of min and max
+ */
+float utilRange( float value, float min, float max )
+{
+  if (value < min) return min;
+  if (value > max) return max;
+
+  return value;
+}
+
+/*
+ * IL will send a message
+ *
+ * Use this callback to update the data of the message
+ */
+LONG J1939ILOnTxPrepare( pg CAPL_MSG txPG )
+{
+  long i, j, count, pos, fmi;
+
+  switch( txPG.PF ) {
+    default:
+      dtcCopyToPgBuffer( txPG );
+      break;
+  }
+
+  return 1; // 1=send message, 0=suppress message
+}
+
+/*
+ * IL has sent a message
+ */
+void J1939ILOnTxMessage( pg * txPG )
+{
+  switch( txPG.PGN ) {
+  }
+}
+
+/*
+ * IL has sent received a request
+ *
+ * return 0 - do not respond
+ *        1 - answer the request
+ *        2 - answer with a NACK
+ *        3 - answer with positive ACK
+ *
+ *     _pgn - requested PGN
+ *     _sa  - sender address of the request
+ */
+LONG J1939ILOnRequest( LONG _pgn, LONG _sa )
+{
+  switch(_pgn) {
+    //
+    // DM3 - Diagnostic data clear/reset of previously active DTCs.
+    //
+    case 0xfecc:
+      dtcClear( gDTCPreviousTable );
+      return 3; // send positive ACK
+    //
+    // DM11 - Diagnostic data clear/Reset for active DTCs
+    //
+    case 0xfed3:
+      dtcClear( gDTCActiveTable );
+      return 3; // send positive ACK
+  }
+
+  return 1; // send response
+}
+
+/*
+ * IL has sent a message
+ */
+void J1939ILOnError( LONG errorCode, LONG additionalParam )
+{
+  write( "<%s> Error %d, additional %d", gNodeName, errorCode, additionalParam );
+}
+
+/*
+ * IL has changed its state
+ *
+ * state - 0 = Initialized
+ *         1 = Claiming
+ *         2 = Active
+ *         3 = Stopped
+ *         4 = Suspended
+ */
+void J1939ILOnChangedState( LONG state )
+{
+  switch( state ) {
+    case 1: // Claiming
+//      write( "<%s> Claiming", gNodeName );
+      break;
+    case 2: // Active
+//      write( "<%s> Active", gNodeName );
+      break;
+    case 3: // Stopped
+//      write( "<%s> Stopped", gNodeName );
+      break;
+    case 4: // Suspended
+//      write( "<%s> Suspended", gNodeName );
+      break;
+  }
+}
+
+void UpdateControls()
+{
+  int enable;
+  long bkColor;
+
+  enable  = (getValue(EnvTECU_SimulationMode) != EnvTECU_SimulationMode::SimulateValues) ? 1 : 0;
+  bkColor = (enable == 1) ? MakeRGB(255,255,255) : MakeRGB(229,229,229);
+
+  enableControl( "TECU", "InputShaftSpeedSlider" , enable );
+  enableControl( "TECU", "InputShaftSpeedEdit"   , enable );
+  setControlBackColor( "TECU", "InputShaftSpeedEdit"   , bkColor);
+  enableControl( "TECU", "OutputShaftSpeedSlider", enable );
+  enableControl( "TECU", "OutputShaftSpeedEdit"  , enable );
+  setControlBackColor( "TECU", "OutputShaftSpeedEdit"   , bkColor);
+  enableControl( "TECU", "CurrentGearSlider"     , enable );
+  enableControl( "TECU", "CurrentGearEdit"       , enable );
+  setControlBackColor( "TECU", "CurrentGearEdit"   , bkColor);
+  
+}
+
+on envVar EnvTECU_SimulationMode
+{
+  UpdateControls();
+}
+
+on envVar EnvIgnitionSwitch
+{
+  if (getValue(this) == 1) {
+    TECUStartUp(); 
+  }
+  else if (getValue(this) == 0) {
+    TECUShutDown();
+  }
+}
+
+on preStart
+{
+  J1939ILControlInit();  
+}
+
+/*
+ * Handle EEC1 message
+ */
+on pg EEC1_EMS
+{
+  if (!J1939ILAcceptRxPG(this)) return;
+
+  RX_EEC1.SA = this.SA;
+  RX_EEC1.DWORD(0) = this.DWORD(0);
+  RX_EEC1.DWORD(4) = this.DWORD(4);
+}
+
+/*
+ * Handle TC1 message
+ */
+on pg TC1
+{
+  if (!J1939ILAcceptRxPG(this)) return;
+
+  if (RX_TC1.SA == kNullAddr) {
+    // accept TC1 only, if no other ECU controls the TECU
+    RX_TC1.SA       = this.SA;
+    RX_TC1.DWORD(0) = this.DWORD(0);
+    RX_TC1.DWORD(4) = this.DWORD(4);
+  }
+}
+
+/*
+ * Shift Down with Page Down
+ */
+on key PageDown
+{
+  ShiftDown();
+}
+
+/*
+ * Shift up with Page Up
+ */
+on key PageUp
+{
+  ShiftUp();
+}
+
+void ShiftUp()
+{
+  int gear;
+
+  gear = getValue( EnvTECU_Gear );
+  if (gear < kMaxGear) {
+    putValue( EnvTECU_Gear, gear + 1 );
+    putValue( EnvTECU_GearBitmap, 0 );
+  }
+}
+
+void ShiftDown()
+{
+  int gear;
+
+  gear = getValue( EnvTECU_Gear );
+  if (gear > 0) {
+    putValue( EnvTECU_Gear, gear - 1 );
+    putValue( EnvTECU_GearBitmap, 0 );
+  }
+}
+
+/*
+ * Send TSC1
+ */
+void sendTSC1( LONG what )
+{
+  float ratio;
+
+  switch(what) {
+    case kReduceEngineTorque:
+      setSignal( TSC1_TECU_EMS::EngOverrideCtrlMode , 2 /* Torque control */ );
+      setSignal( TSC1_TECU_EMS::OverrideCtrlModePrio, 0 /* Highest priority */ );
+      setSignal( TSC1_TECU_EMS::EngRqedSpeedCtrlCond, 1 /* StabilityOpt_disengaged/non-lockup */ );
+      setSignal( TSC1_TECU_EMS::EngRqed_TorqueLimit , 0.0 );
+      J1939ILSetSignalRaw( TSC1_TECU_EMS::EngRqed_SpeedLimit, 0xffff );
+      setSignal( TSC1_TECU_EMS::TransmissionRate    , 5 ); // 50ms
+      setSignal( TSC1_TECU_EMS::ControlPurpose      , 0x1f ); // Temp PT Ctrl (P32)
+      J1939ILSetMsgCycleTime(TSC1_TECU_EMS, 50 );
+      break;
+    case kFitSpeed:
+      setSignal( TSC1_TECU_EMS::EngOverrideCtrlMode  , 1 /* Speed control */ );
+      setSignal( TSC1_TECU_EMS::OverrideCtrlModePrio , 0 /* Highest priority */ );
+      setSignal( TSC1_TECU_EMS::EngRqedSpeedCtrlCond , 1 /* StabilityOpt_disengaged/non-lockup */ );
+      J1939ILSetSignalRaw( TSC1_TECU_EMS::EngRqed_TorqueLimit  , 0xff );
+      setSignal( TSC1_TECU_EMS::TransmissionRate     , 5 ); // 50ms
+      setSignal( TSC1_TECU_EMS::ControlPurpose       , 0x1f ); // Temp PT Ctrl (P32)
+      ratio = getValue( EnvTECU_GearRatio );
+      if (ratio > 0) {
+        setSignal( TSC1_TECU_EMS::EngRqed_SpeedLimit, getValue( EnvTECU_OutputShaftSpeed ) / ratio );
+      }
+      else {
+        setSignal( TSC1_TECU_EMS::EngRqed_SpeedLimit, 1500.0 );
+      }
+      J1939ILSetMsgCycleTime(TSC1_TECU_EMS, 50 );
+      break;
+    case kShiftComplete:
+      J1939ILSetSignalRaw( TSC1_TECU_EMS::EngOverrideCtrlMode , 0 /* Override disabled */ );
+      J1939ILSetSignalRaw( TSC1_TECU_EMS::OverrideCtrlModePrio, 3 /* Low priority */ );
+      J1939ILSetSignalRaw( TSC1_TECU_EMS::EngRqedSpeedCtrlCond, 0x03 );
+      J1939ILSetSignalRaw( TSC1_TECU_EMS::EngRqed_TorqueLimit , 0xff );
+      J1939ILSetSignalRaw( TSC1_TECU_EMS::EngRqed_SpeedLimit  , 0xffff );
+      J1939ILSetSignalRaw( TSC1_TECU_EMS::TransmissionRate    , 0x0 ); // 1000ms
+      J1939ILSetSignalRaw( TSC1_TECU_EMS::ControlPurpose      , 0x1f ); // Temp PT Ctrl (P32)
+      //J1939ILSetMsgEvent(TSC1_TECU_EMS );
+      J1939ILSetMsgCycleTime(TSC1_TECU_EMS, 1000 );
+      break;
+  }
+}
+
+on envVar EnvTECU_ShiftUp
+{
+  if (getValue(this) == 1) {
+    ShiftUp();
+  }
+}
+
+on envVar EnvTECU_ShiftDown
+{
+  if (getValue(this) == 1) {
+    ShiftDown();
+  }
+}
+
+/*
+ * Active DTC for OilTemp signal.
+ */
+on envVar EnvTECU_FaultOilTemp
+{
+  if (getValue(this) == 1) {
+    dtcActivate( 177, kFMI_BelowNormalCritical );
+  }
+  else {
+    dtcDeactivate( 177, kFMI_BelowNormalCritical );
+  }
+}
+
+/*
+ * Active DTC for Input Shaft Speed signal.
+ */
+on envVar EnvTECU_FaultInputShaftSpeed
+{
+  if (getValue(this) == 1) {
+    dtcActivate( 161, kFMI_BelowNormalCritical );
+  }
+  else {
+    dtcDeactivate( 161, kFMI_BelowNormalCritical );
+  }
+}
+

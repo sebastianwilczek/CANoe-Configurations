@@ -1,0 +1,245 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+variables
+{
+  const word kTIMER_WEIGHT = 100;
+  const dword kDEFAULT_ARP_TABLE_RESET_TIME = 60000 * kTIMER_WEIGHT; // arp delete timer[ms]
+  
+  // ARP Entry Type
+  enum EntryType 
+  {
+    static = 0, 
+    dynamic = 1 
+  };
+  
+  const int kARP_TABLE_CNT = 100;  // ARP Table count
+  
+  // arp table struct
+  struct _ARPtable
+  {    
+    dword dwIpAdress;   // Internet Address    
+    qword qwMacAdress;  // Physical Address    
+    enum EntryType entryType; // ARP Entry Type    
+    dword dwLastUsedTime;  // Last used time(for use ARP management)
+  } gArpTable[kARP_TABLE_CNT];
+  
+  // ARP Table management timer
+  msTimer arpTimer;
+  
+  dword gdwArpTableResetTime = kDEFAULT_ARP_TABLE_RESET_TIME; // arp delete timer
+  const int kTIMER_INTERVAL = 100; // arp table delete timer interval[ms]
+  
+  struct _Token_Eth_Packet gArpCache[int64];
+}
+
+// start event
+on start
+{
+  initArpTable();
+  
+  setTimer(arpTimer, kTIMER_INTERVAL);
+}
+
+
+// ARP Table management timer elapsed event
+on timer arpTimer
+{
+  int i;
+  
+  // search for arp table
+  for(i = 0; i < elCount(gArpTable); i++)
+  {
+    if(isEnableArpTable(i) == 0)
+    {
+      continue;
+    } 
+    
+    // delete unused ARP table for a certain period of time
+    if(abs(timeNow() - gArpTable[i].dwLastUsedTime) > gdwArpTableResetTime)
+    {
+      clearArpTable(i);
+    }    
+  }
+  
+  setTimer(arpTimer, kTIMER_INTERVAL);
+}
+
+/// <ArpTableTimer>
+// set ARP table management timer's evenet interbal
+void setArpTimerTime(dword time)
+{
+  // stop timer
+  cancelTimer(arpTimer);
+  
+  gdwArpTableResetTime = time * kTIMER_WEIGHT;
+
+  // restart timer
+  setTimer(arpTimer, kTIMER_INTERVAL);
+}
+
+/// <ArpTableTimer>
+// initialization ARP table management timer's evenet interbal
+void initArpTimerTime()
+{
+  // stop timer
+  cancelTimer(arpTimer);
+  
+  gdwArpTableResetTime = kDEFAULT_ARP_TABLE_RESET_TIME;
+
+  // restart timer
+  setTimer(arpTimer, kTIMER_INTERVAL);
+}
+
+/// <clearArpTable>
+// initialize ALL arp table
+void initArpTable()
+{
+  int i = 0;
+  
+  // initialize arp table
+  for(i = 0; i < elCount(gArpTable); i++)
+  {
+    clearArpTable(i);
+  }
+  
+  // initialize arp delete timer
+  initArpTimerTime(); 
+}
+
+/// <clearArpTable>
+// Initialize specified ARP table number data
+void clearArpTable(int i)
+{
+  gArpTable[i].dwIpAdress = 0;
+  gArpTable[i].qwMacAdress = 0;
+  gArpTable[i].entryType = static;
+  gArpTable[i].dwLastUsedTime = 0;
+}
+
+/// <clearArpTable>
+// delete ARP table of a combination of specified IP and MAC address
+void clearArpTable(dword ip, qword mac)
+{
+  int i = 0;
+  
+  for(i = 0; i < elCount(gArpTable); i++)
+  {
+    if(gArpTable[i].dwIpAdress == ip && gArpTable[i].qwMacAdress == mac)
+    {
+      clearArpTable(i);
+    }
+  }
+}
+
+// set ARP table of a combination of specified IP and MAC address
+// ret 1:succeed 0:failued
+int setArpTable(dword ip, qword mac, enum EntryType type)
+{
+  int i = 0;
+  
+  // search for same IP adress
+  i = getArpTableNo(ip);
+  
+  // when the same IP address is not in the ARP table
+  if(i < 0)
+  {
+    // search for an empty arp table
+    for(i = 0; i < elCount(gArpTable); i++)
+    {
+      // check if ARP table is available
+      if(isEnableArpTable(i) == 0)
+      {        
+        break;
+      }  
+    }
+  }      
+    
+  // check out of range
+  if(elCount(gArpTable) <= i)
+  {
+    return 0;
+  }
+  
+  // set ARP table
+  gArpTable[i].dwIpAdress = ip;
+  gArpTable[i].qwMacAdress = mac;
+  gArpTable[i].entryType = type;
+  gArpTable[i].dwLastUsedTime = timeNow();
+  
+  if(gArpCache.ContainsKey(ip))
+  {
+    gArpCache[ip].qwDestination = mac;
+    sendPacket(gArpCache[ip]);
+    gArpCache.Remove(ip);
+  }
+  
+  return 1;
+}
+
+// Check if ARP table number is available
+// ret 1:using 0:not using
+int isEnableArpTable(int i)
+{
+  if(gArpTable[i].dwIpAdress == 0 && gArpTable[i].qwMacAdress == 0 && gArpTable[i].entryType == static)
+  {
+    return 0;
+  } 
+  
+  return 1;
+}
+
+// get arp table number from ip address
+// ret -1>:ip address isn't set to arp table 0>:arp table number
+int getArpTableNo(dword iAdress)
+{
+  int i = 0;
+    
+  // search for arp table
+  for(i = 0; i < elCount(gArpTable); i++)
+  {
+    if(gArpTable[i].dwIpAdress == iAdress)
+    {
+      break;
+    }  
+  }
+    
+  // check out of range
+  if(i < 0 || elCount(gArpTable) <= i)
+  {
+    return -1;
+  }
+      
+  return i;
+}
+
+int getArpTableNo(dword iAddress, struct _Token_Eth_Packet sendData)
+{
+  int i = -1;  
+  i = getArpTableNo(iAddress);
+  
+  if(i == -1) memcpy(gArpCache[iAddress], sendData);
+  
+  return i;
+}

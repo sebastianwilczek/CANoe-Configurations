@@ -1,0 +1,151 @@
+/*@!Encoding:1252*/
+variables
+{
+  //
+  // Working set master for the loader
+  //
+  // (c) 2001-2012 Vector Informatik GmbH
+  //
+
+   int gLoaderInc = 10;    // Increase/decrease loader position by this value
+  int gBucketInc = 10;    // Increase/decrease bucket position by this value
+
+  msTimer gPressureTimer;        // Timer for hydraulic pressue  
+}
+
+on start
+{
+}
+
+//
+// Timer for loader pressue
+//
+on timer gPressureTimer
+{
+  int i;
+
+  if (Iso11783IL_OPGetState() == 5) 
+  {
+    i = 55 + random( 10 );
+    @sysvar::ISO11783Bus::Loader::OP::OBJ00010_numberVariable::value = i;
+  }
+
+  setTimer( gPressureTimer, 500 );
+}
+
+//
+// Set the environment variable for the loader bitmap
+//
+updateLoaderBitmap ()
+{
+  int loaderPos, bucketPos;
+  loaderPos = @sysvar::ISO11783Bus::Loader::OP::OBJ00104_lineBarGraph::value;
+  bucketPos = @sysvar::ISO11783Bus::Loader::OP::OBJ00106_lineBarGraph::value;
+  if ((loaderPos < 50) && (bucketPos < 50)) {
+    @ISO11783Bus::Loader::svLoaderBitmap = 0;
+  }
+  else if ((loaderPos >= 50) && (bucketPos < 50)) {
+    @ISO11783Bus::Loader::svLoaderBitmap = 2;
+  }
+  else if ((loaderPos < 50) && (bucketPos >= 50)) {
+    @ISO11783Bus::Loader::svLoaderBitmap = 3;
+  }
+  else if ((loaderPos >= 50) && (bucketPos >= 50)) {
+    @ISO11783Bus::Loader::svLoaderBitmap = 1 ;
+  }
+}
+
+void Iso11783IL_OPOnAuxiliaryInput( DWORD objectID, DWORD value1, DWORD value2 )
+{
+  if (value1) 
+  {
+    switch(objectID) 
+    {
+      // Loader up
+      case 1000:
+        ChangeLoaderPos(gLoaderInc);
+        break;
+
+      // Loader down
+      case 1001:
+        ChangeLoaderPos(0 - gLoaderInc);
+        break;
+
+      // Bucket up
+      case 1002:
+        ChangeBucketPos(gBucketInc);
+        break;
+
+      // Bucket down
+      case 1003:
+        ChangeBucketPos(0 - gBucketInc);
+        break;
+    }
+    updateLoaderBitmap();
+  }
+}
+
+void Iso11783IL_OPOnKeyActivation( DWORD objectID, DWORD parentID, DWORD keyCode, DWORD activation )
+{
+  if (activation > 0) {
+    switch(keyCode) {
+
+      // Loader up
+      case 1:
+        ChangeLoaderPos(gLoaderInc);
+        break;
+
+      // Loader down
+      case 2:
+        ChangeLoaderPos(0 - gLoaderInc);
+        break;
+
+      // Bucket up
+      case 3:
+        ChangeBucketPos(gBucketInc);
+        break;
+
+      // Bucket down
+      case 4:
+        ChangeBucketPos(0 - gBucketInc);
+        break;
+    }
+    updateLoaderBitmap();
+  }
+}
+
+void Iso11783IL_OPOnStateChange ( DWORD state )
+{
+  if (state == 5) 
+  {
+    cancelTimer( gPressureTimer );
+    setTimer( gPressureTimer, 500 );
+
+    updateLoaderBitmap();
+  }
+}
+
+ChangeLoaderPos (int difference )
+{
+  int loaderPos;
+  loaderPos = @sysvar::ISO11783Bus::Loader::OP::OBJ00104_lineBarGraph::value + difference;
+  if (loaderPos > 100) 
+    loaderPos = 100;
+  else if(loaderPos < 0)
+    loaderPos = 0;
+  
+  @sysvar::ISO11783Bus::Loader::OP::OBJ00104_lineBarGraph::value = loaderPos;
+}
+
+ChangeBucketPos (int difference)
+{
+  int bucketPos;
+  bucketPos = @sysvar::ISO11783Bus::Loader::OP::OBJ00106_lineBarGraph::value + difference;
+  if (bucketPos > 100) 
+    bucketPos = 100;
+  else if(bucketPos < 0)
+    bucketPos = 0;
+  
+  @sysvar::ISO11783Bus::Loader::OP::OBJ00106_lineBarGraph::value = bucketPos;
+}
+

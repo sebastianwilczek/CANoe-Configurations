@@ -1,0 +1,115 @@
+/*@!Encoding:1252*/
+
+variables
+{
+  TcpSocket gSocket;
+  char      gRxBuffer[1500];
+}
+
+on sysvar_update sysvar::Client::Connect
+{
+  // on button up...
+  if (@this == 0)
+  {
+    // Open an TCP socket. As source address 0.0.0.0 is used, this means that
+    // the configure address of the TCP/IP stack is used. See TCP/IP stack
+    // configuration dialog in the simulation setup.
+    // As TCP port number, we use no port. This means the TCP/IP stack used a
+    // dynamically assigned port number
+    gSocket = TcpSocket::Open( IP_Endpoint(0.0.0.0) );
+    
+    if (IpGetLastError() != 0)
+    {
+      // if UdpSocket::Open fails, we print a message to the write window
+      write( "<%BASE_FILE_NAME%> TcpSocket::Open failed with reauls %d", IpGetLastError() );
+      return;
+    }
+    
+    // Connect to server
+    gSocket.Connect( IP_Endpoint( 192.168.1.1:40001) );
+    
+    if ((gSocket.GetLastSocketError() != 0) && (gSocket.GetLastSocketError() != 10035))
+    {
+      char errorString[100];
+      
+      // if ReceiveFrom fails, we print a message to the write window
+      gSocket.GetLastSocketErrorAsString( errorString, elcount(errorString) );
+      write( "<%BASE_FILE_NAME%> TCPSocket::Connect failed with result %d (%s)", gSocket.GetLastSocketError(), errorString );
+    }
+
+    // update control state
+    enableControl( "Client", "ConnectButton", 0 );
+    enableControl( "Client", "CloseButton", 1 );
+  }
+}
+
+on sysvar_update sysvar::Client::Close
+{
+  // on button up...
+  if (@this == 0)
+  {
+    // Close socket
+    gSocket.Close();
+
+    // update control state
+    enableControl( "Client", "ConnectButton", 1 );
+    enableControl( "Client", "CloseButton", 0 );
+  }
+}
+
+//
+// Callback is called, when the client as successfully connect to server
+//
+void OnTcpConnect( dword socket, long result)
+{
+  if (result == 0)
+  {
+    // To receive data with the created socket, we have to call ReceiveFrom.
+    gSocket.Receive( gRxBuffer, elcount(gRxBuffer) );
+    
+    if ((gSocket.GetLastSocketError() != 0) && (gSocket.GetLastSocketError() != 997))
+    {
+      char errorString[100];
+      
+      // if ReceiveFrom fails, we print a message to the write window
+      gSocket.GetLastSocketErrorAsString( errorString, elcount(errorString) );
+      write( "<%BASE_FILE_NAME%> Receive failed with result %d (%s)", gSocket.GetLastSocketError(), errorString );
+    }
+  }
+  else
+  {
+    // update control state
+    enableControl( "Client", "ConnectButton", 1 );
+    enableControl( "Client", "CloseButton", 0 );
+  }
+}
+  
+//
+// Callback function, which is called if a UDP packet was received
+//
+void OnTcpReceive( dword socket, long result, IP_Endpoint remoteEndpoint, char buffer[], dword size)
+{
+  if (result == 0)
+  {
+    sysSetVariableString( sysvar::Client::RxText, buffer );
+  }
+
+  // To receive more data, we have to call ReceiveFrom again.
+  gSocket.Receive( gRxBuffer, elcount(gRxBuffer) );
+}
+
+//
+// OnTcpClose is called, when the server close the connection.
+//
+void OnTcpClose( dword socket, long result)
+{
+  if (result == 0)
+  {
+    // Client has close the socket, so we can relase our gConnectionSocket object.
+    gSocket.Close();
+
+    // update control state
+    enableControl( "Client", "ConnectButton", 1 );
+    enableControl( "Client", "CloseButton", 0 );
+  }
+}

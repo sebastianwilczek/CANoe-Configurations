@@ -1,0 +1,61 @@
+/*@!Encoding:1252*/
+// -------------------------------------------------------------------------
+// Module: MainInMiddle.can
+// Interfaces: -
+// -------------------------------------------------------------------------
+// Implementation of the Class MainInMiddle
+// -------------------------------------------------------------------------
+// Copyright (c) Vector Informatik GmbH. All rights reserved.
+// -------------------------------------------------------------------------
+
+// Signals of a message on network (AFDX1) will be read, modified, and sent to a second network (AFDX2). 
+// Specifically in this example, the signals "IOM_DEMO_VFG_OIL_TEMP_A_31" and "IOM_DEMO_VFG_OIL_TEMP_A_32" 
+// from the message "DEMOMSG_INT3" will be read and processed in the example while the signal 
+// "IOM_DEMO_VFG_OIL_TEMP_A_33" will be forwarded unchanged.
+includes
+{
+  #include "AFDX/Utils.cin"
+}
+
+/************************************************************************************************** 
+  Description   : CAPL-Handler for manupulating all receiving DEMOMSG_INT3 messages on channel two
+**************************************************************************************************/
+on a664Message MsgChannel1.DEMOMSG_INT3
+{
+  a664Message DEMOMSG_INT3 myMsg;
+  if (@NodeA::ModifyFrame == 0)
+  {
+    myMsg = this;
+    myMsg.msgChannel = 2;
+    if (a664MsgConfig (myMsg, -1, (this.ErrFlag & 0x1) +1, -1) == 0)
+    {
+      myMsg.IOM_DEMO_VFG_OIL_TEMP_A_31 += 10;
+      myMsg.IOM_DEMO_VFG_OIL_TEMP_A_32 = this.IOM_DEMO_VFG_OIL_TEMP_A_32 * 2;
+     write("Msg line: %d, err %d", myMsg.LineSelect, this.ErrFlag & 0x1 );
+      a664TriggerMessage (myMsg, 0);
+    }
+  }
+}
+
+/************************************************************************************************** 
+  Description   : CAPL-Handler for manupulating all receiving frames on channel two with 
+                  Virtual Link ID 0x1A10
+**************************************************************************************************/
+on a664Frame MsgChannel1.0x1A10
+{
+  a664Frame * myFrame;
+  
+  if (@NodeA::ModifyFrame == 1)
+  {
+    myFrame = this;
+    myFrame.msgChannel = 2;
+    myFrame.EthUserId = 0xFFFF;
+    myFrame.IpAdrSrc = myFrame.IpAdrSrc | 0x00FF;
+    if (a664MsgConfig(myFrame, -1, (this.ErrFlag & 0x1)+1, 1) == 0)
+    {
+      
+      write("Frame line: %d, err %d", myFrame.LineSelect, this.ErrFlag & 0x1 );
+      a664TriggerFrame (myFrame, 0);
+    }
+  }
+}

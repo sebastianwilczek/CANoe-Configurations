@@ -1,0 +1,454 @@
+/*@!Encoding:1252*/
+variables
+{
+  //
+  // Version 2.1
+  //
+  // Copyright 2002 - Vector Informatik GmbH
+  //
+  // This is a experimantal implement for use with tractor ECU
+  //  
+
+  int  gECUState     = 0;             // 0=Offline, 1=Online 2=ShutingDown
+  long gECUHandle    = 0;             // ecu handle for ecu nr 2
+  long gECUAddress   = 0;             // global address of this ecu
+  char gEcuName[8];                   // global name of this ecu
+  char gECULabel[32] = "Experimental";// label for output to write window
+  int  gPosition     = 1;             // Position of the implement
+
+  // msTimer for cyclic PGs
+  msTimer TimerShutDown; /* shut down timer */
+
+  int gMaintainTimerECU_PWR = 10000; // time in ms
+  const kShutDownTime       = 1500;
+
+  double gGroundBasedSpeed  = 0.0;   // ground based speed received from tractor ECU
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel         = kDbgInfo; // Set debug level for output to write window
+}
+
+on start
+{
+  putValue( EvVecImpl_ECUAddress, 0xfe );
+}
+
+/*
+  Create an ECU instance and go online.
+*/
+void EcuBootup()
+{
+  DWORD result;
+
+  // init address of this node
+  gECUAddress = ExperimentalImplement.NmStationAddress; /* get ecu address */
+  gPosition   = getValue( EvVecImpl_Position );
+
+  // init deviece name
+  Iso11783MakeName( gEcuName, 
+					ExperimentalImplement.NmJ1939AAC,
+                    ExperimentalImplement.NmJ1939IndustryGroup,
+                    ExperimentalImplement.NmJ1939SystemInstance,
+                    ExperimentalImplement.NmJ1939System,
+                    ExperimentalImplement.NmJ1939Function,
+                    ExperimentalImplement.NmJ1939FunctionInstance,
+                    ExperimentalImplement.NmJ1939ECUInstance,
+                    ExperimentalImplement.NmJ1939ManufacturerCode,
+                    ExperimentalImplement.NmJ1939IdentityNumber    
+                   );
+
+  // get handle for ecu
+  if (gECUHandle == 0) {
+    gECUHandle = Iso11783CreateECU("default",gEcuName);
+  }
+  if (!gECUHandle) {
+    writeDbgLevel( kDbgError, "<%s> Iso11783CreateECU for Ecu failed.", gECULabel );
+    stop();
+  }
+  // ecu(s) going online
+  result = Iso11783ECUGoOnline( gECUHandle, gECUAddress );
+  if (result) {
+	  writeDbgLevel( kDbgError, "Iso11783ECUGoOnline failed, result=%d handle=0x%x", gECULabel, result, gECUHandle );
+  }
+}
+
+/* CALLBACK function */
+DWORD Iso11783AppAddrClaimed(long ecuhdl)
+{
+  if (ecuhdl == gECUHandle) {
+    OnGoOnline(Iso11783GetNodeAddr(ecuhdl));
+	}
+  return 0;
+}
+
+/*
+  This function is called after a successful address claiming.
+*/
+void OnGoOnline(long address)
+{
+  if (address == gECUAddress)
+  {
+    gECUState = 1; /* ecu is online */
+    putValue( EvVecImpl_ECUAddress, gECUAddress );
+  }
+}
+
+/* CALLBACK function */
+DWORD Iso11783AppTxIndication (long ecuhdl,long TxPgn, long src, long dest)
+{
+  return 0;
+}
+
+/* CALLBACK function */
+DWORD Iso11783AppRxIndication (long ecuhdl, long source, long dest, long length, long RxPG)
+{
+  char buffer[1785];
+  int loop;
+  pg 0x00 dummy = {dlc=1785};
+
+  dummy.dlc = length;
+
+  // get ecu address
+  dest = Iso11783GetNodeAddr(ecuhdl);
+
+  Iso11783GetRxData(length, buffer);
+
+  // copy received data to pg
+  for (loop=0;loop < length; loop++)
+  {
+    dummy.byte(loop) = buffer[loop];
+  }
+
+  if (ecuhdl == gECUHandle)
+  {
+    // check for bus 
+    switch(RxPG)
+    {
+      case 0xFE0f:   // Language command
+        RxIndLanguageCommand(ecuhdl, source, dest, length, (pg LC)dummy);
+        break;
+      case 0xFE48:   // WheelBasedSpeedAndDistance
+        RxIndWheelBasesSpeedAndDistance(ecuhdl, source, dest, length, (pg WBSD)dummy);
+        break;
+      case 0xFE49:   // GroundBasedSpeedAndDistance
+        RxIndGroundBasedSpeedAndDistance(ecuhdl, source, dest, length, (pg GBSD)dummy);
+        break;
+      case 0xFE45:   // PrimaryOrRearHitchStatus
+        RxIndPrimaryOrRearHitchStatus(ecuhdl, source, dest, length, (pg RHS)dummy);
+        break;
+      case 0xFE43:   // PrimaryOrRearPTOOutShaft
+        RxIndPrimaryOrRearPTOOutShaft(ecuhdl, source, dest, length, (pg RPTO)dummy);
+        break;
+    }
+  }
+
+  return 0;
+}
+
+/*
+  Langauge command is received.
+*/
+void RxIndLanguageCommand(long ecuhdl, long source, long dest, long length, pg LC langCmd)
+{
+}
+
+/* CALLBACK function */
+DWORD Iso11783AppRequestIndication (long ecuhdl, long source, long dest, long page, long ReqPgn)
+{
+  pg ACKM acknPg;
+  int broadcastFlag;
+  int notAckFlag;
+  int loop;
+  long mpgn;
+  char buffer[8];
+  broadcastFlag=0;
+  notAckFlag=1;
+
+  // check if requested pg is specific or global
+  if (dest == 0xFF)
+  {
+    broadcastFlag=1;
+    dest = Iso11783GetNodeAddr(ecuhdl);
+  }
+  else
+    broadcastFlag=0;
+
+  if (ecuhdl == gECUHandle)
+  {
+    switch(ReqPgn)
+    {
+      default:
+        // check if notack must be sent
+        if (broadcastFlag)
+          notAckFlag=0;
+        break;
+    }
+  }
+
+  if ((notAckFlag) && (!broadcastFlag))
+  {
+    // set reserved byte to 0xFF
+    for (loop=0;loop < 8; loop++)
+    {
+      acknPg.byte(loop) = 0xFF;
+    }
+
+    acknPg.ControlByte=1;      // not ack
+    acknPg.ParameterGroupNumber=ReqPgn; // pgn of requested pg
+
+    for (loop=0;loop < 8; loop++)
+    {
+      buffer[loop] = acknPg.byte(loop);
+    }
+    mpgn = ((acknPg.PF <<8) | 0xFF);
+
+    Iso11783TxReqPG(ecuhdl, mpgn, 0xFF,6,8,buffer);
+  }
+  return 0;
+}
+
+/* CALLBACK function */
+DWORD Iso11783AppErrorIndication(long ecuhdl, long errorClass, long errorNumber, long addCode)
+{
+  char strErrClass[32];
+  char strErrInfo[64];
+
+  switch(errorClass) {
+    case 1: snprintf( strErrClass, elCount(strErrClass), "TimeOut" ); break;
+    case 2: snprintf( strErrClass, elCount(strErrClass), "AddressClaiming" ); break;
+    case 3: snprintf( strErrClass, elCount(strErrClass), "CAN Error" ); break;
+    case 4: snprintf( strErrClass, elCount(strErrClass), "System Error" ); break;
+	case 5: snprintf( strErrClass, elCount(strErrClass), "Transport Protocol Error Error" ); break;
+  }
+
+  switch( errorNumber ) {
+    case 0x1: snprintf( strErrInfo, elCount(strErrInfo), "cts error" ); break;
+    case 0x2: snprintf( strErrInfo, elCount(strErrInfo), "peer to peer data timeout" ); break;
+    case 0x3: snprintf( strErrInfo, elCount(strErrInfo), "BAM data timeout" ); break;
+    case 0x4: snprintf( strErrInfo, elCount(strErrInfo), "acknowledge timeout" ); break;
+	case 0x10: //snprintf( strErrInfo, elCount(strErrInfo), "lost address claiming or received address claim with higher priority" ); break;
+	  EcuDidLoseAddress();
+	  return 0;
+    case 0x15: snprintf( strErrInfo, elCount(strErrInfo), "init error: node name detected two times" ); break;
+    case 0x17: snprintf( strErrInfo, elCount(strErrInfo), "init error: node address detected two times" ); break;
+    case 0x30: snprintf( strErrInfo, elCount(strErrInfo), "exeption while choosing protokoll BAM or CMDT" ); break;
+    case 0x40: snprintf( strErrInfo, elCount(strErrInfo), "internal data buffer full" ); break;
+    case 0x60: snprintf( strErrInfo, elCount(strErrInfo), "user sends system pg " ); break;
+    case 0x71: snprintf( strErrInfo, elCount(strErrInfo), "transmission abort by receiver" ); break;
+    case 0x72: snprintf( strErrInfo, elCount(strErrInfo), "transmission abort by sender" ); break;
+  }
+
+  writeDbgLevel( kDbgError, "<%s> ERROR(0x%x) %s, %s", gECULabel, errorNumber, strErrClass, strErrInfo );
+
+  return 0;
+}
+
+//
+// Sends a parameter group.
+//
+// !!! This function works only with PGs which DLC <= 8 !!!
+//
+TransmitPG( pg *_pg )
+{
+  int i;
+  char txBuffer[9];
+	int dst;
+
+  // copy data to buffer
+  for( i = 0; i< _pg.dlc; i++ ) {
+    txBuffer[i] = _pg.byte(i);
+  }
+
+	if (_pg.PF < 240) {
+	  dst = _pg.DA;
+	}
+	else {
+	  dst = 0xff;
+	}
+
+  Iso11783TxReqPG( gECUHandle, _pg.pgn, dst, (_pg.Characteristic & 0x7), _pg.dlc, txBuffer ); 
+}
+
+/*
+  This function is called, if the key switch is disabled and no implement
+	maintain PWR or ECU_PWR.
+*/
+PowerShutDown()
+{
+  if (gECUHandle) {
+    putValue( EvVecImpl_ECUAddress, 0xfe );
+    // destroy ECU
+    Iso11783DestroyECU( gECUHandle );
+ 	gECUHandle = 0;
+	gECUState  = 0;
+
+	write( "<%s> power shut down", gECULabel );
+  }
+}
+
+/*
+*/
+on timer TimerShutDown
+{
+  gMaintainTimerECU_PWR -= kShutDownTime;
+  if (gMaintainTimerECU_PWR > 0) {
+    setTimer( TimerShutDown, kShutDownTime );
+	TransmitMaintainPower();
+  }
+}
+
+/*
+  This function is called, if EvECU_PWR is 1
+*/
+PowerStartUp()
+{
+  if (gECUState == 0) {
+    EcuBootup();
+    writeDbgLevel( kDbgError, "<%s> power start up", gECULabel );
+  }
+}
+
+on stopMeasurement
+{
+  PowerShutDown();
+}
+
+on sysvar ISOBUS::sysvarECU_PWR
+{
+  float ecu_pwr;
+  ecu_pwr = @this;
+
+  if ((ecu_pwr > 10) && (gECUState == 0))
+  {
+    PowerStartUp();
+  }
+  else if ((ecu_pwr < 10) && (gECUState != 0))
+  {
+    PowerShutDown();
+  }
+}
+
+TransmitMaintainPower ()
+{
+  pg MP mntPwr;
+
+  mntPwr.SA = gECUAddress;
+  mntPwr.DWORD(0) = mntPwr.DWORD(1) = 0xffffffff;
+
+	mntPwr.MaintainECUPower = 1;
+
+	TransmitPG( mntPwr );
+}
+
+/*
+  WheelBasesSpeedAndDistance is received.
+*/
+void RxIndWheelBasesSpeedAndDistance(long ecuhdl, long source, long dest, long length, pg WBSD rxPG )
+{
+  if ((rxPG.KeySwitchState == 0) && (gECUState == 1)) {
+    gMaintainTimerECU_PWR = getValue( EvVecImpl_MaintainTime ) * 1000;
+    gECUState             = 2; // shut down state
+		
+    if (gMaintainTimerECU_PWR > 0) {
+      TransmitMaintainPower();
+      setTimer( TimerShutDown, kShutDownTime );
+    }
+  }
+
+  putValue( EvVecImpl_WheelBasedSpeed, rxPG.WheelBasedMachineSpeed.phys );
+}
+
+/*
+  GroundBasedSpeedAndDistance is received.
+*/
+void RxIndGroundBasedSpeedAndDistance(long ecuhdl, long source, long dest, long length, pg GBSD rxPG )
+{
+  putValue( EvVecImpl_GroundBasedSpeed, rxPG.GroundBasedMachineSpeed.phys );
+
+  gGroundBasedSpeed = rxPG.GroundBasedMachineSpeed.phys;
+}
+
+/*
+  PrimaryOrRearHitchStatus is received.
+*/
+void RxIndPrimaryOrRearHitchStatus(long ecuhdl, long source, long dest, long length, pg RHS rxPG )
+{
+  double draft = 0.0;
+
+  putValue( EvVecImpl_RearHitchPosition, rxPG.RearHitchPosition.phys );
+
+  draft = getValue( EvVecImpl_RearHitchDraft );
+  if (Iso11783SetEnvDbl( "EvISOBUS_RearHitchDraft", gPosition, draft )) {
+    writeDbgLevel( kDbgError, "<%s> cannot set EvISOBUS_RearHitchDraft", gECULabel );
+  }
+}
+
+/*
+  PrimaryOrRearPTOOutShaft is received.
+*/
+void RxIndPrimaryOrRearPTOOutShaft(long ecuhdl, long source, long dest, long length, pg RPTO rxPG )
+{
+  putValue( EvVecImpl_RearPTOShaftSpeed, rxPG.RearPTOOutputShaftSpeed.phys );
+}
+
+on envVar EvVecImpl_CurrentTakeoffECU_PWR
+{
+  double current;
+  current = getValue(this);
+
+  if (@ISOBUS::sysvarECU_PWR > 10.0) {
+    Iso11783SetEnvDbl( "EvISOBUS_ECU_PWRCurrent", gPosition, current );
+  }
+  else {
+    Iso11783SetEnvDbl( "EvISOBUS_ECU_PWRCurrent", gPosition, 0.0 );
+  }
+}
+
+//
+// A commanded address PG was received.
+//
+DWORD Iso11783AppCmdAddrIndication(long ecuHdl, long length)
+{
+  return 0;
+}
+
+//
+// The ECU lost its address. It tries to find a new address in the range
+// of 128..238. 
+//
+EcuDidLoseAddress()
+{
+  dword result;
+
+  // calculate new address
+  if ((gECUAddress < 128) || (gECUAddress > 238)) {
+    gECUAddress = 128;
+  }
+  else {
+    gECUAddress++;
+	if (gECUAddress > 238) {
+	  return;
+	}
+  }
+
+  // ecu(s) going online
+  result = Iso11783ECUGoOnline( gECUHandle, gECUAddress );
+  if (result) {
+    writeDbgLevel( kDbgError, "<%s> Iso11783ECUGoOnline failed, result=%d handle=0x%x", gECULabel, result, gECUHandle );
+  }
+}
+
+//
+// A node has changed its address or claimed an address successfully
+//
+DWORD Iso11783AppNmtIndication( LONG busHandle, LONG address, LONG state )
+{
+  return 0;
+}
+

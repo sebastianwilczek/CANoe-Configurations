@@ -1,0 +1,1240 @@
+/*@!Encoding:1252*/
+//
+// (c)2019 by Vector GmbH 
+// 
+// This is a demo device designed to be used for the J1939-82 Compliance Test 2015 only!
+// Do not use this software for productive projects or in any other situation.
+//
+includes
+{ 
+}
+
+variables
+{
+  const word  gc_J1939_PG_DLC_MAX            = 1785;          // MAX dlc for a PDU.
+  const dword gc_PGN_AC                      = 0xEE00;
+  const dword gc_PGN_AC_COMMANDED            = 0xFED8;
+  const dword gc_PGN_DM03                    = 0xFECC;
+  const dword gc_PGN_DM11                    = 0xFED3;
+  const dword gc_PGN_TPCM                    = 0xEC00;
+  const dword gc_PGN_TPDT                    = 0xEB00;
+  const dword gc_PGN_RQST                    = 0xEA00;
+  const word  gc_RESP_TIMEOUT                = 200;
+  const word  gc_TIMEOUT_T3                  = 1250;
+  const byte  gc_BC_ADDR                     = 0xFF;
+  const byte  gc_ANY_ADDR                    = 0xFE;
+  const byte  gc_NULL_ADDR                   = 0xFE;
+  const word  gc_TP_BAM_MIN_DT               = 50;
+  const word  gc_TP_BAM_MAX_RECEIVE_DT       = 750;           // == gc_TIMEOUT_T1;
+  const byte  gc_TPCM_CTRL_WORD_RTS          = 0x10;
+  const byte  gc_TPCM_CTRL_WORD_CTS          = 0x11;
+  const byte  gc_TPCM_CTRL_WORD_EOM          = 0x13;
+  const byte  gc_TPCM_CTRL_WORD_ABORT        = 0xFF;
+  const byte  gc_TPCM_CTRL_WORD_BAM          = 0x20;
+  const byte  gc_ReclaimLockSeconds          = 5;
+  msTimer rebootTimer;
+  byte gRebootSkipCounter;
+  byte gNextRebootTime;
+  byte gRebooted;
+  byte gRebooting;
+  byte gReclaimLock;
+  byte gAddrViolationCount;
+  dword gACKProducingPgns[long];
+  dword gBUSYProducingPgns[long];
+  dword gAccessDenyPgns[long];
+  dword gRTSAbortPgns[long];
+  byte gUserConfiguredAddress;
+  qword gUserConfiguredDevName;
+  pg TPCMxx gPgCAInit;
+  pg TPCMxx gPgBAMInit;
+  pg TPCMxx gPgCTS;
+  byte gCASeqNr;
+  byte gIgnoreNextCA;
+  byte gNOACOnBootup;
+  byte gAddrTool;
+  byte gAddrDUT;
+  qword gDevNameDUT;
+  byte gCAHandled;
+  mstimer fixMissingCATimer;
+  byte gNewAddr;
+  float gLastDTTime;
+  byte gInvalidDTDetected;
+  pg TPCMxx gPgRTS;
+  pg TPDT gPgDT;
+  msTimer ILEnableTimer;
+  byte gListenOnly;
+  byte gCyclicBeforeListenOnly;
+  timer timerLockReclaim;
+  
+  struct DeviceName             // device name as structure.
+  {
+    byte aac;
+    byte industryGroup;
+    byte vehicleSystemInstance;
+    byte vehicleSystem;
+    byte function;
+    byte functionInstance;
+    byte ecuInstance;
+    word manufacturerCode;
+    dword identityNumber;
+  };
+  
+  enum eILState
+  {
+    ils_initialized = 0,
+    ils_claiming = 1,
+    ils_active = 2,
+    ils_stopped = 3,
+    ils_suspended = 4
+  };
+}
+
+
+void CSV_SplitHexValues(dword result[long], char in[])
+{
+  dword p,c,r;
+  char elem[255], num[255];
+  
+  result.clear();
+  if (strlen(in)==0) return;
+  
+  r=0;
+  for (p=elcount(elem)-1; p>0; p--) elem[p] = 0;
+  
+  for (c=0; c<=strlen(in); c++)
+  {
+    switch(in[c])
+    {
+      case '\r':
+      case '\n':
+      case ' ':
+      case '\t': break;
+
+      case 'x':
+      case 'X': for (p=elcount(elem)-1; p>0; p--) elem[p] = 0; break;
+        
+      case '\0':
+      case ',':
+      case ';': 
+      {
+        if (strlen(elem)>0)
+        {
+          snprintf(num, elcount(num), "0x%s", elem);
+          result[r++] = (dword)atol(num);
+          for (p=elcount(elem)-1; p>0; p--) elem[p] = 0;
+        }
+        break;
+      }
+      default: 
+      {
+        elem[p++] = in[c]; 
+        break;
+      }
+    }
+  }
+}
+
+qword CreateDevNameStruct(qword devName, struct DeviceName result)
+{
+  result.aac                    = (devName & 0x8000000000000000LL) >> 63;
+  result.industryGroup          = (devName & 0x7000000000000000LL) >> 60;
+  result.vehicleSystemInstance  = (devName & 0x0F00000000000000LL) >> 56;
+  result.vehicleSystem          = (devName & 0x00FE000000000000LL) >> 49;
+  result.function               = (devName & 0x0000FF0000000000LL) >> 40;
+  result.functionInstance       = (devName & 0x000000F800000000LL) >> 35;
+  result.ecuInstance            = (devName & 0x0000000700000000LL) >> 32;
+  result.manufacturerCode       = (devName & 0x00000000FFE00000LL) >> 21;
+  result.identityNumber         = (devName & 0x00000000001FFFFFLL);
+  return devName;
+}
+qword CreateDevNameStruct(qword devName, struct DeviceName result, byte aac)
+{
+  CreateDevNameStruct(devName, result);
+  result.aac = aac;
+  return DevName(result);
+}
+
+qword DevName(struct DeviceName devNameStruct)
+{
+  return (qword)0
+  | ((qword)devNameStruct.aac                    << 63)
+  | ((qword)devNameStruct.industryGroup          << 60)
+  | ((qword)devNameStruct.vehicleSystemInstance  << 56)
+  | ((qword)devNameStruct.vehicleSystem          << 49)
+  | ((qword)devNameStruct.function               << 40)
+  | ((qword)devNameStruct.functionInstance       << 35)
+  | ((qword)devNameStruct.ecuInstance            << 32)
+  | ((qword)devNameStruct.manufacturerCode       << 21)
+  | ((qword)devNameStruct.identityNumber              );
+}
+qword DevName(struct DeviceName devNameStruct, byte aac)
+{
+  struct DeviceName temp;
+  memcpy(temp,devNameStruct);
+  temp.aac = aac;
+  return DevName(temp);
+}
+qword DevName(qword devName, byte aac)
+{
+  struct DeviceName temp;
+  return CreateDevNameStruct(devName, temp, aac);
+}
+
+
+void initGlobals()
+{
+  gUserConfiguredAddress = @CT::CFG::DUT::Addr;
+  gUserConfiguredDevName = @CT::CFG::DUT::DevName;
+  gAddrDUT = @CT::CFG::DUT::Addr;
+  gAddrTool = @CT::CFG::TOOL::Addr;
+  initJ1939PGData(gPgCAInit);
+  initJ1939PGData(gPgBAMInit);
+  gIgnoreNextCA = 0;
+  gNOACOnBootup = 0;
+  gCASeqNr = 0;
+  gCAHandled = 0;
+  gNewAddr = 0;
+  gLastDTTime = 0;
+  gInvalidDTDetected = 0;
+  initGlobalPGs();
+}
+
+on start
+{
+  readConfig();
+  manageErrorPanel(1);
+}
+on timer ILEnableTimer
+{
+  EnableIL(1);
+}
+on timer timerLockReclaim
+{
+  gReclaimLock = 0;
+}
+
+on preStop
+{
+  manageErrorPanel(0);
+}
+on preStart
+{
+  J1939ILControlInit();
+  
+  // init vars...
+  initGlobals();
+  
+  startDUT(); // do not use EnableIL() for setting address the first time
+  
+  manageCyclics();
+  
+  if (!isSimulated())
+  {
+    writeLineEx(1, 2, "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    writeLineEx(1, 2, "!! WARNING: RUNNING SIMULATED DUT IN REAL BUS MODE              !!");
+    writeLineEx(1, 2, "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    dout("INFO: DEBUG CHECKS TURNED ON.");
+  }
+}
+on sysvar CT::CFG::DUT::AAC
+{
+  struct DeviceName dn;
+  CreateDevNameStruct(@CT::CFG::DUT::DevName, dn);
+  if (dn.aac != @CT::CFG::DUT::AAC)
+  {
+    cout("CHANGED AAC.");
+    @CT::CFG::DUT::DevName = DevName(@CT::CFG::DUT::DevName, @CT::CFG::DUT::AAC);
+  }
+}
+
+on sysvar CT::CFG::DUT::Addr
+{
+  dout("Detected address change...");
+  gAddrDUT = @CT::CFG::DUT::Addr;
+  rebootDUT();
+}
+on sysvar CT::CFG::DUT::DevName
+{
+  dout("Detected NAME change...");
+  gDevNameDUT = @CT::CFG::DUT::DevName;
+  rebootDUT();
+}
+
+on sysvar CT::CFG::DUT::CyclicDisabled
+{
+  manageCyclics();
+}
+
+on sysvar CT::GUI::CFG::BUTTONS::BtnReset
+{
+  if (@CT::GUI::CFG::BUTTONS::BtnReset == 1)
+  {
+    resetDUT();
+  }
+}
+on sysvar CT::GUI::CFG::BUTTONS::BtnReboot
+{
+  if (@CT::GUI::CFG::BUTTONS::BtnReboot == 1)
+  {
+    rebootDUT();
+  }
+}
+on sysvar CT::GUI::CFG::BUTTONS::BtnError
+{
+  if (@CT::GUI::CFG::BUTTONS::BtnError == 1)
+  {
+    canOutputErrorFrame(CAN2.errorFrame, random(12)+1, 0); 
+  }
+}
+
+On timer rebootTimer
+{
+  if (checkToSkipNextReboot()) return;  
+  stopDUT(0);
+  startDUT();
+  gRebooted = 1;
+  gRebooting = 0;
+  gNextRebootTime = 0;
+  cout("REBOOTED...");
+}
+
+// reset resets the dut's address and reboots it.
+void resetDUT()
+{
+  gAddrViolationCount = 0;
+  cout("RESET DUT...");
+  @CT::CFG::DUT::Addr = gUserConfiguredAddress;
+  @CT::CFG::DUT::DevName = gUserConfiguredDevName;
+  
+  rebootDUT();
+}
+void SetNextRebootTime(dword ms)
+{
+  char text[255];
+  snprintf(text, elcount(text), "Setting next reboot timer to %dms...", ms);
+  gNextRebootTime = ms;
+}
+void SkipNextReboot()
+{
+  cout("Incremented reboot skipping counter");
+  gRebootSkipCounter++;
+}
+byte checkToSkipNextReboot()
+{
+  if (gRebootSkipCounter)
+  {
+    char text[255];
+    snprintf(text, elcount(text), "Skipping next reboot (skip counter=%d)", gRebootSkipCounter);
+    dout(text);
+    gRebootSkipCounter--;
+    return 1;
+  }
+  return 0;
+}
+// reboot is just rebooting the DUT keeping its current SA.
+void rebootDUT()
+{
+  rebootDUT(gNextRebootTime ? gNextRebootTime : 250);
+}
+void rebootDUT(dword t)
+{
+  if (checkToSkipNextReboot()) 
+  {
+    cancelTimer(rebootTimer);
+    return;
+  }
+  if (!gRebooting)
+  {
+    char text[255];
+    snprintf(text,elcount(text),"PREPARING REBOOT in %dms...", t);
+    cout(text);
+    gRebooting = 1;
+  }
+  
+  setTimer(rebootTimer, t);
+  
+}
+
+void startDUT()
+{
+  if (J1939ILGetState() == ils_suspended) 
+  {
+    resetDUT();
+  }
+  else
+  {
+    cout("START DUT.");
+    // were in listen only mode?
+    if (gListenOnly)
+    {
+      // yes, then restore the cyclic behaviour...
+      @CT::CFG::DUT::CyclicDisabled = gCyclicBeforeListenOnly;
+    }
+    gListenOnly = 0;
+    ProvideDevNameInfo();
+    J1939ILControlStart(gAddrDUT);
+  }
+}
+
+void stopDUT(byte sendCannotClaimBefore)
+{
+  if (J1939ILGetState() != ils_stopped) 
+  {
+    cout("STOP DUT.");
+    J1939ILControlStop(sendCannotClaimBefore ? 0 : 1);
+  }
+}
+
+void ProvideDevNameInfo()
+{
+  struct DeviceName dn;
+  CreateDevNameStruct(@CT::CFG::DUT::DevName, dn);
+  
+  J1939ILSetNodeProperty("AAC",                   (long)dn.aac);
+  J1939ILSetNodeProperty("IndustryGroup",         (long)dn.industryGroup);
+  J1939ILSetNodeProperty("VehicleSystemInstance", (long)dn.vehicleSystemInstance);
+  J1939ILSetNodeProperty("VehicleSystem",         (long)dn.vehicleSystem);
+  J1939ILSetNodeProperty("Function",              (long)dn.function);
+  J1939ILSetNodeProperty("FunctionInstance",      (long)dn.functionInstance);
+  J1939ILSetNodeProperty("ECUInstance",           (long)dn.ecuInstance);
+  J1939ILSetNodeProperty("ManufacturerCode",      (long)dn.manufacturerCode);
+  J1939ILSetNodeProperty("IdentityNumber",        (long)dn.identityNumber);
+  
+  cout("----------------------------------------------------------------------");
+  cout_value32("DUT Address           : %-5d (0x%02X)", gAddrDUT);
+  cout_value64("Provided NAME info    : 0x%llX", @CT::CFG::DUT::DevName);
+  cout("----------------------------------------------------------------------");
+  cout_value32("AAC                   : %.5d (0x%04X)",                   dn.aac);
+  cout_value32("IndustryGroup         : %.5d (0x%04X)",         dn.industryGroup);
+  cout_value32("VehicleSystemInstance : %.5d (0x%04X)", dn.vehicleSystemInstance);
+  cout_value32("VehicleSystem         : %.5d (0x%04X)",         dn.vehicleSystem);
+  cout_value32("Function              : %.5d (0x%04X)",              dn.function);
+  cout_value32("FunctionInstance      : %.5d (0x%04X)",      dn.functionInstance);
+  cout_value32("ECUInstance           : %.5d (0x%04X)",           dn.ecuInstance);
+  cout_value32("ManufacturerCode      : %.5d (0x%04X)",      dn.manufacturerCode);
+  cout_value32("IdentityNumber        : %.5d (0x%04X)",        dn.identityNumber);
+  cout("----------------------------------------------------------------------");
+  @CT::CFG::DUT::AAC = dn.aac;
+}
+
+void manageErrorPanel(byte state)
+{
+  char panelError[255] = "Demo DUT Behavior";
+  setControlVisibility(panelError, "ChkAAC", state);
+  setControlVisibility(panelError, "BtnReset", state);
+  setControlVisibility(panelError, "BtnErrFrame", state);
+  setControlVisibility(panelError, "BtnReboot", state);
+}
+
+
+void manageCyclics()
+{
+  byte flag;
+  flag = @CT::CFG::DUT::CyclicDisabled;
+  J1939ILSetMsgCycleTime(MSG_CYCLIC_DUT_C100, flag ? 0 : MSG_CYCLIC_DUT_C100.GenMsgCycleTime);
+  J1939ILSetMsgCycleTime(MSG_CYCLIC_DUT_B400, flag ? 0 : MSG_CYCLIC_DUT_B400.GenMsgCycleTime);
+  J1939ILSetMsgCycleTime(MSG_CYCLIC_DUT_FE01, flag ? 0 : MSG_CYCLIC_DUT_FE01.GenMsgCycleTime);
+  J1939ILSetMsgCycleTime(MSG_CYCLIC_NOREQ_DUT_A100, flag ? 0 : MSG_CYCLIC_NOREQ_DUT_A100.GenMsgCycleTime);
+  J1939ILSetMsgCycleTime(MSG_CYCLIC_NOREQ_DUT_A200, flag ? 0 : MSG_CYCLIC_NOREQ_DUT_A200.GenMsgCycleTime);
+  J1939ILSetMsgCycleTime(MSG_CYCLIC_NOREQ_DUT_FE08, flag ? 0 : MSG_CYCLIC_NOREQ_DUT_FE08.GenMsgCycleTime);
+}
+
+void readConfig()
+{
+  char text[1024];
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::ACK_Producing_Msgs, text, elcount(text));
+  CSV_SplitHexValues( gACKProducingPgns, text );
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::Busy_Producing_Msgs, text, elcount(text));
+  CSV_SplitHexValues( gBUSYProducingPgns, text );
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::AccessDenied_Producing_Msgs, text, elcount(text));
+  CSV_SplitHexValues( gAccessDenyPgns, text );
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::RTSAbort_Msgs, text, elcount(text));
+  CSV_SplitHexValues( gRTSAbortPgns, text );
+}
+
+
+LONG J1939ILOnRequest( LONG rqPGN, LONG srcAddr, long dstAddr )
+{
+  char text[1024];
+  snprintf(text, elcount(text), "J1939ILOnRequest %X->%X for PGN: 0x%.05X...", srcAddr, dstAddr, rqPGN);
+  dout(text);
+  initGlobalPGs();
+  
+  // IL FIX stay in listen only after a cannot claim.
+  if (rqPGN == gc_PGN_AC)
+  {
+    if (gListenOnly)
+    {
+      SendCannotClaim();
+      return 0;
+    }
+  }
+
+  
+  // for all ack producing pgns...
+  for(long k:gACKProducingPgns)
+  {
+    // is requested pgn within the ACK producing configured pgns?
+    if (gACKProducingPgns[k]==rqPGN) 
+    {
+      // yes - produces ACK
+      return 3;
+    }
+  }
+  
+  // for clr requests... ACK or NACK depending on the configuration of Clr-Requests...
+  if ( 
+      (rqPGN == gc_PGN_DM03)
+    ||(rqPGN == gc_PGN_DM11)
+    ) return 3; // 2:negative ACK, 3: positive ACK.
+  
+  // for all access deny pgns
+  if (!@CT::CFG::DUT::DenyResponseDisabled)
+  {
+    for(long k:gAccessDenyPgns)
+    {
+      // is requested pgn within the access deny ACK ?
+      if (gAccessDenyPgns[k]==rqPGN) 
+      {
+        pg ACKM_DUT pgAck;
+        // yes - produces Access Deny...
+        // send it with output...
+        pgAck.sa = gAddrDUT;
+        pgAck.da = 0xFF;                                // global
+        pgAck.word(1) = 0xFFFF;
+        pgAck.byte(3) = 0xFF;
+        pgAck.byte(4) = srcAddr;
+        pgAck.word(5) = rqPGN;                          // requested pgn.
+        pgAck.byte(7) = (byte)((rqPGN &0xFF0000)>>16);  // DP, EDP
+        pgAck.byte(0) = 2;                              // control word for access denied.
+        output (pgAck);                                 // output pg.
+        return 0; // return as managed.
+      }
+    }
+  }
+  
+  // for all busy pgns
+  for(long k:gBUSYProducingPgns)
+  {
+    // is requested pgn within the access deny ACK ?
+    if (gBUSYProducingPgns[k]==rqPGN) 
+    {
+      pg ACKM_DUT pgAck;
+      // yes - produces Access Deny...
+      // send it with output...
+      pgAck.sa = gAddrDUT;
+      pgAck.da = 0xFF;                                // global
+      pgAck.word(1) = 0xFFFF;
+      pgAck.byte(3) = 0xFF;
+      pgAck.byte(4) = srcAddr;
+      pgAck.word(5) = rqPGN;                          // requested pgn.
+      pgAck.byte(7) = (byte)((rqPGN &0xFF0000)>>16);  // DP, EDP
+      pgAck.byte(0) = 3;                              // control word for busy.
+      output (pgAck);                                 // output pg.
+      return 0; // return as managed.
+    }
+  }
+  
+  // FIXED PGN SUPPORT...
+  if (rqPGN == @CT::CFG::DUT::PGN::FixedPgn)
+  {
+    byte byteBuf[1800];
+    long count;
+    word i;
+    pg* pgFixed = {dlc=gc_J1939_PG_DLC_MAX};
+    sysGetVariableData(sysvar::CT::CFG::DUT::PGN::FixedPgnData, byteBuf, count);
+    pgFixed.dlc = count;
+    for (i=0; i<count; i++) pgFixed.byte(i) = byteBuf[i];
+    pgFixed.sa = gAddrDUT;
+    pgFixed.da = (dstAddr == gc_BC_ADDR) ? dstAddr : srcAddr;
+    pgFixed.pgn = @CT::CFG::DUT::PGN::FixedPgn;
+    output(pgFixed);
+    return 0; // return as managed.
+  }
+  
+  // Error indication 1:
+  //switch the pgn of the 0xFEE1 message when checkbox in panel is checked.
+  if(@CT::CFG::DUT::ERROR::Err_1_0xFEE1_Wrong_Order == 1)
+  {
+    if(rqPGN == 0xFEE1)
+    {
+      PG 0xE1FE switchedPG = { DLC=8, PRIO=6 };
+      write("DUT ERROR INDICATION: Send 0xFEE1 in wrong order (0xE1FE) - This may lead to a timeout for 0xFEE1.");
+      switchedPG.sa = srcAddr;
+      switchedPG.da = 0xFF;
+      output(switchedPG);
+      return 0;
+    }
+  } 
+  // Error indication 2:
+  //send pg 0xFEE2 with edp bit set to 1 when checkbox in panel is checked.
+  if(@CT::CFG::DUT::ERROR::Err_2_0xFEE2_EDP1 == 1)
+  {
+    if(rqPGN == 0xFEE2)
+    {
+        PG 0x2FEE2 EDP_FEE2= { DLC=8, PRIO=6 };
+        EDP_FEE2.sa = srcAddr;
+        output(EDP_FEE2);
+        return 0;
+    }
+  } 
+  // Error indication 3:
+  //send pg 0xFEE3 with dp bit set to 1 when checkbox in panel is checked.
+  if(@CT::CFG::DUT::ERROR::Err_3_0xFEE3_DP1 == 1)
+  {
+    if(rqPGN == 0xFEE3)
+    {
+        PG 0x1FEE3 DP_FEE3= { DLC=8, PRIO=6 };
+        DP_FEE3.sa = srcAddr;
+        output(DP_FEE3);
+        return 0;
+    }
+  }
+  // Error indication 4:
+  //send pg 0xFEE4 with dlc = 7 when checkbox in panel is checked.
+  if(@CT::CFG::DUT::ERROR::Err_4_0xFEE4_DLC7 == 1)
+  {
+    if(rqPGN == 0xFEE4)
+    {
+        PG 0xFEE4 D7= { DLC=7, PRIO=6 };
+        D7.sa = srcAddr;
+        output(D7);
+        return 0;
+    }
+  }
+  // Error indication 5:
+  // answer with ACL and wrong device name.
+  if(@CT::CFG::DUT::ERROR::Err_5_WrongDevName == 1)
+  {
+    if (rqPGN==gc_PGN_AC)
+    {
+      pg AC_DUT pgAcDut;
+      pgAcDut.qword(0) = @CT::CFG::DUT::DevName;
+      pgAcDut.byte(0)--; // just change something.
+      output(pgAcDut);
+      return 0;
+    }
+  }
+  
+  return 1; // leave as is.
+}
+
+// check given unkonwn pg to be a vlid TPCM.BAM
+// additional return the counters within the BAM as reference...
+byte IsValidBAM(pg * testPg, byte& packetCount, byte& byteCount)
+{
+  byteCount = 0;
+  packetCount = 0;
+  if (testPg.byte(0)==gc_TPCM_CTRL_WORD_BAM)
+  {
+    pg TPCMxx tpcm;
+    tpcm = testPg;
+    byteCount = tpcm.TotalMessageSizeBAM;
+    packetCount = tpcm.TotalNumberOfPacketsBAM;
+    return 1
+      && (tpcm.byte(0) == gc_TPCM_CTRL_WORD_BAM)
+      && (packetCount == (int)_ceil(byteCount/7.0))
+      ;
+  }
+  return 0;
+}
+
+// check given unknown pg to be a valid TPCM.BAM
+byte IsValidBAM(pg * testPg)
+{
+  byte x;
+  return IsValidBAM(testPg, x, x);
+}
+
+
+void SendAbort(dword pgn, byte reason)
+{
+  pg TPCMxx pgAbrt;
+  initJ1939PGData(pgAbrt);
+  pgAbrt.pgn = gc_PGN_TPCM;
+  pgAbrt.PGNumber = pgn;
+  pgAbrt.sa = gAddrDUT;
+  pgAbrt.da = gAddrTool;
+  pgAbrt.ConnectionAbortReason = reason;
+  dout("Sending ABORT.");
+  output(pgAbrt);
+  initGlobalPGs();
+}
+void initGlobalPGs()
+{
+  initGlobalCTS();
+  initGlobalRTS();
+  initGlobalDT();
+}
+void initGlobalDT()
+{
+  initJ1939PGData(gPgDT);
+  gPgDT.SequenceNumber = 0;
+}
+void initGlobalCTS()
+{
+  initJ1939PGData(gPgCTS);
+  gPgCTS.NextPacketNumberToBeSent = 0;
+  gPgCTS.ControlByte = 0;
+}
+void initGlobalRTS()
+{
+  initJ1939PGData(gPgRTS);
+  gPgRTS.TotalMessageSize = 0;
+  gPgRTS.MaximumNumberOfPackets = 0;
+  gPgRTS.TotalNumberOfPackets = 0;
+  gPgRTS.ControlByte = 0;
+}
+// on send / receive TPCMxx pgs...
+on pg TPCMxx
+{
+  // track RTS TO tool...
+  if (this.da == gAddrTool)
+  {
+    if (this.byte(0) == gc_TPCM_CTRL_WORD_RTS)
+    {
+      gPgRTS = this;
+    }
+  }
+  
+  // track TPCMxx FROM Tool
+  if(this.sa == gAddrTool)
+  {
+  }
+    
+  if (this.byte(0) == gc_TPCM_CTRL_WORD_EOM)
+  {
+    initGlobalPGs();
+    setTimer(ILEnableTimer, gc_TIMEOUT_T3);
+  }
+  if (this.byte(0) == gc_TPCM_CTRL_WORD_ABORT)
+  {
+    initGlobalPGs();
+  }
+}
+
+on pg TPDT
+{
+  if (this.da == gAddrTool)
+  {
+    gPgDT=this;
+  }
+}
+
+void EnableIL(byte state)
+{
+  if (@J1939_CT_Demo::DUT::ILEnable == state) return;
+  if (state)
+  {
+    if (@J1939_CT_Demo::DUT::ILEnable != 1)
+    {
+      dout("Enable IL");
+      startDUT();
+      gNOACOnBootup = 0;
+    }
+  }
+  else
+  {
+    if (@J1939_CT_Demo::DUT::ILEnable != 0)
+    {
+      dout("Disable IL");
+      gNOACOnBootup = 1;
+      stopDUT(0);
+    }
+  }
+}
+long J1939ILOnTxPrepare( pg * txPG )
+{
+  if (gNOACOnBootup)
+  {
+    if (txPG.pgn == gc_PGN_AC)
+    {
+      dout("FIX: Suppress Address Claim of IL.");
+      return 0;
+    }
+  }
+  
+  if (@CT::CFG::DUT::ERROR::Err_5_WrongDevName)
+  {
+    write("Send wrong DevName...");
+    txPG.qword(0)--;
+  }
+  
+  return 1;
+}
+
+void SendCannotClaim()
+{
+  pg AC_DUT pgACDut;
+  pgACDut.sa = gc_NULL_ADDR;
+  pgACDut.da = gc_BC_ADDR;
+  pgACDut.qword(0) = @CT::CFG::DUT::DevName;
+  output(pgACDut); // cannot claim...
+  gListenOnly = 1; // note listen only...
+  gCyclicBeforeListenOnly = @CT::CFG::DUT::CyclicDisabled;
+  @CT::CFG::DUT::CyclicDisabled = 1; // disable cyclic sending in listen only mode.
+}
+void SendClaim()
+{
+  pg AC_DUT pgACDut;
+  pgACDut.sa = @CT::CFG::DUT::Addr;
+  pgACDut.da = gc_BC_ADDR;
+  pgACDut.qword(0) = @CT::CFG::DUT::DevName;
+  output(pgACDut); // claim...
+}
+
+// on before il receives msg
+long J1939ILOnRxMessage( pg * rxPG )
+{
+  char text[1024];
+  pg TPCMxx testTPCM;
+
+  // IL-FIX: listenonly mode...
+  if (gListenOnly)
+  {
+    // only watch on commanded address and on requests (onRequest does the rest)
+    switch(rxPG.pgn)
+    {
+      case gc_PGN_AC_COMMANDED: break;
+      case gc_PGN_RQST: break;
+      default: return 0;
+    }
+  }
+  
+  // IL-FIX: AAC changed after resetting DUT will not react anymore...
+  if (rxPG.pgn == gc_PGN_AC)
+  {
+    byte dutAddr;
+    dutAddr = @CT::CFG::DUT::Addr;
+    if (rxPG.sa == dutAddr)
+    {
+      qword otherDevName;
+      otherDevName = rxPG.qword(0);
+      
+      if (@CT::CFG::DUT::AAC)
+      {
+        byte newAddr;
+        if (otherDevName <= @CT::CFG::DUT::DevName)
+        {
+          // other node has higher dev-name-prio
+          newAddr = dutAddr+1;
+          if (newAddr == gc_NULL_ADDR) newAddr = 0;
+          if (newAddr == gc_BC_ADDR) newAddr = 0;
+          snprintf(text, elcount(text), "AAC Node: Detected Address from higher priority NAME -> Recalculate address from %d (0x%.02X) to %d (0x%.02X).", dutAddr,dutAddr,newAddr,newAddr);
+          dout(text);
+          
+          SetNextRebootTime(10);
+          @CT::CFG::DUT::Addr = newAddr; // starts reboot timer...
+          
+        }
+        else
+        {
+          // IL handles this for lower prio names...
+          // pg AC_DUT pgACDut;
+          // // other node has lower dev-name-prio. Stop device and send cannot claim before.
+          // snprintf(text, elcount(text), "AAC Node: Detected Address from lower priority NAME -> Resend AC for current address from %d (0x%.02X) to %d (0x%.02X).", pgACDut.sa,pgACDut.sa,pgACDut.da,pgACDut.da);
+          // dout(text);
+          // pgACDut.qword(0) = @CT::CFG::DUT::DevName;
+          // output(pgACDut);
+        }
+      }
+      else
+      {
+        // non aac. 
+        if (otherDevName <= @CT::CFG::DUT::DevName)
+        {
+          // other node has higher dev-name-prio
+          dout("FIX: Non-AAC DUT - Detected Address from higher priority NAME -> send Cannot Claim, go into listen only mode and answer AC requests with Cannot Claim. Also no Rx events are received anymore.");
+          SendCannotClaim();
+          return 0; // eat event - else IL will go into listen mode and we'll get no RX events after that
+        }
+      }
+    }
+  }
+  
+  // IL-FIX: TPCXxx...
+  if (rxPG.pgn == gc_PGN_TPCM)
+  {
+    int i;
+    testTPCM = rxPG;
+    //for (i=0; i<8; i++) write("rxPG.byte(%d)=%X", i, rxPG.byte(i));
+    
+    // Support RTS->Abort messages...
+    if (rxPG.byte(0) == gc_TPCM_CTRL_WORD_RTS)
+    {
+      // for all RTS->Abort producing pgns...
+      for(long k:gRTSAbortPgns)
+      {
+        // if the pg number in RTS is one of the abort producing ones...
+        if (gRTSAbortPgns[k]==testTPCM.PGNumber) 
+        {
+          // ... send abort...
+          dout("FIX: Handling RTS->Abort flagged PGIs...");
+          SendAbort(testTPCM.PGNumber, 1);
+          // ... and let IL ignore this one...
+          return 0;
+        }
+      }
+      
+      // IL-FIX: Abort if RTS with msg-size <9...
+      if (rxPG.byte(1)<9)
+      {
+        dout("FIX: Handling RTS with msg-size <9...");
+        SendAbort(testTPCM.PGNumber, 250);
+        // ... and let IL ignore this one...
+        return 0;
+      }
+    }
+    
+    
+    // IL-FIX: Ignore EOM before last DT.
+    if (rxPG.byte(0) == gc_TPCM_CTRL_WORD_EOM)
+    {
+      if (gPgDT.SequenceNumber < gPgRTS.TotalNumberOfPackets)
+      {
+        dout("FIX: Ignore EOM before last TP.DT (Missing feature. TP-Messages like EOM can't be ignored here.)");
+        return 0; // ignore EOM before last DT.
+      }
+    }
+    
+    // IL-FIX CTS hold after last TPDT, before EOM...
+    if (rxPG.byte(0) == gc_TPCM_CTRL_WORD_CTS)
+    {
+      if (rxPG.byte(1) == 0) // CTS hold...
+      {
+        //write("gPgDT.SequenceNumber = %d, RTS total number = %d", gPgDT.SequenceNumber, gPgRTS.TotalNumberOfPackets);
+        if (gPgDT.SequenceNumber == gPgRTS.TotalNumberOfPackets)
+        {
+          snprintf(text, elcount(text), "FIX: CTS hold after last TP.DT before EOM...");
+          dout(text);
+          // disable IL up to next eom.
+          EnableIL(0);
+        }
+      }
+    }
+  
+    // IL-FIX: Ignore Rx ABORTs for PGNs not fitting during a TP...
+    if (rxPG.byte(0) == gc_TPCM_CTRL_WORD_ABORT)
+    {
+      if ( (gPgCTS.ControlByte > 0) && (gPgCTS.PGNumber<=0x3ffff) ) // there was a previously CTS with a valid PG number detected...
+      {
+        if (testTPCM.PGNumber != gPgCTS.PGNumber)
+        {
+          snprintf(text, elcount(text), "FIX: Ignore Rx Abort with wrong PGN 0x%X. TP PGN=0x%X", testTPCM.PGNumber, gPgCTS.PGNumber);
+          dout(text);
+          return 0;
+        }
+      }
+    }
+    
+    // IL-FIX CTS: abort non hold follow up CTS that is out of range.
+    // for follow up non hold CTS...
+    if ( ( rxPG.sa == gAddrTool ) && (rxPG.byte(0) == gc_TPCM_CTRL_WORD_CTS) )
+    {
+      if (rxPG.byte(1)>0) // non hold CTS (byte #2 >0)
+      {
+        // EVERY CTS...
+        // CTS exceeds RTS package limitations...
+        if (gPgRTS.ControlByte>0) // there was a RTS detected
+        {
+          //write("%.06f rx:%d rts:%d", timeNow()/100000.0, rxPG.byte(1), gPgRTS.TotalNumberOfPackets);
+          if (rxPG.byte(1) > gPgRTS.TotalNumberOfPackets)
+          {
+            snprintf(text, elcount(text), "FIX: Aborting CTS NumberOfPacketsThatCanBeSent (%d) exceeds RTS TotalNumberOfPackets limitation (%d).", rxPG.byte(1),gPgRTS.TotalNumberOfPackets);
+            dout(text);
+            SendAbort(gPgRTS.PGNumber, 3);
+            return 0;
+          }
+        }
+        
+        // FOLLOW UP CTS...
+        if (gPgCTS.ControlByte > 0) // a previous CTS was stored.
+        {
+          if (gPgRTS.PGNumber == gPgCTS.PGNumber)
+          {
+            // there was a previous non hold CTS.
+            
+            // next packet number out of range.
+            if ( (rxPG.byte(2) < gPgCTS.NextPacketNumberToBeSent) || (rxPG.byte(2) > gPgCTS.NextPacketNumberToBeSent+gPgCTS.NumberOfPacketsThatCanBeSent) )
+            {
+              snprintf(text, elcount(text), "FIX: Aborting CTS packet number out of valid range. Next pkg #%d not in previous CTS pkg # [%d;%d]", rxPG.byte(2),gPgCTS.NextPacketNumberToBeSent,gPgCTS.NextPacketNumberToBeSent+gPgCTS.NumberOfPacketsThatCanBeSent);
+              dout(text);
+              SendAbort(gPgCTS.PGNumber, 3);
+              return 0;
+            }
+          }
+        }
+        
+        
+        // IL-FIX first CTS next package number is not 1 -> abort.
+        if (gPgCTS.NextPacketNumberToBeSent == 0)
+        {
+          pg TPCMxx cts;
+          cts = rxPG;
+          if (cts.PGNumber == gPgRTS.PGNumber)
+          {
+            if (cts.NextPacketNumberToBeSent != 1)
+            {
+              
+              snprintf(text, elcount(text), "FIX: Aborting first CTS packet number is %d, but has to be 1", rxPG.byte(2));
+              
+              dout(text);
+              SendAbort(cts.PGNumber, 3);
+              return 0;
+            }
+          }
+        }
+        gPgCTS = rxPG;      
+      }
+    }
+  }
+  
+  // FIX: Prevent DUT reacting to invalid CA-BAM.
+  // track only BC stuff from tool 
+  if ( (rxPG.sa == gAddrTool) && (rxPG.da == gc_BC_ADDR) )
+  {
+    // ================================================================================================================
+    // BAM TPCMxx
+    // ================================================================================================================
+    if (rxPG.pgn == gc_PGN_TPCM)
+    {
+      byte controlWord;
+      controlWord = rxPG.byte(0);
+      
+      // ---------------------------------------------------------------------------------------------------------------
+      // TPCMxx is BAM..
+      if (controlWord == gc_TPCM_CTRL_WORD_BAM)
+      {
+        byte packetCount;
+        byte byteCount;
+       
+        dout("Detected BAM...");
+        
+        // initialize the BAM pg's with empty content...
+        initJ1939PGData(gPgBAMInit);
+        initJ1939PGData(gPgCAInit);
+        gCASeqNr = 0;
+        gCAHandled = 0;
+        gLastDTTime = 0;
+        gInvalidDTDetected = 0;
+        
+        // ignore CA's until valid termination of the CA... 
+        // (background: else IL may react due a known open issue with CA on invalid BAM - so the difficulty is to ignore everything until tracked to be OK.)
+        dout("Disallowing answering next CA.");
+        gIgnoreNextCA = 1; 
+
+        // check for valid BAM...
+        if ( IsValidBAM(rxPG, packetCount, byteCount) )
+        {
+          dout("Valid BAM INIT detected");
+          // grep the pg as BAM INIT
+          gPgBAMInit = rxPG;
+          
+          // BAM is CA...
+          if (gPgBAMInit.PGNumber == gc_PGN_AC_COMMANDED)
+          {
+            // at least CA's counters are valid...
+            if ( ( packetCount >= 2) && ( byteCount >= 9))
+            {
+              dout("BAM is valid CA detected.");
+              // valid CA request over BAM...
+              // grep pg as CA...
+              gPgCAInit = rxPG;
+              gLastDTTime = timeNowNS();
+            }
+          }
+        }
+      }
+    } // END OF TPCMxx handling...
+    
+
+    
+    // ================================================================================================================
+    // BAM TPDT handling...
+    // ================================================================================================================
+    else if ( (rxPG.pgn == gc_PGN_TPDT) && (rxPG.da == gc_BC_ADDR) && (rxPG.dlc==8) && (rxPG.sa == gAddrTool) )
+    {
+      // DT for a valid initialized CA...
+      if ( (gPgCAInit.ControlByte == gc_TPCM_CTRL_WORD_BAM) )
+      {
+        byte seqNr;
+        seqNr = rxPG.byte(0);
+        gCASeqNr++;
+        if (seqNr == gCASeqNr)
+        {
+          if (gLastDTTime > 0)
+          {
+            dword dt;
+            dword dtmax;
+            char text[1024];
+            dtmax = gc_TP_BAM_MAX_RECEIVE_DT;
+            
+            dt = _round( (timeNowNS()-gLastDTTime) /1000000 );
+            //write("seq #%d: dt=%d, max=%d",seqNr, dt, dtmax);
+            snprintf(text, elcount(text), "-- TP.DT Seq #%d: dt=%dms (max=%dms)",seqNr, dt, dtmax);
+            dout(text);
+            if ( (dt>dtmax) || (dt < gc_TP_BAM_MIN_DT) )
+            {
+              dout("DT delta time out of range. Ignore next CA.");
+              gIgnoreNextCA = 1;
+              gInvalidDTDetected = 1;
+            }
+          }
+          
+          if (!gInvalidDTDetected)
+          {
+            gLastDTTime = timeNowNS();
+            
+            // last CA seq nr detected...
+            if (seqNr==gPgCAInit.TotalNumberOfPacketsBAM)
+            {
+              gLastDTTime = 0;
+              {
+                // valid DT detected
+                dout("Detected last DT for CA. Allowing next CA.");
+                gIgnoreNextCA = 0;
+                // update sysvar...
+                // IL detects a CA but does not react if it interrupted a previous BAM.
+                gNewAddr = rxPG.byte(2);
+                if (gNewAddr != gAddrDUT) 
+                {
+                  // setting sysvar will reboot. Skip this next reboot...
+                  SkipNextReboot();
+                  @CT::CFG::DUT::Addr = gNewAddr; 
+                  dout("FIX: Starting fix missing CA timer...");
+                  setTimer(fixMissingCATimer, gc_RESP_TIMEOUT-10);
+                }
+              }
+            }
+          }
+        }
+        else
+        {
+          dout("Unexpected DT sequence number detected. Ignore next CA.");
+          gIgnoreNextCA = 1;
+        }
+      }
+    } // END of BAM TPDT handling...
+    
+    
+  } 
+  return 1;
+}
+on message *
+{
+  // no AC... received something different...
+  //write("%x %d", this.id&0xff0000, );
+  if (!gReclaimLock && (this.dir == rx) && (this.msgChannel == %CHANNEL%) && ((this.id & gAddrDUT) == gAddrDUT) && ((this.id&0xff0000)!=0xee0000))
+  {
+    dout("DUT: Hey, something sending from my SA... I'll reclaim it...");
+    gAddrViolationCount++;
+    SendClaim();
+    gReclaimLock = 1;
+    setTimer(timerLockReclaim, gc_ReclaimLockSeconds);
+    if (gAddrViolationCount>=2)
+    {
+      if (@CT::CFG::DUT::AddrViolation_DM)
+      {
+        SendDTC(2000+gAddrDUT, 31, gAddrViolationCount, 0x0101);
+      }
+    }
+  }
+}
+
+// send DM01 DTC...
+void SendDTC(dword spn, byte fmi, byte oc, word lamps)
+{
+  pg * pgDM01 = {DLC=10};
+  dword dtc;
+  char text[255];
+  J1939MakeDTC(2000+gAddrDUT, 31, 1, dtc);
+  pgDM01.id=0x80000000;
+  pgDM01.prio = 3;
+  pgDM01.dp = 0;
+  pgDM01.edp = 0;
+  pgDM01.sa = gAddrDUT;
+  pgDM01.da = 0xFF;
+  pgDM01.pgn = 0xfeca;
+  pgDM01.word(0) = lamps;
+  pgDM01.dword(2)=dtc;
+  snprintf(text,elcount(text),"DUT: Sending DM01: SPN=%d, FMI=%d, OC=%d, LAMPS=0x%X", spn,fmi,oc,lamps);
+  dout(text);
+  output(pgDM01);
+}
+
+// write output helper.
+void cout(char text[])
+{
+  char buf[1024];
+  snprintf(buf, elcount(buf), "[DEMO-DUT] %.6f: %s", timeNowNs()/1000000000, text);
+  writeLineEx(-3,1, buf);
+  write(buf);
+}
+void cout_value64(char text[], qword value)
+{
+  char buf[4096];
+  snprintf(buf, elcount(buf), text, value, value, value, value, value, value, value, value, value);
+  cout(buf);
+}
+void cout_value32(char text[], dword value)
+{
+  char buf[4096];
+  snprintf(buf, elcount(buf), text, value, value, value, value, value, value, value, value, value);
+  cout(buf);
+}
+// debug output
+void dout(char text[])
+{
+  if (@CT::DEBUG::CHECKS) 
+  {
+    char buf[1024];
+    snprintf(buf, elcount(buf), "[DEMO-DUT] %.6f: %s", timeNowNs()/1000000000, text);
+    writeLineEx(-3,1, buf);
+    write(buf);
+  }
+}
+void dout_value64(char text[], qword value)
+{
+  char buf[4096];
+  snprintf(buf, elcount(buf), text, value, value, value, value, value, value, value, value, value);
+  dout(buf);
+}
+void dout_value32(char text[], dword value)
+{
+  char buf[4096];
+  snprintf(buf, elcount(buf), text, value, value, value, value, value, value, value, value, value);
+  dout(buf);
+}
+on timer fixMissingCATimer
+{
+  if ( (gIgnoreNextCA == 0) && (!gCAHandled) )
+  {
+    dout("FIX: Missing CA handling. Output ACL.");
+    {
+      // IL detects a CA but does not react if it interrupted a previous BAM.
+      pg AC_DUT pgAC;
+      pg CA pgCA;
+      byte newAddr;
+      pgAC.sa = gNewAddr;
+      pgAC.qword(0) = @CT::CFG::DUT::DevName;
+      output(pgAC);
+    }
+  }
+}
+
+// on CA detected...
+long J1939ILOnCA(long address)
+{
+  cancelTimer(fixMissingCATimer);
+  dout("J1939ILOnCA...");
+  // Prevent DUT reacting to invalid CA-BAM.
+  if ( gIgnoreNextCA > 0 )
+  {
+    dout("IGNORE INVALID CA BAM");
+    gCAHandled = 0;
+    return 0;
+  }
+  gIgnoreNextCA = 0; // enable until next BAM init...
+  gCAHandled = 1;
+  return 1;
+}

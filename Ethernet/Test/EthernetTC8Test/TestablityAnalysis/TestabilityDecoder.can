@@ -1,0 +1,1847 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "../TestSuite/ShareableFolders/CaplLibrary/TestabilityProtocolLib/Internal_TestabilityMessageDefinition.cin"
+  #include "Encoding.cin"
+}
+
+variables
+{
+
+  // Maximum parameter data size to decode for Service Primitives: 1500 - IPv4 header (20) - UDP header(8) - Testability Header(16)
+  const word kMaxTestabilityParameterLen = 1456;
+  
+  //for Service Pritmitive name
+  const word MAX_SP_NAME_LEN = 30;
+  char[MAX_SP_NAME_LEN] cSpNameMap[long];
+  
+  struct _SERVICE_PRIMITIVES_INFO
+  {
+    byte GID;
+    byte PID;
+    char PrimitiveName[30];
+  };
+  
+  const word kwMAX_SP_INFO_NUM = 46;
+  struct _SERVICE_PRIMITIVES_INFO SP_INFO[kwMAX_SP_INFO_NUM] = { 
+    //GID, PID, name
+     // - GENERAL
+    {kTestabilityGroupGeneral, kTestabilityGroupGeneralGetVersion, "GET_VERSION"},
+    {kTestabilityGroupGeneral, kTestabilityGroupGeneralStartTest, "START_TEST"},
+    {kTestabilityGroupGeneral, kTestabilityGroupGeneralEndTest, "END_TEST"},
+                                                  
+     // - UDP
+    {kTestabilityGroupUDP, kTestabilityGroupUDPCloseSocket, "CLOSE_SOCKET"},
+    {kTestabilityGroupUDP, kTestabilityGroupUDPCreateAndBind, "CREATE_AND_BIND"},
+    {kTestabilityGroupUDP, kTestabilityGroupUDPSendData, "SEND_DATA"},
+    {kTestabilityGroupUDP, kTestabilityGroupUDPReceiveAndFwd, "RECEIVE_AND_FORWARD"},
+    {kTestabilityGroupUDP, kTestabilityGroupUDPConfigureSocket, "CONFIGURE_SOCKET"},
+    {kTestabilityGroupUDP, kTestabilityGroupUDPShutdown, "SHUTDOWN"},
+    
+     // - TCP
+    {kTestabilityGroupTCP, kTestabilityGroupTCPCloseSocket, "CLOSE_SOCKET"},
+    {kTestabilityGroupTCP, kTestabilityGroupTCPCreateAndBind, "CREATE_AND_BIND"},
+    {kTestabilityGroupTCP, kTestabilityGroupTCPSendData, "SEND_DATA"},
+    {kTestabilityGroupTCP, kTestabilityGroupTCPReceiveAndFwd, "RECEIVE_AND_FORWARD"},
+    {kTestabilityGroupTCP, kTestabilityGroupTCPListenAndAccept, "LISTEN_AND_ACCEPT"},
+    {kTestabilityGroupTCP, kTestabilityGroupTCPConnect, "CONNECT"},
+    {kTestabilityGroupTCP, kTestabilityGroupTCPConfigureSocket, "CONFIGURE_SOCKET"},
+    {kTestabilityGroupTCP, kTestabilityGroupTCPShutdown, "SHUTDOWN"},
+    {kTestabilityGroupTCP, kTestabilityGroupTCPGetState, "GET_STATE"},
+    {kTestabilityGroupTCP, kTestabilityGroupTCPCallReceive, "CALL_RECEIVE"},
+    
+     // -ICMP
+    {kTestabilityGroupICMP, kTestabilityGroupICMPv4EchoRequest, "ECHO_REQUEST"},
+    {kTestabilityGroupICMP, kTestabilityGroupICMPv4ReceiveAndFwd, "RECEIVE_AND_FORWARD"}, //### User Define SP
+
+     // -ICMPv6
+    {kTestabilityGroupICMPv6, 0x00, "ECHO_REQUEST"},
+
+     // -IP
+    {kTestabilityGroupIP, 0x00, "STATIC_ADDRESS"},    
+    {kTestabilityGroupIP, 0x01, "STATIC_ROUTE"},    
+    
+     // -IPv6
+    {kTestabilityGroupIPv6, 0x00, "STATIC_ADDRESS"},    
+    {kTestabilityGroupIPv6, 0x01, "STATIC_ROUTE"},
+    
+     // -DHCP
+    {kTestabilityGroupDHCP, kTestabilityGroupDhcpInitialiazeClient, "INIT_DHCP_CILENT"},
+    {kTestabilityGroupDHCP, kTestabilityGroupDhcpStopClient, "STOP_DHCP_CLIENT"},
+    {kTestabilityGroupDHCP, kTestabilityGroupDhcpSetOption, "SET_DHCP_OPTION"},
+
+     // -DHCPv6
+    {kTestabilityGroupDHCPv6, kTestabilityGroupDhcpInitialiazeClient, "INIT_DHCP_CILENT"},
+    {kTestabilityGroupDHCPv6, kTestabilityGroupDhcpStopClient, "STOP_DHCP_CLIENT"},
+    {kTestabilityGroupDHCPv6, kTestabilityGroupDhcpSetOption, "SET_DHCP_OPTION"},
+    
+     // -ARP
+    {kTestabilityGroupARP, kTestabilityGroupARPClearArpTable, "CLEAR_ARP_TABLE"},
+    {kTestabilityGroupARP, kTestabilityGroupARPAddStaticEntry, "ADD_STATIC_ENTRY"},
+    {kTestabilityGroupARP, kTestabilityGroupARPDeleteStaticEntry, "DELETE_STATIC_ENTRY"},
+    {kTestabilityGroupARP, kTestabilityGroupARPSetTimeOut, "SET_TIME_OUT"},
+    {kTestabilityGroupARP, kTestabilityGroupARPClearTimeOut, "CLEAR_TIME_OUT"},
+    
+    
+     // -Eth Group
+    {0x0B, 0x00, "INTERFACE_UP"},
+    {0x0B, 0x01, "INTERFACE_DOWN"},
+    
+     // -PHY Group
+    {0x0C, 0x00, "READ_SIGNAL_QUALITY"},
+    {0x0C, 0x01, "READ_DIAG_RESULT"},
+    {0x0C, 0x02, "ACTIVE_TEST_MODE"},
+    {0x0C, 0x03, "SET_PHY_TX_MODE"},
+    
+    // -SOME/IP ### User define SP
+    {kTestabilityGroupSOMEIP, kTestabilityGroupSOMEIPStartService, "START_SERVICE"}, 
+    {kTestabilityGroupSOMEIP, kTestabilityGroupSOMEIPStopService, "STOP_SERVICE"}, 
+    {kTestabilityGroupSOMEIP, kTestabilityGroupSOMEIPTriggerEvent, "TRIGGER_EVENT"}
+    
+  };
+    
+  //struct for TestabilityMessage
+  struct TestabilityMessageData 
+  {
+    struct TestabilityMessage tm;
+    byte eventBit;
+    long lkey;
+    dword parametersLength;
+    dword parameterOffset;
+  };
+}
+
+on preStart
+{
+  InitSPInfoData();
+}
+/// <Helper>
+//function to get byte parameter from parameter list
+byte getUInt8FromParams(struct TestabilityMessageData tmData) 
+{
+  byte res;
+  
+  res = tmData.tm.params.byte(tmData.parameterOffset);  
+  tmData.parameterOffset += 1;
+  
+  return res;
+}
+
+/// <Helper>
+//function to get word parameter from parameter list (2byte)
+word getUInt16FromParams(struct TestabilityMessageData tmData) 
+{
+  word res;
+  
+  res = swapWord(tmData.tm.params.word(tmData.parameterOffset));  
+  tmData.parameterOffset += 2;
+  
+  return res;
+}
+
+/// <Helper>
+//function to get dword parameter from parameter list (4byte)
+dword getUInt32FromParams(struct TestabilityMessageData tmData) 
+{
+  dword res;
+  
+  res = swapDWord(tmData.tm.params.dword(tmData.parameterOffset));  
+  tmData.parameterOffset += 4;
+  
+  return res;
+}
+/// <Helper>
+//function to get IP address from parameter list (ipv4 or ipv6)
+long getIpAddressFromParams(struct TestabilityMessageData tmData, char ipvXAddress[], dword bufferLength) 
+{
+  word ipType;
+  long retCode;
+  byte ipv6ByteArray[16];
+  byte index;
+  
+  ipType = getUInt16FromParams(tmData);
+    
+  if(ipType == 4) //than the address is ipv4
+  {
+    return ipGetAddressAsString(swapDWord(getUInt32FromParams(tmData)), ipvXAddress, bufferLength);
+  }
+  else if(ipType == 16)//than the address is ipv6
+  {
+    for(index = 0; index < 16; index++) 
+    {
+      ipv6ByteArray[index] = getUInt8FromParams(tmData);
+    }
+    return ipGetAddressAsString(ipv6ByteArray, ipvXAddress, bufferLength);
+  } 
+  else 
+  {
+    return -1;
+  }
+}
+/// <Helper>
+//function to get MAC address from parameter list (6 byte)
+long getMacAddressFromParams(struct TestabilityMessageData tmData, char buffer[], dword bufferLength) 
+{
+  qword mac;
+
+  mac = tmData.tm.params.qword(tmData.parameterOffset);
+  tmData.parameterOffset += 8;
+  
+  return ethGetMacAddressAsString(mac >> 16, buffer, bufferLength);
+}
+
+/// <Initialization>
+//
+// Init string data for Service Primitive
+//
+void InitSPInfoData()
+{
+  long lIdx;
+  long lKey;
+  
+  for(lIdx = 0 ; lIdx < kwMAX_SP_INFO_NUM; lIdx++)
+  {
+    lKey = ((word)(SP_INFO[lIdx].GID) << 8) + (word)(SP_INFO[lIdx].PID);
+    strncpy(cSpNameMap[lKey], SP_INFO[lIdx].PrimitiveName, elcount(SP_INFO[lIdx].PrimitiveName));
+  }
+}
+
+//
+// Callback function for receiving packet.
+// Entry point for decoder
+//
+on ethernetPacket *
+{
+  struct TestabilityMessageData tmData;
+  
+  output(this);
+  
+  // DUT receive and sending UDP packet
+  if(CheckIfDUTTestabilityPacket(this, tmData) == 1)
+  {
+    //AnaliszeTestablityProtocol
+    DecodeTestabilityProtocol(tmData);
+  }
+}
+
+//
+// Check if packet have the specified DUT address and UDP port for testability packet.
+//
+int CheckIfDUTTestabilityPacket(ethernetPacket* packet, struct TestabilityMessageData tmData)
+{
+  dword len;
+  int i = 10;
+  
+  if(!packet.udp.IsAvailable())
+    return 0;
+  if(packet.udp.byteLength < kTestabilityMessageHeaderByteLength)
+    return 0;
+  if(packet.udp.destination != @sysvar::Internal::TestabilityServicesUpdPort && packet.udp.source != @sysvar::Internal::TestabilityServicesUpdPort)
+    return 0;
+  
+  len = packet.udp.GetData(0, tmData.tm);
+  
+  tmData.tm.header.serviceId  = swapWord(tmData.tm.header.serviceId);
+  tmData.tm.header.length     = swapDWord(tmData.tm.header.length);
+  tmData.tm.header.reserved   = swapDWord(tmData.tm.header.reserved);
+  tmData.tm.header.groupId    = tmData.tm.header.groupId & 0x7F;
+  tmData.eventBit             = (tmData.tm.header.groupId >> 7) & 0x01;
+  tmData.parameterOffset      = 0;
+  tmData.lKey                 = swapword(packet.udp.word(2) & 0xFF7F);
+  //Get parameter lengths
+  tmData.parametersLength     = tmData.tm.header.length - 8 /* 8 bytes are header fields */;  
+  if(tmData.parametersLength > kMaxTestabilityParameterLen) 
+   tmData.parametersLength    = kMaxTestabilityParameterLen;
+  
+  if(tmData.tm.header.serviceId != kTestabilityMessageServiceId)
+    return 0;
+  if(tmData.tm.header.length + 8 != len)
+    return 0;
+ 
+  return 1;
+}
+
+//
+// fill TestabilityMessage information for sysvar - without parameter
+//
+void FillTmHeaderWithoutParam(struct TestabilityMessageData tmData, char sysVarName[]) 
+{
+  char sysVarNameFull[255];
+  
+  snprintf(sysVarNameFull, elCount(sysVarNameFull), "%s", sysVarName);
+  
+  sysBeginVariableStructUpdate("AUTOSAR_TP_SP", sysVarNameFull);
+  
+  FillTestabilityMessageHeader(tmData, sysVarName);
+  
+  sysEndVariableStructUpdate("AUTOSAR_TP_SP", sysVarNameFull);
+}
+
+//
+// fill TestabilityMessage information for sysvar - with parameter
+//
+void FillTestabilityMessageHeader(struct TestabilityMessageData tmData, char sysVarName[]) 
+{
+  char sysVarNameFull[255];
+  long retCode;
+  
+  snprintf(sysVarNameFull, elCount(sysVarNameFull), "%s.%s", sysVarName, "Header.ServiceID");
+  retCode = sysSetVariableDWord("AUTOSAR_TP_SP", sysVarNameFull, tmData.tm.header.serviceId);
+  
+  if(retCode != 0)
+  {
+    WriteLineEx(4, 3, "ServiceID retCode: %d", retCode);
+  }
+
+  snprintf(sysVarNameFull, elCount(sysVarNameFull), "%s.%s", sysVarName, "Header.EventBit");
+  retCode = sysSetVariableDWord("AUTOSAR_TP_SP", sysVarNameFull, tmData.eventBit);
+  
+  if(retCode != 0)
+  {
+    WriteLineEx(4, 3, "EventBit retCode: %d", retCode);
+  }
+  
+  snprintf(sysVarNameFull, elCount(sysVarNameFull), "%s.%s", sysVarName, "Header.GroupID");
+  retCode = sysSetVariableInt("AUTOSAR_TP_SP", sysVarNameFull, tmData.tm.header.groupId);
+  
+  if(retCode != 0)
+  {
+    WriteLineEx(4, 3, "GroupID retCode: %d", retCode);
+  }
+  
+  snprintf(sysVarNameFull, elCount(sysVarNameFull), "%s.%s", sysVarName, "Header.servicePrimitiveID");
+  retCode = sysSetVariableInt("AUTOSAR_TP_SP", sysVarNameFull, tmData.tm.header.servicePrimitiveId);
+  
+  if(retCode != 0)
+  {
+    WriteLineEx(4, 3, "ServicePrimitiveId retCode: %d", retCode);
+  }
+  
+  snprintf(sysVarNameFull, elCount(sysVarNameFull), "%s.%s", sysVarName, "Header.ProtocolVersion");
+  retCode = sysSetVariableInt("AUTOSAR_TP_SP", sysVarNameFull, tmData.tm.header.protocolVersion);
+  
+  if(retCode != 0)
+  {
+    WriteLineEx(4, 3, "protocolVersion retCode: %d", retCode);
+  }
+  
+  snprintf(sysVarNameFull, elCount(sysVarNameFull), "%s.%s", sysVarName, "Header.InterfaceVersion");
+  retCode = sysSetVariableInt("AUTOSAR_TP_SP", sysVarNameFull, tmData.tm.header.interfaceVersion);
+  
+  if(retCode != 0)
+  {
+    WriteLineEx(4, 3, "interfaceVersion retCode: %d", retCode);
+  }
+  
+  snprintf(sysVarNameFull, elCount(sysVarNameFull), "%s.%s", sysVarName, "Header.TypeID");
+  retCode = sysSetVariableInt("AUTOSAR_TP_SP", sysVarNameFull, tmData.tm.header.typeId);
+  
+  if(retCode != 0)
+  {
+    WriteLineEx(4, 3, "typeId retCode: %d", retCode);
+  }
+  
+  snprintf(sysVarNameFull, elCount(sysVarNameFull), "%s.%s", sysVarName, "Header.ResultID");
+  retCode = sysSetVariableInt("AUTOSAR_TP_SP", sysVarNameFull, tmData.tm.header.resultId);
+  
+  if(retCode != 0)
+  {
+    WriteLineEx(4, 3, "resulId retCode: %d", retCode);
+  }
+  
+  snprintf(sysVarNameFull, elCount(sysVarNameFull), "%s.%s", sysVarName, "Header.PID_STR");
+  retCode = sysSetVariableString("AUTOSAR_TP_SP", sysVarNameFull, cSpNameMap[tmData.lkey]);
+  
+  if(retCode != 0)
+  {
+    WriteLineEx(4, 3, "sysVarName retCode: %d", retCode);
+  }
+}
+
+//
+// Decode testability protocol
+//
+void DecodeTestabilityProtocol(struct TestabilityMessageData tmData)
+{
+  //Decode Parameters
+  if(DecodeTestabilityParameters(tmData) != 1) 
+  {
+    //not decodable so show unknownMessage
+    DECODE_UNKOWN_MESSAGE(tmData);
+  }
+}
+
+//
+// Decode parameter of testability service primitives 
+//
+byte DecodeTestabilityParameters(struct TestabilityMessageData tmData)
+{
+  switch(tmData.tm.header.groupId)
+  {
+    case kTestabilityGroupTCP:
+    case kTestabilityGroupUDP:
+     return Decode_UDP_TCP_Parameters(tmData);
+    case kTestabilityGroupGeneral:
+     return Decode_GENERAL_Parameters(tmData);
+    case kTestabilityGroupETH:
+     return Decode_ETH_Parameters(tmData);
+    case kTestabilityGroupARP:
+     return Decode_ARP_Messages(tmData);
+    case kTestabilityGroupICMP:
+     return Decode_ICMP_Messages(tmData);
+    case kTestabilityGroupSOMEIP:
+     return Decode_SOMEIP_Messages(tmData);
+    case kTestabilityGroupDHCP:
+     return Decode_DHCP_Messages(tmData);
+    default:
+     return 0;
+  }
+}
+
+/// <SomeIP>
+//
+// Decode START_SERVICE
+//
+byte Decode_START_SERVICE(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_SomeIp_START_SERVICE_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_SomeIp_START_SERVICE_Req");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_SomeIp_START_SERVICE_Req.serviceId = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_SomeIp_START_SERVICE_Req.numOfInst = getUInt16FromParams(tmData);
+    
+    if(tmData.parametersLength > 4) 
+    {
+      @sysvarMember::AUTOSAR_TP_SP::TM_SomeIp_START_SERVICE_Req.sdCyclicDelay = getUInt32FromParams(tmData);
+      if(tmData.parametersLength > 8) 
+      {
+        @sysvarMember::AUTOSAR_TP_SP::TM_SomeIp_START_SERVICE_Req.ttl = getUInt32FromParams(tmData);
+      }
+    }
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_SomeIp_START_SERVICE_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_SomeIp_START_SERVICE_Res");
+    
+    return 1;
+  }
+    return 0;
+}
+/// <SomeIP>
+//
+// Decode STOP_SERVICE
+//
+byte Decode_STOP_SERVICE(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_SomeIp_STOP_SERVICE_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_SomeIp_STOP_SERVICE_Req");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_SomeIp_STOP_SERVICE_Req.serviceId = getUInt16FromParams(tmData);
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_SomeIp_STOP_SERVICE_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_SomeIp_STOP_SERVICE_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+/// <SomeIP>
+//
+// Decode TRIGGER_EVENT
+//
+byte Decode_TRIGGER_EVENT(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_SomeIp_TRIGGER_EVENT_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_SomeIp_TRIGGER_EVENT_Req");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_SomeIp_TRIGGER_EVENT_Req.serviceId = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_SomeIp_TRIGGER_EVENT_Req.eventGroup = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_SomeIp_TRIGGER_EVENT_Req.eventId = getUInt16FromParams(tmData);
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_SomeIp_TRIGGER_EVENT_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_SomeIp_TRIGGER_EVENT_Res");
+    
+    return 1;
+  }
+    return 0;
+}
+
+/// <DHCP>
+//
+// Decode DHCP Messages
+//
+byte Decode_DHCP_Messages(struct TestabilityMessageData tmData)
+{
+  switch(tmData.tm.header.servicePrimitiveId)
+  {
+    case kTestabilityGroupDhcpInitialiazeClient:
+      return Decode_INITALIZE_CLIENT(tmData);
+    case kTestabilityGroupDhcpStopClient:
+      return Decode_STOP_CLIENT(tmData);
+    case kTestabilityGroupDhcpSetOption:
+      return Decode_SET_OPTION(tmData);
+    default :
+      return 0;
+  }
+}
+
+/// <SOMEIP>
+//
+// Decode SOMEIP parameters
+//
+byte Decode_SOMEIP_Messages(struct TestabilityMessageData tmData)
+{
+  switch(tmData.tm.header.servicePrimitiveId)
+  {
+    case kTestabilityGroupSOMEIPStartService:
+      return Decode_START_SERVICE(tmData);
+    case kTestabilityGroupSOMEIPStopService:
+      return Decode_STOP_SERVICE(tmData);
+    case kTestabilityGroupSOMEIPTriggerEvent:
+      return Decode_TRIGGER_EVENT(tmData);
+    default :
+      return 0;
+  }
+}
+
+/// <ICMP>
+//
+// Decode ICMP
+//
+byte Decode_ICMP_Messages(struct TestabilityMessageData tmData)
+{
+  switch(tmData.tm.header.servicePrimitiveId)
+  {
+    case kTestabilityGroupICMPv4EchoRequest:
+      return Decode_ICMP_ECHO_REQUEST(tmData);
+    case kTestabilityGroupICMPv4ReceiveAndFwd:
+      return Decode_ICMP_RECEIVE_AND_FORWARD(tmData);
+    default :
+      return 0;
+  }
+}
+
+/// <ARP>
+//
+// Decode ARP 
+//
+byte Decode_ARP_Messages(struct TestabilityMessageData tmData)
+{
+  switch(tmData.tm.header.servicePrimitiveId)
+  {
+    case kTestabilityGroupARPClearArpTable:
+      return Decode_CLEAR_ARP_TABLE(tmData);
+    case kTestabilityGroupARPAddStaticEntry:
+      return Decode_ADD_STATIC_ENTRY(tmData);
+    case kTestabilityGroupARPDeleteStaticEntry:
+      return Decode_DELETE_STATIC_ENTRY(tmData);
+    case kTestabilityGroupARPSetTimeOut:
+      return Decode_SET_TIMEOUT(tmData);
+    case kTestabilityGroupARPClearTimeOut:
+      return Decode_CLEAR_TIMEOUT(tmData);
+    default :
+      return 0;
+  }
+}
+
+/// <UDP_TCP>
+//
+// Decode UDP/TCP
+//
+byte Decode_UDP_TCP_Parameters(struct TestabilityMessageData tmData)
+{
+  switch(tmData.tm.header.servicePrimitiveId)
+  {
+    case kTestabilityGroupUDPCloseSocket: //CLOSE_SOCKET - UDP/TCP
+      return Decode_CLOSE_SOCKET(tmData);
+    case kTestabilityGroupUDPCreateAndBind: //CREATE_AND_BIND - UDP/TCP
+      return Decode_CREATE_AND_BIND(tmData);
+    case kTestabilityGroupUDPSendData: //SEND_DATA UDP/TCP - UDP/TCP
+      return Decode_SEND_DATA(tmData);
+    case kTestabilityGroupUDPReceiveAndFwd: //RECEIVE_AND_FORWARD - UDP/TCP
+      return Decode_RECEIVE_AND_FORWARD(tmData);
+    case kTestabilityGroupTCPListenAndAccept: //LISTEN_AND_ACCEPT - only TCP
+      return Decode_LISTEN_AND_ACCEPT(tmData);
+    case kTestabilityGroupTCPConnect: //CONNECT - only TCP
+      return Decode_CONNECT(tmData);
+    case kTestabilityGroupUDPConfigureSocket: //CONFIGURE_SOCKET - UDP/TCP
+      return Decode_CONFIGURE_SOCKET(tmData);
+    case kTestabilityGroupTCPShutdown: //SHUTDOWN  - UDP/TCP
+      return Decode_SHUT_DOWN(tmData);
+    case kTestabilityGroupTCPGetState: //GET_STATE - only TCP
+      return Decode_GET_STATE(tmData);
+    case kTestabilityGroupTCPCallReceive: //CALL_RECEIVE - only TCP
+      return Decode_CALL_RECEIVE(tmData);
+    default :
+      return 0;
+  }
+}
+
+/// <General>
+//
+//
+//
+byte Decode_GENERAL_Parameters(struct TestabilityMessageData tmData)
+{
+  switch(tmData.tm.header.servicePrimitiveId)
+  {
+    case kTestabilityGroupGeneralGetVersion:
+      return Decode_GET_VERSION(tmData);
+    case kTestabilityGroupGeneralStartTest:
+      return Decode_START_TEST(tmData);
+    case kTestabilityGroupGeneralEndTest:
+      return Decode_END_TEST(tmData);
+    default:
+      return 0;
+  }
+}
+
+/// <ETH>
+//
+//
+//
+byte Decode_ETH_Parameters(struct TestabilityMessageData tmData)
+{
+  switch(tmData.tm.header.servicePrimitiveId)
+  {
+    case kTestabilityGroupEthInterfaceUp:
+      return Decode_INTERFACE_UP(tmData);
+    case kTestabilityGroupEthInterfaceDown:
+      return Decode_INTERFACE_DOWN(tmData);
+    default:
+      return 0;
+  }
+}
+
+/// <DHCP>
+//
+// Decode DHCP_INTITALIZE_CLIENT
+//
+byte Decode_INITALIZE_CLIENT(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    word wTextInfoLen;
+    word ifNameLength;
+    char stringData[kMaxTestabilityParameterLen];
+    const word kwBOM_LEN = 3;
+    
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Dhcp_INIT_DHCP_CLIENT_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    FillTestabilityMessageHeader(tmData, "TM_Dhcp_INIT_DHCP_CLIENT_Req");
+    
+    wTextInfoLen = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_Dhcp_INIT_DHCP_CLIENT_Req.ifName.length = wTextInfoLen;
+    
+    if(tmData.parametersLength >= wTextInfoLen + tmData.parameterOffset)
+    {
+      wTextInfoLen = wTextInfoLen - kwBOM_LEN; //text data consist with BOM(0xEF,0xBB, 0xBF) + Text + Termination(NULL) 
+      memcpy_off(stringData, 0, tmData.tm.params, tmData.parameterOffset + kwBOM_LEN, wTextInfoLen);
+      sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Dhcp_INIT_DHCP_CLIENT_Req.ifName.stringData, stringData);
+    }
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Dhcp_INIT_DHCP_CLIENT_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Reply
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Dhcp_INIT_DHCP_CLIENT_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <DHCP>
+//
+// Decode DHCP_STOP_CLIENT
+//
+byte Decode_STOP_CLIENT(struct TestabilityMessageData tmData)
+{
+  word wTextInfoLen;
+  word ifNameLength;
+  const word kwBOM_LEN = 3;
+  char stringData[kMaxTestabilityParameterLen];
+  
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Dhcp_STOP_DHCP_CLIENT_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    FillTestabilityMessageHeader(tmData, "TM_Dhcp_STOP_DHCP_CLIENT_Req");
+    
+    wTextInfoLen = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_Dhcp_STOP_DHCP_CLIENT_Req.ifName.length = wTextInfoLen;
+    
+    if(tmData.parametersLength >= wTextInfoLen + tmData.parameterOffset)
+    {
+      wTextInfoLen = wTextInfoLen - kwBOM_LEN; //text data consist with BOM(0xEF,0xBB, 0xBF) + Text + Termination(NULL) 
+      memcpy_off(stringData, 0, tmData.tm.params, tmData.parameterOffset + kwBOM_LEN, wTextInfoLen);
+      sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Dhcp_STOP_DHCP_CLIENT_Req.ifName.stringData, stringData);
+    }
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Dhcp_STOP_DHCP_CLIENT_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Reply
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Dhcp_STOP_DHCP_CLIENT_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <DHCP>
+//
+// Decode _DHCP_SET_OPTION
+//
+byte Decode_SET_OPTION(struct TestabilityMessageData tmData)
+{
+  word wTextInfoLen;
+  word ifNameLength;
+  char stringData[kMaxTestabilityParameterLen];
+  const word kwBOM_LEN = 3;
+  
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Dhcp_STOP_DHCP_CLIENT_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    FillTestabilityMessageHeader(tmData, "TM_Dhcp_SET_DHCP_OPTION_Req");
+    
+    wTextInfoLen = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_Dhcp_SET_DHCP_OPTION_Req.ifName.length = wTextInfoLen;
+    
+    if(tmData.parametersLength >= wTextInfoLen + tmData.parameterOffset)
+    {
+      wTextInfoLen = wTextInfoLen - kwBOM_LEN; //text data consist with BOM(0xEF,0xBB, 0xBF) + Text + Termination(NULL) 
+      memcpy_off(stringData, 0, tmData.tm.params, tmData.parameterOffset + kwBOM_LEN, wTextInfoLen);
+      sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Dhcp_SET_DHCP_OPTION_Req.ifName.stringData, stringData);
+    }
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_Dhcp_SET_DHCP_OPTION_Req.code = getUInt8FromParams(tmData);
+    
+    CopyDataToSysVar(tmData, "TM_Dhcp_SET_DHCP_OPTION_Req", "value");
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Dhcp_SET_DHCP_OPTION_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Dhcp_SET_DHCP_OPTION_Req");
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Reply
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Dhcp_SET_DHCP_OPTION_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <ICMP>
+//
+// Decode ICMP_ECHO_REQUEST
+//
+byte Decode_ICMP_ECHO_REQUEST(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Icmp_ECHO_REQUEST_Req");
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Reply
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Icmp_ECHO_REQUEST_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <ICMP>
+//
+// Decode ICMP_RECEIVE_AND_FORWARD
+//
+byte Decode_ICMP_RECEIVE_AND_FORWARD(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Icmp_RECEIVE_AND_FORWARD_Req");
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Icmp_RECEIVE_AND_FORWARD_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+
+/// <ARP>
+//
+// Decode CLEAR_TIMEOUT
+//
+byte Decode_CLEAR_TIMEOUT(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Arp_CLEAR_TIMEOUT_Req");
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Arp_CLEAR_TIMEOUT_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <ARP>
+//
+// Decode SET_TIMEOUT
+//
+byte Decode_SET_TIMEOUT(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Arp_SET_TIMEOUT_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_Arp_SET_TIMEOUT_Req");
+
+    //skip 2 bytes length of vint8
+    getUInt16FromParams(tmData);
+    
+    //and then get 4 byte timeout value
+    @sysvarMember::AUTOSAR_TP_SP::TM_Arp_SET_TIMEOUT_Req.timeout = getUInt32FromParams(tmData);
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Arp_SET_TIMEOUT_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Arp_SET_TIMEOUT_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <ARP>
+//
+// Decode DELETE_STATIC_ENTRY
+//
+byte Decode_DELETE_STATIC_ENTRY(struct TestabilityMessageData tmData)
+{
+  char ipv4Address[16];
+  char macAddress[18];
+  word ipType;
+  
+  long retCode;
+  
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Arp_DELETE_STATIC_ENTRY_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_Arp_DELETE_STATIC_ENTRY_Req");
+    
+    getIpAddressFromParams(tmData, ipv4Address, elCount(ipv4Address));
+    retCode = sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Arp_DELETE_STATIC_ENTRY_Req.IPv4_Param, ipv4Address);
+  
+    if(retCode != 0)
+    {
+      WriteLineEx(4, 3, "ServiceID retCode: %d", retCode);
+    }
+    
+    //MAC address (vint8 n=6)
+    getMacAddressFromParams(tmData, macAddress, elcount(macAddress));
+
+    retCode = sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Arp_DELETE_STATIC_ENTRY_Req.MAC_Param, macAddress);
+  
+    if(retCode != 0)
+    {
+      WriteLineEx(4, 3, "ServiceID retCode: %d", retCode);
+    }
+
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Arp_DELETE_STATIC_ENTRY_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Arp_DELETE_STATIC_ENTRY_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <ARP>
+//
+// Decode ADD_STATIC_ENTRY
+//
+byte Decode_ADD_STATIC_ENTRY(struct TestabilityMessageData tmData)
+{
+  char ipv4Address[16];
+  char macAddress[18];
+  long retCode;
+  
+  word ipType;
+  
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Arp_ADD_STATIC_ENTRY_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_Arp_ADD_STATIC_ENTRY_Req");
+    
+    getIpAddressFromParams(tmData, ipv4Address, elCount(ipv4Address));
+    retCode = sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Arp_ADD_STATIC_ENTRY_Req.IPv4_Param, ipv4Address);
+  
+    //MAC address (vint8 n=6)
+    getMacAddressFromParams(tmData, macAddress, elcount(macAddress));
+   
+    retCode = sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Arp_ADD_STATIC_ENTRY_Req.MAC_Param, macAddress);
+  
+    if(retCode != 0)
+    {
+      WriteLineEx(4, 3, "ServiceID retCode: %d", retCode);
+    }
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Arp_ADD_STATIC_ENTRY_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Arp_ADD_STATIC_ENTRY_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <ARP>
+//
+// Decode CLEAR_ARP_TABLEDecode_ADD_STATIC_ENTRY
+//
+byte Decode_CLEAR_ARP_TABLE(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Arp_CLEAR_ARP_TABLE_Req");
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Arp_CLEAR_ARP_TABLE_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <UDP_TCP>
+//
+// Decode CLOSE_SOCKET
+//
+byte Decode_CLOSE_SOCKET(struct TestabilityMessageData tmData)
+{
+  //REQUEST
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_UdpTcp_CLOSE_SOCKET_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_UdpTcp_CLOSE_SOCKET_Req");
+    
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_UdpTcp_CLOSE_SOCKET_Req.socketId = getUInt16FromParams(tmData);
+    if(tmData.tm.header.groupId == kTestabilityGroupTCP)
+    {
+      @sysvarMember::AUTOSAR_TP_SP::TM_UdpTcp_CLOSE_SOCKET_Req.abort = getUInt8FromParams(tmData);
+    }
+    else
+    {
+      @sysvarMember::AUTOSAR_TP_SP::TM_UdpTcp_CLOSE_SOCKET_Req.abort = 0xFF;
+    }
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_UdpTcp_CLOSE_SOCKET_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_UdpTcp_CLOSE_SOCKET_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+
+/// <TCP>
+//
+// Decode CREATE_AND_BIND
+//
+byte Decode_CREATE_AND_BIND(struct TestabilityMessageData tmData)
+{
+  long retCode;
+  char ipvXAddress[40];
+  
+  //REQUEST
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    if(tmData.tm.header.groupId == kTestabilityGroupTCP)
+    {
+      sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_CREATE_AND_BIND_Req);
+      
+      //fill the correct TestabilityMessage with data from packet
+      fillTestabilityMessageHeader(tmData, "TM_Tcp_CREATE_AND_BIND_Req");
+      
+      @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_CREATE_AND_BIND_Req.doBind = getUInt8FromParams(tmData);
+      @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_CREATE_AND_BIND_Req.localPort = getUInt16FromParams(tmData);
+      
+      getIpAddressFromParams(tmData, ipvXAddress, elCount(ipvXAddress));
+      retCode = sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Tcp_CREATE_AND_BIND_Req.localAddress, ipvXAddress);
+        
+      sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_CREATE_AND_BIND_Req);
+      
+      return 1;
+    }
+    else if(tmData.tm.header.groupId == kTestabilityGroupUDP)
+    {
+      sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Udp_CREATE_AND_BIND_Req);
+      
+      //fill the correct TestabilityMessage with data from packet
+      fillTestabilityMessageHeader(tmData, "TM_Udp_CREATE_AND_BIND_Req");
+      
+      @sysvarMember::AUTOSAR_TP_SP::TM_Udp_CREATE_AND_BIND_Req.doBind = getUInt8FromParams(tmData);
+      @sysvarMember::AUTOSAR_TP_SP::TM_Udp_CREATE_AND_BIND_Req.localPort = getUInt16FromParams(tmData);
+      
+      getIpAddressFromParams(tmData, ipvXAddress, elCount(ipvXAddress));
+      retCode = sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Udp_CREATE_AND_BIND_Req.localAddress, ipvXAddress);
+      
+      sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Udp_CREATE_AND_BIND_Req);
+      
+      return 1;
+    }
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//RESPONSE
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_UdpTcp_CREATE_AND_BIND_Res);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_UdpTcp_CREATE_AND_BIND_Res");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_UdpTcp_CREATE_AND_BIND_Res.socketId = getUInt16FromParams(tmData);
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_UdpTcp_CREATE_AND_BIND_Res);
+    
+    return 1;
+  }  
+  return 0;
+}
+
+/// <UDP_TCP>
+//
+// Decode SEND_DATA
+//
+byte Decode_SEND_DATA(struct TestabilityMessageData tmData)
+{
+  char ipvXAddress[40];
+  long retCode;
+  
+  //only to decode Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  { 
+    if(tmData.tm.header.groupId == kTestabilityGroupTCP)
+    {
+      sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_SEND_DATA_Req);
+      
+      //fill the correct TestabilityMessage with data from packet
+      fillTestabilityMessageHeader(tmData, "TM_Tcp_SEND_DATA_Req");
+      
+      @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_SEND_DATA_Req.socketId = getUInt16FromParams(tmData);
+      @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_SEND_DATA_Req.totalLen = getUInt16FromParams(tmData);
+      @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_SEND_DATA_Req.flags = getUInt8FromParams(tmData);
+      
+      CopyDataToSysVar(tmData, "TM_Tcp_SEND_DATA_Req", "data");
+      
+      sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_SEND_DATA_Req);
+      
+      return 1;
+    }
+    else if(tmData.tm.header.groupId == kTestabilityGroupUDP)
+    {
+      sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Udp_SEND_DATA_Req);
+      
+      //fill the correct TestabilityMessage with data from packet
+      fillTestabilityMessageHeader(tmData, "TM_Udp_SEND_DATA_Req");
+      
+      @sysvarMember::AUTOSAR_TP_SP::TM_Udp_SEND_DATA_Req.socketId = getUInt16FromParams(tmData);
+      @sysvarMember::AUTOSAR_TP_SP::TM_Udp_SEND_DATA_Req.totalLen = getUInt16FromParams(tmData);
+      @sysvarMember::AUTOSAR_TP_SP::TM_Udp_SEND_DATA_Req.destPort = getUInt16FromParams(tmData);
+      
+      getIpAddressFromParams(tmData, ipvXAddress, elCount(ipvXAddress));
+      retCode = sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Udp_SEND_DATA_Req.destAddr, ipvXAddress);
+  
+      CopyDataToSysVar(tmData, "TM_Udp_SEND_DATA_Req", "data");
+      
+      sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Udp_SEND_DATA_Req);
+      
+      return 1;
+    }
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_UdpTcp_SEND_DATA_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <UDP_TCP>
+//
+// Decode RECEIVE_AND_FORWARD
+//
+byte Decode_RECEIVE_AND_FORWARD(struct TestabilityMessageData tmData)
+{
+  long retCode;
+  char ipvXAddress[40];
+  
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_UdpTcp_REVECEIVE_AND_FORWARD_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_UdpTcp_REVECEIVE_AND_FORWARD_Req");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_UdpTcp_REVECEIVE_AND_FORWARD_Req.socketId = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_UdpTcp_REVECEIVE_AND_FORWARD_Req.maxFwd = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_UdpTcp_REVECEIVE_AND_FORWARD_Req.maxLen = getUInt16FromParams(tmData);
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_UdpTcp_REVECEIVE_AND_FORWARD_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_UdpTcp_REVECEIVE_AND_FORWARD_Res);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_UdpTcp_REVECEIVE_AND_FORWARD_Res");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_UdpTcp_REVECEIVE_AND_FORWARD_Res.dropCnt = getUInt16FromParams(tmData);
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_UdpTcp_REVECEIVE_AND_FORWARD_Res);   
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeEvent)//Event
+  {
+    //TCP
+    if(tmData.tm.header.groupId == kTestabilityGroupTCP)
+    {
+      sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_REVECEIVE_AND_FORWARD_Evt);
+      
+      //fill the correct TestabilityMessage with data from packet
+      fillTestabilityMessageHeader(tmData, "TM_Tcp_REVECEIVE_AND_FORWARD_Evt");
+      
+      @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_REVECEIVE_AND_FORWARD_Evt.fullLen = getUInt16FromParams(tmData);
+      
+      CopyDataToSysVar(tmData, "TM_Tcp_REVECEIVE_AND_FORWARD_Evt", "payload");
+      
+      sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_REVECEIVE_AND_FORWARD_Evt);
+      
+      return 1;
+    }
+    //UDP
+    else if(tmData.tm.header.groupId == kTestabilityGroupUDP)
+    {
+      sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Udp_REVECEIVE_AND_FORWARD_Evt);
+      
+      //fill the correct TestabilityMessage with data from packet
+      fillTestabilityMessageHeader(tmData, "TM_Udp_REVECEIVE_AND_FORWARD_Evt");
+      
+      @sysvarMember::AUTOSAR_TP_SP::TM_Udp_REVECEIVE_AND_FORWARD_Evt.fullLen = getUInt16FromParams(tmData);
+      @sysvarMember::AUTOSAR_TP_SP::TM_Udp_REVECEIVE_AND_FORWARD_Evt.srcPort = getUInt16FromParams(tmData);
+      
+      getIpAddressFromParams(tmData, ipvXAddress, elCount(ipvXAddress));
+      retCode = sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Udp_REVECEIVE_AND_FORWARD_Evt.srcAddr, ipvXAddress);
+  
+      CopyDataToSysVar(tmData, "TM_Udp_REVECEIVE_AND_FORWARD_Evt", "payload");
+      
+      sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Udp_REVECEIVE_AND_FORWARD_Evt);
+      
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/// <TCP>
+//
+// Decode LISTEN_AND_ACCEPT
+//
+byte Decode_LISTEN_AND_ACCEPT(struct TestabilityMessageData tmData)
+{
+  long retCode;
+  char ipvXAddress[40];
+  
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_LISTEN_AND_ACCEPT_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_Tcp_LISTEN_AND_ACCEPT_Req");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_LISTEN_AND_ACCEPT_Req.listenSocketId = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_LISTEN_AND_ACCEPT_Req.maxCon = getUInt16FromParams(tmData);  
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_LISTEN_AND_ACCEPT_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Tcp_LISTEN_AND_ACCEPT_Res");
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeEvent) //EVENT
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_LISTEN_AND_ACCEPT_Evt);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_Tcp_LISTEN_AND_ACCEPT_Evt");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_LISTEN_AND_ACCEPT_Evt.listenSocketId = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_LISTEN_AND_ACCEPT_Evt.newSocketId = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_LISTEN_AND_ACCEPT_Evt.port = getUInt16FromParams(tmData);
+    
+    getIpAddressFromParams(tmData, ipvXAddress, elCount(ipvXAddress));
+    retCode = sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Tcp_LISTEN_AND_ACCEPT_Evt.address, ipvXAddress);
+     
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_LISTEN_AND_ACCEPT_Evt);
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <TCP>
+//
+// Decode CONNECT parameters
+//
+byte Decode_CONNECT(struct TestabilityMessageData tmData)
+{
+  long retCode;
+  char ipvXAddress[40];
+  
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_CONNECT_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_Tcp_CONNECT_Req");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_CONNECT_Req.socketId = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_CONNECT_Req.destPort = getUInt16FromParams(tmData);
+    
+    getIpAddressFromParams(tmData, ipvXAddress, elCount(ipvXAddress));
+    retCode = sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Tcp_CONNECT_Req.destAddr, ipvXAddress);
+     
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_CONNECT_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Tcp_CONNECT_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <UDP_TCP>
+//
+// Decode CONFIGURE SOCKET
+//
+byte Decode_CONFIGURE_SOCKET(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_UdpTcp_CONFIGURE_SOCKET_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_UdpTcp_CONFIGURE_SOCKET_Req");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_UdpTcp_CONFIGURE_SOCKET_Req.socketId = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_UdpTcp_CONFIGURE_SOCKET_Req.paramId = getUInt16FromParams(tmData);
+    
+    CopyDataToSysVar(tmData, "TM_UdpTcp_CONFIGURE_SOCKET_Req", "paramVal");
+      
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_UdpTcp_CONFIGURE_SOCKET_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_UdpTcp_CONFIGURE_SOCKET_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <UDP_TCP>
+//
+// Decode SHUT_DOWN
+//
+byte Decode_SHUT_DOWN(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_UdpTcp_SHUT_DOWN_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_UdpTcp_SHUT_DOWN_Req");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_UdpTcp_SHUT_DOWN_Req.socketId = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_UdpTcp_SHUT_DOWN_Req.typeId = getUInt8FromParams(tmData);
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_UdpTcp_SHUT_DOWN_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_UdpTcp_SHUT_DOWN_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <TCP>
+//
+// Decode GET_STATE
+//
+byte Decode_GET_STATE(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_GET_STATE_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_Tcp_GET_STATE_Req");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_GET_STATE_Req.socketId = getUInt16FromParams(tmData);
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_GET_STATE_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_GET_STATE_Res);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_Tcp_GET_STATE_Res");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_GET_STATE_Res.stateId = getUInt16FromParams(tmData);
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_GET_STATE_Res);
+    
+    return 1;
+  }
+  return 0;
+}
+/// <TCP>
+byte Decode_CALL_RECEIVE(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_CALL_RECEIVE_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_Tcp_CALL_RECEIVE_Req");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_CALL_RECEIVE_Req.socketId = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_CALL_RECEIVE_Req.dataLength = getUInt16FromParams(tmData);
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_CALL_RECEIVE_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_CALL_RECEIVE_Res);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_Tcp_CALL_RECEIVE_Res");
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_Tcp_CALL_RECEIVE_Res.socketId = getUInt16FromParams(tmData);
+    
+    CopyDataToSysVar(tmData, "TM_Tcp_CALL_RECEIVE_Res", "data");
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Tcp_CALL_RECEIVE_Res);
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <General>
+//
+// Decode Get Version
+//
+byte Decode_GET_VERSION(struct TestabilityMessageData tmData)
+{
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_General_GET_VERSION_Req");
+    
+    return 1;
+  }
+  else if (tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    WriteLineEx(4, 2, "Get Version Response entered");
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_General_GET_VERSION_Res);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_General_GET_VERSION_Res");
+    
+    if(tmData.parametersLength < 6)
+    {
+      sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_General_GET_VERSION_Res); 
+      return 1;
+    }
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_General_GET_VERSION_Res.majorVer = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_General_GET_VERSION_Res.minorVer = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_General_GET_VERSION_Res.patchVer = getUInt16FromParams(tmData);
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_General_GET_VERSION_Res);
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <General>
+//
+// Decode START_TEST
+//
+byte Decode_START_TEST(struct TestabilityMessageData tmData)
+{
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)//Request
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_General_START_TEST_Req");
+    
+    return 1;
+  }
+  else if (tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_General_START_TEST_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <General>
+//Decode_START_TEST
+// Decode END_TEST
+//
+byte Decode_END_TEST(struct TestabilityMessageData tmData)
+{
+  word wTextInfoLen;
+  word wTextLen;
+  char cStringData[kMaxTestabilityParameterLen];
+  const word kwPARAM_OFFSET = 4;
+  const word kwMIN_TXT_PARAM_LEN = 4;
+  const word kwBOM_LEN = 3;
+  
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_General_END_TEST_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_General_END_TEST_Req");
+    
+    if(tmData.parametersLength < kwPARAM_OFFSET)
+      return 1;
+    
+    @sysvarMember::AUTOSAR_TP_SP::TM_General_END_TEST_Req.tcId = getUInt16FromParams(tmData);
+    
+    wTextInfoLen = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_General_END_TEST_Req.tsName.length = wTextInfoLen;
+    
+    if(tmData.parametersLength >= wTextInfoLen + kwPARAM_OFFSET && wTextInfoLen > kwMIN_TXT_PARAM_LEN)
+    {
+      wTextLen = wTextInfoLen - kwMIN_TXT_PARAM_LEN; //text data consist with BOM(0xEF,0xBB, 0xBF) + Text + Termination(NULL) 
+      memcpy_off(cStringData, 0, tmData.tm.params, kwPARAM_OFFSET + kwBOM_LEN, wTextLen);
+      sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_General_END_TEST_Req.tsName.stringData, cStringData);
+    }
+    else
+    {
+      sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_General_END_TEST_Req.tsName.stringData, "");
+    }
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_General_END_TEST_Req);
+    
+    return 1;
+  }
+  else if (tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_General_END_TEST_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <ETH>
+//
+// Decode Interface Up
+//
+byte Decode_INTERFACE_UP(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    word wTextInfoLen;
+    word ifNameLength;
+    char stringData[kMaxTestabilityParameterLen];
+    const word kwBOM_LEN = 3;
+    
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Eth_INTERFACE_UP_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    FillTestabilityMessageHeader(tmData, "TM_Eth_INTERFACE_UP_Req");
+    
+    wTextInfoLen = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_Eth_INTERFACE_UP_Req.ifName.length = wTextInfoLen;
+    
+    if(tmData.parametersLength >= wTextInfoLen + tmData.parameterOffset)
+    {
+      wTextInfoLen = wTextInfoLen - kwBOM_LEN; //text data consist with BOM(0xEF,0xBB, 0xBF) + Text + Termination(NULL) 
+      memcpy_off(stringData, 0, tmData.tm.params, tmData.parameterOffset + kwBOM_LEN, wTextInfoLen);
+      sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Eth_INTERFACE_UP_Req.ifName.stringData, stringData);
+    }
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Eth_INTERFACE_UP_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Reply
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Eth_INTERFACE_UP_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <ETH>
+//
+// Decode Interface Down
+//
+byte Decode_INTERFACE_DOWN(struct TestabilityMessageData tmData)
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    word wTextInfoLen;
+    word ifNameLength;
+    char stringData[kMaxTestabilityParameterLen];
+    const word kwBOM_LEN = 3;
+    
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Eth_INTERFACE_DOWN_Req);
+    
+    //fill the correct TestabilityMessage with data from packet
+    FillTestabilityMessageHeader(tmData, "TM_Eth_INTERFACE_DOWN_Req");
+    
+    wTextInfoLen = getUInt16FromParams(tmData);
+    @sysvarMember::AUTOSAR_TP_SP::TM_Eth_INTERFACE_DOWN_Req.ifName.length = wTextInfoLen;
+    
+    if(tmData.parametersLength >= wTextInfoLen + tmData.parameterOffset)
+    {
+      wTextInfoLen = wTextInfoLen - kwBOM_LEN; //text data consist with BOM(0xEF,0xBB, 0xBF) + Text + Termination(NULL) 
+      memcpy_off(stringData, 0, tmData.tm.params, tmData.parameterOffset + kwBOM_LEN, wTextInfoLen);
+      sysSetVariableString(sysvarMember::AUTOSAR_TP_SP::TM_Eth_INTERFACE_DOWN_Req.ifName.stringData, stringData);
+    }
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Eth_INTERFACE_DOWN_Req);
+    
+    return 1;
+  }
+  else if(tmData.tm.header.typeId == kTestabilityTypeResponse)//Reply
+  {
+    //fill the correct TestabilityMessage with data from packet
+    FillTmHeaderWithoutParam(tmData, "TM_Eth_INTERFACE_DOWN_Res");
+    
+    return 1;
+  }
+  return 0;
+}
+
+/// <Helper>
+//
+// Copy IP Address to sysvar data
+//
+long CopyIpAddressInfoToSysVar(sysvarInt* svAddrLen, sysvarIntArray* svAddrIntAr, sysvarData* svAddrData, byte bParams[], word offset)
+{
+  byte bBuffer[16];
+  long lLongArray[16];
+  long lLength;
+  int i; //DEBUG
+  
+  //Get IP address Length
+  lLength = swapWord(bParams.word(offset));
+  sysSetVariableInt(svAddrLen, lLength);
+  // data is valid
+  if(lLength == 4 || lLength == 16)
+  {
+    //Get IP address info
+    memcpy_off(bBuffer, 0, bParams, offset+2, lLength);
+    sysSetVariableArraySize(svAddrData, lLength);
+    sysSetVariableData(svAddrData, bBuffer, lLength);
+  
+    //set ip address as integer data
+    sysSetVariableArraySize(svAddrIntAr, lLength);
+    for(i = 0; i < lLength; i++)
+    {
+      lLongArray[i] = (long)(bBuffer[i]);
+    }
+    sysSetVariableLongArray(svAddrIntAr, lLongArray, lLength);
+  }
+  else
+  {
+  }
+  return lLength;
+}
+/// <Undecodable>
+// function to create output for unknown group ids DECODE_UNKOWN_MESSAGE(packet, bGID, bPID, bTID, bParams, lParamsLen);
+void DECODE_UNKOWN_MESSAGE(struct TestabilityMessageData tmData) 
+{
+  //Request
+  if(tmData.tm.header.typeId == kTestabilityTypeRequest)
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Undecodable_Req);
+   
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_Undecodable_Req");
+  
+    CopyDataToSysVar(tmData, "TM_Undecodable_Req", "Parameter");
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Undecodable_Req);
+  }
+  else if (tmData.tm.header.typeId == kTestabilityTypeResponse)//Response
+  {
+    sysBeginVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Undecodable_Res);
+   
+    //fill the correct TestabilityMessage with data from packet
+    fillTestabilityMessageHeader(tmData, "TM_Undecodable_Res");
+  
+    CopyDataToSysVar(tmData, "TM_Undecodable_Res", "Parameter");
+    
+    sysEndVariableStructUpdate(sysvar::AUTOSAR_TP_SP::TM_Undecodable_Res);
+  }
+}
+/// <Helper>
+//
+// Copy data into sysvar
+//
+void CopyDataToSysVar(struct TestabilityMessageData tmData, char sysVarName[], char sysVarMemberName[])
+{
+  int loopIndex;
+  byte data[250];
+  word dataLength;
+  char sysVarNameFull[255];
+  long retCode;
+  word paramLength;
+  
+  paramLength = getUInt16FromParams(tmData);
+  
+  for(loopIndex = 0; loopIndex < 250; loopIndex++) 
+  {
+    if(loopIndex < paramLength)
+    {
+      data[loopIndex] = getUInt8FromParams(tmData);
+    }
+    else
+    {
+      data[loopIndex] = 0;  
+    }
+  }
+  
+  snprintf(sysVarNameFull, elCount(sysVarNameFull), "%s.%s", sysVarName, sysVarMemberName);
+  
+  retCode = sysSetVariableData("AUTOSAR_TP_SP", sysVarNameFull, data, 250);
+  
+  if(retCode == 1) {
+    WriteLineEx(4, 2, "name space was not found or second try to define the same name space");
+  }
+  else if(retCode == 2) {
+    WriteLineEx(4, 2, "variable was not found or second try to define the same variable");
+  }
+  else if(retCode == 3) {
+    WriteLineEx(4, 2, "no writing right for the name space available");
+  }
+  else if(retCode == 4) {
+    WriteLineEx(4, 2, "the variable has no suitable type for the function");
+  }
+  
+}
+
+/// <Helper>
+//
+// Copy vint8 type data to sysvar data
+//
+void CopyDataInfoToSysVar(sysvarInt* svDataLen, sysvarData* svDataBuf, byte bParams[], long lParamsLen, word wOffset)
+{
+  //byte bBuffer[kMAX_PARAMTER_SIZE];
+  byte bBuffer[64];
+  long lLength;
+  long lRet;
+  int i; //DEBUG
+  
+  //Get Data Length
+  lLength = swapWord(bParams.word(wOffset));
+  sysSetVariableInt(svDataLen, lLength);
+//  if(lLength > kMAX_PARAMTER_SIZE) lLength = kMAX_PARAMTER_SIZE;
+  if(lLength > 64) lLength = 64;
+
+  if(lLength > 0 && wOffset + 2 + lLength < lParamsLen)
+  {
+    //Get Data
+    memcpy_off(bBuffer, 0, bParams, wOffset+2, lLength);
+    sysSetVariableArraySize(svDataBuf, lLength);
+    lRet = sysSetVariableData(svDataBuf, bBuffer, lLength);
+    for(i = 0; i < lLength; i++)
+    {
+      //WriteLineEx(1, 2, "CopyDataInfoToSysVar Data[%d]=%x", i, bBuffer[i]);
+    }
+  }
+}
+
+
+
+

@@ -1,0 +1,497 @@
+/*@!Encoding:1252*/
+/*
+ * Support ECU                                     Version 1.1
+ *
+ * Copyright 2005, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Jr) Created 
+ * 1.1 (Jr) Renamed some attributes and variables
+ */
+variables
+{
+  // some constants
+  const BYTE kNullAddr   = 0xfe;
+  const BYTE kGlobalAddr = 0xff;
+  // ECU states
+  const BYTE kNotInitialized = 0;
+  const BYTE kInitialized    = 1;
+  const BYTE kAddrClaiming   = 2;
+  const BYTE kOnline         = 3;
+  const BYTE kOffline        = 4;
+
+  // General ECU variables
+  char gECULabel[20] = "Support";       // Label for output to write window
+  BYTE gECUState     = kNotInitialized; // State of the ECU
+  BYTE gECUChannel   = 1;               // CAN channel
+
+  // Address claiming stuff
+  pg AC  TX_ACL = { PRIO=6, DP=0 };
+  msTimer TX_ACL_Timer;
+
+  // System stuff
+  const int   kSystemTime    = 100;                  // System time in [ms]
+  const float kSystemTimeSec = kSystemTime / 1000.0; // System time in [sec]
+  msTimer     SystemTimer;                           // System timer
+
+  // transmit PGs
+	pg SupportPosition TX_Position;
+	msTimer TX_Position_Timer;
+
+	// receive PGs
+	pg SupportCommand RX_SupportCommand;
+
+	// simulation constants
+  const float kSupportSpeed       = 0.5 / kSystemTimeSec;
+
+	// variables for simulation
+	float gPositionFrontLeft  = 0.0; // Position of the support in %
+	float gPositionFrontRight = 0.0; // Position of the support in %
+	float gPositionRearLeft   = 0.0; // Position of the support in %
+	float gPositionRearRight  = 0.0; // Position of the support in %
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel         = kDbgWarning; // Set debug level for output to write window
+	
+	
+}
+
+on preStart
+{
+  setWriteDbgLevel( gDbgLevel );
+  TX_Position.DWORD(0) = TX_Position.DWORD(4) = 0xFFFFFFFF; //init datafield
+}
+
+//
+// Initialize the ECU
+//
+EnterInitialized()
+{
+  cancelTimer( SystemTimer );
+
+  // init address claiming PG
+  TX_ACL.ArbitraryAddressCapable = Support.NmJ1939AAC;
+  TX_ACL.IndustryGroup           = Support.NmJ1939IndustryGroup;
+  TX_ACL.VehicleSystem           = Support.NmJ1939System;
+  TX_ACL.VehicleSystemInstance   = Support.NmJ1939SystemInstance;
+  TX_ACL.Function                = Support.NmJ1939Function;
+  TX_ACL.FunctionInstance        = Support.NmJ1939FunctionInstance;
+  TX_ACL.ECUInstance             = Support.NmJ1939ECUInstance;
+  TX_ACL.ManufacturerCode        = Support.NmJ1939ManufacturerCode;
+  TX_ACL.IdentityNumber          = Support.NmJ1939IdentityNumber;
+  TX_ACL.SA  = Support.NmStationAddress;
+  TX_ACL.DA  = kGlobalAddr;
+  TX_ACL.CAN = gECUChannel;
+
+  // initialize SupportPosition
+  TX_Position.PositionFrontLeft.phys  = gPositionFrontLeft;
+  TX_Position.PositionFrontRight.phys = gPositionFrontRight;
+  TX_Position.PositionRearLeft.phys   = gPositionRearLeft;
+  TX_Position.PositionRearRight.phys  = gPositionRearRight;
+  TX_Position.SA = kNullAddr;
+
+  // initialize SupportCommand
+  RX_SupportCommand.CmdFrontLeft  = RX_SupportCommand.CmdFrontLeft::Idle;
+  RX_SupportCommand.CmdFrontRight = RX_SupportCommand.CmdFrontRight::Idle;
+  RX_SupportCommand.CmdRearLeft   = RX_SupportCommand.CmdRearLeft::Idle;
+  RX_SupportCommand.CmdRearRight  = RX_SupportCommand.CmdRearRight::Idle;
+  RX_SupportCommand.SA = kNullAddr;
+
+  writeDbgLevel( kDbgInfo, "<%s> ECU initialized", gECULabel );
+}
+
+//
+// Change the state of the ECU
+//
+EcuChangeState( BYTE newState )
+{
+  if (newState == kNotInitialized) {
+    // stop everthing immediately
+    cancelTimer( SystemTimer );
+    cancelTimer( TX_ACL_Timer );
+    cancelTimer( TX_Position_Timer );
+    gECUState = kNotInitialized;
+    return;
+  }
+
+  switch( gECUState ) {
+    case kNotInitialized:
+	    if (newState == kInitialized) {
+	      EnterInitialized();
+        gECUState = newState;
+	    }
+	    break;
+    case kInitialized:
+	  case kOffline:
+	    if (newState == kAddrClaiming) {
+	      EnterClaiming();
+        gECUState = newState;
+	    }
+	    break;
+    case kAddrClaiming:
+	    if (newState == kOnline) {
+	      EnterOnline();
+        gECUState = newState;
+      }
+      else if (newState == kOffline) {
+	      EnterOffline();
+        gECUState = newState;
+	    }
+	    break;
+    case kOnline:
+	    if (newState == kOffline) {
+	      EnterOffline();
+        gECUState = newState;
+	    }
+	    else if (newState == kAddrClaiming) {
+	      EnterClaiming();
+        gECUState = newState;
+	    }
+	    break;
+  }
+}
+
+//
+// Start address claiming
+//
+EnterClaiming()
+{
+  cancelTimer( SystemTimer );
+  cancelTimer( TX_ACL_Timer );
+
+  // send address claiming PG and wait 250ms
+  output( TX_ACL );
+  SetTimer( TX_ACL_Timer, 250 );
+
+  writeDbgLevel( kDbgInfo, "<%s> start address claiming for address %d", gECULabel, TX_ACL.SA );
+}
+
+//
+// Enter online state
+//
+EnterOnline()
+{
+  setTimer( SystemTimer, kSystemTime );
+  setTimer( TX_Position_Timer, TX_Position.GenMsgCycleTime );
+
+	TX_Position.SA = TX_ACL.SA;
+
+  writeDbgLevel( kDbgInfo, "<%s> online with address %d", gECULabel, TX_ACL.SA );
+}
+
+//
+// Enter offline state
+//
+EnterOffline()
+{
+  cancelTimer( SystemTimer );
+  cancelTimer( TX_Position_Timer );
+
+  // send address claiming PG with NULL address
+  TX_ACL.SA = kNullAddr;
+  output( TX_ACL );
+
+  writeDbgLevel( kDbgInfo, "<%s> offline", gECULabel, TX_ACL.SA );
+}
+
+//
+// Address claiming timer. 
+//
+// If no other node sends an address claim PG while this timer is
+// running, we can use the address and switch the state to kOnline.
+//
+on timer TX_ACL_Timer
+{
+  EcuChangeState( kOnline );
+}
+
+//
+// Received address claim PG
+//
+on pg AC
+{
+  pg AC acl;
+
+  if (this.DIR != RX) return;
+  if (this.CAN != gECUChannel) return;
+
+  if (this.SA == TX_ACL.SA) {
+    acl.DWORD(0) = this.DWORD(0);
+    acl.DWORD(4) = this.DWORD(4);
+
+    // compare names for priority
+    if (utilCompareDeviceName( TX_ACL, acl ) > 0) {
+      // send address claiming PG again
+      output( TX_ACL );
+    }
+    else {
+      // go offline, we have a lower priority
+      EcuChangeState( kOffline );
+    }
+
+    // stop address claiming timer, if we are in claiming phase
+    if (gECUState == kAddrClaiming) {
+      cancelTimer( TX_ACL_Timer );
+    }
+  }
+}
+
+//
+// Compare device names
+//
+// if pg1 has lower priority than pg2, return -1
+// if pg1 has higher priority than pg2, return 1
+// if both names are equal, return 0
+//
+int utilCompareDeviceName( pg AC pg1, pg AC pg2 )
+{
+  int i = 0;
+  for( i = 7; i >= 0; i-- ) {
+    if (pg1.byte(i) < pg2.byte(i)) {
+      return -1;
+    }
+    else if (pg1.byte(i) > pg2.byte(i)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+//
+// Received a request
+//
+on pg RQST
+{
+  if (this.DIR != RX) return;
+  if (this.CAN != gECUChannel) return;
+
+  if (gECUState == kOnline) {
+    if ((this.DA == kGlobalAddr) || (this.DA == TX_ACL.SA)) {
+	  switch(this.ParameterGroupNumber) {
+	    case 0xee00: // Address Claim PGN
+		  output( TX_ACL );
+		  break;
+      }
+    }
+  }
+  else if (gECUState == kOnline) {
+    if ((this.DA == kGlobalAddr) && (this.ParameterGroupNumber == 0xee00)) {
+	  output( TX_ACL );
+	}
+  }
+}
+
+//
+//
+//
+on envVar Ev_ECUPower
+{
+  if ((getValue( this ) == 1) && (gECUState == kNotInitialized)) {
+    EcuChangeState( kInitialized );
+    EcuChangeState( kAddrClaiming );
+  }
+  else if ((getValue( this ) == 0) && (gECUState != kNotInitialized)) {
+    EcuChangeState( kNotInitialized );
+  }
+}
+
+on start
+{
+  if (getValue( Ev_ECUPower ) == 1) {
+    EcuChangeState( kInitialized );
+    EcuChangeState( kAddrClaiming );
+  }
+}
+
+//
+// Received commanded address PG
+//
+on pg CA
+{
+  int i;
+  pg AC nameDummy;
+
+  if (this.DIR != RX) return;
+  if (this.CAN != gECUChannel) return;
+
+  // copy name of 'this' PG to name dummy
+  for( i = 0; i < 8; i++ ) {
+    nameDummy.byte(i) = this.byte(i);
+  }
+  
+  // compare name
+  if (utilCompareDeviceName( TX_ACL, nameDummy ) == 0) {
+    // claim new address
+    TX_ACL.SA = this.AddressAssignment;
+    EcuChangeState( kAddrClaiming );
+  }
+}
+
+//
+//
+//
+on timer SystemTimer
+{
+  // front left support
+	if (RX_SupportCommand.CmdFrontLeft == RX_SupportCommand.CmdFrontLeft::Down) {
+		gPositionFrontLeft = utilMin( gPositionFrontLeft+kSupportSpeed, 100.0 );
+	}
+	else if (RX_SupportCommand.CmdFrontLeft == RX_SupportCommand.CmdFrontLeft::Up) {
+		gPositionFrontLeft = utilMax( gPositionFrontLeft-kSupportSpeed, 0.0 );
+	}
+
+  // front right support
+	if (RX_SupportCommand.CmdFrontRight == RX_SupportCommand.CmdFrontRight::Down) {
+		gPositionFrontRight = utilMin( gPositionFrontRight+kSupportSpeed, 100.0 );
+	}
+	else if (RX_SupportCommand.CmdFrontRight == RX_SupportCommand.CmdFrontRight::Up) {
+		gPositionFrontRight = utilMax( gPositionFrontRight-kSupportSpeed, 0.0 );
+	}
+
+  // rear left support
+	if (RX_SupportCommand.CmdRearLeft == RX_SupportCommand.CmdRearLeft::Down) {
+		gPositionRearLeft = utilMin( gPositionRearLeft+kSupportSpeed, 100.0 );
+	}
+	else if (RX_SupportCommand.CmdRearLeft == RX_SupportCommand.CmdRearLeft::Up) {
+		gPositionRearLeft = utilMax( gPositionRearLeft-kSupportSpeed, 0.0 );
+	}
+
+	// rear right support
+	if (RX_SupportCommand.CmdRearRight == RX_SupportCommand.CmdRearRight::Down) {
+		gPositionRearRight = utilMin( gPositionRearRight+kSupportSpeed, 100.0 );
+	}
+	else if (RX_SupportCommand.CmdRearRight == RX_SupportCommand.CmdRearRight::Up) {
+		gPositionRearRight = utilMax( gPositionRearRight-kSupportSpeed, 0.0 );
+	}
+
+	// set support bitmap
+	putValue( EvSupportBitmap, (int)(gPositionRearLeft / 33.3) );
+
+    setTimer( SystemTimer, kSystemTime );
+}
+
+//
+// Flow control for the CMDT transport protocol
+//
+// Because CANoe is a passive tool we have to transmit
+// the CTS and EoMA message for the transport sessions
+// which we receive.
+//
+on pg TPCMxx, TPDT
+{
+  BYTE  sessionAddress[1]  = { kNullAddr };
+  BYTE  sessionsPackets[1] = { 0 };
+  BYTE  sessionsBytes[1]   = { 0 };
+  DWORD sessionPGN[1]      = { 0x0000 };
+  int   i;
+  pg    TPCMxx cmPG;
+
+  if (this.DIR != RX) return;
+  if (this.CAN != gECUChannel) return;
+
+  cmPG.SA  = TX_ACL.SA;
+  cmPG.DA  = this.SA;
+  cmPG.CAN = this.CAN;
+  cmPG.dword(0) = cmPG.dword(4) = 0xffffffff;
+
+  if (this.PF == 0xec) { // Command
+    if (this.byte(0) == 0x10) { // RTS
+	  // new session
+	  for( i = 0; i < elCount(sessionAddress); i++ ) {
+	    if ((sessionAddress[i] == this.SA) || (sessionAddress[i] == kNullAddr)) {
+		  sessionAddress[i]  = this.SA;
+          sessionsPackets[i] = this.byte(3); 
+          sessionsBytes[i]   = this.word(1);
+		  sessionPGN[i]      = (this.byte(7)) | (this.byte(6) << 8) | (this.byte(5) << 16);
+		  // send CTS
+		  cmPG.ControlByte   = cmPG.ControlByte::CTS;
+		  cmPG.NumberOfPacketsThatCanBeSent = 1;
+		  cmPG.NextPacketNumberToBeSent     = 1;
+		  cmPG.PGNumber      = sessionPGN[i];
+		  output( cmPG );
+		  break;
+		}
+	  }
+	}
+  }
+  else if (this.PF == 0xeb) { // Data
+    // find session
+    for( i = 0; i < elCount(sessionAddress); i++ ) {
+      if (sessionAddress[i] == this.SA) {
+	    if (this.byte(0) < sessionsPackets[i]) {
+		  // send CTS
+		  cmPG.ControlByte   = cmPG.ControlByte::CTS;
+		  cmPG.NumberOfPacketsThatCanBeSent = 1;
+		  cmPG.NextPacketNumberToBeSent     = this.byte(0) + 1;
+		  cmPG.PGNumber      = sessionPGN[i];
+      output( cmPG );
+    }
+		else { // last packet
+		  // send CTS
+		  cmPG.ControlByte          = cmPG.ControlByte::EoMA;
+		  cmPG.TotalMessageSize     = sessionsBytes[i];
+		  cmPG.TotalNumberOfPackets = sessionsPackets[i];
+		  cmPG.PGNumber             = sessionPGN[i];
+      output( cmPG );
+		  sessionAddress[i]  = kNullAddr; // close session
+		}
+	    break;
+      }
+    }
+  }
+}
+
+//
+//
+//
+on timer TX_Position_Timer
+{
+  if (gECUState == kOnline) {
+    TX_Position.PositionFrontLeft.phys  = gPositionFrontLeft;
+    TX_Position.PositionFrontRight.phys = gPositionFrontRight;
+    TX_Position.PositionRearLeft.phys   = gPositionRearLeft;
+    TX_Position.PositionRearRight.phys  = gPositionRearRight;
+
+    output( TX_Position );
+    setTimer( TX_Position_Timer, TX_Position.GenMsgCycleTime );
+  }
+
+}
+
+//
+// Command recevied
+//
+on pg SupportCommand
+{
+  if ((this.dir == RX) && (this.can == gECUChannel) && (gECUState == kOnline)) {
+		RX_SupportCommand.byte(0) = this.byte(0);
+		RX_SupportCommand.id      = this.id;
+	}
+}
+
+float utilMin( float a, float b )
+{
+  if (a < b) {
+	  return a;
+	}
+	else {
+	  return b;
+	}
+}
+
+float utilMax( float a, float b )
+{
+  if (a > b) {
+	  return a;
+	}
+	else {
+	  return b;
+	}
+}
+

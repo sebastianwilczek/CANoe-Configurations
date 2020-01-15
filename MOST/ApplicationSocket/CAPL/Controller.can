@@ -1,0 +1,244 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  long gNodeAdr = 0;
+  const int kTextSize = 20;
+
+  // FBlockIDs of the controlled applications
+  byte kFBlockID_Display   = 0xC0;
+  byte kFBlockID_PhoneBook = 0xC1;
+  byte kFBlockID_Telephone = 0xC5;
+
+  word kFunctionID_Telephone_LineState = 0xC12;
+
+
+  // Definitions for controlling the Telephone
+
+  // line states
+  const byte kLineState_LineFree      = 0;
+  const byte kLineState_NoLine        = 1;
+  const byte kLineState_Connected     = 2;
+  const byte kLineState_Connecting    = 3;
+  const byte kLineState_Disconnecting = 4;
+
+  // actual line state (shadowed)
+  byte gTelephoneLineState = kLineState_LineFree;
+
+  // actual processed number
+  char gNumberStr[kTextSize] = "\0";
+
+
+  // Definitions for controlling the Display
+
+  // line state text
+  char gLineStateText[6][kTextSize] = {
+   "LINE FREE", "NO LINE", "CONNECTED", "CONNECTING...", "DISCONNECTING...", " " };
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // React on node messages from connected channel only; ignore spy messages
+  mostApplicationNode();
+
+  // Enable FBlock requests
+  // Shadow service will poll the Network Master for addresses of these
+  // FBlocks after ConfigOk
+  mostAsShdEnable(kFBlockID_Display, kInstIdBroadcast);
+  mostAsShdEnable(kFBlockID_PhoneBook, kInstIdBroadcast);
+  mostAsShdEnable(kFBlockID_Telephone, kInstIdBroadcast);
+
+  // Register properties at the Notification Shadow Service.
+  // Service will send Notification.Set(SetFunction/ClearFunction) 
+  // as soon as the FBlock is known to this device.
+  mostAsNtfShdFunctionEnable(kFBlockID_Telephone, 0x01, kFunctionID_Telephone_LineState);
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  sysSetVariableString(sysvar::Control::NumberToDial, "555-1234");
+}
+/*@@end*/
+
+/*@@mostAmsMsg:VectorTelephone.LineState.Status (0xC5C12C):*/
+on mostAMSMessage VectorTelephone.LineState.Status
+{
+  mostAMSMessage VectorDisplay.Viewport.Set msgDisplay;
+  mostAMSMessage VectorPhoneBook.SearchByNumber.StartResult msgPB;
+
+  // shadow the property
+  gTelephoneLineState = this.State;
+
+  if(@sysvar::Control::DisplayAvailable == 1)
+  {
+    // show line state in the first row of the display
+    msgDisplay.Row = 0;
+    if(gTelephoneLineState < 5)
+      mostParamSetString(msgDisplay, "Text", gLineStateText[gTelephoneLineState]);
+    else
+      mostParamSetString(msgDisplay, "Text", gLineStateText[5]);
+    output(msgDisplay);
+
+    // show number in the second row
+    msgDisplay.Row = 1;
+    if((gTelephoneLineState >= 2) && (gTelephoneLineState <= 4))
+      mostParamSetString(msgDisplay, "Text", gNumberStr);
+    else
+      mostParamSetString(msgDisplay, "Text", gLineStateText[5]); // clear
+    output(msgDisplay);
+
+    // clear third row
+    if((gTelephoneLineState < kLineState_Connected) || 
+       (gTelephoneLineState > kLineState_Disconnecting))
+    {
+      mostParamSetString(msgDisplay, "Text", gLineStateText[5]); // clear
+      msgDisplay.Row = 2;
+      output(msgDisplay);
+    }
+
+    // search person info in the phone book if available
+    if(@sysvar::Control::PhoneBookAvailable == 1)
+    {
+      if(gTelephoneLineState == kLineState_Connecting)
+      {
+        mostParamSetString(msgPB, "NumberStr", gNumberStr);		
+        output(msgPB);
+      }
+    }
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:Control::TelephoneAvailable:*/
+on sysvar Control::TelephoneAvailable
+{
+  if(@this == 1)
+  {
+    // init line state
+    gTelephoneLineState = kLineState_LineFree;
+  }
+  else
+  {
+    // reset shadowed properties
+    gTelephoneLineState = kLineState_NoLine;
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:Control::DialNumber:*/
+on sysvar Control::DialNumber
+{
+  mostAMSMessage VectorTelephone.DialNumber.Start msgDial;
+
+  if(@this == 1)
+    return;
+
+  if(@sysvar::Control::TelephoneAvailable == 1)
+  {
+    // dial number
+    if(sysGetVariableString(sysvar::Control::NumberToDial, gNumberStr, elCount(gNumberStr)) == 0)
+    {
+      mostParamSetString(msgDial, "NumberStr", gNumberStr);
+      output(msgDial);
+    }
+    else
+    {
+      write("Controller: Please enter number to dial");
+    }
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:Control::HangUp:*/
+on sysvar Control::HangUp
+{
+  mostAMSMessage VectorTelephone.HangupCall.Start msgHangup;
+
+  if(@this == 1)
+    return;
+
+  if((@sysvar::Control::TelephoneAvailable == 1) && (gTelephoneLineState == kLineState_Connected))
+  {
+    // send command to the telephone
+    output(msgHangup);
+  }
+}
+/*@@end*/
+
+/*@@mostAmsMsg:VectorPhoneBook.SearchByNumber.Result (0xC1C0AC):*/
+on mostAMSMessage VectorPhoneBook.SearchByNumber.Result
+{
+  char personstr[kTextSize];
+  mostAMSMessage VectorDisplay.Viewport.Set msgDisplay;
+
+  if(@sysvar::Control::DisplayAvailable == 1)
+  {
+    // get person info from message parameter
+    mostParamGetString(this, "InfoText", personstr, kTextSize);
+
+    // put person info to new message
+    mostParamSetString(msgDisplay, "Text", personstr);
+
+    // show person info in third row
+    msgDisplay.Row = 2;
+    output(msgDisplay);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:Reset():*/
+Reset()
+{
+  // update  availability of the controlled applications
+  @sysvar::Control::DisplayAvailable   = 0;
+  @sysvar::Control::TelephoneAvailable = 0;
+  @sysvar::Control::PhoneBookAvailable = 0;
+}
+/*@@end*/
+
+/*@@mostAsRegistry:OnMostAsRegistry(long):*/
+OnMostAsRegistry(long rgtype)
+{
+  if(rgtype == kBusRegistry)
+  {
+    // update  availability of the controlled applications
+    @sysvar::Control::DisplayAvailable   = (0 < mostAsRgGetRxTxLog(kBusRegistry, kFBlockID_Display, 0x01));
+    @sysvar::Control::TelephoneAvailable = (0 < mostAsRgGetRxTxLog(kBusRegistry, kFBlockID_Telephone, 0x01));
+    @sysvar::Control::PhoneBookAvailable = (0 < mostAsRgGetRxTxLog(kBusRegistry, kFBlockID_PhoneBook, 0x01));
+  }
+}
+/*@@end*/
+
+/*@@mostNetState:OnMostNetState(long,long):*/
+OnMostNetState(long oldstate, long newstate)
+{
+  // The NetState event 'PowerOff' is the first event
+  // after the communication to the interface hardware is
+  // established.
+  
+  if(newstate == kNetStateConfigNotOk)
+  {
+    // clear shadowed properties
+    Reset();
+  }
+}
+/*@@end*/
+
+/*@@mostNodeAdr:OnMostNodeAdr(long):*/
+OnMostNodeAdr(long nodeadr)
+{
+  gNodeAdr = nodeadr;
+  @sysvar::Control::NodeAdr = nodeadr;
+}
+/*@@end*/
+

@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!--Vector Test Automation Editor 2.1.28.0-->
+<!--Version: 1.0-->
+<testmodule title="ABS Brake Tester" version="1.0" xmlns="http://www.vector-informatik.de/CANoe/TestModule/1.16">
+  <description>This test module shows the utilization of Simulink models for test purposes in a very simple way.\n\nVerdicts for the test cases can be derived in different ways:\na) Evaluate a (physical) result value directly in the test module. \nThe allowed range is specified within the test module, there is no need to provide the range to the Simulink model.\nb) Delegate the physical value evaluation to the Simulink model\nProvide the allowed range to Simulink and only consider a result variable (that will contain passed of failed) in the test module.\nWithin this test module, both approaches are shown.</description>
+  <templates>
+    <testcasetemplate name="Brake_Time">
+      <paramdef name="ABSon" default="0" />
+      <description>This testcase measures the time which is needed for a full brake. \nHere, the evaluation of the physical value is done in the XML test module. (see test module description)\n</description>
+      <preparation>
+        <initialize title="Init all">
+          <cansignal name="CarSpeed">100</cansignal>
+          <sysvar name="activeABS" namespace="Control">$ABSon$</sysvar>
+          <sysvar name="BrakeTimeVerdict" namespace="MatlabIO">0</sysvar>
+        </initialize>
+      </preparation>
+      <wait time="2000" title="Duration" />
+      <statechange wait="15000" title="Check Brake Time">
+        <in>
+          <sysvar name="brakeActive" namespace="Control">1</sysvar>
+        </in>
+        <expected>
+          <sysvar name="BrakeTime" namespace="MatlabIO">
+            <le>
+              <var name="MaxAllowedBrakeTime" />
+            </le>
+          </sysvar>
+        </expected>
+      </statechange>
+      <completion>
+        <initialize title="Release Pedal">
+          <sysvar name="brakeActive" namespace="Control">0</sysvar>
+        </initialize>
+        <initialize title="Reset brake ">
+          <cansignal name="xF">0</cansignal>
+        </initialize>
+        <wait time="500" title="Wait" />
+      </completion>
+    </testcasetemplate>
+    <testcasetemplate name="Brake_Distance">
+      <paramdef name="ABSon" default="0" />
+      <description>This testcase checks the distance for the brake sequence. A Simulink model takes the actual brake distance and the setpoint for an upper limit as input. If the limit is excessed the system variable BrakeDistVerdict is  set as an output of the Simulink model. This system variable represents the verdict of the test case and is evaluated by the state change pattern within the test module.</description>
+      <preparation>
+        <initialize title="Init all">
+          <cansignal name="CarSpeed">100</cansignal>
+          <sysvar name="BrakeDistVerdict" namespace="MatlabIO">0</sysvar>
+          <sysvar name="activeABS" namespace="Control">
+            <eq>$ABSon$</eq>
+          </sysvar>
+        </initialize>
+      </preparation>
+      <wait time="2000" title="Duration" />
+      <statechange wait="15000" title="Check Brake Distance">
+        <in>
+          <sysvar name="brakeActive" namespace="Control">1</sysvar>
+        </in>
+        <expected>
+          <sysvar name="BrakeDistVerdict" namespace="MatlabIO">0</sysvar>
+        </expected>
+      </statechange>
+      <completion>
+        <initialize title="Release Pedal">
+          <sysvar name="brakeActive" namespace="Control">0</sysvar>
+        </initialize>
+        <wait time="500" title="Wait" />
+      </completion>
+    </testcasetemplate>
+    <testcasetemplate name="Slip Test">
+      <paramdef name="slipValue" default="0.13" />
+      <description>This testcase modifies internal characteristics of the application model which is connected to the chassis node as a Simulink model. Different set points for the slip value are set before the brake sequence is started. The control algorithm will behave differently upon these values. It can be observed in the graphics window. This test will always succeed.</description>
+      <preparation>
+        <initialize title="Init all">
+          <cansignal name="CarSpeed">100</cansignal>
+          <sysvar name="brakeActive" namespace="Control">0</sysvar>
+          <sysvar name="activeABS" namespace="Control">1</sysvar>
+          <sysvar name="BrakeDistVerdict" namespace="MatlabIO">0</sysvar>
+          <sysvar name="Value" namespace="Brakes::Parameters::Enabled_Subsystem::Slip_Reference">$slipValue$</sysvar>
+        </initialize>
+      </preparation>
+      <wait time="2000" title="Duration" />
+      <statechange wait="10000" title="Brake">
+        <in>
+          <sysvar name="brakeActive" namespace="Control">1</sysvar>
+        </in>
+        <expected>
+          <sysvar name="BrakeDistVerdict" namespace="MatlabIO">
+            <eq>0</eq>
+          </sysvar>
+        </expected>
+      </statechange>
+      <completion>
+        <initialize title="Release Pedal">
+          <sysvar name="brakeActive" namespace="Control">0</sysvar>
+        </initialize>
+        <wait time="500" title="Wait" />
+      </completion>
+    </testcasetemplate>
+  </templates>
+  <preparation>
+    <vardef name="MaxAllowedBrakeTime" type="int" default="0">
+      <sysvar name="SetPointBrakeTime" namespace="MatlabIO" />
+    </vardef>
+    <wait time="2000" title="Wait before test" />
+  </preparation>
+  <testgroup title="Compare Brake Distance">
+    <templateinstances template="Brake_Distance">
+      <testcaseinstance title="Brake no ABS [Brake_Distance] [Brake_Distance]" ident="">
+        <paramvalue name="ABSon">0</paramvalue>
+      </testcaseinstance>
+      <testcaseinstance title="Brake with ABS [Brake_Distance] [Brake_Distance]" ident="">
+        <paramvalue name="ABSon">1</paramvalue>
+      </testcaseinstance>
+    </templateinstances>
+  </testgroup>
+  <testgroup title="Compare Brake Time">
+    <templateinstances template="Brake_Time">
+      <testcaseinstance title="Brake Time no ABS" ident="">
+        <paramvalue name="ABSon">0</paramvalue>
+      </testcaseinstance>
+      <testcaseinstance title="Brake Time ABS" ident="">
+        <paramvalue name="ABSon">1</paramvalue>
+      </testcaseinstance>
+    </templateinstances>
+  </testgroup>
+  <testgroup title="Check ABS Controller">
+    <templateinstances template="Slip Test">
+      <testcaseinstance title="Slip Test with 0.15 [Slip Test]" ident="">
+        <paramvalue name="slipValue">0.15</paramvalue>
+      </testcaseinstance>
+      <testcaseinstance title="Slip Test with 0.11 [Slip Test]" ident="">
+        <paramvalue name="slipValue">0.11</paramvalue>
+      </testcaseinstance>
+      <testcaseinstance title="Slip Test with 0.13 [Slip Test]" ident="">
+        <paramvalue name="slipValue">0.13</paramvalue>
+      </testcaseinstance>
+    </templateinstances>
+  </testgroup>
+</testmodule>

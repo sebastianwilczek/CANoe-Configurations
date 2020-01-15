@@ -1,0 +1,753 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "..\ShareableFolders\CaplLibrary\Tc8TestLib\BasicFunctionsTestLib.cin"
+  #include "..\ShareableFolders\CaplLibrary\StubFunctionLib\ArpStubFunctions.cin"
+  #include "..\ShareableFolders\CaplLibrary\StubFunctionLib\IcmpStubFunctions.cin"
+}
+
+variables
+{
+  /* Ethernet_1 */
+  //dword eth1Ctx;
+  /* Ethernet 2 */
+  //dword eth2Ctx;
+
+  enum ManipulatedToken {
+    knoManipulated,
+    ksrcMacAddr,
+    kdstEthMacAddr,
+    kdstArpMacAddr,
+    ksrcIpAddr,
+    kdstIpAddr
+  };
+
+  // Tester UDP socket
+  UdpSocket gTesterUdpSocket;
+}
+
+/**
+ * This function should be called in the preparation of the test fixture
+ */
+export InitTestFixture()
+{
+  /* Initialize testability service client */
+  Internal_InitTestFixture(kArp,"OnEthPacketArp");
+}
+
+/**
+ * This function should be called in the completion of the test fixture
+ */
+export EndTestFixture()
+{
+  // cleanup testability service client
+  Internal_EndTestFixture();
+  // close tester socket
+  gTesterUdpSocket.Close();
+}
+
+/**
+ * Function to start an ARP testcase.
+ */
+export InitTestCase(char testCaseName[], int testCaseNumber, enum Bool stubFunctionRequired)
+{
+  Internal_InitTestCase(testCaseName, kArp, "ARP", testCaseNumber, stubFunctionRequired);
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Function to end a ARP test case. The function encapsulates the call of the
+ * UDP 'EndTest' Service Primitive and the corresponding error reporting.
+ */
+export EndTestCase()
+{
+  Internal_EndTestCase();
+}
+
+void OnEthPacketArp(long channel, long dir, long packetHandle)
+{
+  enum Bool match;
+
+  if (ShouldIncomingPacketBeProcessed(channel, dir, packetHandle) == kFalse)
+    return;
+
+  match = CompareParameters(packetHandle, channel, gReportOnFailure);
+
+  if (match == kTrue)
+    EthernetPacketReceived(channel);
+}
+
+/**
+ * Waits for an incoming ICMP echo request.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+export testfunction WaitForIcmpEchoRequest(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	destIp[],
+  char	srcIp[])
+{
+
+  PrepareWaitForEthernet(destMac, srcMac); 
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmp("8");                            /* Echo Request Type */
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForIcmpEchoRequest", "DUT sent an ICMPv4 echo request.");
+  else
+    testStepFail("WaitForIcmpEchoRequest", "DUT didn't send an ICMPv4 echo request.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits a specific amount of time for an ARP request on a specific interface.
+ * @param timeout The amount of time in milliseconds to wait for the unexpected packet.
+ * @param destMac The destination MAC address to match the unexpected packet.
+ * @param srcMac The source MAC address to match the unexpected packet.
+ * @param senderHardwareAddress The sender hardware address to match the unexpected packet.
+ * @param senderProtocolAddress The sender protocol address to match the unexpected packet.
+ * @param targetHardwareAddress The target hardware address to match the unexpected packet.
+ * @param targetProtocolAddress The target protocol address to match the unexpected packet.
+ */
+export testfunction WaitForArpRequest(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	senderHardwareAddress[],
+  char	senderProtocolAddress[],
+  char	targetHardwareAddress[],
+  char	targetProtocolAddress[])
+{
+  PrepareWaitForArp(
+    destMac,
+    srcMac,
+    kRequest,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForArpRequest", "DUT sent an ARP request.");
+  else
+    testStepFail("WaitForArpRequest", "DUT didn't send an ARP request.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits a specific amount of time for an ARP request on a specific interface.
+ * @param timeout The amount of time in milliseconds to wait for the unexpected packet.
+ * @param destMac The destination MAC address to match the unexpected packet.
+ * @param srcMac The source MAC address to match the unexpected packet.
+ * @param hardwareType The Type of the hardware address to match the unexpected packet.
+ * @param protocolType The Type of the protocol address to match the unexpected packet.
+ * @param hardwareAddressLength The length of the hardware address to match the unexpected packet.
+ * @param protocolAddressLength The length of the protocol address to match the unexpected packet.
+ * @param senderHardwareAddress The sender hardware address to match the unexpected packet.
+ * @param senderProtocolAddress The sender protocol address to match the unexpected packet.
+ * @param targetHardwareAddress The target hardware address to match the unexpected packet.
+ * @param targetProtocolAddress The target protocol address to match the unexpected packet.
+ */
+export testfunction WaitForArpRequest(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char hardwareType[],
+  char protocolType[],
+  char hardwareAddressLength[],
+  char protocolAddressLength[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  PrepareWaitForArp(
+    destMac,
+    srcMac,
+    kRequest,
+    hardwareType,
+    protocolType,
+    hardwareAddressLength,
+    protocolAddressLength,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForArpRequest", "DUT sent an ARP request.");
+  else
+    testStepFail("WaitForArpRequest", "DUT didn't send an ARP request.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits a specific amount of time for an ARP reply on a specific interface.
+ * @param timeout The amount of time in milliseconds to wait for the unexpected packet.
+ * @param destMac The destination MAC address to match the unexpected packet.
+ * @param srcMac The source MAC address to match the unexpected packet.
+ * @param senderHardwareAddress The sender hardware address to match the unexpected packet.
+ * @param senderProtocolAddress The sender protocol address to match the unexpected packet.
+ * @param targetHardwareAddress The target hardware address to match the unexpected packet.
+ * @param targetProtocolAddress The target protocol address to match the unexpected packet.
+ */
+export testfunction WaitForArpResponse(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	senderHardwareAddress[],
+  char	senderProtocolAddress[],
+  char	targetHardwareAddress[],
+  char	targetProtocolAddress[])
+{
+  PrepareWaitForArp(
+    destMac,
+    srcMac,
+    kResponse,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForArpResponse", "DUT sent an ARP response.");
+  else
+    testStepFail("WaitForArpResponse", "DUT didn't send an ARP response.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits a specific amount of time for an ARP reply on a specific interface.
+ * @param timeout The amount of time in milliseconds to wait for the unexpected packet.
+ * @param destMac The destination MAC address to match the unexpected packet.
+ * @param srcMac The source MAC address to match the unexpected packet.
+ * @param hardwareType The Type of the hardware address to match the unexpected packet.
+ * @param protocolType The Type of the protocol address to match the unexpected packet.
+ * @param hardwareAddressLength The length of the hardware address to match the unexpected packet.
+ * @param protocolAddressLength The length of the protocol address to match the unexpected packet.
+ * @param senderHardwareAddress The sender hardware address to match the unexpected packet.
+ * @param senderProtocolAddress The sender protocol address to match the unexpected packet.
+ * @param targetHardwareAddress The target hardware address to match the unexpected packet.
+ * @param targetProtocolAddress The target protocol address to match the unexpected packet.
+ */
+export testfunction WaitForArpResponse(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char hardwareType[],
+  char protocolType[],
+  char hardwareAddressLength[],
+  char protocolAddressLength[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  PrepareWaitForArp(
+    destMac,
+    srcMac,
+    kResponse,
+    hardwareType,
+    protocolType,
+    hardwareAddressLength,
+    protocolAddressLength,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForArpResponse", "DUT sent an ARP response.");
+  else
+    testStepFail("WaitForArpResponse", "DUT didn't send an ARP response.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits a specific amount of time for an unexpected ARP request on a specific interface.
+ * @param timeout The amount of time in milliseconds to wait for the unexpected packet.
+ * @param destMac The destination MAC address to match the unexpected packet.
+ * @param srcMac The source MAC address to match the unexpected packet.
+ * @param senderHardwareAddress The sender hardware address to match the unexpected packet.
+ * @param senderProtocolAddress The sender protocol address to match the unexpected packet.
+ * @param targetHardwareAddress The target hardware address to match the unexpected packet.
+ * @param targetProtocolAddress The target protocol address to match the unexpected packet.
+ */
+export testfunction WaitForUnexpectedArpRequest(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	senderHardwareAddress[],
+  char	senderProtocolAddress[],
+  char	targetHardwareAddress[],
+  char	targetProtocolAddress[])
+{
+  PrepareWaitForArp(
+    destMac,
+    srcMac,
+    kRequest,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+
+  if (WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+    testStepPass("WaitForUnexpectedArpRequest", "DUT didn't send an ARP request.");
+  else
+    testStepFail("WaitForUnexpectedArpRequest", "DUT sent an ARP request.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits a specific amount of time for an unexpected ARP request on a specific interface.
+ * @param timeout The amount of time in milliseconds to wait for the unexpected packet.
+ * @param destMac The destination MAC address to match the unexpected packet.
+ * @param srcMac The source MAC address to match the unexpected packet.
+ * @param hardwareType The Type of the hardware address to match the unexpected packet.
+ * @param protocolType The Type of the protocol address to match the unexpected packet.
+ * @param hardwareAddressLength The length of the hardware address to match the unexpected packet.
+ * @param protocolAddressLength The length of the protocol address to match the unexpected packet.
+ * @param senderHardwareAddress The sender hardware address to match the unexpected packet.
+ * @param senderProtocolAddress The sender protocol address to match the unexpected packet.
+ * @param targetHardwareAddress The target hardware address to match the unexpected packet.
+ * @param targetProtocolAddress The target protocol address to match the unexpected packet.
+ */
+export testfunction WaitForUnexpectedArpRequest(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char hardwareType[],
+  char protocolType[],
+  char hardwareAddressLength[],
+  char protocolAddressLength[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  PrepareWaitForArp(
+    destMac,
+    srcMac,
+    kRequest,
+    hardwareType,
+    protocolType,
+    hardwareAddressLength,
+    protocolAddressLength,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+
+  if (WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+    testStepPass("WaitForUnexpectedArpRequest", "DUT didn't send an ARP request.");
+  else
+    testStepFail("WaitForUnexpectedArpRequest", "DUT sent an ARP request.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits a specific amount of time for an unexpected ARP reply on a specific interface.
+ * @param timeout The amount of time in milliseconds to wait for the unexpected packet.
+ * @param destMac The destination MAC address to match the unexpected packet.
+ * @param srcMac The source MAC address to match the unexpected packet.
+ * @param senderHardwareAddress The sender hardware address to match the unexpected packet.
+ * @param senderProtocolAddress The sender protocol address to match the unexpected packet.
+ * @param targetHardwareAddress The target hardware address to match the unexpected packet.
+ * @param targetProtocolAddress The target protocol address to match the unexpected packet.
+ */
+export testfunction WaitForUnexpectedArpResponse(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	senderHardwareAddress[],
+  char	senderProtocolAddress[],
+  char	targetHardwareAddress[],
+  char	targetProtocolAddress[])
+{
+  PrepareWaitForArp(
+    destMac,
+    srcMac,
+    kResponse,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+
+  if (WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+    testStepPass("WaitForUnexpectedArpResponse", "DUT didn't send an ARP response.");
+  else
+    testStepFail("WaitForUnexpectedArpResponse", "DUT sent an ARP response.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits a specific amount of time for an unexpected ARP reply on a specific interface.
+ * @param timeout The amount of time in milliseconds to wait for the unexpected packet.
+ * @param destMac The destination MAC address to match the unexpected packet.
+ * @param srcMac The source MAC address to match the unexpected packet.
+ * @param hardwareType The Type of the hardware address to match the unexpected packet.
+ * @param protocolType The Type of the protocol address to match the unexpected packet.
+ * @param hardwareAddressLength The length of the hardware address to match the unexpected packet.
+ * @param protocolAddressLength The length of the protocol address to match the unexpected packet.
+ * @param senderHardwareAddress The sender hardware address to match the unexpected packet.
+ * @param senderProtocolAddress The sender protocol address to match the unexpected packet.
+ * @param targetHardwareAddress The target hardware address to match the unexpected packet.
+ * @param targetProtocolAddress The target protocol address to match the unexpected packet.
+ */
+export testfunction WaitForUnexpectedArpResponse(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char hardwareType[],
+  char protocolType[],
+  char hardwareAddressLength[],
+  char protocolAddressLength[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  PrepareWaitForArp(
+    destMac,
+    srcMac,
+    kResponse,
+    hardwareType,
+    protocolType,
+    hardwareAddressLength,
+    protocolAddressLength,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+
+  if (WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+    testStepPass("WaitForUnexpectedArpResponse", "DUT didn't send an ARP response.");
+  else
+    testStepFail("WaitForUnexpectedArpResponse", "DUT sent an ARP response.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Sends an ARP request.
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ */
+export testfunction SendArpRequest(
+  char destMac[],
+  char srcMac[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  InternalSendArpRequest(
+    destMac,
+    srcMac,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+}
+
+/**
+ * Sends an ARP request.
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param hardwareType The Type of the hardware address.
+ * @param protocolType The Type of the protocol address.
+ * @param hardwareAddressLength The length of the hardware address.
+ * @param protocolAddressLength The length of the protocol address.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ */
+export testfunction SendArpRequest(
+  char destMac[],
+  char srcMac[],
+  char hardwareType[],
+  char protocolType[],
+  char hardwareAddressLength[],
+  char protocolAddressLength[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  InternalSendArpRequest(
+    destMac,
+    srcMac,
+    hardwareType,
+    protocolType,
+    hardwareAddressLength,
+    protocolAddressLength,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+}
+
+/**
+ * Sends an ARP request.
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param hardwareType The Type of the hardware address.
+ * @param protocolType The Type of the protocol address.
+ * @param hardwareAddressLength The length of the hardware address.
+ * @param protocolAddressLength The length of the protocol address.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ */
+void InternalSendArpRequest(
+  char destMac[],
+  char srcMac[],
+  char hardwareType[],
+  char protocolType[],
+  char hardwareAddressLength[],
+  char protocolAddressLength[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  long p;
+
+  SetBusContext(getBusNameContext("Ethernet_1"));
+
+  p = EthInitPacket("arp");
+
+  EthSetTokenInt64(p, "eth", "destination", ConvertMacAddressStringToInt64(destMac));
+  EthSetTokenInt64(p, "eth", "source", ConvertMacAddressStringToInt64(srcMac));
+
+  if (IsWildcard(hardwareType)) 
+    EthSetTokenInt64(p, "arp", "hwType", 1);
+  else 
+    EthSetTokenInt64(p, "arp", "hwType", atol(hardwareType));
+  
+  if (IsWildcard(protocolType)) 
+    EthSetTokenInt64(p, "arp", "protType", 0x0800);
+  else 
+    EthSetTokenInt64(p, "arp", "protType", atol(protocolType));
+  
+  EthSetTokenInt64(p, "arp", "hwSize", 6);
+  EthSetTokenInt64(p, "arp", "protSize", 4);
+  EthSetTokenInt64(p, "arp", "operation", kRequest);
+  EthSetTokenInt64(p, "arp", "hwSourceAddr", ConvertMacAddressStringToInt64(senderHardwareAddress));
+  EthSetTokenInt64(p, "arp", "protSourceAddr", ConvertIpAddressStringToInt64(senderProtocolAddress));
+  EthSetTokenInt64(p, "arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(targetHardwareAddress));
+  EthSetTokenInt64(p, "arp", "protDestinationAddr", ConvertIpAddressStringToInt64(targetProtocolAddress));
+  
+  if (!IsWildcard(hardwareAddressLength)) 
+    EthSetTokenInt64(p, "arp", "hwSize", atol(hardwareAddressLength));
+  
+  if (!IsWildcard(protocolAddressLength)) 
+    EthSetTokenInt64(p, "arp", "protSize", atol(protocolAddressLength));
+
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  EthCompletePacket(p);
+
+  /* send and release package */
+  EthOutputPacket(p);
+  EthReleasePacket(p);
+}
+
+/**
+ * Sends an ARP response.
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ */
+export testfunction SendArpResponse(
+  char destMac[],
+  char srcMac[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  InternalSendArpResponse(
+    destMac,
+    srcMac,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+}
+
+/**
+ * Sends an ARP response.
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param hardwareType The Type of the hardware address.
+ * @param protocolType The Type of the protocol address.
+ * @param hardwareAddressLength The length of the hardware address.
+ * @param protocolAddressLength The length of the protocol address.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ */
+export testfunction SendArpResponse(
+  char destMac[],
+  char srcMac[],
+  char hardwareType[],
+  char protocolType[],
+  char hardwareAddressLength[],
+  char protocolAddressLength[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  InternalSendArpResponse(
+    destMac,
+    srcMac,
+    hardwareType,
+    protocolType,
+    hardwareAddressLength,
+    protocolAddressLength,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+}
+
+/**
+ * Sends an ARP response.
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param hardwareType The Type of the hardware address.
+ * @param protocolType The Type of the protocol address.
+ * @param hardwareAddressLength The length of the hardware address.
+ * @param protocolAddressLength The length of the protocol address.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ */
+void InternalSendArpResponse(
+  char destMac[],
+  char srcMac[],
+  char hardwareType[],
+  char protocolType[],
+  char hardwareAddressLength[],
+  char protocolAddressLength[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  long p;
+
+  SetBusContext(getBusNameContext("Ethernet_1"));
+
+  p = EthInitPacket("arp");
+
+  EthSetTokenInt64(p, "eth", "destination", ConvertMacAddressStringToInt64(destMac));
+  EthSetTokenInt64(p, "eth", "source", ConvertMacAddressStringToInt64(srcMac));
+
+  if (IsWildcard(hardwareType)) 
+    EthSetTokenInt64(p, "arp", "hwType", 1);
+  else 
+    EthSetTokenInt64(p, "arp", "hwType", atol(hardwareType));
+  
+  if (IsWildcard(protocolType)) 
+    EthSetTokenInt64(p, "arp", "protType", 0x0800);
+  else 
+  EthSetTokenInt64(p, "arp", "protType", atol(protocolType));
+  
+  EthSetTokenInt64(p, "arp", "hwSize", 6);
+  EthSetTokenInt64(p, "arp", "protSize", 4);
+  EthSetTokenInt64(p, "arp", "operation", kResponse);
+  EthSetTokenInt64(p, "arp", "hwSourceAddr", ConvertMacAddressStringToInt64(senderHardwareAddress));
+  EthSetTokenInt64(p, "arp", "protSourceAddr", ConvertIpAddressStringToInt64(senderProtocolAddress));
+  EthSetTokenInt64(p, "arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(targetHardwareAddress));
+  EthSetTokenInt64(p, "arp", "protDestinationAddr", ConvertIpAddressStringToInt64(targetProtocolAddress));
+  
+  if (!IsWildcard(hardwareAddressLength)) 
+    EthSetTokenInt64(p, "arp", "hwSize", atol(hardwareAddressLength));
+  
+  if (!IsWildcard(protocolAddressLength)) 
+    EthSetTokenInt64(p, "arp", "protSize", atol(protocolAddressLength));
+
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  EthCompletePacket(p);
+
+  /* send and release package */
+  EthOutputPacket(p);
+  EthReleasePacket(p);
+}

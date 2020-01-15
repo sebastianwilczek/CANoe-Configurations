@@ -1,0 +1,188 @@
+/*@!Encoding:1252*/
+variables
+{
+  // ------------------------------------------------
+  // File information
+  // Copyright         : 2019, Vector Informatik GmbH
+  // ------------------------------------------------
+
+  // Globals for "NMTMaster" device
+  BYTE gNodeId          = 1;                   // Node ID
+  char gNodeLabel[256] = "Master";             // Label for debug output
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  msTimer   gSystemTimer;
+  const int kSystemTime = 100;
+
+  // control word bits for drives
+  const int kSwitchOn        = 0x01;
+  const int kDisableVoltage  = 0x02;
+  const int kQuickStop       = 0x04;
+  const int kEnableOperation = 0x08;
+  const int kResetFault      = 0x80;
+
+  // status word bits for drives
+  const int kBitReadyToSwitchOn     = 0x0001;
+  const int kBitSwitchedOn          = 0x0002;
+  const int kBitOperationEnable     = 0x0004;
+  const int kBitFault               = 0x0008;
+  const int kBitVoltageDisabled     = 0x0010;
+  const int kBitQuickStop           = 0x0020;
+  const int kBitSwitchOnDisabled    = 0x0040;
+}
+
+on sysvar CANopen::CAN::Master::Control::CommunicationState
+{
+  switch(@this)
+  {
+    case 0: // Not active
+      writeDbgLevel(kDbgInfo, "<%s>: Changed state to 'Not active'", gNodeLabel);
+      @sysvar::GUIControls::NMTMaster_CommState = 3;
+      break;
+    case 4: // Stopped
+      writeDbgLevel(kDbgInfo, "<%s>: Changed state to 'Stopped'", gNodeLabel);
+      @sysvar::GUIControls::NMTMaster_CommState = 3;
+      break;
+    case 5: // Operational
+      writeDbgLevel(kDbgInfo, "<%s>: Changed state to 'Operational'", gNodeLabel);
+      setTimer( gSystemTimer, kSystemTime );
+      @sysvar::GUIControls::NMTMaster_CommState = 1;
+      break;
+    case 6: // Reset Node
+      writeDbgLevel(kDbgInfo, "<%s>: 'Reset Node' command received", gNodeLabel);
+      @sysvar::GUIControls::NMTMaster_CommState = 3;
+      break;
+    case 7: // Reset Communication
+      writeDbgLevel(kDbgInfo, "<%s>: 'Reset Communication' command received", gNodeLabel);
+      @sysvar::GUIControls::NMTMaster_CommState = 3;
+      break;
+    case 127: // Preoperational
+      writeDbgLevel(kDbgInfo, "<%s>: Changed state to 'Preoperational'", gNodeLabel);
+      @sysvar::GUIControls::NMTMaster_CommState = 2;
+      break;
+    default:
+      writeDbgLevel(kDbgInfo, "<%s>: Changed state (?)", gNodeLabel);
+      break;
+  }
+  // TODO: Implement additional handling here
+}
+
+on timer gSystemTimer
+{
+  // lock mechanism for ladder
+  int lock;
+  lock = (@sysvar::CANopen::CAN::Master::NetVarInt32Out::pos_act_val_sup_front > 0 ) &&
+         (@sysvar::CANopen::CAN::Master::NetVarInt32Out::pos_act_val_sup_rear > 0 );
+  
+  @sysvar::CANopen::CAN::Master::NetVarUInt8In::LadderLock = lock;
+
+  setTimer( gSystemTimer, kSystemTime );
+}
+
+void TrySetVelocity(sysvarInt* sysVarStatus, sysvarInt* sysVelocity, int velocity, char text[])
+{
+  // set target velocity of drive only, if it is on state 'operation enable'
+  if (@sysVarStatus & kBitOperationEnable)
+  {
+    @sysVelocity = velocity;
+  }
+  else
+  {
+    writeDbgLevel( kDbgError, "<%s> ERROR: %s is not 'Operation enable'", gNodeLabel, text); 
+  }
+}
+
+void SetLadderVelocity(int val, int velocity)
+{
+  if (@sysvar::CANopen::CAN::Master::NetVarUInt8In::LadderLock == 0)
+  {
+    TrySetVelocity(sysvar::CANopen::CAN::Master::NetVarUInt16Out::statusword_ladder,
+                   sysvar::CANopen::CAN::Master::NetVarInt16In::vl_target_velocity_ladder,
+                   val == 1 ? velocity : 0,
+                   "ladder");
+  }
+}
+
+void SetSupportVelocity(int val, int velocity)
+{
+  if (@sysvar::CANopen::CAN::Master::NetVarUInt8In::SupportLock == 0)
+  {
+    TrySetVelocity(sysvar::CANopen::CAN::Master::NetVarUInt16Out::statusword_support_front,
+                   sysvar::CANopen::CAN::Master::NetVarInt16In::vl_target_velocity_sup_front,
+                   val == 1 ? velocity : 0,
+                   "front support");
+
+    TrySetVelocity(sysvar::CANopen::CAN::Master::NetVarUInt16Out::statusword_support_rear,
+                   sysvar::CANopen::CAN::Master::NetVarInt16In::vl_target_velocity_sup_rear,
+                   val == 1 ? velocity : 0,
+                   "rear support");
+  }
+}
+
+on sysvar CANopen::CAN::Master::NetVarUInt8Out::Ladder_Up
+{
+  SetLadderVelocity(@this, 1000);
+}
+
+on sysvar CANopen::CAN::Master::NetVarUInt8Out::Ladder_Down
+{
+  SetLadderVelocity(@this, -1000);
+}
+
+on sysvar CANopen::CAN::Master::NetVarInt32Out::pos_act_val_ladder
+{
+  // lock mechanism for support
+  @sysvar::CANopen::CAN::Master::NetVarUInt8In::SupportLock = @this > 0 ? 1 : 0;
+}
+
+void SetControlWord(dword status, sysvarInt* sysVarControlWord)
+{
+  if ((status & kBitSwitchOnDisabled) && !(status & kBitReadyToSwitchOn))
+    {
+    // the drive is in state 'switch on disabled' -> shutdown command
+    @sysVarControlWord = kBitQuickStop|kDisableVoltage;
+  }
+  else if ((status & kBitReadyToSwitchOn) && !(status & kBitSwitchedOn))
+    {
+    // the drive is in state 'ready to switch on' -> switch on command
+    @sysVarControlWord = kBitQuickStop|kDisableVoltage|kSwitchOn;
+  }
+  else if ((status & kBitSwitchedOn) && !(status & kBitOperationEnable))
+    {
+    // the drive is in state 'switched on' ->  enable operation command
+    @sysVarControlWord = kBitQuickStop|kDisableVoltage|kSwitchOn|kEnableOperation;
+  }
+}
+
+// Received status word of ladder drive
+on sysvar CANopen::CAN::Master::NetVarUInt16Out::statusword_ladder
+{
+  SetControlWord(@this, sysvar::CANopen::CAN::Master::NetVarUInt16In::controlword_ladder);
+}
+
+// Received status word of rear support drive
+on sysvar CANopen::CAN::Master::NetVarUInt16Out::statusword_support_rear
+{
+  SetControlWord(@this, sysvar::CANopen::CAN::Master::NetVarUInt16In::controlword_sup_rear);
+}
+
+// Received status word of front support drive
+on sysvar CANopen::CAN::Master::NetVarUInt16Out::statusword_support_front
+{
+  SetControlWord(@this, sysvar::CANopen::CAN::Master::NetVarUInt16In::controlword_sup_front);
+}
+
+on sysvar CANopen::CAN::Master::NetVarUInt8Out::Support_Down
+{
+  SetSupportVelocity(@this, 500);
+}
+
+on sysvar CANopen::CAN::Master::NetVarUInt8Out::Support_Up
+{
+  SetSupportVelocity(@this, -500);
+}

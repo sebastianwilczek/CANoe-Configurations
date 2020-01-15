@@ -1,0 +1,158 @@
+variables
+{
+  struct Measure
+  {
+      QWORD  tSend;                     // timestamp of last CyclicMessage
+      QWORD  tLastRx;                   // timestamp of last CyclicMessage received
+      QWORD  tResponse;                 // timestamp of last ResponseMessage
+  
+      QWORD  tCurResponseTimeNs;        // current response time (tResponse - tSend)
+      QWORD  tMinResponseTimeNs;        // minimum response time
+      QWORD  tMaxResponseTimeNs;        // maximum response time
+      QWORD  tAvgResponseTimeNs;        // average response time
+
+      QWORD  tCurCycleTimeNs;           // current cycle time
+      QWORD  tMinCycleTimeNs;           // minimum cycle time
+      QWORD  tMaxCycleTimeNs;           // maximum cycle time
+
+      QWORD  sumResponseTimeNs;         // accumulated sum of all response times
+      DWORD  numResponseTime;           // number of response times accumulated
+ 
+      DWORD  sendId;
+      DWORD  receiveId;
+  };
+  struct Measure Normal_Mode;
+}
+
+on message CyclicMessage
+{
+  if (this.dir == Tx)
+  {
+    if (this.can == 1)
+    {
+      Normal_Mode.tSend = this.time_ns;
+      Normal_Mode.sendId = this.SendCount;
+    }
+  }
+  else if (this.dir == Rx)
+  {
+    if (timeNow() > 10000)
+    {
+      CalculateCycleTimes(this, Normal_Mode);
+      SetNormalModeCycleTimes();
+    }
+  }
+
+  output (this);
+}
+
+on message ResponseMessage
+{
+  output(this);
+
+  if (this.dir == TX)
+  {
+    if (timeNow() > 10000)
+    {
+      CalculateResponseTimes(this, Normal_Mode);
+      SetNormalModeResponseTimes();
+    }
+  }
+}
+
+on message *
+{
+  output(this);
+}
+
+on preStart
+{
+  InitMeasure(Normal_Mode);
+}
+
+SetNormalModeCycleTimes()
+{
+  @sysvar::CycleTime::Cur = (float)Normal_Mode.tCurCycleTimeNs / 1000.0;
+  @sysvar::CycleTime::Min = (float)Normal_Mode.tMinCycleTimeNs / 1000.0;
+  @sysvar::CycleTime::Max = (float)Normal_Mode.tMaxCycleTimeNs / 1000.0;
+}
+
+SetNormalModeResponseTimes()
+{
+  @sysvar::ResponseTime::Cur = (float)Normal_Mode.tCurResponseTimeNs / 1000.0;
+  @sysvar::ResponseTime::Avg = (float)Normal_Mode.tAvgResponseTimeNs / 1000.0;
+  @sysvar::ResponseTime::Min = (float)Normal_Mode.tMinResponseTimeNs / 1000.0;
+  @sysvar::ResponseTime::Max = (float)Normal_Mode.tMaxResponseTimeNs / 1000.0;
+}
+
+InitMeasure (struct Measure m)
+{
+  m.tSend = 0;
+  m.tLastRx = 0;
+  m.tResponse = 0;
+
+  m.tMinResponseTimeNs = 0xFFFFFFFFFFFFFFFFLL;
+  m.tMaxResponseTimeNs = 0;
+  m.tAvgResponseTimeNs = 0;
+  m.tCurResponseTimeNs = 0;
+
+  m.tMinCycleTimeNs = @sysvar::kCycleTime*1000;
+  m.tMaxCycleTimeNs = @sysvar::kCycleTime*1000;
+  m.tCurCycleTimeNs = @sysvar::kCycleTime*1000;
+ 
+  m.sumResponseTimeNs  = 0;
+  m.numResponseTime  = 0;
+
+  m.sendId = 0xFFFFFFFF;
+  m.receiveId = 0xFFFFFFFF;
+}
+
+CalculateCycleTimes (message CyclicMessage msg, struct Measure mode)
+{
+  QWORD tDiffNs;
+
+  if ((mode.tLastRx > 5000000LL) && ((mode.receiveId + 1) == msg.SendCount))
+  {
+    tDiffNs = (msg.time_ns - mode.tLastRx);
+    mode.tCurCycleTimeNs = tDiffNs;
+    
+    if (mode.tMinCycleTimeNs > mode.tCurCycleTimeNs)
+    {
+      mode.tMinCycleTimeNs = mode.tCurCycleTimeNs;
+    }
+    
+    if (mode.tMaxCycleTimeNs < mode.tCurCycleTimeNs)
+    {
+      mode.tMaxCycleTimeNs = mode.tCurCycleTimeNs;
+    }
+  }
+  mode.tLastRx = msg.time_ns;
+  mode.receiveId = msg.SendCount;
+}
+
+CalculateResponseTimes (message ResponseMessage msg, struct Measure mode)
+{  
+  if (mode.sendId == msg.ResponseCount)
+  {
+    QWORD tDiffNs;
+    mode.tResponse          = msg.sof;
+    tDiffNs                 = mode.tResponse - mode.tSend;
+    mode.tCurResponseTimeNs = tDiffNs;
+
+    mode.sumResponseTimeNs += mode.tCurResponseTimeNs;
+    mode.numResponseTime += 1;    
+
+    mode.tAvgResponseTimeNs = mode.sumResponseTimeNs / mode.numResponseTime;
+
+    if (mode.tCurResponseTimeNs < mode.tMinResponseTimeNs) 
+    {
+      mode.tMinResponseTimeNs = mode.tCurResponseTimeNs;
+    }
+
+    if (mode.tCurResponseTimeNs > mode.tMaxResponseTimeNs) 
+    {
+      mode.tMaxResponseTimeNs = mode.tCurResponseTimeNs;
+    }
+  }
+}
+

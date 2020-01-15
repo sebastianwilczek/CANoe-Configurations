@@ -1,0 +1,1686 @@
+/*@!Encoding:1252*/
+/*@!Encoding:1252*/
+includes
+{
+  #include "RT_checks.cin"
+}
+
+variables
+{
+}
+
+// ==============================================================================================================
+// functionality of the test A10 01
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react (timeout) (FAIL)
+// 3: NAME alignment error in AC (FAIL)
+void CTF_A10_01_CA_NAME(byte toolAddr, byte dutAddr, qword devNameDut)
+{
+  char errText[1024];
+  char reportText[1024];
+  pg J1939::J1939_CT_RT::AC pgAC;
+
+  // =============
+  // PRECONDITIONS
+  // =============
+
+  // =============
+  // INIT
+  // =============
+  
+  // ====================
+  // step 1/1 Request AC and check NAME alignment in AC response)...
+  // ====================
+  CT_STEP_BEGIN(-1, "Request AC and check NAME alignment in AC response...");
+  if (!CT_Request_And_Await_AC(pgAC, toolAddr, dutAddr, dutAddr, errText))
+  {
+    CT_STEP_END_FAIL(2, errText);
+    return; // leave on fail.
+  }
+  
+  snprintf(reportText, elcount(reportText), "Detected AC from DUT at t=%.06f.", CT_Ns2Sec(pgAC.time_ns));
+  CT_WAIT(1);
+  CT_Info(1,"",reportText);
+  
+  if (!CT_VALIDATE_AC_DEVNAME(pgAC.time_ns, pgAC.qword(0), devNameDut, errText))
+  {
+    CT_STEP_END_FAIL(3, errText);
+    return; // leave on fail.
+  }
+  
+  CT_WAIT_AFTER_AC_WITH_INFO();
+  
+  CT_STEP_END_PASS(1);
+}
+
+// ==============================================================================================================
+// functionality of the test A10 02
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not transmit AC after bootup within waiting time.(FAIL)
+// 3: User canceled.
+void CTF_A10_02_System_Initialization(byte dutAddr, qword devNameDut)
+{
+  // =============
+  // PRECONDITIONS
+  // =============
+  
+  // =============
+  // INIT
+  // =============
+
+  // ====================
+  // step 1/1 Await tester resets the DUT...
+  // ====================
+  {
+    byte checkDevName = 1;
+    byte funcPathSuccess = 1;
+    byte funcPathTimeout = 2;
+    byte funcPathCancel = 3;
+    byte funcPathAddrFail = 2;
+    byte funcPathDevNameFail = 2;
+    byte reboot = 1;
+    dword timeout = gc_DLG_WAITING_TIME_MS;
+    enum eNoWaitFlag waitAfterAC = WF_NOWAIT;
+    int stepNr = -1;
+    CT_STEP_DLG_TESTER_SHALL_RESET_THE_DUT(stepNr, dutAddr, devNameDut, checkDevName, timeout, funcPathSuccess, funcPathTimeout, funcPathCancel, funcPathAddrFail, funcPathDevNameFail, waitAfterAC, reboot);
+  }
+}
+
+// ==============================================================================================================
+// functionality of the test A10 03
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT is AAC device (INCONCLUSIVE)
+// 3: Cannot Claim message not sent within 250ms. (FAIL)
+// 6: Reset DUT error (FAIL)
+// 7: DUT is not idle in listen mode for at least 30 seconds. (FAIL)
+// 8: DUT sends not allowed messages in listen only state after Cannot Claim message (FAIL)
+void CTF_A10_03_Non_AAC_Device_Fails(byte toolAddr, byte dutAddr, qword devNameDut)
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  pg J1939::J1939_CT_RT::AC pgACDut;
+  pg J1939::J1939_CT_RT::AC pgACTool;
+  qword devNameTool;
+  int res;
+  int64 acccm_time_ns;
+  int i;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  if (!CT_PRECOND_CHECK_DUT_AAC_BIT(0, devNameDut, 2, 1)) return;
+  
+  // =============
+  // INIT...
+  // =============
+  devNameTool = devNameDut-1; // tool devname has more prio due it's numerically "smaller".
+  
+  // ====================
+  // step 1/5 Try to use DUT's addess (higher prio) and check for Cannot Claim within 250ms...
+  // ====================
+  stepTime = CT_STEP_BEGIN(-5, "Try to use DUT's addess (higher prio) and check for Cannot Claim within 250ms...");
+  if ( (res = CT_Send_AC_And_Await_AC(pgACDut, pgACTool, dutAddr, gc_NULL_ADDR, devNameTool, devNameDut, gc_TIMEOUT_AC, errText)) != 1)
+  {
+    if (res == 0)
+    {
+      CT_STEP_END_FAIL(3, errText);
+      // just let the user reset the dut without continuing doing test steps.
+      CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+      return; // leave on fail.
+    }
+  }
+  CT_STEP_END_PASS(0);
+  CT_WAIT(1);
+  
+  // ====================
+  // step 2/5 Check Cannot Claim response...
+  // ====================
+  {
+    byte stepNr = 0;
+    byte cannotClaim = 1;
+    byte funcPathSuccess = 0;
+    byte funcPathOnFailedSA = 3;
+    byte funcPathOnFailedDevName = 3;
+    byte resetAfterCannotClaim = 0;
+    if (!CT_STEP_CHECK_AC_RESPONSE(stepNr, pgACDut, dutAddr, devNameDut, cannotClaim, funcPathSuccess, funcPathOnFailedSA, funcPathOnFailedDevName, resetAfterCannotClaim)) return;
+  }
+  acccm_time_ns = pgACDut.time_ns;
+  
+  // ====================
+  // step 3/5 Check DUT is in listen only mode for 30 seconds.
+  // ====================
+  stepTime = CT_STEP_BEGIN("Check DUT is in listen only mode for 30 seconds...");
+  CT_WAIT(1);
+  MsgBuf_StartRecording();
+  for (i=0; i<=gc_LISTEN_ONLY_CHECK_TIME_MS; i++)
+  {
+    if (testWaitForMessage(1) == 1)
+    {
+      message * msg;
+      byte msg_sa;
+      // there was a message...
+      TestGetWaitEventMsgData(msg);
+      msg_sa = msg.id & 0xFF;
+      if (msg_sa == dutAddr)
+      {
+        CT_WAIT(gc_TIMEOUT_T3);
+        snprintf(reportText, elcount(reportText), "DUT sent a message in listen only mode at t=%.06f and is not idle for at least 30 seconds after Cannot Claim message at t=%.06f.", CT_Ns2Sec(msg.time_ns), CT_Ns2Sec(acccm_time_ns));
+        CT_STEP_END_FAIL(7, reportText);
+        // just let the user reset the dut without continuing doing test steps.
+        CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+        return; // leave on fail.
+      }
+    }
+    
+  }
+  CT_STEP_END_PASS(0);
+  
+  // ====================
+  // step 4/5 Check DUT reacts on requests in listen only mode.
+  // ====================
+  snprintf(reportText, elcount(reportText), "Check DUT reacts on non AC requests in listen only mode (started at t=%.06f)", CT_Ns2Sec(acccm_time_ns));
+  CT_STEP_BEGIN(reportText);
+  CT_SendRequest(0x1000, toolAddr, dutAddr);
+  CT_WAIT(gc_TIMEOUT_T3);
+
+  MsgBuf_StopRecording();
+  
+  if (!CT_Check_For_Allowed_Messages_During_AC(acccm_time_ns, dutAddr, 1, errText))
+  {
+    snprintf(reportText, elcount(reportText), "DUT sends not allowed messages in listen mode after Cannot Claim message at t=%.06f", CT_Ns2Sec(acccm_time_ns));
+    CT_STEP_END_FAIL(8, reportText);
+    // just let the user reset the dut without continuing doing test steps.
+    CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+    return; // leave on fail.
+  }
+  
+  CT_STEP_END_PASS(0);
+  
+  // ====================
+  // step 5/5 Reset DUT.
+  // ====================
+  {
+    byte checkDevName = 1;
+    byte funcPathSuccess = 1;
+    byte funcPathTimeout = 6;
+    byte funcPathCancel = 6;
+    byte funcPathAddrFail = 6;
+    byte funcPathDevNameFail = 6;
+    dword timeout = gc_DLG_WAITING_TIME_MS;
+    enum eNoWaitFlag waitAfterAC = WF_NOWAIT;    
+    int stepNr = 0;
+    byte reboot = 0;
+    CT_STEP_DLG_TESTER_SHALL_RESET_THE_DUT(stepNr, dutAddr, devNameDut, checkDevName, timeout, funcPathSuccess, funcPathTimeout, funcPathCancel, funcPathAddrFail, funcPathDevNameFail, waitAfterAC, reboot);
+  }
+}
+
+// ==============================================================================================================
+// functionality of the test A10 04
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not respond with ACL (timeout). (FAIL)
+// 3: DUT's address claimed but with wrong content. (FAIL)
+// 4: DUT reset error (FAIL)
+// 5: DUT is configured not to support Commanded Address. (INCONCLUSIVE)
+void CTF_A10_04_CommandedAddresses_On_CC_Device(byte toolAddr, byte dutAddr, qword devNameDut)
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte newAddr;
+  pg J1939::J1939_CT_RT::CA pgCA;
+  pg J1939::J1939_CT_RT::AC pgACDUT;
+  int res;
+
+  // =============
+  // PRECONDITIONS
+  // =============
+  if (!CT_CHECK_CA_SUPPORT_INCONCLUSIVE(5)) return;
+  
+  // =============
+  // INIT...
+  // =============
+  newAddr = CT_Get_Third_Node_Adr(toolAddr, dutAddr);
+  pgCA.sa = toolAddr;
+  pgCA.AddressAssignment = newAddr;
+  pgCA.dp  = 0;
+  pgCA.edp = 0;
+  
+  // ====================
+  // step 1/2 Send CA...
+  // ====================
+  snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) commands DUT %d (0x%.02X) to use address %d (0x%.02X)...", toolAddr, toolAddr, dutAddr, dutAddr, newAddr, newAddr);
+  stepTime = CT_STEP_BEGIN(-2, reportText);
+
+  res = CT_CommandedDUTAdressAndAwaitResponse(pgACDUT, pgCA, gc_TIMEOUT_TR, 1, 1);
+  if (res == 1)
+  {
+    snprintf(reportText, elcount(reportText), "DUT does not respond with ACL from an expected address %d (0x%.02X) or %d (0x%.02X) after Commanded Address at t=%.06f within Tr (200ms)", newAddr, newAddr, dutAddr, dutAddr, CT_Ns2Sec(pgCA.time_ns));
+    CT_STEP_END_FAIL(2, reportText);
+    // just let the user reset the dut without continuing doing test steps.
+    CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+    return;
+  }
+  else if (res == 2)
+  {
+    snprintf(reportText, elcount(reportText), "DUT's address claimed but with wrong content. Got:0x%llX. Expected:0x%llX.", pgACDUT.qword(0), devNameDut);
+    CT_STEP_END_FAIL(3, reportText);
+    // just let the user reset the dut without continuing doing test steps.
+    CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+    return; // leave on fail.
+  }
+  CT_STEP_END_PASS(0);
+  
+  // ====================
+  // step 2/2 Reset DUT.
+  // ====================
+  {
+    byte checkDevName = 1;
+    byte funcPathSuccess = 1;
+    byte funcPathTimeout = 4;
+    byte funcPathCancel = 4;
+    byte funcPathAddrFail = 4;
+    byte funcPathDevNameFail = 4;
+    dword timeout = gc_DLG_WAITING_TIME_MS;
+    enum eNoWaitFlag waitAfterAC = WF_NOWAIT;    
+    int stepNr = 0;
+    byte reboot = 0;
+    CT_STEP_DLG_TESTER_SHALL_RESET_THE_DUT(stepNr, dutAddr, devNameDut, checkDevName, timeout, funcPathSuccess, funcPathTimeout, funcPathCancel, funcPathAddrFail, funcPathDevNameFail, waitAfterAC, reboot);
+  }
+  
+}
+
+// ==============================================================================================================
+// functionality of the test A10 05
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react on AC within 250ms. (FAIL)
+// 3: DUT does not recalculate to a new address (FAIL)
+// 4: DUT answers with Cannot Claim instead of recalculating new address (FAIL)
+// 5: Error in reset (FAIL)
+// 6: DUT is no AAC device (INCONCLUSIVE)
+void CTF_A10_05_Address_Recalculation_On_AAC_Device(byte toolAddr, byte dutAddr, qword devNameDut)
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  qword devNameTool;
+  pg J1939::J1939_CT_RT::AC pgACDut;
+  pg J1939::J1939_CT_RT::AC pgACTool;
+  byte runCount;
+  byte originalDutAddr;
+  int res;
+
+  // =============
+  // PRECONDITIONS
+  // =============
+  if (!CT_PRECOND_CHECK_DUT_AAC_BIT(1, devNameDut, 6, 1)) return;
+  
+  // =============
+  // INIT...
+  // =============
+  devNameTool = devNameDut-1; // tool devname has more prio due it's numerically "smaller".
+  originalDutAddr = dutAddr;
+  
+  for (runCount=1; runCount<=2; runCount++)
+  {
+    // ====================
+    // step 1/5 3/5 Try to use DUT's addess (higher prio) and check for AC from DUT.
+    // ====================
+    switch(runCount)
+    {
+      case 1: stepTime  = CT_STEP_BEGIN(-5, "Try to use DUT's address (higher prio) and wait for AC from DUT within 250ms..." ); break;
+      default: stepTime  = CT_STEP_BEGIN("Try to use DUT's address again and wait for AC from DUT within 250ms..."); break;
+    }
+    if ( (res = CT_Send_AC_And_Await_AC(pgACDut, pgACTool, dutAddr, gc_ANY_ADDR, devNameTool, devNameDut, gc_TIMEOUT_AC, errText)) != 1)
+    {
+      if (res == 0)
+      {
+        CT_STEP_END_FAIL(2, errText);
+        // just let the user reset the dut without continuing doing test steps.
+        CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+        return; // leave on fail.
+      }
+    }
+    CT_STEP_END_PASS(0);
+
+    CT_WAIT(1);
+    // ====================
+    // step 2/5 4/5 Check DUT's AC response...
+    // ====================
+    stepTime = CT_STEP_BEGIN("Check DUT's AC response...");
+    if (pgACDut.sa == dutAddr)
+    {
+      snprintf(reportText, elcount(reportText), "DUT does not recalculate to a new address in AC at t=%.06f. It used the same address %d (0x%.02X) as before.", CT_Ns2Sec(pgACDut.time_ns), pgACDut.sa, pgACDut.sa);
+      CT_STEP_END_FAIL(3, reportText);
+      // just let the user reset the dut without continuing doing test steps.
+      CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+      return; // leave on fail.
+    }
+    else if (pgACDut.sa == gc_NULL_ADDR)
+    {
+      snprintf(reportText, elcount(reportText), "DUT does not recalculate to a new address in AC at t=%.06f. It sent an Cannot Claim instead.", CT_Ns2Sec(pgACDut.time_ns));
+      CT_STEP_END_FAIL(4, reportText);
+      // just let the user reset the dut without continuing doing test steps.
+      CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    
+    CT_WAIT_AFTER_AC_WITH_INFO();
+    
+    // for the next run use the DUT's newly reported address...
+    dutAddr = pgACDut.sa;
+  } // END run-loop.
+  
+  // ====================
+  // step 5/5 Reset DUT.
+  // ====================
+  {
+    byte checkDevName = 1;
+    byte funcPathSuccess = 1;
+    byte funcPathTimeout = 5;
+    byte funcPathCancel = 5;
+    byte funcPathAddrFail = 5;
+    byte funcPathDevNameFail = 5;
+    dword timeout = gc_DLG_WAITING_TIME_MS;
+    int stepNr = 0;
+    enum eNoWaitFlag waitAfterAC = WF_NOWAIT;    
+    byte reboot = 0;
+    CT_STEP_DLG_TESTER_SHALL_RESET_THE_DUT(stepNr, originalDutAddr, devNameDut, checkDevName, timeout, funcPathSuccess, funcPathTimeout, funcPathCancel, funcPathAddrFail, funcPathDevNameFail, waitAfterAC, reboot);
+  }
+  
+}
+
+// ==============================================================================================================
+// functionality of the test A10 06
+// FuncPath's:
+// 1: Not active testable (INCONCLUSIVE)
+void CTF_A10_06_Send_AC_Request(byte toolAddr, byte dutAddr)
+{
+  CT_NOT_TESTABLE(1);
+}
+
+// ==============================================================================================================
+// functionality of the test A10 07
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react (timeout) (FAIL)
+void CTF_A10_07_Receive_AC_Request_Glob(byte toolAddr, byte dutAddr, qword devNameDut)
+{
+  char errText[1024];
+  char reportText[1024];
+  pg J1939::J1939_CT_RT::AC pgACDut;
+  byte expectedSA;
+
+  // =============
+  // PRECONDITIONS
+  // =============
+
+  // =============
+  // INIT
+  // =============
+  expectedSA = dutAddr;
+  
+  // ====================
+  // step 1/2 Request AC globally from DUT and check NAME in AC response...
+  // ====================
+  CT_STEP_BEGIN(-2, "Request AC globally from DUT and check NAME in AC response...");
+  if (!CT_Request_And_Await_AC(pgACDut, toolAddr, gc_BC_ADDR, gc_ANY_ADDR, devNameDut, errText))
+  {
+    CT_STEP_END_FAIL(2, errText);
+    // just let the user reset the dut without continuing doing test steps.
+    CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+    return; // leave on fail.
+  }
+
+  CT_STEP_END_PASS(0);
+  CT_WAIT(1);
+  
+  // ====================
+  // step 2/2 Check any AC response...
+  // ====================
+  {
+    byte stepNr = 0;
+    byte cannotClaim = 2;
+    byte funcPathSuccess = 1;
+    byte funcPathOnFailedSA = 2;
+    byte funcPathOnFailedDevName = 2;
+    byte resetAfterCannotClaim = 1;
+    if (!CT_STEP_CHECK_AC_RESPONSE(stepNr, pgACDut, dutAddr, devNameDut, cannotClaim, funcPathSuccess, funcPathOnFailedSA, funcPathOnFailedDevName, resetAfterCannotClaim)) return;
+  }
+}
+
+// ==============================================================================================================
+// functionality of the test A10 08
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react (timeout) (FAIL)
+// 3: DUT sent an unexpected device name (FAIL)
+// 4: DUT sent AC with device name from unexpected SA. (FAIL)
+void CTF_A10_08_Receive_AC_Request_P2P(byte toolAddr, byte dutAddr, qword devNameDut)
+{
+  char errText[1024];
+  char reportText[1024];
+  pg J1939::J1939_CT_RT::AC pgACDut;
+  byte expectedSA;
+
+  // =============
+  // PRECONDITIONS
+  // =============
+
+  // =============
+  // INIT
+  // =============
+  expectedSA = dutAddr;
+  
+  // ====================
+  // step 1/2 Request AC directly from DUT and check NAME in AC response...
+  // ====================
+  CT_STEP_BEGIN(-2, "Request AC directly from DUT and check NAME in AC response...");
+  if (!CT_Request_And_Await_AC(pgACDut, toolAddr, dutAddr, gc_ANY_ADDR, errText))
+  {
+    CT_STEP_END_FAIL(2, errText);
+    // just let the user reset the dut without continuing doing test steps.
+    CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+    return; // leave on fail.
+  }
+
+  CT_STEP_END_PASS(0);
+  CT_WAIT(1);
+  
+  // ====================
+  // step 2/2 Check any AC response...
+  // ====================
+  {
+    byte stepNr = 0;
+    byte cannotClaim = 2;
+    byte funcPathSuccess = 1;
+    byte funcPathOnFailedSA = 4;
+    byte funcPathOnFailedDevName = 3;
+    byte resetAfterCannotClaim = 1;
+    if (!CT_STEP_CHECK_AC_RESPONSE(stepNr, pgACDut, dutAddr, devNameDut, cannotClaim, funcPathSuccess, funcPathOnFailedSA, funcPathOnFailedDevName, resetAfterCannotClaim)) return;
+  }
+}
+
+// ==============================================================================================================
+// functionality of the test A10 09
+// FuncPath's:
+// 1: DUT reacts as expected or in predefined address range [0;127] or [248;253]. (PASS)
+// 2: Timeout waiting for DUT's AC (FAIL)
+// 3: User cancel (FAIL)
+// 6: DUT sent non AC message within 250ms after AC (FAIL)
+void CTF_A10_09_Behaviour_After_AC_Bootup(byte toolAddr, byte dutAddr, qword devNameDut)
+{
+  char reportText[1024];
+  char errText[1024];
+  word bufIndices[long];
+  int64 stepTime;
+  int64 dutACTime;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  
+  // =============
+  // INIT...
+  // =============
+  
+  // ====================
+  // step 1/3 Check for predefined address range [0;127] or [248;253]...
+  // ====================
+  CT_STEP_BEGIN(-3, "Check for predefined address range [0;127] or [248;253]...");
+  if (CT_InRange(dutAddr, (byte)0, (byte)127) || CT_InRange(dutAddr, (byte)248, (byte)253))
+  {
+    CT_STEP_END_PASS(1, "DUT address in range [0;127] or [248;253]. It can start communication immediately.");
+    return; // leave on success
+  }
+  CT_STEP_END_PASS(0);
+  
+  // ====================
+  // step 2/3 Await tester resets the DUT...
+  // ====================
+  {
+    byte checkDevName = 1;
+    byte funcPathSuccess = 1;
+    byte funcPathTimeout = 2;
+    byte funcPathCancel = 3;
+    byte funcPathAddrFail = 2;
+    byte funcPathDevNameFail = 2;
+    enum eNoWaitFlag waitAfterAC = WF_NOWAIT;
+    dword timeout = gc_DLG_WAITING_TIME_MS;
+    int stepNr = 0;
+    byte reboot = 0;
+    if (!CT_STEP_DLG_TESTER_SHALL_RESET_THE_DUT(stepNr, dutAddr, devNameDut, checkDevName, timeout, funcPathSuccess, funcPathTimeout, funcPathCancel, funcPathAddrFail, funcPathDevNameFail, waitAfterAC, reboot))
+    {
+      return; // leave test if this step fails.
+    }
+  }
+  
+  dutACTime = gPgLastAC.time_ns;
+  
+  // ====================
+  // step 3/3 Check for non AC messages within 249ms after AC.
+  // ====================
+  stepTime = CT_STEP_BEGIN("Check for non AC messages within 249ms after AC");
+  
+  // record all messages within 250ms...
+  MsgBuf_StartRecording(); // implies buffer clear before...
+  CT_WAIT(gc_TIMEOUT_AC);
+  MsgBuf_StopRecording();
+
+  if (!CT_Check_For_Allowed_Messages_During_AC(dutACTime, dutAddr, 0, errText))
+  {
+    CT_STEP_END_FAIL(6, errText);
+    return;
+  }
+  
+  CT_STEP_END_PASS(1);
+  
+}
+
+// ==============================================================================================================
+// functionality of the test A10 10
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: AC not sent within 250ms (FAIL)
+// 3: Unexpected SA in AC message (FAIL)
+void CTF_A10_10_Receive_AC_Low_Prio_Conflict(byte toolAddr, byte dutAddr, qword devNameDut)
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  qword devNameTool;
+  pg J1939::J1939_CT_RT::AC pgACTool;
+  pg J1939::J1939_CT_RT::AC pgACDut;
+  int res;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  
+  // =============
+  // INIT...
+  // =============
+  devNameTool = devNameDut+1; // tool uses lower prio name
+  
+  // ====================
+  // step 1/2 Try to use DUT's addess (lower prio) and check DUT sends AC from same address within 250ms...
+  // ====================
+  stepTime = CT_STEP_BEGIN(-2, "Try to use DUT's addess (lower prio) and check DUT sends AC from same address within 250ms...");
+  if ( (res = CT_Send_AC_And_Await_AC(pgACDut, pgACTool, dutAddr, dutAddr, devNameTool, devNameDut, gc_TIMEOUT_AC, errText)) != 1)
+  {
+    if (res == 0)
+    {
+      CT_STEP_END_FAIL(2, errText);
+      // just let the user reset the dut without continuing doing test steps.
+      CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+      return; // leave on fail.
+    }
+  }
+  CT_STEP_END_PASS(0);
+  CT_WAIT(1);
+  
+  // ====================
+  // step 2/2 Check any AC response...
+  // ====================
+  {
+    byte stepNr = 0;
+    byte cannotClaim = 0;
+    byte funcPathSuccess = 1;
+    byte funcPathOnFailedSA = 3;
+    byte funcPathOnFailedDevName = 2;
+    byte resetAfterCannotClaim = 1;
+    if (!CT_STEP_CHECK_AC_RESPONSE(stepNr, pgACDut, dutAddr, devNameDut, cannotClaim, funcPathSuccess, funcPathOnFailedSA, funcPathOnFailedDevName, resetAfterCannotClaim)) return;
+  }
+  
+}
+
+// ==============================================================================================================
+// functionality of the test A10 11
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: AC not sent within 250ms (FAIL)
+// 3: Unexpected SA in Cannot Claim message (FAIL)
+// 4: Reboot error (FAIL)
+void CTF_A10_11_Receive_AC_High_Prio_Conflict(byte toolAddr, byte dutAddr, qword devNameDut)
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  qword devNameTool;
+  pg J1939::J1939_CT_RT::AC pgACTool;
+  pg J1939::J1939_CT_RT::AC pgACDut;
+  int res;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  
+  // =============
+  // INIT...
+  // =============
+  devNameTool = devNameDut-1; // tool uses higher prio name
+  
+  // ====================
+  // step 1/3 Try to use DUT's addess (higher prio) and check DUT sends AC from same address within 250ms...
+  // ====================
+  stepTime = CT_STEP_BEGIN(-3, "Try to use DUT's addess (higher prio) and check DUT sends any AC from same address within 250ms...");
+  if ( (res = CT_Send_AC_And_Await_AC(pgACDut, pgACTool, dutAddr, gc_ANY_ADDR, devNameTool, devNameDut, gc_TIMEOUT_AC, errText)) != 1)
+  {
+    if (res == 0)
+    {
+      CT_STEP_END_FAIL(2, errText);
+      // just let the user reset the dut without continuing doing test steps.
+      CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+      return; // leave on fail.
+    }
+  }
+  CT_STEP_END_PASS(0);
+  CT_WAIT(1);
+  
+  // ====================
+  // step 2/3 Check any AC response...
+  // ====================
+  {
+    byte stepNr = 0;
+    byte cannotClaim = 4;
+    byte funcPathSuccess = 4;
+    byte funcPathOnFailedSA = 4;
+    byte funcPathOnFailedDevName = 4;
+    byte resetAfterCannotClaim = 0;
+    if (!CT_STEP_CHECK_AC_RESPONSE(stepNr, pgACDut, gc_ANY_ADDR, devNameDut, cannotClaim, funcPathSuccess, funcPathOnFailedSA, funcPathOnFailedDevName, resetAfterCannotClaim)) return;
+    
+    if (pgACDut.sa == dutAddr)
+    {
+      CT_STEP_END_FAIL(3, "DUT sent AC from same SA as before, but Cannot Claim or an address change was expected.");
+      // just let the user reset the dut without continuing doing test steps.
+      CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+      return; // leave on fail.
+    }
+  }
+  
+  // ====================
+  // step 3/3 Reboot DUT.
+  // ====================
+  {
+    byte checkDevName = 1;
+    byte funcPathSuccess = 1;
+    byte funcPathTimeout = 4;
+    byte funcPathCancel = 4;
+    byte funcPathAddrFail = 4;
+    byte funcPathDevNameFail = 4;
+    byte reboot = 1;
+    dword timeout = gc_DLG_WAITING_TIME_MS;
+    enum eNoWaitFlag waitAfterAC = WF_NOWAIT;
+    int stepNr = 0;
+    CT_STEP_DLG_TESTER_SHALL_RESET_THE_DUT(stepNr, dutAddr, devNameDut, checkDevName, timeout, funcPathSuccess, funcPathTimeout, funcPathCancel, funcPathAddrFail, funcPathDevNameFail, waitAfterAC, reboot);
+  }
+}
+
+// ==============================================================================================================
+// functionality of the test A10 12
+// FuncPath's:
+// 1: DUT reacts as expected or has AAC. (PASS)
+// 2: AC not sent within 250ms (FAIL)
+// 3: Unexpected SA in Cannot Claim message (FAIL)
+// 4: Reboot error (FAIL)
+// 5: DUT sends any other messages than cannot claim message in listen only mode. (FAIL)
+void CTF_A10_12_Receive_AC_Request_If_Not_Claimed(byte toolAddr, byte dutAddr, qword devNameDut)
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  qword devNameTool;
+  pg J1939::J1939_CT_RT::AC pgACTool;
+  pg J1939::J1939_CT_RT::AC pgACDut;
+  int res;
+  int64 dutCannotClaimTime;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  
+  // =============
+  // INIT...
+  // =============
+  devNameTool = devNameDut-1; // tool uses higher prio name
+  
+  // ====================
+  // step 1/7 Try to use DUT's addess (higher prio) and check DUT sends AC from same address within 250ms...
+  // ====================
+  CT_STEP_BEGIN(-7, "DUT has AAC bit set...");
+  if (CT_Is_AAC_Set_To(1, devNameDut))
+  {
+    CT_STEP_END_PASS(1); // test passes for aac dut...
+    return;
+  }
+  CT_STEP_END_PASS(0);
+  
+  // ====================
+  // step 2/7 Try to use DUT's addess (higher prio) and check DUT sends AC from same address within 250ms...
+  // ====================
+  stepTime = CT_STEP_BEGIN("Try to use DUT's addess (higher prio) and check DUT sends Cannot Claim message within 250ms...");
+  if ( (res = CT_Send_AC_And_Await_AC(pgACDut, pgACTool, dutAddr, gc_NULL_ADDR, devNameTool, devNameDut, gc_TIMEOUT_AC, errText)) != 1)
+  {
+    if (res == 0)
+    {
+      CT_STEP_END_FAIL(2, errText);
+      // just let the user reset the dut without continuing doing test steps.
+      CT_DLG_TESTER_SHALL_REBOOT_THE_DUT();
+      return; // leave on fail.
+    }
+  }
+  CT_STEP_END_PASS(0);
+  CT_WAIT(1);
+  
+  dutCannotClaimTime = pgACDut.time_ns;
+  
+  // ====================
+  // step 3/7 Check Cannot Claim response...
+  // ====================
+  {
+    byte stepNr = 0;
+    byte cannotClaim = 1;
+    byte funcPathSuccess = 1;
+    byte funcPathOnFailedSA = 3;
+    byte funcPathOnFailedDevName = 2;
+    byte resetAfterCannotClaim = 0;
+    if (!CT_STEP_CHECK_AC_RESPONSE(stepNr, pgACDut, dutAddr, devNameDut, cannotClaim, funcPathSuccess, funcPathOnFailedSA, funcPathOnFailedDevName, resetAfterCannotClaim)) return;
+  }
+  CT_WAIT(gc_TIMEOUT_T3); // leave dut in listen only for some time...
+  
+  // ====================
+  // step 4/7 Check DUT answers with Cannot Claim on AC-Request in listen mode...
+  // ====================
+  CT_STEP_BEGIN("Check DUT answers with Cannot Claim on AC-Request in listen mode...");
+  if (!CT_Request_And_Await_AC(pgACDut, toolAddr, dutAddr, gc_NULL_ADDR, errText))
+  {
+    word actimeout = gc_TIMEOUT_AC;
+    // timeout for request in listen mode to cannot claim message.
+    snprintf(reportText, elcount(reportText), "DUT does not respond with Cannot Claim message in listen mode to AC-Request at t=%.06f within %dms)", CT_Ns2Sec(gPgLastRequest.time_ns), actimeout);
+    CT_STEP_END_FAIL(2, reportText);
+    // just let the user reset the dut without continuing doing test steps.
+    CT_DLG_TESTER_SHALL_REBOOT_THE_DUT();
+    return; // leave on fail.
+  }  
+  CT_STEP_END_PASS(0);
+  CT_WAIT(gc_TIMEOUT_T3); // do not continue too fast
+  
+  // ====================
+  // step 5/7 Check Cannot Claim response...
+  // ====================
+  {
+    byte stepNr = 0;
+    byte cannotClaim = 1;
+    byte funcPathSuccess = 0;
+    byte funcPathOnFailedSA = 3;
+    byte funcPathOnFailedDevName = 2;
+    byte resetAfterCannotClaim = 0;
+    if (!CT_STEP_CHECK_AC_RESPONSE(stepNr, pgACDut, dutAddr, devNameDut, cannotClaim, funcPathSuccess, funcPathOnFailedSA, funcPathOnFailedDevName, resetAfterCannotClaim)) return;
+  }
+  // ====================
+  // step 6/7 Check no other messages than cannot claim were sent in listen only mode.
+  // ====================
+  CT_STEP_BEGIN("Check no other messages than cannot claim were sent in listen only mode.");
+  if (!CT_Check_For_Allowed_Messages_During_AC(dutCannotClaimTime, dutAddr, 1, errText))
+  {
+    CT_STEP_END_FAIL(5, errText);
+    // just let the user reset the dut without continuing doing test steps.
+    CT_DLG_TESTER_SHALL_REBOOT_THE_DUT();
+    return;
+  }
+  CT_WAIT(gc_TIMEOUT_T3); // do not continue too fast
+  CT_STEP_END_PASS(0);
+  
+  // ====================
+  // step 3/3 Reset DUT.
+  // ====================
+  {
+    byte checkDevName = 1;
+    byte funcPathSuccess = 1;
+    byte funcPathTimeout = 4;
+    byte funcPathCancel = 4;
+    byte funcPathAddrFail = 4;
+    byte funcPathDevNameFail = 4;
+    byte reboot = 0;
+    dword timeout = gc_DLG_WAITING_TIME_MS;
+    enum eNoWaitFlag waitAfterAC = WF_NOWAIT;
+    int stepNr = 0;
+    CT_STEP_DLG_TESTER_SHALL_RESET_THE_DUT(stepNr, dutAddr, devNameDut, checkDevName, timeout, funcPathSuccess, funcPathTimeout, funcPathCancel, funcPathAddrFail, funcPathDevNameFail, waitAfterAC, reboot);
+  }
+  
+}
+
+// ==============================================================================================================
+// functionality of the test A10 13
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: Power loss <2ms simulation not possible (INCONCLUSIVE)
+// 3: DUT does not send AC after power loss >1s - user canceled. (FAIL)
+// 4: DUT sends AC after power loss <2ms (FAIL)
+// 5: DUT sent unexpected SA in AC (FAIL)
+// 6: DUT send unexpected NAME in AC (FAIL)
+// 7: DUT sent unexpectedly AC while user didn't react (FAIL)
+// 8: DUT sent unexpectedly AC after user told not to be able to do a power loss <2ms.
+// 9: User didn't react. (INCONCLUSIVE)
+void CTF_A10_13_Power_Interruption(byte toolAddr, byte dutAddr, qword devNameDut, byte shortPeriod)
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  
+  // =============
+  // INIT...
+  // =============
+
+  // ============================================================================================================================================
+  // shortperiod: < 2ms
+  // ============================================================================================================================================
+  if (shortPeriod)
+  {
+    // ====================
+    // step 1/1 Check for reaction on power loss < 2ms...
+    // ====================
+    MsgBuf_StartRecording();
+    stepTime = CT_STEP_BEGIN(-1, "Checking for reaction on power loss <2ms. Ask user if its possible to simulate and let him execute...");
+    switch (CT_DLG_AskYesNo("Checking for power loss <2ms.\n\n[YES]:\nYou executed a power loss <2ms.\n\n[NO]:\nYou are not able to execute a power loss <2ms.", gc_DLG_WAITING_TIME_MS))
+    {
+      case 0: // timeout
+      {
+        // check the buffer for AC from DUT...
+        if (CT_Check_For_AC_In_MsgBuf(0, dutAddr))
+        {
+          CT_STEP_END_FAIL(7, "DUT sent unexpectedly AC while user didn't react");
+          return; // leave on fail.
+        }
+        // user is not able to simmulate power loss <2ms.
+        CT_STEP_END_INCONCLUSIVE(2, "Power loss <2ms simulation seems to be not possible, due user didnt react within waiting time.");
+        return; // leave on inconclusive.
+      }
+      case 1: // user clicked yes...
+      {
+        // check the buffer for AC from DUT...
+        word idx;
+        idx = CT_Find_In_MsgBuf(stepTime, gc_PGN_AC, dutAddr, (byte)0, gc_CANID_BITMASK_PGN_SRC);
+        if (idx != IDX_NOT_FOUND)
+        {
+          snprintf(reportText, elcount(reportText), "DUT sends AC after power loss <2ms at t=%.06f.", CT_Ns2Sec(gMsgBuf[idx].time_ns));
+          CT_STEP_END_FAIL(4, reportText);
+          return; // leave on fail.
+        }
+        break;
+      }
+      
+      case 2: // user clicked no...
+      {
+        // check the buffer for AC from DUT...
+        word idx;
+        idx = CT_Find_In_MsgBuf(stepTime, gc_PGN_AC, dutAddr, (byte)0, gc_CANID_BITMASK_PGN_SRC);
+        if (idx != IDX_NOT_FOUND)
+        {
+          snprintf(reportText, elcount(reportText), "DUT sent unexpectedly AC after user told not to be able to do a power loss <2ms at t=%.06f.", CT_Ns2Sec(gMsgBuf[idx].time_ns));
+          CT_STEP_END_FAIL(8, reportText);
+          return; // leave on fail.
+        }
+        
+        // user is not able to simmulate power loss <2ms.
+        CT_STEP_END_INCONCLUSIVE(2, "Power loss <2ms simulation not possible.");
+        return; // leave on inconclusive.
+      }
+        
+    }
+    CT_STEP_END_PASS(1);
+  }
+  
+  // ============================================================================================================================================
+  // shortPeriod > 1s
+  // ============================================================================================================================================
+  else
+  {
+    // ====================
+    // step 1/1 Check for reaction on power loss > 1s
+    // ====================
+    CT_STEP_BEGIN(-1, "Check for reaction on power loss > 1s");
+    snprintf(reportText, elcount(reportText), "Please simulate a power loss >1s within the remaining time.\n\nThe dialog closes as soon as AC is detected within remaining time...\n\nIf DUT does not send any AC after power loss, the dialog remains open. You then can cancel the dialog to avoid await the timeout. In this case the test fails, due a device with a power loss >1s shall re-initialize and reboot implying an ACL bootup message.");
+    CT_Info(1, "", "CT : Dialog showing, waiting for reboot / reset the DUT");
+    switch(CT_DLG_AwaitACFromDUT(reportText, gc_DLG_WAITING_TIME_MS, WF_WAIT))
+    {
+      case 0: /* timeout */
+      {
+        if ( (gPgLastAC.time_ns>0) && (gPgLastAC.sa != gc_BC_ADDR) )
+        switch(CT_VALIDATE_LAST_SEEN_AC(dutAddr, 1, devNameDut, errText))
+        {
+          case 1: CT_STEP_END_FAIL(5, errText); return;
+          case 2: CT_STEP_END_FAIL(6, errText); return;
+        }
+        CT_STEP_END_INCONCLUSIVE(9, "User didn't react, DUT sent no AC within waiting time.");
+        return; // leave on fail.
+      }
+      case 1: /* OK */ 
+      {
+        // dut sent AC... validate the AC.
+        switch(CT_VALIDATE_LAST_SEEN_AC(dutAddr, 1, devNameDut, errText))
+        {
+          case 1: CT_STEP_END_FAIL(5, errText); return;
+          case 2: CT_STEP_END_FAIL(6, errText); return;
+        }
+        break;
+      }
+      case 2: /*user canceled*/
+      {
+        // user canceled... 
+        CT_STEP_END_FAIL(3, "DUT does not send AC after power loss >1s - user canceled");
+        return; // leave on fail.
+      }
+    }
+    
+    CT_STEP_END_PASS(1);
+  }
+}
+
+// ==============================================================================================================
+// functionality of the test A10 14
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: Errorframes detected. (FAIL)
+// 3: Dialog timeout (INCONCLUSIVE)
+// 4: User clicked No or Canceled or ignored followup dialog(FAIL)
+void CTF_A10_14_Network_Disruption(byte toolAddr, byte dutAddr, qword devNameDut)
+{
+  char reportText[1024];
+  char errText[1024];
+  word bufIndices[long];
+  char textErrFrames[255];
+  char textTimeout[255];
+  char textUserClickedNo[255];
+  int64 stepTime;
+  dword dlgTimeout;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  
+  // =============
+  // INIT...
+  // =============
+  dlgTimeout = gc_DLG_WAITING_TIME_MS;
+  snprintf(textErrFrames, elcount(textErrFrames), "Error frames detected.");
+  snprintf(textTimeout, elcount(textTimeout), "Dialog timeout.");
+  snprintf(textUserClickedNo, elcount(textUserClickedNo), "User clicked 'No'.");
+  
+  // ====================
+  // step 1/3 Ask user if DUT is connected and working. Await user's answer.
+  // ====================
+  CT_STEP_BEGIN(-4, "Ask user if DUT is connected and working. Await user's answer.");
+  switch (CT_DLG_AskYesNo("Is DUT connected and working?", dlgTimeout)) 
+  { 
+    case 0: CT_STEP_END_INCONCLUSIVE(3, textTimeout); return;
+    case 1: break;
+    default: CT_STEP_END_FAIL(4, textUserClickedNo); return; 
+  }
+  if (gErrFrameBuf.size()>0) { CT_STEP_END_FAIL(2, textErrFrames); CT_DLG_TESTER_SHALL_RESET_THE_DUT(); return; }
+  CT_STEP_END_PASS(0);
+  CT_WAIT(gc_TIMEOUT_T3);
+
+  // ====================
+  // step 2/3 Ask the user if he diconnected and reconnected the DUT some times. Await user's answer.
+  // ====================
+  CT_STEP_BEGIN("Ask the user if he diconnected and reconnected the DUT some times. Await user's answer.");
+  switch (CT_DLG_AskYesNo("Disonnect and reconnect the DUT some times.\n\n\nIs DUT disconnected and reconnected some times?", dlgTimeout))
+  { 
+    case 0: CT_STEP_END_FAIL(4, textTimeout); return;
+    case 1: break;
+    default: CT_STEP_END_FAIL(4, textUserClickedNo); return; 
+  }
+  if (gErrFrameBuf.size()>0) { CT_STEP_END_FAIL(2, textErrFrames); CT_DLG_TESTER_SHALL_RESET_THE_DUT(); return; }
+  CT_STEP_END_PASS(0);
+  CT_WAIT(gc_TIMEOUT_T3);
+
+  // ====================
+  // step 3/3 Ask the user if he powered the DUT on/off some times. Await user's answer.
+  // ====================
+  CT_STEP_BEGIN("Ask the user if he powered the DUT on/off some times. Await user's answer.");
+  switch (CT_DLG_AskYesNo("Now power on/off the DUT some times.\n\n\nDid you powered the DUT on/off some times?", dlgTimeout))
+  { 
+    case 0: CT_STEP_END_FAIL(4, textTimeout); return;
+    case 1: break;
+    default: CT_STEP_END_FAIL(4, textUserClickedNo); return; 
+  }
+  if (gErrFrameBuf.size()>0) { CT_STEP_END_FAIL(2, textErrFrames); CT_DLG_TESTER_SHALL_RESET_THE_DUT(); return; }
+  
+  CT_STEP_END_PASS(0);
+  
+  // ====================
+  // step 3/4 Reset DUT.
+  // ====================
+  {
+    byte checkDevName = 1;
+    byte funcPathSuccess = 1;
+    byte funcPathTimeout = 4;
+    byte funcPathCancel = 4;
+    byte funcPathAddrFail = 4;
+    byte funcPathDevNameFail = 4;
+    byte reboot = 0;
+    dword timeout = gc_DLG_WAITING_TIME_MS;
+    enum eNoWaitFlag waitAfterAC = WF_NOWAIT;
+    int stepNr = 0;
+    CT_STEP_DLG_TESTER_SHALL_RESET_THE_DUT(stepNr, dutAddr, devNameDut, checkDevName, timeout, funcPathSuccess, funcPathTimeout, funcPathCancel, funcPathAddrFail, funcPathDevNameFail, waitAfterAC, reboot);
+  }
+    
+}
+
+// ==============================================================================================================
+// functionality of the test A10 15
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: AC timeout (FAIL)
+// 3: User canceled.
+// 4: AC from unexpected SA (FAIL)
+// 5: AC with unexpected NAME (FAIL)
+// 6: AAC recalculation error (FAIL)
+// 7: DUT sent Cannot Claim message (FAIL)
+void CTF_A10_15_Address_Continuity(byte toolAddr, byte dutAddr, qword devNameDut)
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  pg J1939::J1939_CT_RT::CA pgCA;
+  pg J1939::J1939_CT_RT::AC pgACDut1;
+  pg J1939::J1939_CT_RT::AC pgACDut2;
+  pg J1939::J1939_CT_RT::AC pgACTool;
+  int res;
+  byte originalDutAddr;
+  qword devNameTool;
+  byte newAddr;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  
+  
+  CT_STEP_BEGIN_CHECK("DUT supports Commanded Address and has AAC bit set.");
+  if (!gDUT_CA && CT_Is_AAC_Set_To(0, devNameDut)) 
+  {
+    CT_STEP_END_PASS(1);
+    return;
+  }
+  CT_STEP_END_PASS(0);
+  
+  // =============
+  // INIT...
+  // =============
+  originalDutAddr = dutAddr;
+  devNameTool = devNameDut-1;
+  newAddr = CT_Get_Third_Node_Adr(toolAddr, dutAddr);
+  pgCA.sa = toolAddr;
+  pgCA.AddressAssignment = newAddr;
+  pgCA.dp  = 0;
+  pgCA.edp = 0;
+
+  // ====================
+  // step 1/5 Await tester resets the DUT...
+  // ====================
+  {
+    byte checkDevName = 1;
+    byte funcPathSuccess = 0;
+    byte funcPathTimeout = 2;
+    byte funcPathCancel = 3;
+    byte funcPathAddrFail = 4;
+    byte funcPathDevNameFail = 5;
+    dword timeout = gc_DLG_WAITING_TIME_MS;
+    enum eNoWaitFlag waitAfterAC = WF_NOWAIT;
+    byte reboot = 0;
+    int stepNr = -5;
+    if (!CT_STEP_DLG_TESTER_SHALL_RESET_THE_DUT(stepNr, originalDutAddr, devNameDut, checkDevName, timeout, funcPathSuccess, funcPathTimeout, funcPathCancel, funcPathAddrFail, funcPathDevNameFail, waitAfterAC, reboot)) return;
+  }
+  
+  // ====================
+  // step 2/5 If DUT supports commanded address, reconfigure it.
+  // ====================
+  if (gDUT_CA)
+  {
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) commands DUT %d (0x%.02X) to use address %d (0x%.02X)...", toolAddr, toolAddr, dutAddr, dutAddr, newAddr, newAddr);
+    stepTime = CT_STEP_BEGIN(reportText);
+    
+    
+    
+    
+    // commanded address...
+    res = CT_CommandedDUTAdressAndAwaitResponse(pgACDut1, pgCA, gc_TIMEOUT_TR, 1, 1);
+    // 1: DUT does not respond with ACL (timeout)
+    // 2: DUT reacts with wrong content (DUT's DevName expected).
+    if (res == 1)
+    {
+      // timeout so far...
+      // ivalidate last seen AC and check ACL within the next 250ms...
+      gPgLastAC.sa = gc_BC_ADDR; 
+      
+      // wait 250ms...
+      CT_WAIT(gc_TIMEOUT_AC);
+      
+      // check last seen ac if there now is one...
+      if (gPgLastAC.sa != gc_BC_ADDR)
+      {
+        // check for cannot claim...
+        if (gPgLastAC.sa == gc_NULL_ADDR)
+        {
+          // sent Cannot claim instead AC...
+          snprintf(reportText, elcount(reportText), "DUT declined new address for Commanded Address at t=%.06f with Cannot Claim AC at t=%.06f.", CT_Ns2Sec(pgCA.time_ns), CT_Ns2Sec(gPgLastAC.time_ns));
+          CT_STEP_END_FAIL(7, reportText);
+          // just let the user reset the dut without continuing doing test steps.
+          CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+          return; // leave on fail.
+        }
+        
+        // validate devname
+        if (CT_VALIDATE_LAST_SEEN_AC(pgCA.AddressAssignment, 1, devNameDut, errText) == 1)
+        {
+          CT_STEP_END_FAIL(4, errText); 
+          CT_DLG_TESTER_SHALL_RESET_THE_DUT(); 
+          return;
+        };
+      }
+      snprintf(reportText, elcount(reportText), "DUT does not respond with ACL from an expected address %d (0x%.02X) or %d (0x%.02X) after Commanded Address at t=%.06f within Tr (200ms)", newAddr, newAddr, dutAddr, dutAddr, CT_Ns2Sec(pgCA.time_ns));
+      CT_STEP_END_FAIL(2, reportText);
+      // just let the user reset the dut without continuing doing test steps.
+      CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+      return;
+    }
+    dutAddr = pgACDut1.sa;
+    
+    if (CT_VALIDATE_LAST_SEEN_AC(dutAddr, 1, devNameDut, errText) == 2)
+    {
+      CT_STEP_END_FAIL(5, errText);
+      CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+      return;
+    }
+    
+    CT_STEP_END_PASS(0);
+  }
+  else
+  {
+    CT_STEP_BEGIN("DUT does not support Commanded Address, step passed.");
+    CT_STEP_END_PASS(0);
+  }
+  
+  // ====================
+  // step 3/5 If DUT is AAC, claim DUT's address.
+  // ====================
+  if (CT_Is_AAC_Set_To(1, devNameDut))
+  {
+    stepTime  = CT_STEP_BEGIN("Try to use DUT's address (higher prio) and wait for AC from DUT within 250ms..." );
+    if ( (res = CT_Send_AC_And_Await_AC(pgACDut2, pgACTool, dutAddr, gc_ANY_ADDR, devNameTool, devNameDut, gc_TIMEOUT_AC, errText)) != 1)
+    {
+      if (res == 0)
+      {
+        CT_STEP_END_FAIL(2, errText);
+        // just let the user reset the dut without continuing doing test steps.
+        CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+        return; // leave on fail.
+      }
+    }
+    CT_STEP_END_PASS(0);
+
+    CT_WAIT(1);
+    if (pgACDut2.sa == dutAddr)
+    {
+      snprintf(reportText, elcount(reportText), "DUT does not recalculate to a new address in AC at t=%.06f. It used the same address %d (0x%.02X) as before.", CT_Ns2Sec(pgACDut2.time_ns), pgACDut2.sa, pgACDut2.sa);
+      CT_STEP_END_FAIL(6, reportText);
+      // just let the user reset the dut without continuing doing test steps.
+      CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+      return; // leave on fail.
+    }
+    else if (pgACDut2.sa == gc_NULL_ADDR)
+    {
+      snprintf(reportText, elcount(reportText), "DUT does not recalculate to a new address in AC at t=%.06f. It sent an Cannot Claim instead.", CT_Ns2Sec(pgACDut2.time_ns));
+      CT_STEP_END_FAIL(7, reportText);
+      // just let the user reset the dut without continuing doing test steps.
+      CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+      return; // leave on fail.
+    }
+    dutAddr = pgACDut2.sa;
+    
+    switch(CT_VALIDATE_LAST_SEEN_AC(dutAddr, 1, devNameDut, errText))
+    {
+      case 1: CT_STEP_END_FAIL(4, errText); return;
+      case 2: CT_STEP_END_FAIL(5, errText); return;
+    }
+    
+    CT_STEP_END_PASS(0);
+    
+    CT_WAIT_AFTER_AC_WITH_INFO();
+    
+  }
+  else
+  {
+    CT_STEP_BEGIN("DUT has no AAC, step passed.");
+    CT_STEP_END_PASS(0);
+  }
+  CT_WAIT(gc_TIMEOUT_T3);
+  
+  // ====================
+  // step 4/5 Await tester reboots the DUT...
+  // ====================
+  {
+    byte checkDevName = 1;
+    byte funcPathSuccess = 0;
+    byte funcPathTimeout = 2;
+    byte funcPathCancel = 3;
+    byte funcPathAddrFail = 4;
+    byte funcPathDevNameFail = 5;
+    dword timeout = gc_DLG_WAITING_TIME_MS;
+    enum eNoWaitFlag waitAfterAC = WF_WAIT;
+    byte reboot = 1;
+    int stepNr = 0;
+    if (!CT_STEP_DLG_TESTER_SHALL_RESET_THE_DUT(stepNr, dutAddr, devNameDut, checkDevName, timeout, funcPathSuccess, funcPathTimeout, funcPathCancel, funcPathAddrFail, funcPathDevNameFail, waitAfterAC, reboot)) return;
+  }
+  CT_WAIT(gc_TIMEOUT_T3);
+  
+  // ====================
+  // step 5/5 Await tester resets the DUT...
+  // ====================
+  {
+    byte checkDevName = 1;
+    byte funcPathSuccess = 1;
+    byte funcPathTimeout = 2;
+    byte funcPathCancel = 3;
+    byte funcPathAddrFail = 4;
+    byte funcPathDevNameFail = 5;
+    dword timeout = gc_DLG_WAITING_TIME_MS;
+    enum eNoWaitFlag waitAfterAC = WF_WAIT;
+    byte reboot = 0;
+    int stepNr = 0;
+    if (!CT_STEP_DLG_TESTER_SHALL_RESET_THE_DUT(stepNr, originalDutAddr, devNameDut, checkDevName, timeout, funcPathSuccess, funcPathTimeout, funcPathCancel, funcPathAddrFail, funcPathDevNameFail, waitAfterAC, reboot)) return;
+  }
+}
+
+// ==============================================================================================================
+// functionality of the test A10 16
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: Unexpected ACL count. (FAIL)
+// 3: ACL time distance <5s. (FAIL)
+// 4: User cancel (FAIL)
+// 5: Reset Dialog timeout (INCONCLUSIVE)
+void CTF_A10_16_Address_Violation_Response(byte toolAddr, byte dutAddr)
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  word bufIndices[long];
+  int64 t1,t2,tm;
+  dword dtms;
+  byte thirdNodeAddr;
+  int i;
+  pg J1939::J1939_CT_RT::AC pgAC1;
+  pg J1939::J1939_CT_RT::AC pgAC2;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  
+  // =============
+  // INIT...
+  // =============
+  thirdNodeAddr = CT_Get_Third_Node_Adr(toolAddr, dutAddr);
+
+  // ====================
+  // step 1/3 Reset DUT...
+  // ====================
+  CT_STEP_BEGIN(-3, "Reset DUT...");
+  switch(CT_DLG_TESTER_SHALL_RESET_THE_DUT())
+  {
+    case 0: CT_STEP_END_INCONCLUSIVE(5, "Dialog timeout."); return;
+    case 2: CT_STEP_END_FAIL(4, "User canceled."); return;
+  }
+  CT_STEP_END_PASS(0);
+  
+  CT_WAIT(2000);
+  
+  // ====================
+  // step 2/3 Send messasges from DUT's SA and await 2 ACLs
+  // ====================
+  stepTime = CT_STEP_BEGIN("Send messasges from DUT's SA every 500ms and await 2 ACLs...");
+  
+  CT_START_SEND_PG_GENERATOR(500, dutAddr, thirdNodeAddr, 0x100); // auto stops at end of test.
+  if (!CT_AWAIT_AC(pgAC1, dutAddr, 10000, errText))
+  {
+    CT_STEP_END_FAIL(2, "Unexpected ACL count. (Got: 0, Expected: 2)");
+    return; // leave on fail.
+  }
+  if (!CT_AWAIT_AC(pgAC2, dutAddr, 10000, errText))
+  {
+    CT_STEP_END_FAIL(2, "Unexpected ACL count. (Got: 1, Expected: 2)");
+    return; // leave on fail.
+  }
+  CT_STOP_SEND_PG_GENERATOR();
+  CT_WAIT(1000);
+  
+  
+  // ====================
+  // step 3/3 Check ACL time distance...
+  // ====================
+  stepTime = CT_STEP_BEGIN("Check ACL time distance...");
+  t1 = pgAC1.time_ns;
+  t2 = pgAC2.time_ns;
+  dtms = CT_Ns2Ms(t2-t1);
+  snprintf(reportText, elcount(reportText), "ACL time distances: t1=%.06f, t2=%.06f, dt=%dms", CT_Ns2Sec(t1),CT_Ns2Sec(t2),dtms);
+  CT_Info(1, "INFO", reportText);
+  if (dtms<5000)
+  {
+    snprintf(reportText, elcount(reportText), "ACL time distance <5s. t1=%.06f, t2=%.06f, dt=%dms", CT_Ns2Sec(t1), CT_Ns2Sec(t2), dtms);
+    CT_STEP_END_FAIL(3, reportText);
+    return; // leave on fail.
+  }
+    
+  CT_STEP_END_PASS(1);
+  
+}
+
+// ==============================================================================================================
+// functionality of the test A10 17
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DM01 not found. (FAIL)
+// 3: DM01 found, but DTC 2000+SA, FMI31 not found. (FAIL)
+// 4: User cancel (FAIL)
+// 5: Reset Dialog timeout (INCONCLUSIVE)
+// 6. DUT is configured not to support Address violation over DM (INCONCLUSIVE)
+void CTF_A10_17_System_Notification_Of_Continued_Address_Violation(byte toolAddr, byte dutAddr)
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  byte thirdNodeAddr;
+  int i;
+  pg * pgDM01;
+  dword dtc;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  if (!CT_PRECOND_CHECK_ADDR_VIOLATION_DM_SUPPORT(6, 1)) return;
+  
+  // =============
+  // INIT...
+  // =============
+  thirdNodeAddr = CT_Get_Third_Node_Adr(toolAddr, dutAddr);
+
+  // ====================
+  // step 1/3 Reset DUT...
+  // ====================
+  CT_STEP_BEGIN(-3, "Reset DUT...");
+  switch(CT_DLG_TESTER_SHALL_RESET_THE_DUT())
+  {
+    case 0: CT_STEP_END_INCONCLUSIVE(5, "Dialog timeout."); return;
+    case 2: CT_STEP_END_FAIL(4, "User canceled."); return;
+  }
+  CT_STEP_END_PASS(0);
+  
+  CT_WAIT(2000);
+  
+  // ====================
+  // step 2/3 Send 4 messasges from DUT's SA and await DM01
+  // ====================
+  stepTime = CT_STEP_BEGIN("Send messasges from DUT's SA every 500ms and await DM01 from DUT within 30s...");
+  
+  CT_START_SEND_PG_GENERATOR(500, dutAddr, thirdNodeAddr, 0x100); // auto stops at the end of test.
+  
+  // await dm01 within wmax...
+  if (!CT_AWAIT_PG_FROM(pgDM01, dutAddr, gc_BC_ADDR, gc_PGN_DM01, (dword)30000, errText, gBroadcast))
+  {
+    CT_STEP_END_FAIL(2, "DM01 not found.");
+    return; // leave on fail.
+  }
+  CT_STOP_SEND_PG_GENERATOR();
+  CT_WAIT(1000);
+  
+  // ====================
+  // step 3/3 Check DM01...
+  // ====================
+  stepTime = CT_STEP_BEGIN("Check DM01...");
+  if (J1939GetDTC(pgDM01, 2000+dutAddr, 31, 0xFFFF, dtc)<0)
+  {
+    CT_STEP_END_FAIL(3, "DM01 found, but DTC 2000+SA, FMI31 not found.");
+    return; // leave on fail.
+  }
+  
+  CT_STEP_END_PASS(1);
+}
+
+// ==============================================================================================================
+// functionality of the test A10 18
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: Timeout (FAIL)
+// 3: Reset canceled (FAIL)
+// 4: Unexpected NM response. (FAIL)
+// 5: No field can be set using NM (FAIL)
+// 6: DUT sent from unexpected SA (FAIL)
+// 7: DUT sent unexpected Device Name (FAIL)
+// 8: DUT is configured not to support NM (INCONCLUSIVE)
+// 9: NM ACK error. (FAIL)
+void CTF_A10_18_NAME_Management(byte toolAddr, byte dutAddr, qword devNameDut)
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  pg * pgReq;
+  pg * pgResp;
+  struct DeviceName origDn;
+  struct DeviceName newDn;
+  struct DeviceName finalDn;
+  struct DeviceName gotDn;
+  qword currentDevName;
+  qword qmem;
+  byte chkSum;
+  byte i;
+  byte mode;
+  byte flags;
+  byte fieldSetCount;
+  byte s;
+  char[255] fieldName[long];
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  if (!CT_CHECK_NM_SUPPORT_INCONCLUSIVE(8)) return;
+  
+  // =============
+  // INIT...
+  // =============
+  snprintf(fieldName[0], elcount(fieldName[0]), "Manufacturer Code"         );
+  snprintf(fieldName[1], elcount(fieldName[1]), "ECU Instance"              );
+  snprintf(fieldName[2], elcount(fieldName[2]), "Function Instance"         );
+  snprintf(fieldName[3], elcount(fieldName[3]), "Function qualifier"        );
+  snprintf(fieldName[4], elcount(fieldName[4]), "Vehicle System"            );
+  snprintf(fieldName[5], elcount(fieldName[5]), "Vehicle System Instance"   );
+  snprintf(fieldName[6], elcount(fieldName[6]), "Industry Group"            );
+  snprintf(fieldName[7], elcount(fieldName[7]), "Arbitrary Address Capable" );
+  snprintf(fieldName[8], elcount(fieldName[8]), "ALL");
+  
+  fieldSetCount = 0;
+  currentDevName = devNameDut;
+  CT_CreateDevNameStruct(devNameDut, origDn);
+  CT_CreateDevNameStruct(~currentDevName, finalDn);
+
+  // ====================
+  // step 1/10 Await tester resets the DUT...
+  // ====================
+  {
+    byte checkDevName = 1;
+    byte funcPathSuccess = 1;
+    byte funcPathTimeout = 2;
+    byte funcPathCancel = 3;
+    byte funcPathAddrFail = 6;
+    byte funcPathDevNameFail = 7;
+    byte reboot = 0;
+    dword timeout = gc_DLG_WAITING_TIME_MS;
+    enum eNoWaitFlag waitAfterAC = WF_WAIT;
+    int stepNr = -10;
+    if (!CT_STEP_DLG_TESTER_SHALL_RESET_THE_DUT(stepNr, dutAddr, devNameDut, checkDevName, timeout, funcPathSuccess, funcPathTimeout, funcPathCancel, funcPathAddrFail, funcPathDevNameFail, waitAfterAC, reboot)) return;
+  }
+
+  for (s=2; s<=10; s++)
+  {
+    // ====================
+    // steps 2..10/10
+    // ====================
+    mode = 0;
+    flags = ~(1<<s-2);
+    snprintf(reportText, elcount(reportText), "Set %s...", fieldName[s-2]);
+    CT_CreateDevNameStruct(currentDevName, newDn);
+
+    switch(s)
+    {
+      case 2: CT_STEP_BEGIN(reportText);  newDn.manufacturerCode       = finalDn.manufacturerCode       ; break;
+      case 3: CT_STEP_BEGIN(reportText);  newDn.ecuInstance            = finalDn.ecuInstance            ; break;
+      case 4: CT_STEP_BEGIN(reportText);  newDn.functionInstance       = finalDn.functionInstance       ; break;
+      case 5: CT_STEP_BEGIN(reportText);  newDn.function               = finalDn.function               ; break;
+      case 6: CT_STEP_BEGIN(reportText);  newDn.vehicleSystem          = finalDn.vehicleSystem          ; break;
+      case 7: CT_STEP_BEGIN(reportText);  newDn.vehicleSystemInstance  = finalDn.vehicleSystemInstance  ; break;
+      case 8: CT_STEP_BEGIN(reportText);  newDn.industryGroup          = finalDn.industryGroup          ; break;
+      case 9: CT_STEP_BEGIN(reportText);  newDn.aac                    = finalDn.aac                    ; break;
+      case 10: CT_STEP_BEGIN(reportText); flags = -1; CT_CreateDevNameStruct(devNameDut, newDn)         ; break;
+    }
+    if (!CT_SendNM_And_Await_Response(pgReq, pgResp, mode, flags, toolAddr, dutAddr, currentDevName, newDn, errText))
+    {
+      snprintf(errText, elcount(errText), "Response timeout for request at t=%.06f. %s", CT_Ns2Sec(pgReq.time_ns), errText);
+      CT_STEP_END_FAIL(2, errText);
+      // just let the user reset the dut without continuing doing test steps.
+      CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+      return; // leave on fail.
+    }
+    
+    // NM ACK? (mode=3)
+    mode = pgResp.byte(2)&0xF;
+    if (mode==3)
+    {
+      qword expPayload;
+      pg J1939::J1939_CT_RT::AC pgAC;
+      dword expectedValue, gotValue;
+      CT_CreateDevNameStruct(pgResp.qword(0), gotDn);
+      gotDn.identityNumber = -1;
+      expPayload = CT_DevName(newDn) | 0xFFFF; // last 2 bytes high.
+      expPayload &= 0xFFFFFFFFFFF0FFFFLL;      // clear mode
+      expPayload |= 0x000000000003000FLL;      // set mode to 3.
+      expPayload |= gc_NM_RESERVED_BITMASK;    // set reserved bits.
+    
+      switch(s)
+      {
+        case 2: gotValue = gotDn.manufacturerCode       ; expectedValue = newDn.manufacturerCode;       break;
+        case 3: gotValue = gotDn.ecuInstance            ; expectedValue = newDn.ecuInstance;            break;
+        case 4: gotValue = gotDn.functionInstance       ; expectedValue = newDn.functionInstance;       break;
+        case 5: gotValue = gotDn.function               ; expectedValue = newDn.function;               break;
+        case 6: gotValue = gotDn.vehicleSystem          ; expectedValue = newDn.vehicleSystem;          break;
+        case 7: gotValue = gotDn.vehicleSystemInstance  ; expectedValue = newDn.vehicleSystemInstance;  break;
+        case 8: gotValue = gotDn.industryGroup          ; expectedValue = newDn.industryGroup;          break;
+        case 9: gotValue = gotDn.aac                    ; expectedValue = newDn.aac;                    break;
+      }
+      if (s == 10)
+      {
+        currentDevName = devNameDut;
+      }
+      else
+      {
+        // check expected field value only...
+        if (expectedValue != gotValue)
+        {
+          char hrPayload[255];
+          CT_HumanReadablePayload(hrPayload, expPayload);
+          snprintf(reportText, elcount(reportText), "Unexpected %s in NM ACK. (Got: 0x%X, Expected: 0x%X - Payload %s)", fieldName[s-2], gotValue, expectedValue, hrPayload);
+          CT_STEP_END_FAIL(4, reportText);
+          // just let the user reset the dut without continuing doing test steps.
+          CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+          return; // leave on fail.
+        }
+        gotDn.identityNumber = origDn.identityNumber;
+        currentDevName = CT_DevName(gotDn);
+      }
+
+      // check for expected payload in NM ACK answer.
+      if (expPayload != pgResp.qword(0))
+      {
+        char sGot[255],sExp[255];
+        CT_HumanReadablePayload(sGot, pgResp.qword(0));
+        CT_HumanReadablePayload(sExp, expPayload);
+        CT_MarkDiffInHumanReadablePayload(sGot, sExp);
+        snprintf(errText, elcount(errText), "NM ACK response mismatch. (Got: 0x %s, Expected: 0x %s)", sGot, sExp);
+        CT_STEP_END_FAIL(9, errText);
+        // just let the user reset the dut without continuing doing test steps.
+        CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+        return; // leave on fail.
+      }
+
+      // Adopt...
+      mode = 7;
+      if (!CT_SendNM_And_Await_Response(pgReq, pgAC, mode, flags, toolAddr, dutAddr, currentDevName, newDn, errText))
+      {
+        //write("reqtime %.06f, lastACtime=%.06f", CT_Ns2Sec(pgReq.time_ns), CT_Ns2Sec(gPgLastAC.time_ns));
+        if ( (gPgLastAC.time_ns > pgReq.time_ns) )
+        {
+          
+          switch(CT_VALIDATE_LAST_SEEN_AC(dutAddr, 1, currentDevName, errText))
+          {
+            case 1: CT_STEP_END_FAIL(6, errText); CT_DLG_TESTER_SHALL_RESET_THE_DUT(); return;
+            case 2: CT_STEP_END_FAIL(7, errText); CT_DLG_TESTER_SHALL_RESET_THE_DUT(); return;
+          }
+        }
+        
+        CT_STEP_END_FAIL(2, errText);
+        // just let the user reset the dut without continuing doing test steps.
+        CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+        return; // leave on fail.
+      }
+      
+      // check AC
+      
+      switch(CT_VALIDATE_AC(pgAC, dutAddr, 1, currentDevName, errText))
+      {
+        case 1: CT_STEP_END_FAIL(6, errText); ; CT_DLG_TESTER_SHALL_RESET_THE_DUT(); return;
+        case 2: CT_STEP_END_FAIL(7, errText); ; CT_DLG_TESTER_SHALL_RESET_THE_DUT(); return;
+      }
+      fieldSetCount++;
+    }
+    else if (mode==4)
+    {
+      CT_WAIT(10);
+      CT_Info(1,"NM", "NACK");
+      
+      // NM NACK. accept, but do not count this field to be set.
+    }
+    else
+    {
+      snprintf(reportText, elcount(reportText), "Unexpected NM response. Got: mode=%d, Expected: mode=3 or mode=4", mode);
+      CT_STEP_END_FAIL(4, reportText);
+      // just let the user reset the dut without continuing doing test steps.
+      CT_DLG_TESTER_SHALL_RESET_THE_DUT();
+      return; // leave on fail.
+    }
+    CT_WAIT(gc_TIMEOUT_TR);
+    
+    if (s==9)
+    {
+      if (fieldSetCount==0)
+      {
+        CT_STEP_END_FAIL(5, "No field can be set using NM");
+        return; // leave on fail.
+      }
+    }
+    
+    CT_STEP_END_PASS(0);
+    
+  };
+  
+  CT_STEP_END_PASS(1);  
+
+}

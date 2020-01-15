@@ -1,0 +1,694 @@
+/*@@includes:*/
+includes
+{
+  // include DLL with file streaming extensions
+  // path relative to this CAPL file
+  #pragma library ("MostSyncStrmRx2Tx.dll")
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  //
+  // This CAPL program applies the CAPL DLL MostSyncStrmRx2Tx.dll
+  // to stream received data of synchronous MOST channels directly back on MOST.
+  // 
+
+  // channel of MOST interface
+  long  gChannel        = 1;
+  // name of extension DLL for streaming (path relative to cfg file)
+  char  gDllName[200]   = "MostSyncStrmRx2Tx.dll";
+  
+  // latency: 0 (short reaction time, high CPU load)...
+  //          4 (slow reaction time, low CPU load)
+  const int kLatencyVeryLow  = 0;
+  const int kLatencyLow      = 1;
+  const int kLatencyMedium   = 2;
+  const int kLatencyhigh     = 3;
+  const int kLatencyVeryHigh = 4; // This can not be used for direct RX to TX streaming!!
+
+  // MOST frame rate
+  float gFrequency      = 44100.0;
+
+  // streaming states (see OnMostSyncStrmState)
+  const int kClosed  = 1;
+  const int kOpened  = 2;
+  const int kStarted = 3;
+  const int kStopped = 4;
+
+  // streaming errors (see OnMostSyncStrmError)
+  const int kOK                          =   0;
+  const int kOpenFailed                  =   1;
+  const int kCloseFailed                 =   2;
+  const int kStartFailed                 =   3;
+  const int kStopFailed                  =   4;
+  const int kDriverCallFailed            =  10; // call of the bus interface driver failed
+  const int kDirectionNotSupported       =  11; // the streaming direction is not supported by the client
+  const int kNumSyncChannelsNotSupported =  12; // the number of streaming channels is not supported by the client
+  const int kOptionsNotSupported         =  13; // the streaming options are not supported by the client
+  const int kLatencyNotSupported         =  14; // the suggested latency is not supported by the client
+  const int kInvalidInterface            =  15;
+  const int kBufferUnderrunHW            =  40; // 0-data was streamed (TX only)
+  const int kBufferUnderrunClient        =  41; // client didn't provide buffer in time (TX only)
+  const int kBufferOverflowHW            =  42; // synchr data got lost (RX only)
+  const int kBufferOverflowClient        =  43; // client didn't provide buffer in time (RX only)
+  const int kBufferErrorClient           =  44; // streaming client was unable to prepare/process a buffer
+  const int kBufferErrorStart            =  45; // no buffers provided at start of streaming (TX: 0-data was streamed; RX: data got lost)
+  const int kBufferErrorStop             =  46; // buffer underrun or overflow reported after the stream has been stopped
+  const int kUnknownError                = 255; 
+
+  dword gHandleRx;        // handle for synchronous channel streaming
+  byte  gChannelsRx[60];  // channels to stream
+  long  gNumChannelsRx;
+  byte  gOpenFailedRx;
+
+  dword gHandleTx;        // handle for synchronous channel streaming
+  byte  gChannelsTx[60];  // channels to stream
+  long  gNumChannelsTx;
+  byte  gOpenFailedTx;
+
+  // Muting of audio channels
+  const int kMuteLeftAudioChannel  = 0;
+  const int kMuteRightAudioChannel = 1;
+  const int kMuteBothAudioChannel  = 2;
+
+  char  gPanelName[40] = "Rx 2 Tx Streaming";
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // initialize extension DLL for file streaming
+  // binds the CAPL node exclusively to the DLL
+  gHandleRx = mostSyncStrmInit(gChannel, RX, gDllName);
+  gHandleTx = mostSyncStrmInit(gChannel, TX, gDllName);
+
+  if(0 == gHandleRx || 0 == gHandleTx)
+    write("Initialization of streaming client failed (%s)", gDllName);
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  if(gHandleRx == 0 || gHandleTx == 0)
+  {
+    writeLineEx(0,3,"Streaming not possible!");
+    writeLineEx(0,3,"Please check you have a VN2610 interface box connected!");
+    stop();
+  }
+
+  @sysvar::RxSysVar::State = kClosed;
+  @sysvar::TxSysVar::State = kClosed;
+  EnableDisableControls();
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncStrmError(dword,long):*///callback
+void OnMostSyncStrmError(dword handle, long errorcode)
+{
+  // this callback reports a general streaming error
+  if( (errorcode == 41) || (errorcode == 46) )
+    return;
+
+  if(handle == gHandleRx)
+  {
+    write("Rx Stream: Error %d occured while streaming", errorcode);
+    
+    if(errorcode == 1) // Rx Stream: open failed
+    {
+      gOpenFailedRx = 1;
+      if(@sysvar::TxSysVar::State == kOpened)
+      {
+        // also close Tx Stream since no Rx data will be streamed from MOST
+        mostSyncStrmClose(gHandleTx);
+      }
+    }
+  }
+  else if(handle == gHandleTx)
+  {
+    write("Tx Stream: Error %d occured while streaming", errorcode);
+
+    if(errorcode == 1) // Tx Stream: open failed
+    {
+      gOpenFailedTx = 1;
+      if(@sysvar::RxSysVar::State == kOpened)
+      {
+        // also close Rx Stream since no Rx data will be streamed back on MOST
+        mostSyncStrmClose(gHandleRx);
+      }
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncStrmState(dword,long):*///callback
+void OnMostSyncStrmState(dword handle, long state)
+{
+  // state of a stream is reported
+  
+  if(handle == gHandleRx)
+  {
+    switch( state )
+    {
+      case kClosed:
+      case kOpened:
+      case kStarted:
+      case kStopped:
+        
+        if(state == kOpened && gOpenFailedTx)
+        {
+          // also close Rx Stream since no Rx data will be streamed back on MOST
+          mostSyncStrmClose(gHandleRx);
+        }
+
+        @sysvar::RxSysVar::State = state;
+        EnableDisableControls();
+        break;
+
+      default: 
+        break;
+    }
+  }
+  else if(handle == gHandleTx)
+  {
+    switch( state )
+    {
+      case kClosed:
+      case kOpened:
+      case kStarted:
+      case kStopped:
+        
+        if(state == kOpened && gOpenFailedRx)
+        {
+          // also close Tx Stream since no Rx data will be streamed from MOST
+          mostSyncStrmClose(gHandleTx);
+        }
+        else if(state == kStopped)
+        {
+          // clear any buffers, since no "old" data should be streamed, in case of re-starting Tx streaming
+          mostSyncStrmClearAllBuffers(gHandleTx);
+        }
+
+        @sysvar::TxSysVar::State = state;
+        EnableDisableControls();
+        break;
+
+      default:
+        break;
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:EnableDisableControls():*///function
+void EnableDisableControls()
+{
+  // switch user controls on/off
+
+  int state;
+
+  ///////////////////////////////////////////////////
+  // Rx Stream
+  ///////////////////////////////////////////////////
+  state = @sysvar::RxSysVar::State;
+
+  enableControl(gPanelName, "Radio_Btn_Rx_Label", state == kClosed);
+  enableControl(gPanelName, "Radio_Btn_Rx_Channels", state == kClosed);
+
+  enableControl(gPanelName, "Rx_Stream_Channels", @sysvar::RxSysVar::ChannelsSel != 0 && state == kClosed);
+
+  enableControl(gPanelName, "Rx_Stream_Label", @sysvar::RxSysVar::ChannelsSel == 0 && state == kClosed);
+  enableControl(gPanelName, "Rx_Stream_Label_Up", @sysvar::RxSysVar::ChannelsSel == 0 && state == kClosed);
+  enableControl(gPanelName, "Rx_Stream_Label_Down", @sysvar::RxSysVar::ChannelsSel == 0 && state == kClosed);
+
+  if(state == kClosed)
+    sysGetVariableData(sysvar::RxSysVar::Channels, gChannelsRx, gNumChannelsRx);
+
+  ///////////////////////////////////////////////////
+  // Tx Stream
+  ///////////////////////////////////////////////////
+  state = @sysvar::TxSysVar::State;
+
+  enableControl(gPanelName, "Chk_Box_Use_Same_Channels", state == kClosed);
+  enableControl(gPanelName, "Radio_Btn_Tx_Label", state == kClosed);
+  enableControl(gPanelName, "Radio_Btn_Tx_Channels", state == kClosed);
+
+  enableControl(gPanelName, "Tx_Stream_Channels", @sysvar::TxSysVar::UseSameChannels == 0 && @sysvar::TxSysVar::ChannelsSel != 0 && state == kClosed);
+  enableControl(gPanelName, "Tx_Stream_Label", @sysvar::TxSysVar::UseSameChannels == 0 && @sysvar::TxSysVar::ChannelsSel == 0 && state == kClosed);
+  enableControl(gPanelName, "Tx_Stream_Label_Up", @sysvar::TxSysVar::UseSameChannels == 0 && @sysvar::TxSysVar::ChannelsSel == 0 && state == kClosed);
+  enableControl(gPanelName, "Tx_Stream_Label_Down", @sysvar::TxSysVar::UseSameChannels == 0 && @sysvar::TxSysVar::ChannelsSel == 0 && state == kClosed);
+
+  if(state == kClosed)
+  {
+    if(@sysvar::TxSysVar::UseSameChannels)
+      sysGetVariableData(sysvar::RxSysVar::Channels, gChannelsTx, gNumChannelsTx);
+    else
+      sysGetVariableData(sysvar::TxSysVar::Channels, gChannelsTx, gNumChannelsTx);
+  }
+
+  ///////////////////////////////////////////////////
+  // Volume
+  ///////////////////////////////////////////////////
+  enableControl(gPanelName, "Radio_Btn_MuteAll", @sysvar::TxSysVar::Mute);
+  enableControl(gPanelName, "Radio_Btn_MuteLeft", @sysvar::TxSysVar::Mute && (gNumChannelsTx == 4));
+  enableControl(gPanelName, "Radio_Btn_MuteRight", @sysvar::TxSysVar::Mute && (gNumChannelsTx == 4));
+
+  enableControl(gPanelName, "Volume_Value", (gNumChannelsTx == 4));
+  enableControl(gPanelName, "Volume_Slider", (gNumChannelsTx == 4));
+
+  ///////////////////////////////////////////////////
+  // Latency
+  ///////////////////////////////////////////////////  
+  enableControl(gPanelName, "Grp_Box_RxTx_Stream_Latency", state == kClosed);
+
+  ///////////////////////////////////////////////////
+  // Buttons
+  ///////////////////////////////////////////////////
+  enableControl(gPanelName, "Btn_OpenStreams",  state == kClosed);
+  enableControl(gPanelName, "Btn_StartStreams", state == kOpened || state == kStopped);
+  enableControl(gPanelName, "Btn_StopStreams",  state == kStarted);
+  enableControl(gPanelName, "Btn_CloseStreams", state == kOpened || state == kStopped);
+}
+/*@@end*/
+
+/*@@mostAllocTable:OnMostAllocTable():*/
+OnMostAllocTable()
+{
+  // allocation table changed
+  UpdateChannelsToSet( RX );
+  UpdateChannelsToSet( TX );
+}
+/*@@end*/
+
+/*@@caplFunc:GetChannelsOfLabel(byte,byte[]):*///function
+long GetChannelsOfLabel(byte label, byte channels[])
+{
+  // The function gets all channel numbers of a connection 
+  // label. Therefore the allocation table is parsed.
+  // Returns the number of channels.
+
+  byte allocTable[60];
+  byte i, chnidx;
+
+  // copy allocation table to local buffer
+  mostGetAllocTable(gChannel, allocTable,  elcount(allocTable));
+
+  for(i = 0; i < 60; ++i)
+    channels[i] = 0xFF;
+
+  chnidx = 0;
+  for(i = 0; i < 60; ++i)
+  {
+    if((allocTable[i] & 0x7F) == label)
+    {
+      channels[chnidx] = i;
+      ++chnidx;
+    }
+  }
+  return chnidx;
+}
+/*@@end*/
+
+/*@@caplFunc:UpdateChannelsToSet(long):*///function
+UpdateChannelsToSet( long direction )
+{
+  byte channels[60];
+  long numChannels;
+
+  // Rx Stream
+  if( (@sysvar::RxSysVar::State == kClosed) && (direction == RX) )
+  {
+    if(@sysvar::RxSysVar::ChannelsSel == 0)
+    {
+      // channel numbers are selected through connection label
+      numChannels = GetChannelsOfLabel(@sysvar::RxSysVar::Label, channels);
+      sysSetVariableData(sysvar::RxSysVar::Channels, channels, numChannels);
+      if(@sysvar::TxSysVar::UseSameChannels)
+      {
+        sysGetVariableData(sysvar::RxSysVar::Channels, gChannelsTx, gNumChannelsTx);
+        sysSetVariableData(sysvar::TxSysVar::Channels, gChannelsTx, gNumChannelsTx);
+      }
+    }
+    else
+    {
+      // channel numbers in raw format
+    }
+  }
+
+  // Tx Stream
+  if( (@sysvar::TxSysVar::State == kClosed) && (direction == TX) )
+  {
+    if(@sysvar::TxSysVar::ChannelsSel == 0)
+    {
+      // channel numbers are selected through connection label
+      numChannels = GetChannelsOfLabel(@sysvar::TxSysVar::Label, channels);
+      sysSetVariableData(sysvar::TxSysVar::Channels, channels, numChannels);
+    }
+    else
+    {
+      // channel numbers in raw format
+    }
+  }  
+}
+/*@@end*/
+
+/*@@sysvarChange:RxSysVar::LabelUp:*/
+on sysvar RxSysVar::LabelUp
+{
+  int nextlabel;
+  
+  if(@this)
+    return;
+
+  if(@sysvar::RxSysVar::State != kClosed)
+    return; // no modification if stream is open
+  
+  // search nearest label
+  nextlabel = GetNextLabel(@sysvar::RxSysVar::Label, 1);
+  if(nextlabel != 0xFF)
+    @sysvar::RxSysVar::Label = nextlabel;
+}
+/*@@end*/
+
+/*@@caplFunc:GetNextLabel(long,long):*///function
+long GetNextLabel (long currentLabel, long up)
+{
+  long i, nextlabel;
+  byte label;
+  byte allocTable[60];
+
+  // copy allocation table to local buffer
+  mostGetAllocTable(mostGetChannel(), allocTable,  elcount(allocTable));
+
+  if(up)
+    nextlabel = 0xFF;
+  else
+    nextlabel = -1;
+
+  for(i = 0; i < 60; ++i)
+  {
+    label = allocTable[i] & 0x7F;
+    if(label < 60)
+    {
+      if(up)
+      {
+        if( (label > currentLabel) && (label < nextlabel) )
+          nextlabel = label;
+      }
+      else
+      {
+        if( (label < currentLabel) && (label > nextlabel) )
+        {
+          nextlabel = label;
+        }
+      }
+    }
+  }
+
+  return nextlabel;
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::LabelUp:*/
+on sysvar TxSysVar::LabelUp
+{
+  int nextlabel;
+  
+  if(@this)
+    return;
+
+  if(@sysvar::TxSysVar::State != kClosed)
+    return; // no modification if stream is open
+  
+  // search nearest label
+  nextlabel = GetNextLabel(@sysvar::TxSysVar::Label, 1);
+  if(nextlabel != 0xFF)
+    @sysvar::TxSysVar::Label = nextlabel;
+}
+/*@@end*/
+
+/*@@sysvarChange:RxSysVar::LabelDown:*/
+on sysvar RxSysVar::LabelDown
+{
+  int nextlabel;
+
+  if(@this)
+    return;
+
+  if(@sysvar::RxSysVar::State != kClosed)
+    return; // no modification if stream is open
+  
+   // search nearest label
+  nextlabel = GetNextLabel(@sysvar::RxSysVar::Label, 0);
+  if(nextlabel != -1)
+    @sysvar::RxSysVar::Label = nextlabel;
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::LabelDown:*/
+on sysvar TxSysVar::LabelDown
+{
+  int nextlabel;
+
+  if(@this)
+    return;
+
+  if(@sysvar::TxSysVar::State != kClosed)
+    return; // no modification if stream is open
+  
+   // search nearest label
+  nextlabel = GetNextLabel(@sysvar::TxSysVar::Label, 0);
+  if(nextlabel != -1)
+    @sysvar::TxSysVar::Label = nextlabel;
+}
+/*@@end*/
+
+/*@@sysvarChange:RxSysVar::Label:*/
+on sysvar RxSysVar::Label
+{
+  UpdateChannelsToSet( RX );
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::Label:*/
+on sysvar TxSysVar::Label
+{
+  UpdateChannelsToSet( TX );
+}
+/*@@end*/
+
+/*@@sysvarChange:RxSysVar::ChannelsSel:*/
+on sysvar RxSysVar::ChannelsSel
+{
+  UpdateChannelsToSet( RX );
+  EnableDisableControls();
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::ChannelsSel:*/
+on sysvar TxSysVar::ChannelsSel
+{
+  UpdateChannelsToSet( TX );
+  EnableDisableControls();
+}
+/*@@end*/
+
+/*@@sysvarChange:Rx2TxSysVar::CloseStreams:*/
+on sysvar Rx2TxSysVar::CloseStreams
+{
+  if(@this)
+    return;
+
+  mostSyncStrmClose(gHandleRx);
+  mostSyncStrmClose(gHandleTx);
+}
+/*@@end*/
+
+/*@@sysvarChange:Rx2TxSysVar::OpenStreams:*/
+on sysvar Rx2TxSysVar::OpenStreams
+{
+  long ret;
+  dword options;
+
+  if(@this)
+    return;
+
+  ///////////////////////////////////////////////////////
+  // Rx Stream
+  ///////////////////////////////////////////////////////
+
+  // copy channel numbers from data environment variable
+  sysGetVariableData(sysvar::RxSysVar::Channels, gChannelsRx, gNumChannelsRx);
+
+  // copy channel numbers from data environment variable
+  if((gNumChannelsRx < 1) || (gNumChannelsRx > 60))
+  {
+    write("Rx: Channels not specified correctly");
+    return;
+  }
+
+  // check whether the number of Rx and Tx channels equals
+  // NOTE: This only a check here for the demo configuration.
+  //       It is of course possible to stream different number of
+  //       synchronous channels (e.g. RX: S/PDIF signal, TX: Extracted stereo audio signal).
+  //       Therefore the handling has to be done in the MostSyncStrmRx2Tx.dll
+  // copy channel numbers from data environment variable
+  if(@sysvar::TxSysVar::UseSameChannels)
+    sysGetVariableData(sysvar::RxSysVar::Channels, gChannelsTx, gNumChannelsTx);
+  else
+    sysGetVariableData(sysvar::TxSysVar::Channels, gChannelsTx, gNumChannelsTx);
+
+  if(gNumChannelsRx != gNumChannelsTx)
+  {
+    writeLineEx(0, 3, "Number of synchronous channels for RX and TX are not equal!");
+    return;
+  }
+
+  // NOTE: For this demo configuration we do not select any RX option, since
+  //       we just want to stream the synchronous data bytes without header information.
+  options = 0;
+  gOpenFailedRx = 0;
+  ret = mostSyncStrmOpen(gHandleRx, gNumChannelsRx, options, @sysvar::RxSysVar::Latency);
+
+  if(ret != 0)
+    write("Failed to open Rx stream (%d)", ret);
+
+  
+  ///////////////////////////////////////////////////////
+  // Tx Stream
+  ///////////////////////////////////////////////////////  
+
+  // copy channel numbers from data environment variable
+  if((gNumChannelsTx < 1) || (gNumChannelsTx > 60))
+  {
+    write("Tx: Channels not specified correctly");
+    return;
+  }
+
+  gOpenFailedTx = 0;
+  ret = mostSyncStrmOpen(gHandleTx, gNumChannelsTx, options, @sysvar::RxSysVar::Latency);
+
+  if(ret != 0)
+    write("Failed to open Tx stream (%d)", ret);
+}
+/*@@end*/
+
+/*@@sysvarChange:Rx2TxSysVar::StartStreams:*/
+on sysvar Rx2TxSysVar::StartStreams
+{
+  long ret, i, j;
+
+  if(@this)
+    return;
+
+  // start streaming
+
+  ///////////////////////////////////////////////////////
+  // Rx Stream
+  ///////////////////////////////////////////////////////
+  ret = mostSyncStrmStart(gHandleRx, gChannelsRx);
+  if(ret != 0)
+    write("Failed to start Rx stream (%d)", ret);
+
+
+  ///////////////////////////////////////////////////////
+  // Tx Stream
+  ///////////////////////////////////////////////////////
+  
+  // inform the DLL to fill up any Tx buffer first
+  mostSyncStrmFillAllBuffers(gHandleTx);
+
+  // The TX stream will be started as soon as enough RX buffers were received.
+  // (see OnMostStartTxStream)
+}
+/*@@end*/
+
+/*@@sysvarChange:Rx2TxSysVar::StopStreams:*/
+on sysvar Rx2TxSysVar::StopStreams
+{
+  if(@this)
+    return;
+
+  mostSyncStrmStop(gHandleRx);
+  mostSyncStrmStop(gHandleTx);
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::Mute:*/
+on sysvar TxSysVar::Mute
+{
+  // Call provided DLL function
+  MostSyncStrmRx2TxMute(@this, @sysvar::TxSysVar::MuteType);
+
+  // update panel controls
+  EnableDisableControls();
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::Volume:*/
+on sysvar TxSysVar::Volume
+{
+  // Call provided DLL function
+  MostSyncStrmRx2TxSetVolume(@this);
+}
+/*@@end*/
+
+/*@@stop:StopMeasurement:*/
+on stopMeasurement
+{
+  @sysvar::RxSysVar::State = 0;
+  @sysvar::TxSysVar::State = 0;
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::MuteType:*/
+on sysvar TxSysVar::MuteType
+{
+  MostSyncStrmRx2TxMute(@sysvar::TxSysVar::Mute, @this);
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::UseSameChannels:*/
+on sysvar TxSysVar::UseSameChannels
+{
+  if(@this)
+  {
+    sysGetVariableData(sysvar::RxSysVar::Channels, gChannelsTx, gNumChannelsTx);
+    sysSetVariableData(sysvar::TxSysVar::Channels, gChannelsTx, gNumChannelsTx);
+  }
+  else
+  {
+    if(@sysvar::TxSysVar::ChannelsSel == 0)    
+      UpdateChannelsToSet( TX );
+  }
+
+  EnableDisableControls();
+}
+/*@@end*/
+
+/*@@sysvarChange:RxSysVar::Channels:*/
+on sysvar RxSysVar::Channels
+{
+  if(@sysvar::TxSysVar::UseSameChannels)
+  {
+     sysGetVariableData(sysvar::RxSysVar::Channels, gChannelsTx, gNumChannelsTx);
+     sysSetVariableData(sysvar::TxSysVar::Channels, gChannelsTx, gNumChannelsTx);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostStartTxStream():*///callback
+OnMostStartTxStream  ()
+{
+  long ret;
+
+  // start Tx stream now, since buffers filled for streaming
+  ret = mostSyncStrmStart(gHandleTx, gChannelsTx);
+  if(ret != 0)
+    write("Failed to start Tx stream (%d)", ret);
+}
+/*@@end*/
+

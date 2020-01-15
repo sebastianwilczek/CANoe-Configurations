@@ -1,0 +1,130 @@
+/*@@var:*/
+/*
+ * CAPLNodeC - Parameter Monitor example           Version 1.0
+ *
+ * Copyright 2006, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Pr) Created 
+ */
+variables
+{
+  BYTE gMID          = 0;
+  char gNodeName[32] = "NodeC";
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  gMID = CAPLNodeC.NmStationAddress;
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  byte init[4];
+  init[0] = 1; init[1] = 2; init[2] = 3; init[3] = 4;
+  putValue( EvNodeC_TxData, init );
+  putValue( EvNodeC_MID, gMID );
+}
+/*@@end*/
+
+/*@@envVar:EvNodeC_TxSend:*/
+on envVar EvNodeC_TxSend
+{
+  J1587Param 0 txParam;
+  byte         data[21];
+  int          i;
+
+  if (getValue(this) == 1) {
+    getValue( EvNodeC_TxData, data );
+
+
+    txParam.J1587_PID         = getValue( EvNodeC_TxPID );
+    txParam.J1587_MID         = gMID;
+    txParam.J1587_ReceiverMID = getValue( EvNodeC_TxReceiverMID );
+    txParam.DLC               = getValue( EvNodeC_TxDataSize );
+    for( i = 0; i < txParam.DLC; i++ ) {
+      txParam.BYTE(i) = data[i];
+    }
+
+    output( txParam );
+
+    write( "<%s> Send PID %d, DLC %d", gNodeName, txParam.J1587_PID, txParam.DLC );
+  }
+
+}
+/*@@end*/
+
+/*@@j1587Param:J1587::CMP (0xC5),J1587::CDP (0xC6):*/
+on J1587Param CMP, CDP
+{
+  J1587Param CMP rxCmp;
+  J1587Param CMP txCmp;
+  J1587Param CDP rxCdp;
+  INT            i;
+  BYTE           nextSegment;
+  BYTE           numberOfSegments;
+  WORD           numberOfDataBytes;
+
+  if (this.J1587_ReceiverMID != gMID || this.msgChannel > 1) return;
+
+  if (this.J1587_PID == rxCmp.J1587_PID) {
+    rxCmp.DWORD(0) = this.DWORD(0);
+    rxCmp.DWORD(4) = this.DWORD(4);
+
+    switch(rxCmp.CMCommand) {
+      case 1: // RTS
+        nextSegment       = 1;
+        numberOfSegments  = rxCmp.RTSNumberOfSegments;
+        numberOfDataBytes = rxCmp.RTSNumberOfDataBytes;
+
+        txCmp.J1587_MID           = gMID;
+        txCmp.ReceiverMID         = this.J1587_MID;
+        txCmp.CMCommand           = txCmp.CMCommand::CTS;
+        txCmp.CTSNextSegment      = nextSegment;
+        txCmp.CTSNumberOfSegments = 1;
+        txCmp.DLC                 = 4;
+        output( txCmp );
+        break;
+    }
+  }
+  else {
+    for( i = 0; i < this.dlc; i++ ) {
+      rxCdp.byte(i) = this.byte(i);
+    }
+
+    if (this.J1587_ReceiverMID != gMID) return;
+
+    if (rxCdp.SegmentID == nextSegment) {
+      nextSegment++;
+      if (nextSegment > numberOfSegments) {
+        txCmp.J1587_MID           = gMID;
+        txCmp.ReceiverMID         = this.J1587_MID;
+        txCmp.CMCommand           = txCmp.CMCommand::EOM;
+        txCmp.DLC                 = 2;
+        output( txCmp );
+      }
+      else {
+        txCmp.J1587_MID           = gMID;
+        txCmp.ReceiverMID         = this.J1587_MID;
+        txCmp.CMCommand           = txCmp.CMCommand::CTS;
+        txCmp.CTSNextSegment      = nextSegment;
+        txCmp.CTSNumberOfSegments = 1;
+        txCmp.DLC                 = 4;
+        output( txCmp );
+      }
+    }
+    else {
+      txCmp.J1587_MID           = gMID;
+      txCmp.ReceiverMID         = this.J1587_MID;
+      txCmp.CMCommand           = txCmp.CMCommand::Abort;
+      txCmp.DLC                 = 2;
+      output( txCmp );
+    }
+  }
+}
+/*@@end*/
+

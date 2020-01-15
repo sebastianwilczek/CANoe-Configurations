@@ -1,0 +1,300 @@
+/*@!Encoding:1252*/
+variables
+{
+  const dword kSource_MaxBuffers = 2;
+  const dword kSource_MaxBufferSize = 1024 * 128;
+  
+  dword gSource_ReaderHandle,
+        gSource_TalkerHandle,
+        gSource_MediaTypeHandle;
+    
+  byte gSource_Buffer[kSource_MaxBuffers][kSource_MaxBufferSize];
+}
+
+void OnMediaSourceReaderRead(dword sourceReaderHandle, long result, dword streamIndex, dword streamFlags, int64 timestamp, byte buffer[], dword length)
+{
+  byte endReachedCount;
+    
+  if (result != kMedia_OK)
+  {
+    Media_WriteErrorAndStop(result, "OnMediaSourceReaderRead");
+    return;
+  }
+  
+  switch (streamFlags)
+  {
+    case 2:
+      if (++endReachedCount == 1) // End of media stream
+      {
+        OnSource_EndReached();
+      }
+      endReachedCount %= kSource_MaxBuffers;
+      Source_MediaRead(buffer);
+      break;
+    case 256:
+      if (length != 0)
+      {
+        write("StreamFlags 256, but length != 0: %d", length);
+        Stop();
+        return;
+      }
+      Source_MediaRead(buffer);
+      break;
+    default:
+      Source_Send(buffer, length);
+      break;
+  }
+}
+
+on start
+{
+  long ret;
+  
+  ret = AvbSetVerbosity(kAvb_VerbosityWarning);
+  
+  if (Avb_StopIfError(ret, "AvbSetVerbosity") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbSetProperty("StreamReservation", 0);
+    
+  if (Avb_StopIfError(ret, "AvbSetProperty") != 0)
+  {
+    return;
+  }
+}
+
+void OnAvbConnect(dword talkerHandle, dword result)
+{  
+  if (result != kAvb_OK)
+  {
+    Avb_WriteErrorAndStop(result, "OnAvbConnect");
+    return;
+  }
+  
+  Source_MediaRead(gSource_Buffer[0]);
+  Source_MediaRead(gSource_Buffer[1]);
+}
+
+void OnAvbSend(dword talkerHandle, long result, byte buffer[], dword length)
+{  
+  if (result != kAvb_OK)
+  {
+    Avb_WriteErrorAndStop(result, "OnAvbSend");
+    return;
+  }
+         
+  Source_MediaRead(buffer);
+}
+
+void Source_StartCapture()
+{    
+  dword mediaTypeHandle, audioCapturerHandle;
+
+  long ret;
+  
+  audioCapturerHandle = MediaCreateAudioCapturer();
+
+  if (audioCapturerHandle == kMedia_InvalidHandle)
+  {
+    write("Please attach a microphone to capture audio data.");
+  }
+  else
+  {
+    gSource_ReaderHandle = MediaCreateSourceReaderFromMediaSource(audioCapturerHandle);
+    
+    if (Media_CheckHandleAndStopIfError(gSource_ReaderHandle, "MediaCreateSourceReaderFromMediaSource") != 0)
+    {
+      return;
+    }
+    
+    ret = MediaReleaseAudioCapturer(audioCapturerHandle);
+    
+    if (Media_StopIfError(ret, "MediaReleaseAudioCapturer") != 0)
+    {
+      return;
+    }
+  }
+  
+  if (gSource_TalkerHandle == 0)
+  {
+    Source_StartTalker();
+  }
+  else if (gSource_ReaderHandle != kMedia_InvalidHandle)
+  {
+    ret = MediaSetMediaType(gSource_ReaderHandle, 0, gSource_MediaTypeHandle);
+  
+    if (Media_StopIfError(ret, "MediaSetMediaType") != 0)
+    {
+      return;
+    }
+  }
+}
+
+void Source_StartFile(char filePath[])
+{
+  long ret;
+          
+  gSource_ReaderHandle = MediaCreateSourceReaderFromURL(filePath);
+  
+  if (Media_CheckHandleAndStopIfError(gSource_ReaderHandle, "MediaSourceReaderCreateFromUrl") != 0)
+  {
+    return;
+  }
+  
+  if (gSource_TalkerHandle == 0)
+  {
+    Source_StartTalker();
+  }
+  else
+  {
+    ret = MediaSetMediaType(gSource_ReaderHandle, 0, gSource_MediaTypeHandle);
+  
+    if (Media_StopIfError(ret, "MediaSetMediaType") != 0)
+    {
+      return;
+    }
+  }
+}
+
+void Source_StopReader()
+{
+  long ret;
+  
+  if (gSource_ReaderHandle != kMedia_InvalidHandle)
+  {
+    Source_StopReader(gSource_ReaderHandle);
+    gSource_ReaderHandle = kMedia_InvalidHandle;
+  }
+}
+
+void Source_StopReader(dword sourceReaderHandle)
+{
+  long ret;
+  
+  ret = MediaReleaseSourceReader(sourceReaderHandle);
+  
+  if (Media_StopIfError(ret, "MediaReleaseSourceReader") != 0)
+  {
+    return;
+  }
+}
+
+void Source_StopTalker()
+{
+  long ret;
+  
+  ret = MediaReleaseMediaType(gSource_MediaTypeHandle);
+   
+  if (Media_StopIfError(ret, "MediaReleaseMediaType") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbCloseTalker(gSource_TalkerHandle);
+  
+  if (Avb_StopIfError(ret, "AvbCloseTalker") != 0)
+  {
+    return;
+  }
+
+  gSource_TalkerHandle = kAvb_InvalidHandle;
+}
+
+void Source_StartTalker()
+{
+  long ret;
+  
+  gSource_TalkerHandle = AvbOpenTalker(kSource_UniqueId);
+    
+  if (Avb_CheckHandleAndStopIfError(gSource_TalkerHandle, "AvbOpenTalker") != 0)
+  {
+    return;
+  }
+      
+  gSource_MediaTypeHandle = AvbGetMediaType(gSource_TalkerHandle);
+  
+  if (Avb_CheckHandleAndStopIfError(gSource_MediaTypeHandle, "AvbGetMediaType") != 0)
+  {
+    return;
+  }
+  
+  if (gSource_ReaderHandle != kMedia_InvalidHandle)
+  {
+    ret = MediaSetMediaType(gSource_ReaderHandle, 0, gSource_MediaTypeHandle);
+    
+    if (Media_StopIfError(ret, "MediaSetMediaType") != 0)
+    {
+      return;
+    }
+  }
+  
+  ret = AvbConnect(gSource_TalkerHandle, gSource_StreamDestinationAddress, "OnAvbConnect");
+  
+  if (Avb_StopIfError(ret, "AvbConnect") != 0)
+  {
+    return;
+  }
+  
+  if (ret != kAvb_IoPending)
+  {
+    Source_MediaRead(gSource_Buffer[0]);
+    Source_MediaRead(gSource_Buffer[1]);
+  }
+}
+
+void Source_MediaRead(byte buffer[])
+{  
+  long ret;
+  dword i;
+  
+  if (gSource_ReaderHandle != kMedia_InvalidHandle)
+  {
+    ret = MediaRead(gSource_ReaderHandle, 0, buffer, kSource_MaxBufferSize, "OnMediaSourceReaderRead");
+    
+    if (Media_StopIfError(ret, "MediaSourceReaderRead") != 0)
+    {
+      return;
+    }
+  }
+  else
+  {    
+    // Send zeroes if no microphone is attached
+    for (i = 0; i < elcount(buffer); i++)
+    {
+      buffer[i] = 0;
+    }
+    
+    Source_Send(buffer, elcount(buffer));
+  }
+}
+
+void Source_Send(byte buf[], dword length)
+{  
+  dword ret;
+  dword i;
+        
+  if (length % __size_of(int) != 0)
+  {
+    length += 1;
+  }
+  
+  ret = AvbSend(gSource_TalkerHandle, buf, length, "OnAvbSend");
+  
+  if (ret == kAvb_DataOmmitted)
+  {
+    Write("Samples ommitted (delivered too late to AvbSend)");
+  }
+  else if (Avb_StopIfError(ret, "AvbSend") != 0)
+  {
+    return;
+  }
+  
+  if (ret == kAvb_IoPending)
+  {
+    return;
+  }
+     
+  Source_MediaRead(buf);
+}

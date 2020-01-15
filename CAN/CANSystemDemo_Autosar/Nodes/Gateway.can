@@ -1,0 +1,298 @@
+/*@!Encoding:1252*/
+
+includes
+{
+  #include "..\CAPL Includes\NM_Observer_Include.cin"
+}
+
+variables
+{
+  PDU EngineData gMsgEngineData;
+
+  // Variables for Transport-Layer
+  char gECU[12] = "%NODE_NAME%";
+
+  msTimer tWheelSpin; 
+
+  const int gWheelSpinTimerInterval = 186;
+  int gWheelSpin = 0;
+  
+  dword gNewPage; // Sink identifier
+  
+  int gEngineIsRunning = 0; 
+  int gActKeyPos = 0;
+
+  enum enumIgnition{IGN_OFF = 0, IGN_KEY = 1, IGN_KL15R = 2, IGN_KL15 = 3};
+
+  const long SA_COMFORT = 29;
+  const long SA_POWER_TRAIN = 26;
+}
+
+on start
+{   
+  SetBusContext(gBusContext_Comfort);
+  ILSetOperationMode(2,0);
+  
+  // Send type: cyclic if active
+  $Comfort::Gateway_1::EngineRunning = @sysvar::ComfortBus::EngineRunning;
+  $Comfort::Gateway_1::Ig_15 = @sysvar::ComfortBus::IG_15;
+  $Comfort::Gateway_1::Ig_15R = @sysvar::ComfortBus::IG_15R;
+  $Comfort::Gateway_1::StarterKey = @sysvar::ComfortBus::StarterKey;
+
+  //Create a new page at the write window
+  gNewPage= writeCreate("Test Environment");
+  //display information for the test-setup
+  writeLineEx(gNewPage,1,"- Press <e> to start the engine node test");
+  writeLineEx(gNewPage,1,"- Use the interactive generator for sending a undefined message");
+
+  // set to 2 to get more information into write-window 
+  setWriteDbgLevel(1);
+  writeDbgLevel(2,"Gateway");
+
+  enableControl("Control", "Run", 0);
+}
+
+on PDU ABSdata
+{
+  double lastval;
+
+  SetBusContext(gBusContext_Comfort);
+
+  if(lastval != this.CarSpeed.phys && gEngineIsRunning)
+    $Gateway_2::CarSpeed = $ABSdata::CarSpeed;
+
+  lastval = this.CarSpeed.phys;
+}
+
+on PDU EngineData
+{
+  double lastEngTemp;
+  double lastPetrolLevel;
+  double lastEngSpeed;
+
+  SetBusContext(gBusContext_Comfort);
+
+  if (gEngineIsRunning) {
+    if (lastEngTemp != this.EngTemp.phys)
+      $Gateway_2::EngineTemp = this.EngTemp.phys;
+
+    if (lastPetrolLevel != this.PetrolLevel.phys)
+      $Gateway_2::PetrolLevel = this.PetrolLevel.phys;
+
+    if(lastEngSpeed != this.EngSpeed.phys)
+      $Gateway_2::EngSpeed = this.EngSpeed.phys;
+
+    lastEngTemp = this.EngTemp.phys;
+    lastPetrolLevel = this.PetrolLevel.phys;
+    lastEngSpeed = this.EngSpeed.phys;
+  }
+
+  gMsgEngineData = this;
+}
+
+on timer tWheelSpin
+{
+  if(gWheelSpin < 16) 
+  {
+    @sysvar::ComfortBus::EngineRunningWheel = gWheelSpin;
+    gWheelSpin ++;   
+  }
+  else
+  {
+    gWheelSpin = 0; 
+    @sysvar::ComfortBus::EngineRunningWheel = gWheelSpin;
+    gWheelSpin ++;
+  }
+  cancelTimer(this);
+  setTimer(this,gWheelSpinTimerInterval);
+}
+
+on preStart
+{
+  if (0 == gBusContext_Comfort)
+  {
+    writeex( 0, 3, "Error: Cannot determine context for bus: %s", gComfort);
+  }
+
+  if (0 == gBusContext_PowerTrain)
+  {
+    writeex( 0, 3, "Error: Cannot determine context for bus: %s", gPowerTrain);
+  }   
+  
+  if( GetBusContext() == gBusContext_Comfort)
+  { 
+    // Nm_CtrlSimulationOff(); // Disable ASR NM on Comfort
+     Nm_SetAutoStartParam(0);
+     ILSetAutoStartParam(0);
+  } 
+  else if( GetBusContext() == gBusContext_PowerTrain)
+  {
+    //ILConfigureNMNotifications(0,1);
+    Nm_SetAutoStartParam(0);
+    ILSetAutoStartParam(0);
+  }
+}
+
+CallbackInfo (char apName[])
+{
+  if( GetBusContext() == gBusContext_Comfort)
+  { 
+    writeDbgLevel(2,"%s is called on Comfort", apName);
+  } 
+  else if( GetBusContext() == gBusContext_PowerTrain)
+  {
+    writeDbgLevel(2,"%s is called on PowerTrain", apName);
+  }
+}
+
+on PDU GearBoxInfo
+{
+  SetBusContext(gBusContext_Comfort);
+  $Gateway_1::Gear = $GearBoxInfo::Gear;
+}
+
+
+
+GWStarter(long status)
+{
+  if(status && gActKeyPos == IGN_KL15)
+  {
+    gEngineIsRunning = status;
+
+    setBusContext(gBusContext_PowerTrain);
+    ILActivateClamp15();
+       
+    enableControl("Control", "Run", 0);
+    CancelTimer(tWheelSpin);
+    SetTimer(tWheelSpin,gWheelSpinTimerInterval);
+
+    $PowerTrain::Ignition_Info::StarterKey = status;
+    
+    SetBusContext(gBusContext_Comfort);
+    ILActivateClamp15();
+    $Comfort::Gateway_1::EngineRunning = status;
+    $Comfort::Gateway_1::StarterKey = status;
+  }
+}
+
+IgnitionStatus (long status)
+{
+  switch(status)
+  {
+    case IGN_OFF:   if (gActKeyPos != IGN_KL15R) {
+                      IgnitionStatus(IGN_KEY);
+                    }
+                    gActKeyPos = IGN_OFF;  
+                    break;
+    case IGN_KEY:                       
+                    if(gActKeyPos == IGN_KL15)
+                    {
+                      IgnitionStatus(IGN_KL15R);
+                    }
+                    SetBusContext(gBusContext_Comfort);
+                    $Comfort::Gateway_1::Ig_15R = 0;
+                    gActKeyPos = IGN_KEY;
+                    break;
+    case IGN_KL15R:
+                    if(gActKeyPos == IGN_OFF) {
+                      IgnitionStatus(IGN_KEY);
+                    } 
+                    else if(gActKeyPos == IGN_KL15)
+                    {
+                      SetBusContext(gBusContext_PowerTrain);
+                      $PowerTrain::Ignition_Info::StarterKey = 0;
+                      ILDeactivateClamp15();
+                      
+                      SetBusContext(gBusContext_Comfort);
+                      $Comfort::Gateway_1::Ig_15 = 0;
+                      $Comfort::Gateway_1::EngineRunning = 0;
+                      ILDeactivateClamp15();
+                    }      
+                    
+                    if(gActKeyPos == IGN_KEY)
+                    {
+                      SetBusContext(gBusContext_Comfort);
+                      //fs canOnline(3);
+                      $Comfort::Gateway_1::Ig_15R = 1;
+                    }
+
+                    gEngineIsRunning = 0;
+                    // Reset signals on comfort bus
+                    $Gateway_2::EngineTemp = 0;
+                    $Gateway_2::PetrolLevel = 0;
+                    $Gateway_2::EngSpeed = 0;
+                    $Gateway_2::CarSpeed = 0;
+
+                    cancelTimer(tWheelSpin);
+                    enableControl("Control", "Run", 0);
+  
+                    gActKeyPos = IGN_KL15R;
+                    SetBusContext(gBusContext_PowerTrain);
+                    NM_ReinitSleepTimer();
+                    SetBusContext(gBusContext_Comfort);          
+                    NM_ReinitSleepTimer();
+                    break;
+    case IGN_KL15:
+                    if(gActKeyPos != IGN_KL15R)
+                    {
+                      IgnitionStatus(IGN_KL15R);
+                    }
+                    SetBusContext(gBusContext_Comfort);
+                    $Comfort::Gateway_1::Ig_15 = 1;
+                    $Comfort::Gateway_1::StarterKey = 0;
+
+                    enableControl("Control", "Run", 1);
+                    gActKeyPos = IGN_KL15;
+                    break;
+  }    
+}
+
+void Nm_PrepareBusSleepModeInd()
+{ 
+  ILControlWait(0);
+}
+
+void Nm_NetworkModeInd()
+{
+  ILControlResume(0);
+}
+
+on sysvar_update sysvar::ComfortBus::GatewayStarter
+{
+  GWStarter(@sysvar::ComfortBus::GatewayStarter);
+}
+
+on sysvar_update sysvar::ComfortBus::GatewaySwitchIgnition
+{
+   IgnitionStatus(@sysvar::ComfortBus::GatewaySwitchIgnition);
+}
+
+on sysvar_update sysvar::NMTester::NMOnOff29
+{
+  setBusContext( gBusContext_Comfort);
+  if(@this) 
+  {
+    canOffline(3);
+    TraceNMState(getBusContext(),8);
+  }
+  else 
+  {
+    canOnline(3);
+    TraceNMState(getBusContext(), Nm_GetState());
+  }
+}
+
+on sysvar_update sysvar::NMTester::NMOnOff26_PT
+{
+  setBusContext( gBusContext_PowerTrain);
+  if(@this) 
+  {
+    canOffline(3);
+    TraceNMState(getBusContext(),8);
+  }
+  else 
+  {
+    canOnline(3);
+    TraceNMState(getBusContext(), Nm_GetState());
+  }
+}

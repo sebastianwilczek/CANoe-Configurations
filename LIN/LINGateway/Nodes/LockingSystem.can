@@ -1,0 +1,75 @@
+/*@!Encoding:1252*/
+variables
+{
+  const int kCLOSE = 0x00;
+  const int kOPEN  = 0x01;
+  const int kON    = 0x01;
+  const int kOFF   = 0x00;
+
+  //declare millisecond timer
+  msTimer tIgnition;
+  msTimer tClose;
+
+  long gStopSending = 1000;  // in ms
+}
+
+on sysvar CAN::OpenCar
+{
+  if (@this && !$CarLockingSystem::ActualState)
+  {
+    ILControlStart();
+    $Driver_ID::Driver = @CAN::Driver;
+    $CarLockingSystem::ActualState = kOPEN;
+  }
+}
+
+on sysvar CAN::StorePositon
+{
+  if($CarLockingSystem::ActualState == kOPEN)  $Driver_ID::StoreSeatposition = @CAN::StorePositon;
+}
+
+on sysvar CAN::IgnitionSwitch
+{
+  if ($CarLockingSystem::ActualState) $Ignition::PowerOn = @CAN::IgnitionSwitch;
+ 
+  //reset the environment variable EnvIgnitionSwitch, because the car isn't open
+  if (!@CAN::OpenCar && @CAN::IgnitionSwitch && !$CarLockingSystem::ActualState)
+  {
+    write("First open the car, before you turn on the ignition!");
+    setTimer(tIgnition, 100);
+  }
+}
+
+on sysvar CAN::CloseCar
+{
+  if(@CAN::CloseCar && $CarLockingSystem::ActualState && $Ignition::PowerOn == 0)
+  {
+    $CarLockingSystem::ActualState = kCLOSE;
+    SetTimer(tClose,gStopSending);
+  }
+}
+
+on timer tIgnition
+{
+  @CAN::IgnitionSwitch = 0;
+}
+
+on start
+{
+}
+
+on preStart
+{
+  ILControlInit();
+}
+
+on timer tClose
+{
+  ILControlStop();
+}
+
+on sysVar CAN::Driver
+{
+  if($CarLockingSystem::ActualState == kOPEN)  $Driver_ID::Driver = @CAN::Driver;
+}
+

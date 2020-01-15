@@ -1,0 +1,688 @@
+/*@@includes:*/
+includes
+{
+  #include "DiagTester_SessionManagement.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  long result2 = -1;
+  long result3 = -1;
+
+  char gECU[20] = "Node_B";
+
+  // NOTE: The default parameters are set in a function! So change that!!!
+
+  // ------- Session Handling -------
+  // This is the current session the ECU is in:
+  // 0 default
+  // 1 extended
+  // 2 programming
+  byte gCurrentSession;
+
+  // Fault memory:
+  const BYTE  cDTCSupportedStatusBits = 0x79; // Support 5 of the bits
+  const word  cDTCMaxNumberOfSnapshots = 10;  // The fault memory is limited
+  DWORD gDTCNumber[ cDTCMaxNumberOfSnapshots];
+  byte  gDTCStatus[ cDTCMaxNumberOfSnapshots];
+  DWORD gDTCEnvData[ cDTCMaxNumberOfSnapshots];
+  DWORD gDTCNumSnapShots = 0;
+
+  // Timer:
+  int gCycleReadMode = 0;
+  const long cReadCyclePeriod = 270; // ms
+  msTimer tReadCycleTimer;
+
+  const int cMaxLineLen = 49;
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::GotoExtendedSession:*/
+on sysvar sysvar::DiagTester::GotoExtendedSession
+{
+  if (@this == 1)
+  {
+    GotoExtendedSession();
+  }
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  setWriteDbgLevel( 0);
+
+  @sysvar::DiagTester::SerialNumberIn = 0;
+
+  setTimer(tReadCycleTimer, cReadCyclePeriod);
+
+  StartSessionManagement();
+
+  //openPanel("DiagOBDPanel");
+  //openPanel("VarCodingPanel.VariantCodingControl");
+  //openPanel("DiagTesterPanel");
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // The tester does not need the CAPL Callback Interface (CCI), because
+  // it hooks via DiagSetTarget() onto the CANoe's internal diagnostics channel.
+
+  DiagSetTarget("Door"); // this enables this CAPL Prg to act as the tester
+
+  InitializeSessionManagement();
+
+  setWriteDbgLevel( 2);
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::EnableTesterPresent:*/
+on sysvar sysvar::DiagTester::EnableTesterPresent
+{
+  if (@this == 1)
+  {
+    SendTesterPresent();
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::GotoDefaultSession:*/
+on sysvar sysvar::DiagTester::GotoDefaultSession
+{
+  if (@this == 1)
+  {
+    GotoDefaultSession();
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::ReadSerialNumber:*/
+on sysvar sysvar::DiagTester::ReadSerialNumber
+{
+  if (@this == 1)
+  {
+    DiagRequest "Identification::SerialNumber::Read" request;
+
+    result = request.SendRequest();
+    SetRequestResult(cUnknown);
+
+    snprintf( text, elcount(text), "CAPL: %s: Identification::SerialNumber::Read result %d", gECU, result);
+    writeDbgLevel( gDiagDbgLevel, text);
+  }
+}
+/*@@end*/
+
+/*@@diagResponse:Identification::SerialNumber::Read:*/
+on diagResponse Identification::SerialNumber::Read
+{
+  double par[1];
+  if ((result == 0) && (DiagGetLastResponseCode() == -1))
+  {
+    this.GetParameter( 0, "SerialNumber", par);
+    @sysvar::DiagTester::SerialNumberIn = par[0];
+
+    snprintf( text, elcount(text), "CAPL: %s: read serial number %d", gECU, @sysvar::DiagTester::SerialNumberIn);
+    writeDbgLevel( gDiagDbgLevel, text);
+
+    SetRequestResult(cOk);
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::WriteSerialNumber:*/
+on sysvar sysvar::DiagTester::WriteSerialNumber
+{
+  if (@this == 1)
+  {
+    DiagRequest "Identification::SerialNumber::Write" request;
+
+    request.SetParameter("SerialNumber", @sysvar::DiagTester::SerialNumberOut);
+    result = request.SendRequest();
+    SetRequestResult(cUnknown);
+
+    @sysvar::DiagTester::SerialNumberOut += 1;
+
+    snprintf( text, elcount(text), "CAPL: %s: Identification::SerialNumber::Write result %d", gECU, result);
+    writeDbgLevel( gDiagDbgLevel, text);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::GotoProgrammingSession:*/
+on sysvar sysvar::DiagTester::GotoProgrammingSession
+{
+  if (@this == 1)
+  {
+    GotoProgrammingSession();
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::ReadDoorContacts:*/
+on sysvar sysvar::DiagTester::ReadDoorContacts
+{
+  if (@this == 1)
+  {
+    DiagRequest "IOControl::DoorStatus::Read" request;
+
+    result = request.SendRequest();
+    SetRequestResult(cUnknown);
+
+    snprintf( text, elcount(text), "CAPL: %s: IOControl::DoorStatus::Read result %d", gECU, result);
+    writeDbgLevel( gDiagDbgLevel, text);
+  }
+}
+/*@@end*/
+
+/*@@diagResponse:IOControl::DoorStatus::Read:*/
+on diagResponse IOControl::DoorStatus::Read
+{
+  double par[1];
+  if ((result == 0) && (DiagGetLastResponseCode() == -1))
+  {
+
+    this.GetParameter("DoorContact.DoorContactFrontLeft", par);
+    @sysvar::DiagTester::StatusFrontLeftDoor = par[0];
+    this.GetParameter("DoorContact.DoorContactFrontRight", par);
+    @sysvar::DiagTester::StatusFrontRightDoor = par[0];
+    this.GetParameter("DoorContact.DoorContactRearLeft", par);
+    @sysvar::DiagTester::StatusRearLeftDoor = par[0];
+    this.GetParameter("DoorContact.DoorContactRearRight", par);
+    @sysvar::DiagTester::StatusRearRightDoor = par[0];
+    //request.SetParameter("DoorContact._reserved", 0);
+
+    snprintf( text, elcount(text), "CAPL: %s: received door contacts inputs", gECU);
+    writeDbgLevel( gDiagDbgLevel, text);
+
+    SetRequestResult(cOk);
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::WriteDoorContacts:*/
+on sysvar sysvar::DiagTester::WriteDoorContacts
+{
+  if (@this == 1)
+  {
+    DiagRequest "IOControl::DoorStatus::Set" request;
+
+    request.SetParameter("DoorContact.DoorContactFrontLeft", @sysvar::DiagTester::StatusFrontLeftDoor);
+    request.SetParameter("DoorContact.DoorContactFrontRight", @sysvar::DiagTester::StatusFrontRightDoor);
+    request.SetParameter("DoorContact.DoorContactRearLeft", @sysvar::DiagTester::StatusRearLeftDoor);
+    request.SetParameter("DoorContact.DoorContactRearRight", @sysvar::DiagTester::StatusRearRightDoor);
+    request.SetParameter("DoorContact._reserved", 0);
+
+    result = request.SendRequest();
+    SetRequestResult(cUnknown);
+
+    snprintf( text, elcount(text), "CAPL: %s: IOControl::DoorStatus::Set result %d", gECU, result);
+    writeDbgLevel( gDiagDbgLevel, text);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::ReadFaultMemory:*/
+on sysvar sysvar::DiagTester::ReadFaultMemory
+{
+  if (@this == 1)
+  {
+    DiagRequest "FaultMemory::FaultMemory::ReadAllIdentified" request;
+
+    request.SetParameter("DtcStatusbyte", cDTCSupportedStatusBits);
+    result = request.SendRequest();
+    SetRequestResult(cUnknown);
+
+    snprintf( text, elcount(text), "CAPL: %s: FaultMemory::FaultMemory::ReadAllIdentified result %d", gECU, result);
+    writeDbgLevel( gDiagDbgLevel, text);
+  }
+}
+/*@@end*/
+
+/*@@diagResponse:FaultMemory::FaultMemory::ReadAllIdentified:*/
+on diagResponse FaultMemory::FaultMemory::ReadAllIdentified
+{
+  double par[1];
+  long i, size, entries, index;
+
+  if ((result == 0) && (DiagGetLastResponseCode() == -1))
+  {
+    size = this.GetPrimitiveSize();
+    entries = (size - 3) / 4;
+
+    index = 0;
+    for( i = 0; i < entries; ++i)
+    {
+      if (index < cDTCMaxNumberOfSnapshots)
+      {
+        DiagGetComplexParameter( this, "ListOfDTC", i, "DTC", par);
+        gDTCNumber[index] = par[0];
+        DiagGetComplexParameter( this, "ListOfDTC", i, "DtcStatusbyte", par);
+        gDTCStatus[index] = par[0];
+        index++;
+      }
+    }
+    gDTCNumSnapShots = index;
+
+    displayFaultMemory();
+    SetRequestResult(cOk);
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::ClearFaultMemory:*/
+on sysvar sysvar::DiagTester::ClearFaultMemory
+{
+  if (@this == 1)
+  {
+    DiagRequest "FaultMemory::FaultMemory::Clear" request;
+
+    request.SetParameter("GroupOfDtc", 0);
+
+    result = request.SendRequest();
+    SetRequestResult(cUnknown);
+
+    snprintf( text, elcount(text), "CAPL: %s: FaultMemory::FaultMemory::Clear result %d", gECU, result);
+    writeDbgLevel( gDiagDbgLevel, text);
+  }
+}
+/*@@end*/
+
+/*@@timer:tReadCycleTimer:*/
+on timer tReadCycleTimer
+{
+  if ((@sysvar::DiagTester::ReadADValuesCyclic > 0) && (gCycleReadMode % 2 == 0))
+  {
+    DiagRequest "DynamicData::ADValues::Read" request;
+
+    result2 = request.SendRequest();   
+
+    SetRequestResult(cUnknown);
+  }
+
+  if ((@sysvar::DiagTester::ReadEngineStatusCyclic > 0) && (gCycleReadMode % 2 == 1))
+  {
+    DiagRequest "DynamicData::EngineStatus::Read" request;
+
+    result3 = request.SendRequest();   
+
+    SetRequestResult(cUnknown);
+  }
+
+  gCycleReadMode += 1;
+  gCycleReadMode %= 2;
+
+  setTimer(tReadCycleTimer, cReadCyclePeriod); // run timer periodically
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::ResetDoorContacts:*/
+on sysvar sysvar::DiagTester::ResetDoorContacts
+{
+  if (@this == 1)
+  {
+    @sysvar::DiagTester::StatusFrontLeftDoor = 2;
+    @sysvar::DiagTester::StatusFrontRightDoor = 2;
+    @sysvar::DiagTester::StatusRearLeftDoor = 2;
+    @sysvar::DiagTester::StatusRearRightDoor = 2;
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::ClearFaultMemoryDisplay:*/
+on sysvar sysvar::DiagTester::ClearFaultMemoryDisplay
+{
+  if (@this == 1)
+  {
+    ClearFaultMemoryDisplay();
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ClearFaultMemoryDisplay():*///function
+void ClearFaultMemoryDisplay ()
+{
+  char line[100], fmStr[500];
+
+  strncpy(fmStr, "", elcount(fmStr));
+  SysSetVariableString(sysvar::DiagTester::FaultMemoryStrings, fmStr);
+  gDTCNumSnapShots = 0;
+  @sysvar::DiagTester::NumSnapShots = gDTCNumSnapShots;
+}
+/*@@end*/
+
+/*@@diagResponse:FaultMemory::FaultMemory::Clear:*/
+on diagResponse FaultMemory::FaultMemory::Clear
+{
+  if ((result == 0) && (DiagGetLastResponseCode() == -1))
+  {
+    ClearFaultMemoryDisplay();
+    SetRequestResult(cOk);
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+/*@@end*/
+
+/*@@diagResponse:IOControl::DoorStatus::Set:*/
+on diagResponse IOControl::DoorStatus::Set
+{
+  if ((result == 0) && (DiagGetLastResponseCode() == -1))
+  {
+    SetRequestResult(cOk);
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+/*@@end*/
+
+/*@@diagResponse:Identification::SerialNumber::Write:*/
+on diagResponse Identification::SerialNumber::Write
+{
+  if ((result == 0) && (DiagGetLastResponseCode() == -1))
+  {
+    SetRequestResult(cOk);
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+/*@@end*/
+
+/*@@diagResponse:*:*/
+on diagResponse *
+{
+  if ((result != 0) || (DiagGetLastResponseCode() != -1))
+  {
+    
+    SetRequestResult(cBad);
+  }
+}
+/*@@end*/
+
+/*@@diagResponse:DynamicData::ADValues::Read:*/
+on diagResponse DynamicData::ADValues::Read
+{
+  double par[1];
+
+  if ((result2 == 0) && (DiagGetLastResponseCode() == -1))
+  {
+    this.GetParameter( 0, "Voltage", par);
+    par[0] /= 10.0;
+    @sysvar::DiagTester::Voltage = par[0];
+
+    snprintf( text, elcount(text), "CAPL: %s: Voltage = %f", gECU, par[0]);
+    writeDbgLevel( gDiagDbgLevel, text);
+
+    SetRequestResult(cOk);
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+/*@@end*/
+
+/*@@diagResponse:DynamicData::EngineStatus::Read:*/
+on diagResponse DynamicData::EngineStatus::Read
+{
+  double par[1];
+
+  if ((result3 == 0) && (DiagGetLastResponseCode() == -1))
+  {
+    this.GetParameter( 0, "Engine_Speed", par);
+    par[0] /= 1.0;
+    @sysvar::DiagTester::EngineRPM = par[0];
+
+    snprintf( text, elcount(text), "CAPL: %s: RPM = %f", gECU, par[0]);
+    writeDbgLevel( gDiagDbgLevel, text);
+
+    SetRequestResult(cOk);
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::DoSoftReset:*/
+on sysvar sysvar::DiagTester::DoSoftReset
+{
+  if (@this == 1)
+  {
+    DoSoftReset();
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::DoHardReset:*/
+on sysvar sysvar::DiagTester::DoHardReset
+{
+  if (@this == 1)
+  {
+    DoHardReset();
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DiagTester::GetDoorContactStates:*/
+on sysvar sysvar::DiagTester::GetDoorContactStates
+{
+  if (@this == 1)
+  {
+    DiagRequest "IOControl::DoorStatus::ReturnControl" request;
+
+    result = request.SendRequest();
+    SetRequestResult(cUnknown);
+
+    snprintf( text, elcount(text), "CAPL: %s: IOControl::DoorStatus::ReturnControl result %d", gECU, result);
+    writeDbgLevel( gDiagDbgLevel, text);
+  }
+}
+/*@@end*/
+
+/*@@diagResponse:IOControl::DoorStatus::ReturnControl:*/
+on diagResponse IOControl::DoorStatus::ReturnControl
+{
+  double par[1];
+  if ((result == 0) && (DiagGetLastResponseCode() == -1))
+  {
+
+    this.GetParameter("DoorContact.DoorContactFrontLeft", par);
+    @sysvar::DiagTester::StatusFrontLeftDoor = par[0];
+    this.GetParameter("DoorContact.DoorContactFrontRight", par);
+    @sysvar::DiagTester::StatusFrontRightDoor = par[0];
+    this.GetParameter("DoorContact.DoorContactRearLeft", par);
+    @sysvar::DiagTester::StatusRearLeftDoor = par[0];
+    this.GetParameter("DoorContact.DoorContactRearRight", par);
+    @sysvar::DiagTester::StatusRearRightDoor = par[0];
+    //request.SetParameter("DoorContact._reserved", 0);
+
+    snprintf( text, elcount(text), "CAPL: %s: received door contact states", gECU);
+    writeDbgLevel( gDiagDbgLevel, text);
+
+    SetRequestResult(cOk);
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:displayFaultMemory():*///function
+displayFaultMemory ()
+{
+  char dtcText[100];
+  DWORD dtcSelected;
+  diagResponse FaultMemory::FaultMemory::ReadEnvironmentData converter;
+  char line[100], fmStr[1000];
+  int i;
+
+  strncpy(fmStr, "", elcount(fmStr));
+  for( i = 0; i < gDTCNumSnapShots; ++i)
+  {
+    // Use a response object to convert the code into its text
+    dtcSelected = gDTCNumber[i];
+    DiagSetParameter( converter, "DTC", dtcSelected);
+    DiagGetParameter( converter, "DTC", dtcText, elcount( dtcText));
+
+    snprintf( line, elcount(line), "%d: DTC %d, Status 0x%02X", i, gDTCNumber[i], gDTCStatus[i]);
+    adjustLine(line, cMaxLineLen);
+    writeDbgLevel( gDiagDbgLevel, line);
+    strncat(fmStr, line, elcount(fmStr));
+
+    snprintf( line, elcount(line), "   %s", dtcText);
+    adjustLine(line, cMaxLineLen);
+    writeDbgLevel( gDiagDbgLevel, line);
+    strncat(fmStr, line, elcount(fmStr));
+  }
+
+  SysSetVariableString(sysvar::DiagTester::FaultMemoryStrings, fmStr);
+
+  @sysvar::DiagTester::NumSnapShots = gDTCNumSnapShots;
+}
+/*@@end*/
+
+/*@@diagResponse:EcuReset::HardReset::Reset:*/
+on diagResponse EcuReset::HardReset::Reset
+{
+  OnRespHardReset();
+}
+/*@@end*/
+
+/*@@diagResponse:EcuReset::SoftReset::Reset:*/
+on diagResponse EcuReset::SoftReset::Reset
+{
+  OnRespSoftReset();
+}
+/*@@end*/
+
+/*@@diagResponse:SecurityAccess::KeyLevel1::Send:*/
+on diagResponse SecurityAccess::KeyLevel1::Send
+{
+  OnRespKeyLevel1();
+}
+/*@@end*/
+
+/*@@diagResponse:SecurityAccess::SeedLevel1::Request:*/
+on diagResponse SecurityAccess::SeedLevel1::Request
+{
+  DWORD seedValue;
+  seedValue = this.GetParameter( 0, "SecuritySeed");
+  OnRespSeedLevel1(seedValue);
+}
+/*@@end*/
+
+/*@@diagResponse:Sessions::DefaultSession::Start:*/
+on diagResponse Sessions::DefaultSession::Start
+{
+  OnRespDefaultSession();
+}
+/*@@end*/
+
+/*@@diagResponse:Sessions::ExtendedDiagnosticSession::Start:*/
+on diagResponse Sessions::ExtendedDiagnosticSession::Start
+{
+  OnRespExtendedSession();
+}
+/*@@end*/
+
+/*@@diagResponse:Sessions::ProgrammingSession::Start:*/
+on diagResponse Sessions::ProgrammingSession::Start
+{
+  OnRespProgrammingSession();
+}
+/*@@end*/
+
+/*@@diagResponse:TesterPresent::TesterPresent::Send:*/
+on diagResponse TesterPresent::TesterPresent::Send
+{
+  OnRespTesterPresent();
+}
+/*@@end*/
+
+/*@@diagRequest:*:*/
+on diagRequest *
+{
+  char nameBufferOut[200];
+
+  this.GetObjectName( nameBufferOut,  elcount(nameBufferOut));
+  write("###### Diagnostics Request %s sent ...", nameBufferOut);
+}
+/*@@end*/
+
+/*@@caplFunc:TP_ReceptionInd(long,byte[]):*///callback
+void TP_ReceptionInd (long connectionHdl, BYTE data[])
+{
+  // nothing to do here
+}
+/*@@end*/
+
+/*@@caplFunc:adjustLine(char[],int):*///function
+adjustLine(char str[], int maxLen)
+{
+  int i, len;
+
+  len = strlen(str);
+  for( i = len; i < maxLen; ++i)
+  {
+    strncat(str, " ", elcount(str));
+  }
+}
+/*@@end*/
+
+/*@@key:'1':*/
+on key '1'
+{
+  diagRequest SerialNumber_Read req1;
+
+  req1.Resize(2000);
+  req1.SendRequest();
+}
+/*@@end*/
+
+/*@@sysvarChange:TPTest::StartRequest:*/
+on sysvar sysvar::TPTest::StartRequest
+{
+  if (@this == 1)
+  {
+    diagRequest SerialNumber_Read req1;
+
+    req1.Resize(2000);
+    req1.SendRequest();
+  }
+}
+/*@@end*/
+
+/*@@key:'f':*/
+on key 'f'
+{
+  diagRequest Sessions::DefaultSession::Start req1;
+
+  req1.SendFunctional();
+}
+/*@@end*/
+

@@ -1,0 +1,169 @@
+/*@!Encoding:1252*/
+/*----------------------------------------------------------------------------
+|
+| Modulname : SeatLeft.can
+|-----------------------------------------------------------------------------
+|*****************************************************************************
+|-----------------------------------------------------------------------------
+|               A U T H O R   I D E N T I T Y
+|-----------------------------------------------------------------------------
+| Author               Initials         Company
+| ------               --------         -------
+| Alexander Büttner      Br             Vector Informatik GmbH
+|-----------------------------------------------------------------------------
+|               R E V I S I O N   H I S T O R Y
+|-----------------------------------------------------------------------------
+| Date         Ver    Author  Description
+| ---------    ---    ------  ------------------------------------------------
+| 21.11.03     1.0     Br     build
+| 08.01.2004   1.1     Bee    some slight changes (general message)
+| 15.02.2007   1.2     Br     integration of InteractionLayer and CDD (Diagnostic)  
+|----------------------------------------------------------------------------
+*/
+includes
+{
+  #include "Diagnostics/CCI_CanTp.cin"
+}
+
+variables
+{
+  const cIsTester  = 0;
+  const int kOFF   = 0;
+  const int kON    = 1;
+
+  msTimer tHeightAdj;
+  const int gHEIGHT_ADJ_SHAFT_SPEED = 100;
+  int gHeightAdjErrorValue = 0; // in ms
+
+  msTimer tLongAdj;
+  const int gLONG_ADJ_SHAFT_SPEED = 100;
+  int gLongAdjErrorValue = 0; // in ms
+
+  // Variables for Transport-Layer
+  char gECU[15] = "Seat";
+
+  int gTxPending = kOFF; 
+  int gPendingState = 0;
+}
+
+on start
+{
+  setWriteDbgLevel(0);  // Set '1' for more informations
+
+  SetTimer(tHeightAdj,gHEIGHT_ADJ_SHAFT_SPEED + gHeightAdjErrorValue);
+  SetTimer(tLongAdj,gLONG_ADJ_SHAFT_SPEED + gLongAdjErrorValue);
+}
+
+on timer tLongAdj
+{
+  if($LongitudinalAdjustmentForward && !$LongitudinalAdjustmentBackward)
+  {
+    $Longitudinal_Block = 20 == $Longitudinal_Pos.txrq;
+
+    if(!$Longitudinal_Block.txrq)
+    {
+      $Longitudinal_Pos += 1;
+    }
+  }
+  else if($LongitudinalAdjustmentBackward && !$LongitudinalAdjustmentForward)
+  {
+    $Longitudinal_Block = 0 == $Longitudinal_Pos.txrq;
+
+    if(!$Longitudinal_Block.txrq)
+    {
+      $Longitudinal_Pos -= 1;
+    }
+  }
+
+  SetTimer(this,gLONG_ADJ_SHAFT_SPEED + gLongAdjErrorValue);  
+}
+
+on timer tHeightAdj
+{
+  if($HeightAdjustmentUp && !$HeightAdjustmentDown)
+  {
+    $Height_Block = 20 == $Height_Pos.txrq;
+
+    if(!$Height_Block.txrq)
+    {
+      $Height_Pos += 1;
+    }
+  }
+  else if($HeightAdjustmentDown && !$HeightAdjustmentUp)
+  {
+    $Height_Block = 0 == $Height_Pos.txrq;
+
+    if(!$Height_Block.txrq)
+    {
+      $Height_Pos -= 1;
+    }
+  }
+
+  SetTimer(this,gHEIGHT_ADJ_SHAFT_SPEED + gHeightAdjErrorValue);  
+}
+
+on diagRequest Manufacturer_Date_Lesen
+{
+  diagresponse Manufacturer_Date_Lesen resp;
+
+  DiagSetParameter(resp,"Date_year","2007");
+  DiagSetParameter(resp,"Date_month","02");
+  DiagSetParameter(resp,"Date_day","19");
+  DiagSetParameter(resp,"Supplier","Vector Informatik GmbH");
+
+  DiagSendResponse(resp);
+}
+
+on diagRequest Seat_Variant_Lesen
+{
+  diagresponse Seat_Variant_Lesen resp;
+
+  if(@sysvar::SeatTester::SeatVariant == 0) 
+    DiagSetParameter(resp,"Seat_Variant","Basis");
+  else 
+    DiagSetParameter(resp,"Seat_Variant","Comfort");
+  DiagSendResponse(resp);
+
+}
+
+on diagRequest Serial_Number_Lesen
+{
+  diagresponse Serial_Number_Lesen resp;
+
+  DiagSetParameter(resp,"Serial_Number",123456);
+
+  DiagSendResponse(resp);
+}
+
+// ///////////////////////////////////////////////////////////////////////////////////
+// With this Callback-Function it is possible to prevent sending of certain messages.
+// ///////////////////////////////////////////////////////////////////////////////////
+dword applILTxPending(long aID)
+{
+  message SeatMsg msg;
+
+  if(aID == msg.id && gTxPending == kON)
+  {
+    gPendingState = gPendingState < 1 ? 1 : 0;
+
+    return gPendingState;
+  }
+
+  return 1;
+}
+
+on sysvar_update sysvar::SeatTester::SetCyclicMsgError
+{
+  gTxPending = @this ? kON : kOFF;
+}
+
+on sysvar_update sysvar::SeatTester::SetHeightAdjError
+{
+  gHeightAdjErrorValue = @this ? 300 : 0;
+}
+
+on sysvar_update sysvar::SeatTester::SetLongAdjError
+{
+  gLongAdjErrorValue = @this ? 300 : 0;
+}
+

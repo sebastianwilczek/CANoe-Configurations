@@ -1,0 +1,192 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "GAIN.cin"
+  #include "Panel.cin"
+}
+
+/*
+ * DisplayPanel - Display Panel Galley Insert      Version 1.0
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Pr) Created 
+ */
+variables
+{
+  char gDisplayName_NodeName[32] = "Display Panel";   // Name of the node, is used for output to write window
+
+  const int kDisplayPanel_ScreenMain  = 0;
+  const int kDisplayPanel_ScreenNodes = 1;
+
+  const int kDisplayPanel_MenuNodes = 0;
+}
+
+on preStart
+{
+  strncpy(gNode_FuncRO         , DisplayPanel.CFG2_0_0_GAIN_REMOTE_FUNCTION, 32);
+  strncpy(gNode_FuncPC_CENTR   , DisplayPanel.CFG2_1_0_CENTRALIZED_POWER_CONTR, 32);
+  strncpy(gNode_FuncPC_DECENTR , DisplayPanel.CFG2_2_0_DECENTRALIZED_POWER_CON, 32);
+  strncpy(gNode_FuncDIAG       , DisplayPanel.CFG2_3_0_DIAGNOSIS_FUNCTION, 32);
+
+  gNode_LevelId                = DisplayPanel.GAINCFG5_1_0_FEEDER_NUMBER;
+  gNode_DeviceId               = DisplayPanel.GAINCFG5_2_0_DEVICE_NUMBER;
+
+  gNode_NM_STA_CycleTimeMs     = DisplayPanel.GAINCFG9_9_0_TIMER_STA_GAIN;
+  gNode_NM_STA_TimeoutTimeMs   = DisplayPanel.GAINCFG9_9_1_TIMER_STA_TIMEOUT_G;
+
+  gNode_CounterDeltaInc        = DisplayPanel.GAINCFG12_1_0_GAIN_COUNTER_DELTA;
+  gNode_CounterDeltaDec        = DisplayPanel.GAINCFG12_1_1_GAIN_COUNTER_DELTA;
+  gNode_CounterThreshold       = DisplayPanel.GAINCFG12_1_2_GAIN_COUNTER_THRES;
+
+  gNode_SequenceTimeoutMs      = DisplayPanel.GAINCFG9_2_0_SEQUENCE_TIMEOUT_TI;
+
+  gPanel_Width = 45;
+  gPanel_Height = 7;
+}
+
+on start
+{
+  @DisplayPanel_Feeder = gNode_LevelId;
+  @DisplayPanel_Device = gNode_DeviceId;
+
+  Panel_Activate();
+  
+  DisplayPanel_DisplayScreen(kDisplayPanel_ScreenMain);
+}
+
+void DisplayPanel_DisplayScreen (int screenType)
+{
+  int len, i;
+  char str[1024], strOnline[8], strOffline[8];
+
+  strncpy(strOnline, "Online", 8);
+  strncpy(strOffline, "Offline", 8); 
+
+  len = gPanel_Width * gPanel_Height;
+  for (i = 0; i < len; i++) {
+    gPanel_OutString[i] = 0;
+  }
+
+  gPanel_MenuCount = 0;
+
+  switch (screenType) {
+    case kDisplayPanel_ScreenMain:
+      Panel_SetCaption("Main Menu");
+      Panel_AddMenu("Nodes Overview", "");
+      gPanel_CurrentScreen = kDisplayPanel_ScreenMain;
+      break;
+    case kDisplayPanel_ScreenNodes:
+      Panel_SetCaption("Nodes Overview");
+
+      for (i = 0; i < gNode_NM_STA_GAIN_BufferSize; i++) {
+        snprintf(str, 1024, "Level ID: %d, Device ID: %d, ", gNode_NM_STA_GAIN_LevelDeviceIds[i] >> 8, gNode_NM_STA_GAIN_LevelDeviceIds[i] & 0xFF);
+        if (gNode_NM_STA_GAIN_Availability[i] == kNode_NM_AvailabilityOnline) {
+          strncat(str, strOnline, 1024);
+        }
+        else {
+          strncat(str, strOffline, 1024);
+        }
+        Panel_AddMenu(str, "");
+      }
+      for (i = 0; i < gNode_NM_STA_MGCU_BufferSize; i++) {
+        snprintf(str, 1024, "Level ID: %d, Device ID: %d, ", gNode_NM_STA_MGCU_LevelDeviceIds[i] >> 8, gNode_NM_STA_MGCU_LevelDeviceIds[i] & 0xFF);
+        if (gNode_NM_STA_MGCU_Availability[i] == kNode_NM_AvailabilityOnline) {
+          strncat(str, strOnline, 1024);
+        }
+        else {
+          strncat(str, strOffline, 1024);
+        }
+        Panel_AddMenu(str, "");
+      }
+      if (gNode_NM_STA_GAIN_BufferSize == 0 && gNode_NM_STA_MGCU_BufferSize == 0) {
+        Panel_AddMenu("No Nodes online", "");
+      }
+
+      gPanel_CurrentScreen = kDisplayPanel_ScreenNodes;
+      break;
+  }
+
+  Panel_FlushScreen();
+}
+
+void DisplayPanel_DisplayPreviousScreen ()
+{
+
+  switch (gPanel_CurrentScreen) {
+    case kDisplayPanel_ScreenNodes:
+      DisplayPanel_DisplayScreen(kDisplayPanel_ScreenMain);
+      break;
+  }
+
+  Panel_FlushScreen();
+}
+
+on envVar DisplayPanel_OK
+{
+  if (getValue(this) == 0) {
+    switch (gPanel_CurrentScreen) {
+      case kDisplayPanel_ScreenMain:
+        switch (gPanel_CurrentSelection[gPanel_CurrentScreen]) {
+          case kDisplayPanel_MenuNodes:
+            DisplayPanel_DisplayScreen(kDisplayPanel_ScreenNodes);
+            break;
+        }
+    }
+  }
+}
+
+on envVar DisplayPanel_Back
+{
+  if (getValue(this) == 0) {
+    if (0 <= gPanel_CurrentSelection[gPanel_CurrentScreen]-1) {
+      gPanel_CurrentSelection[gPanel_CurrentScreen]--;
+    }
+    Panel_FlushScreen();
+  }
+}
+
+on envVar DisplayPanel_Esc
+{
+  if (getValue(this) == 0) {
+    DisplayPanel_DisplayPreviousScreen();
+  }
+}
+
+on envVar DisplayPanel_Next
+{
+  if (getValue(this) == 0) {
+    if (gPanel_MenuCount > gPanel_CurrentSelection[gPanel_CurrentScreen]+1) {
+      gPanel_CurrentSelection[gPanel_CurrentScreen]++;
+    }
+    
+    Panel_FlushScreen();
+  }
+}
+
+void OnNode_NMAvailabilityChanged(BYTE levelId, BYTE deviceId, int newAvailability)
+{
+  if (gPanel_CurrentScreen == kDisplayPanel_ScreenNodes) {
+    DisplayPanel_DisplayScreen(kDisplayPanel_ScreenNodes);
+  }
+}
+
+void OnGAIN_ChangeState (int oldState, int newState)
+{
+}
+
+void OnGAIN_PBM (word power, word time)
+{
+}
+
+void Panel_OnOutput (char text[])
+{
+  putValue(DisplayPanel_Out, text);
+}
+
+on preStop
+{
+  Panel_Deactivate();
+}
+

@@ -1,0 +1,165 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "include/Avb.cin"
+  #include "include/SineGenerator.cin"
+}
+
+variables
+{
+  const dword kTalker_Protocol = kAvtpProtocolAaf;
+  const dword kTalker_AafSampleRate = kAafSampleRate48KHz;
+  const dword kTalker_AafFormat = kAafFormat16BitInteger;
+  const dword kTalker_AafChannelCount = 1;
+
+  const dword kTalker_MaxBuffers = 32;
+  
+  const int kTalker_MaxInt = 32767;
+  
+  dword gTalker_Handle;
+}
+
+on start
+{
+  dword ret;
+  
+  byte destinationAddress[6] = { 1, 2, 3, 4, 5, 6 };
+  
+  ret = AvbSetProperty("StreamReservation", 0);
+    
+  if (StopIfError(ret, "AvbSetProperty") != 0)
+  {
+    return;
+  }
+  
+  gTalker_Handle = AvbOpenTalker();
+    
+  if (CheckHandleAndStopIfError(gTalker_Handle, "AvbOpenTalker") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbSetProtocol(gTalker_Handle, kTalker_Protocol);
+    
+  if (StopIfError(ret, "AvbSetProtocol") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbSetAafFormat(gTalker_Handle, kAafFormat16BitInteger);
+  
+  if (StopIfError(ret, "AvbSetAafFormat") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbSetAafBitDepth(gTalker_Handle, 16);
+  
+  if (StopIfError(ret, "AvbSetAafBitDepth") != 0)
+  {
+    return;
+  }
+
+  ret = AvbSetAafSampleRate(gTalker_Handle, kTalker_AafSampleRate);
+  
+  if (StopIfError(ret, "AvbSetAafSampleRate") != 0)
+  {
+    return;
+  }
+    
+  ret = AvbSetAafChannelCount(gTalker_Handle, kTalker_AafChannelCount);
+  
+  if (StopIfError(ret, "AvbSetAafChannelCount") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbConnect(gTalker_Handle, destinationAddress, "OnAvbConnect");
+  
+  if (StopIfError(ret, "AvbConnect") != 0)
+  {
+    return;
+  }
+  
+  if (ret != kAvbIoPending)
+  {
+    SineGenerator_Start(GetSamplesPerSecond(kTalker_AafSampleRate) / 100, _pow(10, @Frequency));
+  }
+}
+
+on preStop
+{
+  long ret;
+  
+  SineGenerator_Stop();
+  
+  if (gTalker_Handle != 0)
+  {
+    ret = AvbCloseTalker(gTalker_Handle);
+    
+    if (StopIfError(ret, "AvbCloseTalker") != 0)
+    {
+      return;
+    }
+  }
+}
+
+on sysvar_update Frequency
+{
+  word frequencyHz;
+  
+  frequencyHz = _pow(10, @this);
+  
+  SineGenerator_SetFrequency(frequencyHz);
+  
+  @DisplayFrequency = frequencyHz;
+}
+
+void OnAvbConnect(dword talkerHandle, dword result)
+{
+  long ret;
+  
+  if (result != kAvbOK)
+  {
+    WriteErrorAndStop(result, "OnAvbConnect");
+    return;
+  }
+
+  SineGenerator_Start(GetSamplesPerSecond(kTalker_AafSampleRate) / 100, _pow(10, @Frequency));
+}
+
+void OnAvbSend(dword talkerHandle, dword result, int buffer[], dword length)
+{
+  if (result != kAvbOK)
+  {
+    WriteErrorAndStop(result, "OnAvbSend");
+    return;
+  }
+}
+
+void OnSineGeneratorTimer(float values[], dword count)
+{  
+  int buffer[kTalker_MaxBuffers][kSineGenerator_MaxBuffers];
+  dword bufferIndex, bufferOffset, i, ret;
+  int started;
+  
+  for (i = 0; i < count; i++)
+  {
+    buffer[bufferIndex][i] = (int)(values[i] * kTalker_MaxInt);
+  }
+ 
+  ret = AvbSend(gTalker_Handle, buffer[bufferIndex++], count, "OnAvbSend");
+
+  bufferIndex %= elCount(buffer);
+  bufferOffset = 0;
+
+  if (ret == kAvbDataOmmitted)
+  {
+    Write("Samples ommitted (delivered too late to AvbSend)");
+  }
+  else if (StopIfError(ret, "AvbSend") != 0)
+  {
+    return;
+  }
+}
+

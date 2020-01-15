@@ -1,0 +1,481 @@
+/*@@var:*/
+variables
+{
+  // flag indicating whether ET scan is processing
+  byte gbETScan;
+
+  // sink for displaying info (Tabs in write window)
+  DWORD tabScanFBlockET;
+
+  // severity
+  const int kSeverity_Success = 0;
+  const int kSeverity_Info    = 1;
+  const int kSeverity_Warning = 2;
+  const int kSeverity_Error   = 3;
+
+  // scan step
+  int gScanStep;
+  const int kScanStep_ET_Version                = 0;
+  const int kScanStep_ET_FktIDs                 = 1;
+  const int kScanStep_ET_NetInterfaceState      = 2;
+  const int kScanStep_ET_MessageBufSize         = 3;
+  const int kScanStep_ET_CentralRegistrySize    = 4;
+  const int kScanStep_ET_NotificationMatrixSize = 5;
+  
+  const int kFBlockID_ET = 0x0F; // Function Block EnhancedTestability
+
+  // functions of FBlock ET
+  const int fbET_FktIDs                 = 0x000;
+  const int fbET_NetInterfaceState      = 0x206;
+  const int fbET_MessageBufSize         = 0x209;
+  const int fbET_CentralRegistrySize    = 0x212;
+  const int fbET_NotificationMatrixSize = 0x213;
+  const int fbET_Version                = 0xF00;
+
+  // optypes
+  const byte opType_Get = 0x01;
+
+  mstimer noResponse;
+  const int noResponseDelay = 1000;
+}
+/*@@end*/
+
+/*@@sysvarChange:ScanET:*/
+on sysvar ScanET
+{
+  if(@this == 0)
+    return;
+
+  if(gbETScan == 1)
+    return;
+
+  gbETScan = 1;
+  sysSetVariableString( sysvar::ScanStatus, "Scanning ..." );
+
+  query_ScanFBlockET();
+}
+/*@@end*/
+
+/*@@caplFunc:query_ScanFBlockET():*///function
+query_ScanFBlockET ()
+{
+  int i, selDev;
+  mostMessage * msg;
+  selDev = @sysvar::SelectedETNodePos;
+
+  writeLineEx(tabScanFBlockET, kSeverity_Info,  "****************************************************************");
+  writeLineEx(tabScanFBlockET, kSeverity_Info,  "****************************************************************");
+
+  writeLineEx(tabScanFBlockET, kSeverity_Info, "");
+  writeLineEx(tabScanFBlockET, kSeverity_Info, "Scanning FBlock: EnhancedTestability at node position %d", selDev);
+
+  if(selDev == MostGetNPR(MostGetChannel()))
+  {
+    writeLineEx(tabScanFBlockET, kSeverity_Info,  "Function block EnhancedTestability not available");
+    gbETScan = 0;
+    sysSetVariableString( sysvar::ScanStatus, "ready" );
+    return;
+  }
+
+  gScanStep = kScanStep_ET_Version;
+  NextScanStep( selDev );
+}
+/*@@end*/
+
+/*@@mostAmsMsg:*:*/
+on mostAMSMessage *
+{
+  word functionId;
+  byte opType, errorCode;
+  long fktIDs[100];
+  int length, i, selDev;
+  char temp[100];
+  char msgBuf[10000];
+  char errInfo[100];
+  mostAmsMessage * copy = { DLC = 0xFFFF };
+
+  // we only react on received messages
+  if( this.dir == Tx )
+    return;
+
+  if(gbETScan == 0)
+    return;
+
+  if(kFBlockID_ET != this.FBlockId)
+    return;
+
+  copy = this;
+
+  selDev     = @sysvar::SelectedDevice;
+  functionId = copy.FunctionId;
+  opType     = copy.OpType;
+
+  switch( functionId )
+  {
+    case fbET_FktIDs:
+      
+      writeLineEx(tabScanFBlockET, kSeverity_Info, "");
+
+      if( opType == 0xF )
+      {
+        if(copy.DLC > 0)
+          GetErrorInfo(copy.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "FktIDs:                 %s", errInfo);
+      }
+      else
+      {
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "FktIDs:");
+        length = mostMsgDecodeRLE(copy, fktIDs, 100);
+
+        for( i=0; i<length; i++ )
+        {
+          writeLineEx(tabScanFBlockET, kSeverity_Info, "   0x%03x",fktIDs[i] );
+        }
+
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "");
+      }
+
+      // scan 'NetInterfaceState'
+      gScanStep = kScanStep_ET_NetInterfaceState;
+      NextScanStep( selDev );
+      break;
+
+    case fbET_NetInterfaceState:
+
+      writeLineEx(tabScanFBlockET, kSeverity_Info, "");
+
+      if( opType == 0xF )
+      {
+        if(copy.DLC > 0)
+          GetErrorInfo(copy.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "NetInterfaceState:      %s", errInfo);
+      }
+      else
+      {
+        switch( copy.BYTE(0) )
+        {
+          case 0: // Normal Operation
+            snprintf(temp, elcount(temp), "NetInterfaceState: NormalOperation");
+            break;
+          case 1: // StandBy
+            snprintf(temp, elcount(temp), "NetInterfaceState: StandBy");
+            break;
+          default:
+            snprintf(temp, elcount(temp), "NetInterfaceState: unknown");
+            break;
+         }
+
+        writeLineEx(tabScanFBlockET, kSeverity_Info, temp);
+      }
+
+      // scan 'MessageBufSize'
+      gScanStep = kScanStep_ET_MessageBufSize;
+      NextScanStep( selDev );
+      break;
+
+    case fbET_MessageBufSize:
+
+      writeLineEx(tabScanFBlockET, kSeverity_Info, "");
+
+      if( opType == 0xF )
+      {
+        if(copy.DLC > 0)
+          GetErrorInfo(copy.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "MessageBufSize:         %s", errInfo);
+      }
+      else
+      {
+        // retrieve all buffer sizes from the message
+        msgBuf[0] = '\0';
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "MessageBufSize:");
+
+        // buffer count rx
+        snprintf(msgBuf, elcount(msgBuf), "   BufferCountRx:   %d\n", (copy.BYTE(0) << 8) | copy.BYTE(1));
+        strncat(msgBuf, temp, elcount(msgBuf));
+
+        // message length rx
+        snprintf(temp, elcount(temp), "   MessageLengthRx: %d\n", (copy.BYTE(2) << 8) | copy.BYTE(3));
+        strncat(msgBuf, temp, elcount(msgBuf));
+        
+        // buffer count tx
+        snprintf(temp, elcount(temp), "   BufferCountTx:   %d\n", (copy.BYTE(4) << 8) | copy.BYTE(5));
+        strncat(msgBuf, temp, elcount(msgBuf));
+
+        // message length tx
+        snprintf(temp, elcount(temp), "   MessageLengthTx: %d\n", (copy.BYTE(6) << 8) | copy.BYTE(7));
+        strncat(msgBuf, temp, elcount(msgBuf));
+
+        // shared
+        if(copy.BYTE(8) == 1)
+          snprintf(temp, elcount(temp), "   Shared buffers:  %s\n", "Yes");
+        else
+          snprintf(temp, elcount(temp), "   Shared buffers:  %s\n", "No");
+
+        strncat(msgBuf, temp, elcount(msgBuf));
+
+        writeLineEx(tabScanFBlockET, kSeverity_Info, msgBuf);
+      }
+
+      // scan 'CentralRegistrySize'
+      gScanStep = kScanStep_ET_CentralRegistrySize;
+      NextScanStep( selDev );
+      break;
+
+    case fbET_CentralRegistrySize:
+
+      writeLineEx(tabScanFBlockET, kSeverity_Info, "");
+
+      if( opType == 0xF )
+      {
+        if(copy.DLC > 0)
+          GetErrorInfo(copy.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "CentralRegistrySize:    %s", errInfo);
+      }
+      else
+      {
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "CentralRegistrySize: %d", (copy.BYTE(0) << 8) | copy.BYTE(1));
+      }
+
+      // scan 'NotificationMatrixSize'
+      gScanStep = kScanStep_ET_NotificationMatrixSize;
+      NextScanStep( selDev );
+      break;
+
+    case fbET_NotificationMatrixSize:
+
+      writeLineEx(tabScanFBlockET, kSeverity_Info, "");
+
+      if( opType == 0xF )
+      {
+        if(copy.DLC > 0)
+          GetErrorInfo(copy.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "NotificationMatrixSize: %s", errInfo);
+      }
+      else
+      {
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "NotificationMatrixSize:");
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "   MinSize: %d", copy.BYTE(0));
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "   MaxSize: %d", copy.BYTE(1));
+      }
+
+      writeLineEx(tabScanFBlockET, kSeverity_Info, "");
+
+      @sysvar::ScanET = 0;
+      gbETScan = 0;
+      sysSetVariableString( sysvar::ScanStatus, "ready" );
+      break;
+
+    case fbET_Version:
+
+      writeLineEx(tabScanFBlockET, kSeverity_Info, "");
+
+      if( opType == 0xF )
+      {
+        // check for secondary node
+        if( (copy.DLC >= 3) && (copy.BYTE(0) == 0x0A) )
+        {
+          writeLineEx(tabScanFBlockET, kSeverity_Info, "Device at node position %d is a 'Secondary Node'", selDev);
+          writeLineEx(tabScanFBlockET, kSeverity_Info, "Primary Node Address: 0x%03X", (copy.BYTE(1) << 8) | copy.BYTE(2));
+          writeLineEx(tabScanFBlockET, kSeverity_Info, "");
+
+          cancelTimer( noResponse );
+
+          gbETScan = 0;
+          sysSetVariableString( sysvar::ScanStatus, "ready" );
+          break;
+        }
+        // check for FBlockID not available
+        else if( (copy.DLC > 0) && (copy.BYTE(0) == 0x01) )
+        {
+           writeLineEx(tabScanFBlockET, kSeverity_Info, "Function block EnhancedTestability not available");
+           writeLineEx(tabScanFBlockET, kSeverity_Info, "");
+
+           cancelTimer( noResponse );
+
+           gbETScan = 0;
+           sysSetVariableString( sysvar::ScanStatus, "ready" );
+           break;
+        }
+        else
+        {
+          if(copy.DLC > 0)
+            GetErrorInfo(copy.Byte(0), errInfo);
+          else
+            GetErrorInfo(-1, errInfo);
+
+          writeLineEx(tabScanFBlockET, kSeverity_Info, "Version:                %s", errInfo);
+        }
+      }
+      else
+      {
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "Version:");
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "   Major: %d", copy.BYTE(0));
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "   Minor: %d", copy.BYTE(1));
+        writeLineEx(tabScanFBlockET, kSeverity_Info, "   Build: %d", copy.BYTE(2));
+      }
+
+      // scan 'FktIDs'
+      gScanStep = kScanStep_ET_FktIDs;
+      NextScanStep( selDev );
+
+      break;
+    default:
+      return;
+  }
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  MostApplicationNode();
+
+  tabScanFBlockET = writeCreate("ScanET");
+  gbETScan = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:NextScanStep(int):*///function
+NextScanStep (int selDev)
+{
+  mostMessage * msg;
+
+  // general message parameters
+  msg.FBlockId = kFBlockID_ET;     // FBlockID  = NetBlock
+  msg.InstanceId = selDev;         // InstanceID  = node position
+  msg.OpType = opType_Get;         // OpType      = Get
+  msg.DA = 0x400+selDev;           // Destination = node position address
+  msg.DLC = 0x00;                  // DLC
+
+  switch (gScanStep)
+  {
+    case kScanStep_ET_Version:
+
+      MostSetFunctionID(msg, fbET_Version ); // FktID = Version
+      break;
+
+    case kScanStep_ET_FktIDs:
+
+      MostSetFunctionID(msg, fbET_FktIDs ); // FktID = FktIDs
+      break;
+
+    case kScanStep_ET_NetInterfaceState:
+
+      MostSetFunctionID(msg, fbET_NetInterfaceState ); // FktID = NetInterfaceState
+      break;
+
+    case kScanStep_ET_MessageBufSize:
+
+      MostSetFunctionID(msg, fbET_MessageBufSize ); // FktID = MessageBufSize
+      break;
+
+    case kScanStep_ET_CentralRegistrySize:
+
+      MostSetFunctionID(msg, fbET_CentralRegistrySize ); // FktID = CentralRegistrySize
+      break;
+
+    case kScanStep_ET_NotificationMatrixSize:
+
+      MostSetFunctionID(msg, fbET_NotificationMatrixSize ); // FktID = NotificationMatrixSize
+      break;
+
+    default: return;
+
+  }
+
+  output(msg);
+  cancelTimer( noResponse );
+  settimer( noResponse, noResponseDelay );
+}
+/*@@end*/
+
+/*@@timer:noResponse:*/
+on timer noResponse
+{
+  if(gScanStep >= kScanStep_ET_NotificationMatrixSize)
+  {
+    sysSetVariableString( sysvar::ScanStatus, "ready" );
+    gbETScan = 0;
+    return;
+  }
+
+  gScanStep++;
+  NextScanStep(@sysvar::SelectedETNodePos);
+}
+/*@@end*/
+
+/*@@caplFunc:GetErrorInfo(int,char[]):*///function
+/************************************************************
+ * This function is part of the visualization module of the *
+ * MOST-Scanner. It generates a string dependent on the     *
+ * type of error.                                           *
+ *                                                          *
+ * err      the received error code                         *
+ * out[]    the convenient error info                       * 
+ ************************************************************/
+
+void GetErrorInfo ( int err, char out[] )
+{
+  switch( err )
+  {
+    // FBlock not available
+    case( 0x01 ):
+      snprintf(out, elcount(out), "ERROR - FBlockID not avaliable");
+      break;
+
+    // InstID not available
+    case( 0x02 ):
+      snprintf(out, elcount(out), "ERROR - InstID not avaliable");
+      break;
+
+    // Function not available
+    case( 0x03 ):
+      snprintf(out, elcount(out), "ERROR - FunctionID not avaliable");
+      break;
+
+    // OPType not available
+    case( 0x04 ):
+      snprintf(out, elcount(out), "ERROR - OpType not avaliable");
+      break;
+
+    // Invalid Length
+    case( 0x05 ):
+      snprintf(out, elcount(out), "ERROR - Invalid message length");
+      break;
+
+    // Parameter wrong/out of range
+    case( 0x06 ):
+      snprintf(out, elcount(out), "ERROR - Parameter wrong/out of range");
+      break;
+
+    // Parameter not avaliable
+    case( 0x07 ):
+      snprintf(out, elcount(out), "ERROR - Parameter not avaliable");
+      break;
+
+    case ( -1): // DLC = 0
+      snprintf(out, elcount(out), "ERROR - No error code avaliable");
+      break;
+
+    default: // unknown error code
+      snprintf(out, elcount(out), "ERROR - Unknown error code 0x%02x", err);
+      break;
+  }
+}
+/*@@end*/
+

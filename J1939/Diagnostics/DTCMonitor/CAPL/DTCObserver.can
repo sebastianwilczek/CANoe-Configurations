@@ -1,0 +1,56 @@
+/*@!Encoding:1252*/
+includes
+{
+  
+}
+
+variables
+{
+  
+}
+
+/**
+Check all SPNs and FMIs transmitted by diagnostic message
+Current implementation checks the DM1 mesage only, but can be applied to any of the following PGs:
+DM01  0xFECA
+DM02  0xFECB
+DM06  0xFECF
+DM12  0xFED4
+DM23  0xFDB5
+DM27  0xFD82
+DM28  0xFD80
+DM41-DM52 0xFD5F - 0xFD54  if(this.pgn == 0xFECA)
+*/
+on pg *
+{
+  int numOfDTCs, posOfDTC;
+  dword dtc, spn;
+  byte fmi;
+  byte spnLow, spnMid, spnHigh;
+  {
+    if(this.pgn == 0xFECA) // DM01
+    {
+      //iterate over all DTCs in the DM01
+      if(this.dlc == 8)
+        numOfDTCs = 1;
+      else
+        numOfDTCs = (this.dlc - 2) / 4;
+      
+      for(posOfDTC = 0; posOfDTC < numOfDTCs; posOfDTC++)
+      {
+        dtc = this.dword(posOfDTC * 4 + 2);
+        //reassemble SPN from dtc
+        spnLow = dtc & 0xFF;
+        spnMid = (dtc >> 8) & 0xFF;
+        spnHigh = (dtc >> 16) & 0xE0;
+        
+        spn = (spnHigh << 16) | (spnMid << 8) | spnLow;
+        if(spn != 0)
+        {
+          fmi = (dtc >> 16) & 0x1F;
+          write("DM1 from adress 0x%X, DTC%d:  SPN = 0x%X (%d), FMI = 0x%X (%d)", this.SA, posOfDTC + 1, spn, spn, fmi, fmi);
+        }
+      }
+    }
+  }
+}

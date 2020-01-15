@@ -1,0 +1,133 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "TransportLayer/protTestability.cin"
+  #include "InternetLayer/protIPv4.cin"
+  #include "LinkLayer/protARP.cin"
+  #include "LinkLayer/protEther.cin"
+  
+  #include "ARPtable.cin"
+  #include "EnumDefinitions.cin" 
+  #include "includeSetting.cin"
+}
+
+variables
+{
+  byte gDHCPenabled;
+}
+on start
+{  
+  // initialize
+  initDUT();
+  
+  // register a ethernet receive callback function
+  EthReceivePacket("onEthPacket");
+  
+  if(@sysvar::TC8_DUT_Config::TestGroup != kArp)
+  {
+    initIPv4Address();
+  }
+}
+
+void SetIpReassemblyTimout(long fragTtlSeconds)
+{
+  ipSetStackParameter("net.inet.ip.fragttl", fragTtlSeconds); // timeout for IPv4 reassembly
+  IPv4FragReassemblyTimeout = fragTtlSeconds;
+}
+
+/// <initialize>
+// initialization of DUT parameter
+void initDUT()
+{
+  long lResult;
+  long lValue;
+  
+  // DHCP off
+  gDHCPenabled = 0;
+  
+  // set testability state
+  setTestAbilityState(TestAbility_State_Idle);
+  
+  // arp table initializaton
+  initArpTable();
+  
+  // Set TCP/IP stack parameter
+  ipSetStackParameter("net.inet.icmp.bmcastecho", 1); // reply broadcast icmp
+  SetIpReassemblyTimout(kIPV4_DEF_FRAG_REASSEMBLY_TIMEOUT);
+  ipSetStackParameter("net.inet.tcp.path_mtu_discovery", 1);  // Set DF bit
+  ipSetStackParameter("net.inet.tcp.mssdflt", kIPV4_DEF_MSS);
+  ipSetStackParameter("net.inet.tcp.v6mssdflt", kIPV6_DEF_MSS);
+  
+  lResult = ipSetStackParameter("net.inet.tcp.rexmit_slop", kTCP_RETRANSMIT_SLOP);
+  if(lResult != 0) {
+    writeLineEx(1, 3, "Failed to set rexmit_slop to %d byte. Result: %d", kTCP_RETRANSMIT_SLOP, lResult);
+    writeLineEx(1, 3, "IpGetLastError: %d", IpGetLastError());
+  }
+  lResult = ipSetStackParameter("net.inet.tcp.rexmit_min", kTCP_RETRANSMIT_MIN);
+  if(lResult != 0) {
+    writeLineEx(1, 3, "Failed to set rexmit_min to %d byte. Result: %d", kTCP_RETRANSMIT_MIN, lResult);
+    writeLineEx(1, 3, "IpGetLastError: %d", IpGetLastError());
+  }
+  
+  // reset finwait2-time
+  if(setSocketFinwait2TimeOut(kTCP_FINWAIT2_TIMEOUT) != 0)
+  {
+    writeLineEx(1, 3, "Failed to reset finwait2_timeout. IpGetLastError: %d", IpGetLastError());
+  }
+  // reset msl
+  if(setSocketMsl(kTCP_MSL) != 0)
+  {
+    writeLineEx(1, 3, "Failed to reset MSL. IpGetLastError: %d", IpGetLastError());
+  }
+
+  gTcpSetFlags.bEnable = 0;
+  
+  gbListenAndAcceptEvtFlag = 0;
+  initSendData(gSendDataQueue);
+}
+
+on sysvar sysvar::TC8_DUT_Config::TestGroup
+{
+  if(@sysvar::TC8_DUT_Config::TestGroup == kArp)
+  {
+    Write("TC8 Config: ARP test is selected");
+    remoteIPv4Address();
+  }
+  else
+  {
+    initIPv4Address();
+    Write("TC8 Config: other test is selected");
+  }
+}
+
+on stopMeasurement
+{
+  if(@sysvar::TC8_DUT_Config::TestGroup != kArp)
+  {
+    remoteIPv4Address();
+  }
+}
+

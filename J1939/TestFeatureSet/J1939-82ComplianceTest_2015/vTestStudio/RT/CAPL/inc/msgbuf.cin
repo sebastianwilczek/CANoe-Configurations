@@ -1,0 +1,494 @@
+/*@!Encoding:1252*/
+includes
+{
+}
+
+variables
+{
+  struct MsgBufEntry
+  {
+    dword id;
+    int64 time_ns;
+    dword dlc;
+    byte isJ1939WideEvent;
+    byte data[256];
+  };
+  
+  struct ErrFrameStruct
+  {
+    word CAN;
+    word MsgChannel;
+    dword ID;
+    byte DLC;
+    int64 Time_ns;
+    qword SOF;
+    dword ErrorPosition_Bit;
+    dword ErrorPosition_Time;
+    byte FDF;
+    byte BRS;
+    byte ESI;
+    char Phase;
+    word ErrorCode;
+    byte CtrlType;
+  };
+
+  enum eFilterType
+  {
+      gFT_BLOCKFILTER = 0
+    , gFT_FILTEROUT  = 0
+    , gFT_PASSFILTER = 1
+    , gFT_HIGHPASS = 2
+    , gFT_LOWPASS  = 3
+  };
+  
+  const word IDX_NOT_FOUND = 0xFFFF;          // const for buffer find routines to detect a not found.
+  const word MSGBUF_SIZE = IDX_NOT_FOUND-1;   // do not set the size to a max of 0xFFFF, this is "IDX_NOT_FOUND"
+  struct MsgBufEntry gMsgBuf[long];           // global message buffer.
+  struct ErrFrameStruct gErrFrameBuf[long];   // global error frame buffer.
+  byte gMsgBufRecordingActive = 0;            // global message buffer activation flag.
+  byte gMsgBufRecordTP = 0;                   // semaphore to record on pg
+  word gMsgBufCounter = 0;                    // global message buf counter
+  byte gMsgBufEnabled = 1;                    // global message buffer enable flag.
+  byte gMsgBufErrorFrameChannel = 0;          // default 0 to get all error frames on all channels.
+}
+
+
+// ==============================================================================================================
+// get an empty message buffer structure.
+void MsgBuf_InitEmptyMsg(struct MsgBufEntry result)
+{
+  result.time_ns = 0;
+  result.id = -1;
+  result.dlc = 0;
+  result.isJ1939WideEvent = 0;
+}
+
+
+// ==============================================================================================================
+// clear message buffer.
+void MsgBuf_Clear()
+{
+  struct MsgBufEntry emptyMsg;
+  word i;
+  MsgBuf_InitEmptyMsg(emptyMsg);
+  MsgBuf_Add(emptyMsg); // resets the message-buffer index-counter. (empty message)
+  gErrFrameBuf.clear();
+  for (i=0; i<MSGBUF_SIZE; i++)
+  {
+    MsgBuf_InitEmptyMsg(gMsgBuf[i]);
+  }
+}
+
+// ==============================================================================================================
+// check for empty (uninitialized) message*
+byte MsgBuf_IsEmptyMsg(struct MsgBufEntry m)
+{
+  return ( 1    
+      &&  (m.time_ns == 0)
+      &&  (m.id == -1)
+      &&  (m.dlc == 0)
+      &&  (m.isJ1939WideEvent == 0)
+    );
+}
+
+// ==============================================================================================================
+// check for valid (non empty / uninitialized) message*
+byte MsgBuf_IsValidMsg(struct MsgBufEntry m)
+{
+  return !MsgBuf_IsEmptyMsg(m);
+}
+
+// ==============================================================================================================
+// get MsgBufEntry out of given pg
+void MsgBuf_Copy(struct MsgBufEntry dst, pg* src)
+{
+  word i;
+  dst.id  = src.id;
+  dst.dlc = src.dlc;
+  dst.time_ns = src.time_ns;
+  dst.isJ1939WideEvent = 0; // only known after adding to buffer, due indicates through same time-stamps in history.
+  for(i=0; i<src.dlc; i++) if (i<elcount(dst.data)) dst.data[i] = src.byte(i);
+}
+
+// ==============================================================================================================
+// fill message out of given msgbuf entry.
+void MsgBuf_Copy(message * dst, struct MsgBufEntry src)
+{
+  word i;
+  dst.id  = src.id;
+  dst.dlc = src.dlc;
+  dst.time = src.time_ns;
+  for(i=0; i<src.dlc; i++) if (i<dst.dlc) dst.byte(i) = src.data[i];
+}
+
+
+// ==============================================================================================================
+// fill MsgBufEntry out of given entry
+void MsgBuf_Copy(struct MsgBufEntry dst, struct MsgBufEntry src)
+{
+  word i;
+  dst.id  = src.id;
+  dst.dlc = src.dlc;
+  dst.time_ns = src.time_ns;
+  dst.isJ1939WideEvent = src.isJ1939WideEvent;
+  for(i=0; i<src.dlc; i++) if (i<elcount(dst.data)) dst.data[i] = src.data[i];
+}
+
+
+// ==============================================================================================================
+// helper to add given message to the message buffer.
+// adding an empty message (uninitialized message*) the internal index-counter of the buffer is resetted.
+void MsgBuf_Add(struct MsgBufEntry m)
+{
+  word i;
+  if (MsgBuf_IsEmptyMsg(m))
+  {
+    gMsgBufCounter = 0;
+    return;
+  }
+  
+  if (gMsgBufCounter < MSGBUF_SIZE)
+  {
+    if ( (m.id & 0x80000000) == 0x80000000 )
+    {
+      m.isJ1939WideEvent = ( (gMsgBufCounter>0) && (gMsgBuf[gMsgBufCounter-1].time_ns == m.time_ns) );
+      MsgBuf_Copy(gMsgBuf[gMsgBufCounter++], m);
+    }
+  }
+  else
+  {
+    writeEx(3, 3, "MESSAGE BUFFER OVERRUN.");
+  }
+}
+
+// ==============================================================================================================
+void MsgBuf_Print_Header(dword bitmask)
+{
+  write("MsgBuf:");
+  write("[idx] | [ts]     | [ID]       (BITMASK=%.08x)", bitmask);
+  write("------+----------+--------------------------------");
+}
+
+// ==============================================================================================================
+void MsgBuf_Print_Entry(struct MsgBufEntry entry, dword bitmask)
+{
+  dword CANId;
+  CANId = entry.ID & 0x1FFFFFFF;
+  if (!MsgBuf_IsEmptyMsg(entry))
+  {
+    write("%lld | 0x%.08X (masked: 0x%.08X)", entry.time_ns, CANId, CANId & bitmask);
+  }
+}
+// ==============================================================================================================
+void MsgBuf_Print_Entry(word entryNr, dword bitmask)
+{
+  dword CANId;
+  CANId = gMsgBuf[entryNr].ID & 0x1FFFFFFF;
+  if (MsgBuf_IsValidMsg(gMsgBuf[entryNr]))
+  {
+    write("%.05d | %.06f | 0x%.08X (masked: 0x%.08X)", entryNr, (double)gMsgBuf[entryNr].time_ns/(double)1000000000, CANId, CANId & bitmask);
+  }
+}
+// ==============================================================================================================
+void MsgBuf_Print_Entrys(dword bitmask)
+{
+  word i;
+  MsgBuf_Print_Header(bitmask);
+  for (i=0; i<MSGBUF_SIZE; i++) 
+  {
+    if (!MsgBuf_IsValidMsg(gMsgBuf[i])) break;
+    MsgBuf_Print_Entry(i, bitmask);
+  }
+}
+
+// ==============================================================================================================
+// get index for given timestamp in buffer starting at given startindex si.
+// the result is the entry with the first timestamp that is >= the given timestamp.
+// if the timestamp was not found, 0xFFFF (NOT_FOUND) is returned.
+word MsgBuf_FindByTimestamp(word si, int64 ts)
+{
+  word i;
+  for (i=si; i<MSGBUF_SIZE; i++)
+  {
+    if (gMsgBuf[i].time_ns >= ts) return i;
+    if (MsgBuf_IsEmptyMsg(gMsgBuf[i])) break;
+  }
+  return IDX_NOT_FOUND;
+}
+
+// ==============================================================================================================
+// filter resulting bufindices by time to be in given range [ts;te]
+// to ignore te set it to -1. this leads to be te a max value. Else te is smaller then ts and will be taken as starting time.
+void MsgBuf_FilterByTimestamp( word bufIndices[long], int64 ts, int64 te, enum eFilterType filterType )
+{
+  int64 t,a,b;
+  long idx,i;
+  byte debug;
+  word result[long];
+  result.clear();
+  a=_min(ts, te);
+  b=_max(ts, te);
+  i=0;
+  for (long k:bufIndices)
+  {
+    idx = bufIndices[k];
+    t = gMsgBuf[idx].time_ns;
+    switch(filterType)
+    {
+      case gFT_BLOCKFILTER: if ( (t<a) || (t>b) ) result[i++]=idx; break;
+      case gFT_HIGHPASS: if (t>b) result[i++]=idx; break;
+      case gFT_LOWPASS: if (t<a) result[i++]=idx; break;
+      default: if ( (t>=a) && (t<=b) ) result[i++]=idx; break;
+    }
+  }
+  
+  bufIndices.clear();
+  for(long k:result) bufIndices[k] = result[k];
+}
+void MsgBuf_FilterByTimestamp( word bufIndices[long], int64 ts, int64 te )
+{
+  MsgBuf_FilterByTimestamp( bufIndices, ts, te, gFT_PASSFILTER );
+}
+
+// ==============================================================================================================
+// filter resulting bufindices by given ID.
+// filter respects only entries fitting the given bitmask
+void MsgBuf_FilterByID( word bufIndices[long], dword ID, dword bitmask, enum eFilterType filterType )
+{
+  long idx,i;
+  byte debug = 0;
+  word result[long];
+  
+  
+  if (debug) write("Filtering buffer for ID=%x (masked=%x), bitmask=%x, filterType=%d", ID, ID&bitmask, bitmask, filterType);
+  
+  result.clear();
+  i=0;
+  for (long k:bufIndices)
+  {
+    idx = bufIndices[k];
+    if (debug) write("(gMsgBuf[idx].id & bitmask)=%x, (ID & bitmask)=%x", (gMsgBuf[idx].id & bitmask), (ID&bitmask));
+    switch(filterType)
+    {
+      case gFT_BLOCKFILTER: if ( (gMsgBuf[idx].id & bitmask) != (ID & bitmask) ) result[i++] = idx; break;
+      case gFT_HIGHPASS: if ( (gMsgBuf[idx].id & bitmask) > (ID & bitmask) ) result[i++] = idx; break;
+      case gFT_LOWPASS: if ( (gMsgBuf[idx].id & bitmask) < (ID & bitmask) ) result[i++] = idx; break;
+      default: if ( (gMsgBuf[idx].id & bitmask) == (ID & bitmask) ) result[i++] = idx; break;
+    }
+  }
+  
+  bufIndices.clear();
+  for(long k:result) bufIndices[k] = result[k];
+}
+void MsgBuf_FilterByID( word bufIndices[long], dword ID, dword bitmask )
+{
+  MsgBuf_FilterByID(bufIndices, ID, bitmask, gFT_PASSFILTER);
+}
+// ==============================================================================================================
+// get all indices (assoc array) with all timestamps between [ts;te] starting at index si
+void MsgBuf_FindAllByTimestamp(word result[long], word si, int64 ts, int64 te)
+{
+  word i;
+  long c;
+  int64 a,b,t;
+  c=0;
+  result.clear();
+  a=_min(ts, te);
+  b=_max(ts, te);
+  for (i=si; i<MSGBUF_SIZE; i++)
+  {
+    t = gMsgBuf[i].time_ns;
+    if ( (t>=a) && (t<=b) ) result[c++] = i;
+    if (MsgBuf_IsEmptyMsg(gMsgBuf[i])) break;
+  }
+}
+
+// ==============================================================================================================
+// get index for message with given id fitting given bitmask. Start searching from given timestamp onwards.
+// if not found, 0xffff (IDX_NOT_FOUND) is returned.
+word MsgBuf_FindByID(int64 ts, dword id, dword bitmask)
+{
+  word ri;
+  
+  // get entrypoint...
+  ri = MsgBuf_FindByTimestamp(0, ts);
+
+  // if not found, return not found...
+  if (ri == IDX_NOT_FOUND) return IDX_NOT_FOUND;
+  
+  // if there is an entrypoint, search onwards for the id fitting given bitmask...
+  return MsgBuf_FindByID(ri, id, bitmask);
+}
+
+// ==============================================================================================================
+// find next index matching message with given id fitting given bitmask. if not found 0xffff (IDX_NOT_FOUND) is returned.
+word MsgBuf_FindByID(word si, dword id, dword bitmask)
+{
+  word i;
+  for (i=si; i<MSGBUF_SIZE; i++)
+  {
+    if ( (gMsgBuf[i].ID & bitmask) == (id & bitmask) ) return i;
+    if (MsgBuf_IsEmptyMsg(gMsgBuf[i])) break;
+  }
+  return IDX_NOT_FOUND;
+}
+
+// ==============================================================================================================
+// find all indices (assoc array) with all ids fitting the given bitmask, starting at given index si
+void MsgBuf_FindAllByID(word result[long], word si, dword id, dword bitmask)
+{
+  word i;
+  long c;
+  c=0;
+  result.clear();
+  for (i=si; i<MSGBUF_SIZE; i++)
+  {
+    //write("MsgBuf_FindAllByID: Compare id %x with %x using bm %x (%x == %x)", gMsgBuf[i].ID, id, bitmask, gMsgBuf[i].ID&bitmask, id&bitmask);
+    if ( (gMsgBuf[i].ID & bitmask) == (id & bitmask) ) result[c++] = i;
+    if (MsgBuf_IsEmptyMsg(gMsgBuf[i])) break;
+    
+  }  
+}
+
+// ==============================================================================================================
+// find next index (starting from index si) matching message with given id. if not found 0xffff (IDX_NOT_FOUND) is returned.
+word MsgBuf_FindByDLC(word si, byte dlc)
+{
+  word i;
+  for (i=si; i<MSGBUF_SIZE; i++)
+  {
+    if (gMsgBuf[i].DLC == dlc) return i;
+    if (MsgBuf_IsEmptyMsg(gMsgBuf[i])) break;
+  }
+  return IDX_NOT_FOUND;
+}
+
+// ==============================================================================================================
+// find all indices (assoc array) with all messages fitting given dlc starting at index si
+void MsgBuf_FindAllByDLC(word result[long], word si, byte dlc)
+{
+  word i;
+  word c=0;
+  result.clear();
+  for (i=si; i<MSGBUF_SIZE; i++)
+  {
+    if (gMsgBuf[i].DLC == dlc) result[c++] = i;
+    if (MsgBuf_IsEmptyMsg(gMsgBuf[i])) break;
+  }
+}
+
+// ==============================================================================================================
+// start CAN message buffering. (implied within CT_BEGIN)
+void MsgBuf_StartRecording()
+{
+  MsgBuf_Clear();
+  gMsgBufRecordingActive = 1;
+  //write("Recording ON");
+}
+
+// ==============================================================================================================
+// stop CAN message buffering
+void MsgBuf_StopRecording()
+{
+  gMsgBufRecordingActive = 0;
+  //write("Recording OFF");
+}
+
+// ==============================================================================================================
+qword MsgBuf_GetQWPayload(struct MsgBufEntry entry)
+{
+  return 
+      ((qword)entry.data[7] << 56)
+    | ((qword)entry.data[6] << 48)
+    | ((qword)entry.data[5] << 40)
+    | ((qword)entry.data[4] << 32)
+    | ((qword)entry.data[3] << 24)
+    | ((qword)entry.data[2] << 16)
+    | ((qword)entry.data[1] << 08)
+    | ((qword)entry.data[0] << 00)
+    ;
+}
+
+// ==============================================================================================================
+// Merge two indice buffers a and b into the resulting buffer.
+void MsgBuf_Merge(word result[long], word s1[long], word s2[long])
+{
+  long t;
+  dword i;
+  word tmp[long];
+  // strat:
+  // use temp buffer sorting s1 and s2 completely into by timestamp.
+  // assoc array is sorted then by time.
+  // after that build up the resulting buffer index list.
+  for(long k: s1)
+  {
+    i=s1[k];  // buffer index.
+    t=gMsgBuf[i].time_ns; // ns time of the message at buffer index.
+    tmp[t]=i; // "sort into temp buffer with time_ns as index"
+  }
+  for(long k: s2)
+  {
+    i=s2[k];  // buffer index.
+    t=gMsgBuf[i].time_ns; // ns time of the message at buffer index.
+    tmp[t]=i; // "sort into temp buffer with time_ns as index"
+  }
+  
+  // build result.
+  result.clear(); 
+  i=0;
+  for(long k: tmp)
+  {
+    result[i++] = tmp[k]; // put buffer index to result.
+  }
+  tmp.clear();
+}
+
+
+// ==============================================================================================================
+void MsgBuf_OnPG_Callback(pg * p)
+{
+  word i;
+  struct MsgBufEntry e;
+  if (gMsgBufRecordingActive && gMsgBufEnabled)
+  {
+    MsgBuf_Copy(e, p);
+    MsgBuf_Add(e);
+  }
+}
+
+// ==============================================================================================================
+on errorFrame
+{
+  long idx;
+  word extInfo;
+  int nDir;
+  if (gMsgBufRecordingActive)
+  {
+
+    extInfo = (this.ErrorCode >> 12) & 0x3;
+    nDir = extInfo == 0 || extInfo == 2 ? 0 : 1; //set ndir to 0 for RX and to 1 for TX
+    if (nDir == tx) 
+    {
+      write("TX ERRORFRAMES DETECTED. STOPPING MEASUREMENT");
+      stop();
+    }
+    
+    if( (gMsgBufErrorFrameChannel>0) && (gMsgBufErrorFrameChannel != this.can) ) return;
+
+    idx = gErrFrameBuf.size();
+    gErrFrameBuf[idx].BRS = this.BRS;
+    gErrFrameBuf[idx].CAN = this.CAN;
+    gErrFrameBuf[idx].CtrlType = this.CtrlType;
+    gErrFrameBuf[idx].DLC = this.DLC;
+    gErrFrameBuf[idx].ESI = this.ESI;
+    gErrFrameBuf[idx].ErrorCode = this.ErrorCode;
+    gErrFrameBuf[idx].ErrorPosition_Bit = this.ErrorPosition_Bit;
+    gErrFrameBuf[idx].ErrorPosition_Time = this.ErrorPosition_Time;
+    gErrFrameBuf[idx].FDF = this.FDF;
+    gErrFrameBuf[idx].ID = this.ID;
+    gErrFrameBuf[idx].MsgChannel = this.MsgChannel;
+    gErrFrameBuf[idx].Phase = this.Phase;
+    gErrFrameBuf[idx].SOF = this.SOF;
+    gErrFrameBuf[idx].Time_ns = this.time_ns;
+  }
+}

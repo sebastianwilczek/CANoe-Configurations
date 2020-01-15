@@ -1,0 +1,254 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+/**
+ * Closes a socket.
+ * @param socketId Socket that should be closed
+ */
+long Internal_Stub_TcpCloseSocket(word socketId, enum Bool abort)
+{
+  return SP_TCP_CloseSocket(socketId, abort);
+}
+
+/**
+ * Closes a socket and waits for response.
+ * @param socketId Socket that should be closed
+ */
+long Internal_Stub_TcpCloseSocket_WaitForResponse(word socketId, enum Bool abort)
+{
+  return SP_TCP_CloseSocket_WaitForResponse(socketId, abort);
+}
+
+/**
+ * Creates a socket and optionally binds this socket to a port and a local IP address.
+ * @param doBind kTrue: bind will be performed, kFalse: no bind will be performed
+ * @param localAddress Local address
+ * @param localPort Local port to bind
+ * @param socketId Output: The resulting socket ID
+ */
+long Internal_Stub_TcpCreateAndBind(enum Bool doBind, char localAddress[], word localPort, word& socketId)
+{
+  byte ipV6Addr[16];
+  long result;
+  
+  if(ConvertIpAddressStringToByteArray(localAddress, ipV6Addr) == 4)
+  {
+    result = SP_TCP_CreateAndBind(doBind, localPort, ipGetAddressAsNumber(localAddress));
+  }
+  else
+  {
+    result = SP_TCP_CreateAndBind(doBind, localPort, ipV6Addr);
+  }
+  socketId = gInternalServicePrimitiveResponseParameters.CreateAndBindResponse.socketId;
+  return result;
+}
+
+/**
+ * Sends data to a target.
+ * @param socketId Local socket used to perform the transmission
+ * @param totalLength Total length: repeat data up to that length
+ * @param flags Flags of the TCP Message
+ * @param data Data to transmit
+ */
+long Internal_Stub_TcpSendData(word socketId, word totalLength, byte flags, char data[])
+{
+  return SP_TCP_SendData(socketId, totalLength, data, flags);
+}
+
+/**
+ * Sends data to a target and wait for a response.
+ * @param socketId Local socket used to perform the transmission
+ * @param totalLength Total length: repeat data up to that length
+ * @param flags Flags of the TCP Message
+ * @param data Data to transmit
+ */
+long Internal_Stub_TcpSendData_WaitForResponse(word socketId, word totalLength, byte flags, char data[])
+{
+  return SP_TCP_SendData_WaitForResponse(socketId, totalLength, data, flags);
+}
+
+/**
+ * Data that will be received after the call of this SP will be forwarded to the test system.
+ * @param socketId The Socket selected for forwarding
+ * @param maxFwd Maximum length of payload to be forwarded per event
+ * @param MaxLen Maximum count of bytes to receive over all
+ * @param dropCnt Output: Count of received and dropped bytes within the inactive phase of this SP
+ */
+long Internal_Stub_TcpReceiveAndForward(word socketId, word maxFwd, word maxLen, word& dropCnt)
+{
+  long result;
+  result = SP_Tcp_ReceiveAndForward(socketId, maxFwd, maxLen);
+  dropCnt = gInternalServicePrimitiveResponseParameters.ReceiveAndForwardResponse.dropCnt;
+  return result;
+}
+
+/**
+ * Data that will be received after the call of this SP will be forwarded to the test system.
+ * @param timeoutMilliseconds Listen timeout in milliseconds
+ * @param fullLen Output: The full length of available data in bytes
+ * @param payload Output: The payload that was received
+ * @param payloadLength Output: The length of the payload that was received
+ */
+long Internal_Stub_TcpReceiveAndForwardEvent(long timeoutMilliseconds, word& fullLen, byte payload[], word& payloadLength)
+{
+  long result;
+  int bytesToCopy;
+  result = TmpWaitForServicePrimitiveEvent(kInternalEventReceiveAndForward, timeoutMilliseconds);
+  if(result == 1) // event occured
+  {
+    fullLen = gInternalServicePrimitiveEventParameters.ReceiveAndForwardTcpEvent.fullLen;
+    bytesToCopy = _min(elcount(payload), elcount(gInternalServicePrimitiveEventParameters.ReceiveAndForwardTcpEvent.payload));
+    memcpy(payload, gInternalServicePrimitiveEventParameters.ReceiveAndForwardTcpEvent.payload, bytesToCopy);
+    payloadLength = gInternalServicePrimitiveEventParameters.ReceiveAndForwardTcpEvent.payloadByteLength;
+    return gInternalServicePrimitiveEventParameters.ReceiveAndForwardTcpEvent.resultId;
+  }
+  else if(result == 0) // event did not occur
+  {
+    return -1;
+  }
+  else //error during wait
+  {
+    return -1;
+  }
+}
+
+/**
+ * Marks a socket as listen socket that will be used to accept incoming connections.
+ * @param listenSocketId Local socket that should listen
+ * @param maxCon Maximum number of connections allowed to establish
+ */
+long Internal_Stub_TcpListenAndAccept(word listenSocketId, word maxCon)
+{
+  return SP_Tcp_Listen_and_Accept(listenSocketId, maxCon);
+}
+
+/**
+ * Marks a socket as listen socket that will be used to accept incoming connections.
+ * @param timeoutMilliseconds Listen timeout in milliseconds
+ * @param listenSockedId Output: Listen socket where the connection was established
+ * @param newSocketId Output: Socket of the newly created connection
+ * @param port Output: Client Port
+ * @param address Output: Client IP address
+ */
+long Internal_Stub_TcpListenAndAcceptEvent(long timeoutMilliseconds, word& listenSockedId, word& newSocketId, word& port, char address[])
+{
+  long result;
+  int bytesToCopy;
+  write("Entering Internal_Stub_TcpListenAndAcceptEvent");
+  
+  result = TmpWaitForServicePrimitiveEvent(kInternalEventListenAndAccept, timeoutMilliseconds);
+  if(result == 1) // event occured
+  {
+    write("Internal_Stub_TcpListenAndAcceptEvent Text Event received");
+    listenSockedId = gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.listenSocketId;
+    newSocketId = gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.newSocketId;
+    port = gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.port;
+    if(gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.ipAddressByteLength == 4)
+    {
+      snprintf(address, elcount(address),
+        "%d.%d.%d.%d",
+        gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.address[0],
+        gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.address[1],
+        gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.address[2],
+        gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.address[3]);
+    }
+    else
+    {
+      IpGetAddressAsString(
+        gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.address,
+        address,
+        elcount(address));
+    }
+    return 0;
+  }
+  else if(result == 0) // event did not occur
+  {
+    return -1;
+  }
+  else //error during wait
+  {
+    return -1;
+  }
+}
+
+/**
+ * Triggers a TCP connection to a remote destination.
+ * @param socketId TCP socket that should connect to a remote destination
+ * @param destPort Port of the remote destination
+ * @param destAddr IP address of the remote destination
+ */
+long Internal_Stub_TcpConnect(word socketId, word destPort, char destAddr[])
+{
+  byte ipV6Addr[16];
+  
+  if(ConvertIpAddressStringToByteArray(destAddr, ipV6Addr) == 4)
+  {
+    return SP_Tcp_Connect(socketId, destPort, ipGetAddressAsNumber(destAddr));
+  }
+  else
+  {
+    return SP_Tcp_Connect(socketId, destPort, ipV6Addr);
+  }
+}
+
+/**
+ * Triggers a TCP connection to a remote destination with waiting for response.
+ * @param socketId TCP socket that should connect to a remote destination
+ * @param destPort Port of the remote destination
+ * @param destAddr IP address of the remote destination
+ */
+long Internal_Stub_TcpConnect_WaitForResponse(word socketId, word destPort, char destAddr[])
+{
+  byte ipV6Addr[16];
+  
+  if(ConvertIpAddressStringToByteArray(destAddr, ipV6Addr) == 4)
+  {
+    return SP_Tcp_Connect_WaitForResponse(socketId, destPort, ipGetAddressAsNumber(destAddr));
+  }
+  else
+  {
+    return SP_Tcp_Connect_WaitForResponse(socketId, destPort, ipV6Addr);
+  }
+}
+
+/**
+ * This SP is used to select and set parameters that can be configured on a socket basis.
+ * @param socketId socket that should be configured
+ * @param paramId Selects the parameter to be configured
+ * @param paramVal The value of the selected parameter that must match the corresponding length.
+ */
+long Internal_Stub_TcpConfigureSocket(word socketId, word paramId, byte paramVal[], word paramLength)
+{
+  return SP_Tcp_ConfigureSocket(socketId, paramId, paramVal, paramLength);
+}
+
+/**
+ * Shuts down a socket.
+ * @param socketId Socket that should shutdown
+ * @param typeId Selects the way the socket is shutdown
+ */
+long Internal_Stub_TcpShutdown(word socketId, byte typeId)
+{
+  return SP_Tcp_Shutdown(socketId, typeId);
+}

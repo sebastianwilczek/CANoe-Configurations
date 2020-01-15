@@ -1,0 +1,192 @@
+/*@!Encoding:1252*/
+/*
+ * Receiver                                      Version 1.0
+ *
+ * Copyright Vector Informatik GmbH - All right reserved
+ *
+ * This node receives both ASN.1 protocols and passes some
+ * values of the received protocol fields to the panel.
+ * 
+ * History:
+ * 1.0   (sbj) Created
+ * 2.0   (bje) Enhanced
+ */
+
+includes
+{
+  #include  "..\DataSources\ASNV_Template_ASN1Protocol.cin"
+}
+
+variables
+{
+  char  gErrorString[1024];
+  char  gStrResult[8193];
+  char  gDataResult[1024];
+  int64 gResult;
+  
+  struct ASN1Protocol asn1;
+}
+
+void OnC2xPacket( LONG channel, LONG dir, LONG radioChannel, LONG signalStrength, LONG signalQuality, LONG packet ) 
+{
+  int64 gResult;  
+
+  gResult = C2xGetTokenInt64(packet, "btp", "destination");
+
+  if (C2xGetLastError()!=0)
+  {
+    if (C2xGetLastError()!=106)
+    /* ignore error if protocol 'btp' was not found in packet */
+    {      
+      C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+      write("OnC2xPacket: Get Token returned error: %s", gErrorString);
+    }    
+  }
+  else 
+  {
+    if (gResult == 2012) /* ASN.1 example protocol 'ASN1Protocol' */
+    {
+      HandleASN1Protocol(packet);
+    }    
+  }
+}
+
+on start
+{
+  if (C2xRegisterCallback(0, "OnC2xPacket") != 0) // register the receive callback
+  {
+    C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+    write("on start: C2xRegisterCallback returned error: %s", gErrorString);
+  }
+}
+
+void HandleASN1Protocol (LONG packet)
+{   
+  API_GetASN1ProtocolParams(packet, asn1);
+  
+  GetASN1ProtocolBooleanField(asn1);
+  
+  GetASN1ProtocolBitStringField(asn1);
+  
+  GetASN1ProtocolEnumeratedField(asn1);
+  
+  GetASN1ProtocolArrayField(asn1); 
+  
+  if(C2xIsTokenAvailable(packet, "ASN1Protocol", "sequenceField.intFieldOptional"))
+  {
+    GetASN1ProtocolIntOptField(asn1);
+  }
+  else
+  {
+    SysSetVariableString(SysVar::Receiver::SysVarIntOpt, "NOT SET");
+  }
+  
+  GetASN1ProtocolIntPhysField(asn1);
+    
+  GetASN1ProtocolOctetStringField(asn1); 
+}
+
+void GetASN1ProtocolArrayField (struct ASN1Protocol asn1)
+{
+  char arrayText[8192];
+  char arrayTextElement[1024];
+  char tmpString[1024];
+  int stringLength;
+  int i, j;
+  
+  tmpString[0]        = 0;
+  arrayText[0]        = 0;
+  arrayTextElement[0] = 0;
+  
+  SysSetVariableString(SysVar::Receiver::SysVarArray, arrayText); 
+
+  for(i=0; i < asn1.sequenceField.arrayField.length; i++)
+  {
+    switch(asn1.sequenceField.arrayField.arrayValue[i].choice)
+    {
+      case 0:
+        snprintf(tmpString, elCount(tmpString), "%i is the number '%i'", i, asn1.sequenceField.arrayField.arrayValue[i].numberChoice);
+        strncat(arrayTextElement, tmpString, elcount(arrayTextElement));
+        break;
+      case 1:
+        snprintf(tmpString, elCount(tmpString), "%i is the string '%s'", i, asn1.sequenceField.arrayField.arrayValue[i].ia5StringChoice.string);
+        strncat(arrayTextElement, tmpString, elcount(arrayTextElement));
+        break;
+    }
+    
+    stringLength = strlen(arrayTextElement) % 35;
+    if (stringLength != 0)
+    { 
+      for (j=35; j>stringLength; j--)
+      {        
+        strncat(arrayTextElement, " ", elcount(arrayTextElement));
+      }        
+    }
+  
+    strncat(arrayText, arrayTextElement, elcount(arrayText));
+  }
+  
+  SysSetVariableString(SysVar::Receiver::SysVarArray, arrayTextElement);  
+}
+
+void GetASN1ProtocolBooleanField (struct ASN1Protocol asn1)
+{
+  if(asn1.sequenceField.booleanField == 0)
+  {
+    SysSetVariableString(SysVar::Receiver::SysVarBoolean, "FALSE");
+  }
+  else if(asn1.sequenceField.booleanField == 1)
+  {
+    SysSetVariableString(SysVar::Receiver::SysVarBoolean, "TRUE");
+  }
+}
+
+void GetASN1ProtocolIntOptField (struct ASN1Protocol asn1)
+{
+  if(asn1.sequenceField.intFieldOptional.value == 0)
+  {
+    SysSetVariableString(SysVar::Receiver::SysVarIntOpt, "NOT SET");
+  }
+  else if(asn1.sequenceField.intFieldOptional.value == 1)
+  {
+    SysSetVariableString(SysVar::Receiver::SysVarIntOpt, "SET");
+  }
+}
+
+
+void GetASN1ProtocolIntPhysField (struct ASN1Protocol asn1)
+{
+  float value = 0;
+  float factor = 10;
+   
+  value = asn1.sequenceField.intFieldPhys / factor;
+  
+  sysSetVariableFloat(sysvar::Receiver::SysVarIntPhys, value);
+}
+
+void GetASN1ProtocolEnumeratedField (struct ASN1Protocol asn1)
+{
+  if(asn1.sequenceField.enumeratedField == 0)
+  {
+    SysSetVariableString(SysVar::Receiver::SysVarEnumerated, "low");
+  }
+  else if(asn1.sequenceField.enumeratedField == 1)
+  {
+    SysSetVariableString(SysVar::Receiver::SysVarEnumerated, "middle");
+  }
+  else if(asn1.sequenceField.enumeratedField == 2)
+  {
+    SysSetVariableString(SysVar::Receiver::SysVarEnumerated, "high");
+  }
+}
+
+void GetASN1ProtocolBitStringField (struct ASN1Protocol asn1)
+{
+  SysSetVariableString(SysVar::Receiver::SysVarBitString, asn1.sequenceField.bitStringField.string);
+}
+
+void GetASN1ProtocolOctetStringField (struct ASN1Protocol asn1)
+{
+  SysSetVariableInt (SysVar::Receiver::SysVarOctetString, asn1.octetString._Blob_Definition.integerValue);
+}
+

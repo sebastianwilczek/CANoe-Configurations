@@ -1,0 +1,164 @@
+/*@@var:*/
+variables {
+
+  byte gTxDataBuffer_C1[kTxSize];
+
+  msTimer tSignalRcvdData_C1; // Signal Received Data
+}
+/*@@end*/
+
+/*@@timer:tSignalRcvdData_C1:*/
+on timer tSignalRcvdData_C1
+{
+  // Switch off LED for RcvdData
+  @sysvar::Panel_C1::RxIndication = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:InitConnSysPanelVars_C1():*///function
+void InitConnSysPanelVars_C1 ()
+{
+  SysSetVariableString(sysvar::Panel_C1::NodeName, gECU);
+}
+/*@@end*/
+
+/*@@caplFunc:FrTP_ErrorInd_C1(long,dword):*///callback
+FrTP_ErrorInd_C1(long connectionHdl, DWORD error)
+{
+  char errorStrings[13][200] =
+  {
+    /*   0 */ "unknown error",
+    /*   1 */ "Some mandatory settings are missing, e.g. the addresses to use",
+    /*   2 */ "The value given contradicts another setting made earlier, e.g. payload length is larger than maximum",
+    /*   3 */ "The request to send some data was rejected since another transmission is in progress",
+    /*   4 */ "A reception was active when FF or SF was received",
+    /*   5 */ "A negative ACK was received for acknowledged connections",
+    /*   6 */ "The bus did not confirm transmission of a frame in time",
+    /*   7 */ "The transmitter did not receive a FC (or AF) in time",
+    /*   8 */ "The receiver did not receive the next CF in time",
+    /*   9 */ "unknown error",
+    /*  10 */ "unknown error",
+    /*  11 */ "The peer rejected the data since it is too long",
+    /*  12 */ "Peer sent an undefined Ack"
+  };
+
+  SetTPPrefixString(connectionHdl);
+
+  if ((error > 0) && (error < 13))
+  {
+    write("%sError (%d): %s", gTPPrefix, error, errorStrings[error]);
+  }
+  else
+  {
+    write("%sError (%d): %s", gTPPrefix, error, errorStrings[0]);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:FrTP_FirstFrameInd_C1(long,dword):*///callback
+FrTP_FirstFrameInd_C1 (long connectionHdl, dword dataLength)
+{
+  if (@sysvar::TP_C1::VerbosityLevel > 1)
+  {
+    SetTPPrefixString(connectionHdl);
+    write("%sCALLBACK: FF indication, peer has started transfer of %d byte.", gTPPrefix, dataLength);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:FrTP_TxConfirmationInd_C1(long):*///callback
+FrTP_TxConfirmationInd_C1 (long connectionHdl)
+{
+  @sysvar::TP_C1::ExclusiveTxUsage = 0; // set again to default
+
+  if (@sysvar::TP_C1::VerbosityLevel > 1)
+  {
+    SetTPPrefixString(connectionHdl);
+    write("%sCALLBACK: Tx confirmation received", gTPPrefix);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:FrTP_ReceptionInd_C1(long,byte[]):*///callback
+FrTP_ReceptionInd_C1 (long connectionHdl, BYTE data[])
+{
+  if (@sysvar::TP_C1::VerbosityLevel > 1)
+  {
+    SetTPPrefixString(connectionHdl);
+    write("%sCALLBACK: ReceptionInd called, received = %ld Bytes", gTPPrefix, elcount(data)); 
+  }
+
+  SysSetVariableData(sysvar::Panel_C1::DataBuffer, data, elcount(data));
+  @sysvar::Panel_C1::RxDataLength = elcount(data);
+
+  /* Signal received Data */
+  @sysvar::Panel_C1::RxIndication = 1;
+  cancelTimer(tSignalRcvdData_C1); setTimer(tSignalRcvdData_C1, 500);
+}
+/*@@end*/
+
+/*@@sysvarChange:Panel_C1::ClearData:*/
+on sysvar sysvar::Panel_C1::ClearData
+{
+  if (@this >= 1)
+  {
+    SysSetVariableData(sysvar::Panel_C1::DataBuffer, gClearData, 0);
+    @sysvar::Panel_C1::RxIndication = 0;
+    if (@sysvar::TP_C1::VerbosityLevel > 1)
+    {
+      SetTPPrefixString(gConnectionHandle_C1);
+      write("%sData cleared!", gTPPrefix);
+    }
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:Panel_C1::SendData:*/
+on sysvar sysvar::Panel_C1::SendData
+{
+  long txCount, txArraySize;
+
+  // Prevent from sending when button is released
+  if (@this == 0)
+    return;
+
+  SysGetVariableData(sysvar::Panel_C1::DataBuffer, gTxDataBuffer_C1, txArraySize);
+  txCount = @sysvar::Panel_C1::TxDataLength;
+
+  // FlexRay Demo TP supports only up to kTxSize bytes per transmission
+  if (txArraySize>=kTxSize) txArraySize=kTxSize; // don't write over array limits
+
+  TPTransmit_C1(gTxDataBuffer_C1, txArraySize);
+}
+/*@@end*/
+
+/*@@sysvarChange:Panel_C1::FillSendData:*/
+on sysvar sysvar::Panel_C1::FillSendData
+{
+  long txCount,i;
+
+  // No action if button is released
+  if (@this==0)
+    return;
+    
+  txCount = @sysvar::Panel_C1::TxDataLength;
+
+  // don't write over array limits
+  // use maximum capacity of protocol
+  if (txCount>=kTxSize) txCount=kTxSize; 
+
+  for( i=0; i<txCount; i++ ) 
+  {
+    gTxDataBuffer_C1[i] = 0x30+i;
+  }
+  
+  // show data in panel
+    
+  SysSetVariableData(sysvar::Panel_C1::DataBuffer, gTxDataBuffer_C1, txCount);
+
+  // send data
+
+  TPTransmit_C1(gTxDataBuffer_C1, txCount);
+}
+/*@@end*/
+

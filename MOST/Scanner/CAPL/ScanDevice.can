@@ -1,0 +1,1497 @@
+/*@@var:*/
+variables
+{
+  // flag indicating whether device scan is processing
+  byte gbDeviceScan;
+
+  // maximum ams message length
+  const int ams_data_length = 400;  
+
+  // buffer for remote read info
+  const long regBufferLength = 20000;
+  char regBuffer[regBufferLength];
+  
+  // switch for info-type
+  int infoType;
+  int infoTypeFlag;
+
+  // scan step
+  int gScanStep;
+  const int kScanStep_DevInfo_ProductName = 0;
+  const int kScanStep_DevInfo_CompanyName = 1;
+  const int kScanStep_Node_Address        = 2;
+  const int kScanStep_Group_Address       = 3;
+  const int kScanStep_Ability_To_Wake     = 4;
+  const int kScanStep_Retry_Parameters    = 5;
+  const int kScanStep_Source_Handles      = 6;
+  const int kScanStep_FBlock_IDs          = 7;
+  const int kScanStep_INIC_FktIDs         = 8;
+  const int kScanStep_INIC_DeviceMode     = 9;
+  const int kScanStep_INIC_NIState        = 10;
+  const int kScanStep_INIC_EHCIState      = 11;
+  const int kScanStep_INIC_NCState        = 12;
+
+  // FBlockIDs
+  const int fblockID_INIC     = 0x00;
+  const int fblockID_NetBlock = 0x01;
+
+  // NetBlock functions
+  const int fbNB_FBlockIDs     = 0x000;
+  const int fbNB_DeviceInfo    = 0x001;
+  const int fbNB_NodeAddress   = 0x003;
+  const int fbNB_GroupAddress  = 0x004;
+  const int fbNB_AbilityToWake = 0x005;
+  const int fbNB_RetryParams   = 0x007;
+  const int fbNB_SourceHandles = 0x100;
+
+  // INIC functions
+  const int fbINIC_FktIDs      = 0x000;
+  const int fbINIC_DeviceMode  = 0x102;
+  const int fbINIC_NIState     = 0x103;
+  const int fbINIC_EHCIState   = 0x113;
+  const int fbINIC_NCState     = 0x115;
+
+  // optypes
+  const byte opType_Get = 0x01;
+
+  // timer
+  int snMsgFlag, snDevNum;
+  
+  mstimer noResponse;
+  const int noResponseDelay = 1000;
+  mstimer startupTimer;
+  const int startupDelay = 1000;
+  msTimer scanRegTimer;
+  const int scanRegDelay = 3000;
+  msTimer scanINICTimer;
+  const int scanINICDelay = 1000;
+
+  // control variables
+  int NPR;
+  int MPR;
+  int currentDevice;
+  int CentralRegistryStatus;
+
+  // sink for displaying info (Tabs in write window)
+  DWORD tabScanDevice;
+  
+  // severity
+  const int kSeverity_Success = 0;
+  const int kSeverity_Info    = 1;
+  const int kSeverity_Warning = 2;
+  const int kSeverity_Error   = 3;
+
+  // control identifier
+  const int kAllControls      = 0;
+  const int kBtnScanDev       = 1;
+  const int kBtnScanFBlock    = 2;
+  const int kBtnScanET        = 3;
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+/*****************************************************************
+ ** MOST SCANNER                                                **
+ **                                                             **
+ ** This 'on start' function sets a timer.                      **
+ *****************************************************************/
+
+on start
+{
+  gbDeviceScan = 0;
+  infoType   = 0;
+  NPR        = 0;
+  MPR        = 0;
+  snMsgFlag  = 0;
+  snDevNum   = 0;
+  CentralRegistryStatus = 0;
+
+  sysSetVariableString(sysvar::ScanStatus, "Initializing ...");
+
+  settimer( startupTimer, startupDelay );
+
+  if(MostGetRxLight(MostGetChannel()))
+  {
+    EnableControls(1, kAllControls);
+  }
+  else
+  {
+    EnableControls(0, kAllControls);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:convert_StringToByteArray(byte[],char[]):*/
+/*******************************************************************************
+ * This function converts a string (char[]) to a byte[]                        *
+ *                                                                             *
+ * returns    the number of bytes in 'out[]'                                   *
+ *                                                                             *
+ * out[]      the conversion result                                            *
+ * string[]   the string (char[]) to convert                                   *
+ *                                                                             *
+ * example    int length;                                                      *
+ *            byte text[20];                                                   *
+ *            length = convert_StringToByteArray( text, "Hello World!" );      *
+ *******************************************************************************/
+
+int convert_StringToByteArray ( byte out[], char string[] )
+{
+  int i, length;
+
+  length = 0;
+  for( i=0; i<elCount(string)-1; i++ )
+  {
+    out[i] = string[i];
+    length++;
+  }
+
+  return length;
+}
+/*@@end*/
+
+/*@@caplFunc:GetErrorInfo(int,char[]):*/
+/************************************************************
+ * This function is part of the visualization module of the *
+ * MOST-Scanner. It generates a string dependent on the     *
+ * type of error.                                           *
+ *                                                          *
+ * err      the received error code                         *
+ * out[]    the convenient error info                       * 
+ ************************************************************/
+
+void GetErrorInfo ( int err, char out[] )
+{
+  switch( err )
+  {
+    // FBlock not available
+    case( 0x01 ):
+      snprintf(out, elcount(out), "ERROR - FBlockID not avaliable");
+      break;
+
+    // InstID not available
+    case( 0x02 ):
+      snprintf(out, elcount(out), "ERROR - InstID not avaliable");
+      break;
+
+    // Function not available
+    case( 0x03 ):
+      snprintf(out, elcount(out), "ERROR - FunctionID not avaliable");
+      break;
+
+    // OPType not available
+    case( 0x04 ):
+      snprintf(out, elcount(out), "ERROR - OpType not avaliable");
+      break;
+
+    // Invalid Length
+    case( 0x05 ):
+      snprintf(out, elcount(out), "ERROR - Invalid message length");
+      break;
+
+    // Parameter wrong/out of range
+    case( 0x06 ):
+      snprintf(out, elcount(out), "ERROR - Parameter wrong/out of range");
+      break;
+
+    // Parameter not avaliable
+    case( 0x07 ):
+      snprintf(out, elcount(out), "ERROR - Parameter not avaliable");
+      break;
+
+    case ( -1): // DLC = 0
+      snprintf(out, elcount(out), "ERROR - No error code avaliable");
+      break;
+
+    default: // unknown error code
+      snprintf(out, elcount(out), "ERROR - Unknown error code 0x%02x", err);
+      break;
+  }
+}
+/*@@end*/
+
+/*@@mostAmsMsg:MsgChannel1.*:*/
+on mostAMSMessage MsgChannel1.*
+{
+  byte data[ams_data_length];
+  int length, i;
+  mostAMSMessage * copy = {DLC = ams_data_length};
+
+  // do not handle any message if not scanning the devices
+  if(gbDeviceScan == 0)
+    return;
+
+  // we only react on received messages
+  if( this.dir == Tx )
+    return;
+
+  // we only react on reports
+  if(this.OpType <= 0x08)
+    return;
+
+  if(this.Most_IsSpy)
+    return;
+
+  // get a copy of the recieved message
+  copy = this;
+
+  if(copy.FBlockID == fblockID_INIC)
+  {
+    handleAnswer_ScanINIC( copy );
+  }
+  else
+  {
+    handleAnswer_ScanDevice( copy );
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:transmit_RemRead(int,byte):*/
+/*******************************************************************************
+ General function
+
+ This function uses the given arguments to create a RemoteRead message and
+ transmits it.
+
+ targetAdr   the address of the device to read from
+ offset      the first register to read ( 8 registers are read )
+ channel     the channel of the scanner node
+
+ example     transmit_RemRead( 0x400, 0x80, 1 );
+*******************************************************************************/
+
+transmit_RemRead ( int targetAdr, byte offset )
+{
+  int i;
+  mostRawMessage RAWmsg;
+
+  // init data bytes
+  for( i=0; i<17; i++ )
+    RAWmsg.byte(i) = 0;
+
+  // set parameters
+  RAWmsg.DLC = 17;
+  RAWmsg.DA = targetAdr;
+  RAWmsg.most_rtype = 1;  // RType 'RemoteRead'
+  RAWmsg.byte(1) = offset;
+
+  // send message
+  output( RAWmsg );
+}
+/*@@end*/
+
+/*@@sysvarChange:ScanDevice:*/
+on sysvar ScanDevice
+{
+  int selDev, i;
+
+  selDev = @sysvar::SelectedDevice;
+
+  if(@this)
+    return;
+  
+  // there is another scan already processing
+  if(gbDeviceScan == 1)
+    return;
+
+  writeLineEx(tabScanDevice, kSeverity_Info,  "****************************************************************");
+  writeLineEx(tabScanDevice, kSeverity_Info,  "****************************************************************");
+
+  if( selDev >= MPR || selDev < 0 )
+  {
+    writeLineEx(tabScanDevice, kSeverity_Error, "ERROR: Device number out of range.");
+    writeLineEx(tabScanDevice, kSeverity_Info,  "");
+    writeLineEx(tabScanDevice, kSeverity_Info,  "Valid range is: 0..%d",MPR-1 );
+    return;
+  }
+
+  // initialize
+  gbDeviceScan = 1;
+  infoType = 2;
+  sysSetVariableString( sysvar::ScanStatus, "Scanning ..." );
+  infoTypeFlag = 0;
+
+  if( selDev == NPR )
+  {
+    query_ScanDevice_ThisNode();
+  }
+  else
+  {
+    gScanStep = kScanStep_DevInfo_ProductName;
+    NextScanStep( selDev );
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:handleAnswer_ScanDevice(mostAmsMessage*):*/
+handleAnswer_ScanDevice ( mostAMSMessage * recMsg )
+{
+  int i, j, selDev, functionID, opType, length;
+  char temp[ams_data_length];
+  char errInfo[100];
+  byte adr[2];
+  char fblock[100];
+  char function[100];
+  char optype[100];
+  char temp2[100];
+  int bufSize = 100;
+  mostMessage * symMsg;
+
+  // initialize
+  selDev     = @sysvar::SelectedDevice;
+  length     = recMsg.DLC;
+
+  switch(recMsg.FunctionId)
+  {
+    case fbNB_FBlockIDs: // FBlockIDs
+
+      writeLineEx(tabScanDevice, kSeverity_Info, "");
+      writeLineEx(tabScanDevice, kSeverity_Info, "FBlockID       -        InstanceID");
+    
+      if( recMsg.OpType == 0xF )
+      {
+        if(recMsg.DLC > 0)
+          GetErrorInfo(recMsg.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanDevice, kSeverity_Info, "   %s", errInfo);
+      }
+      else
+      {
+        for( i=0; i<(length/2); i++ )
+        {
+          symMsg.FBlockID = recMsg.Byte(2*i);
+
+          if(MostMsgGetSymbols(symMsg, fblock, function, optype, bufSize) > 0)
+          {
+            WriteSymFBlock(fblock, recMsg.Byte(2*i), recMsg.Byte(2*i+1));
+          }
+          else
+          {
+            writeLineEx(tabScanDevice, kSeverity_Info, "   0x%02X                    0x%02X",recMsg.Byte(2*i), recMsg.Byte(2*i+1) );          
+          }
+        }
+      }
+
+      writeLineEx(tabScanDevice, kSeverity_Info, "");
+
+      cancelTimer( noResponse );
+
+      if( (@sysvar::ScanRegisters == 1) && 
+          (@sysvar::HasINIC == 0) ) // reading chip register only possible if NIC is used!!
+      {
+        cancelTimer(scanRegTimer);
+        setTimer(scanRegTimer, scanRegDelay);
+      }
+      else if(@sysvar::HasINIC == 1) // request INIC FBlock
+      {
+        cancelTimer(scanINICTimer);
+        setTimer(scanINICTimer, scanINICDelay);
+      }
+      else
+      {
+        infoType = 0;
+        gbDeviceScan = 0;
+        sysSetVariableString( sysvar::ScanStatus, "ready" );
+      }
+
+      break;
+
+    case fbNB_DeviceInfo: // DeviceInfo
+
+      if( infoTypeFlag == 0 )
+      {
+        canceltimer( noResponse );
+        infoTypeFlag = 1;
+      
+        writeLineEx(tabScanDevice, kSeverity_Info, "");
+
+        // product name
+        if( recMsg.OpType == 0xF )
+        {
+          // check for secondary node
+          if( (recMsg.DLC >= 3) && (recMsg.BYTE(0) == 0x0A) )
+          {
+            writeLineEx(tabScanDevice, kSeverity_Info, "Device at node position %d is a 'Secondary Node'", selDev);
+            writeLineEx(tabScanDevice, kSeverity_Info, "Primary Node Address: 0x%03X", (recMsg.BYTE(1) << 8) | recMsg.BYTE(2));
+            writeLineEx(tabScanDevice, kSeverity_Info, "");
+
+            cancelTimer( noResponse );
+
+            if( (@sysvar::ScanRegisters == 1) && 
+                (@sysvar::HasINIC == 0) ) // reading chip register only possible if NIC is used!!
+            {
+              cancelTimer(scanRegTimer);
+              setTimer(scanRegTimer, scanRegDelay);
+            }
+            else
+            {
+              infoType = 0;
+              gbDeviceScan = 0;
+              sysSetVariableString( sysvar::ScanStatus, "ready" );
+            }
+
+            break;
+          }
+          else
+          {
+            writeLineEx(tabScanDevice, kSeverity_Info, "Product: -");
+          }
+        }
+        else
+        {
+          for( i=1; i<length; i++ )
+            temp[i-1] = recMsg.Byte(i);
+        
+          writeLineEx(tabScanDevice, kSeverity_Info, "%s", temp);
+        }
+
+        // scan 'Company Name'
+        gScanStep = kScanStep_DevInfo_CompanyName;
+        NextScanStep( selDev );
+      }
+      else if( infoTypeFlag == 1 )
+      {
+        // company name
+        if( recMsg.OpType == 0xF )
+        {
+          writeLineEx(tabScanDevice, kSeverity_Info, "( Company: - )");
+        }
+        else
+        {
+          for( i=1; i<length; i++ )
+            temp[i-1] = recMsg.Byte(i);
+        
+          writeLineEx(tabScanDevice, kSeverity_Info, "( %s )", temp);
+        }
+        
+        writeLineEx(tabScanDevice, kSeverity_Info, "");
+        writeLineEx(tabScanDevice, kSeverity_Info, "Physical Info");
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Node Position Address   0x%03x", 0x400+selDev);
+
+        // scan 'Node Address'
+        gScanStep = kScanStep_Node_Address;
+        NextScanStep( selDev );
+      }
+
+      break;
+
+    case fbNB_NodeAddress: // NodeAddress
+    
+      if( recMsg.OpType == 0xF )
+      {
+        if(recMsg.DLC > 0)
+          GetErrorInfo(recMsg.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Node Address            %s", errInfo);
+      }
+      else
+      {
+        adr[0] = recMsg.Byte(0);
+        adr[1] = recMsg.Byte(1);
+
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Node Address            0x%03X", ((adr[0] << 8) | adr[1]));
+      }
+
+      // scan 'Group Address'
+      gScanStep = kScanStep_Group_Address;
+      NextScanStep( selDev );
+      break;
+
+    case fbNB_GroupAddress: // GroupAddress
+    
+      if( recMsg.OpType == 0xF )
+      {
+        if(recMsg.DLC > 0)
+          GetErrorInfo(recMsg.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Group Address           %s", errInfo);
+      }
+      else
+      {
+        adr[0] = recMsg.Byte(0);
+        adr[1] = recMsg.Byte(1);
+
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Group Address           0x%03X", ((adr[0] << 8) | adr[1]) );
+      }
+
+      // scan 'Ability To Wake'
+      gScanStep = kScanStep_Ability_To_Wake;
+      NextScanStep( selDev );
+      break;
+
+    case fbNB_AbilityToWake: // AbilityToWake
+
+      if( recMsg.OpType == 0xF )
+      {
+        if(recMsg.DLC > 0)
+          GetErrorInfo(recMsg.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Ability to wake         %s", errInfo);
+      }
+      else if( recMsg.Byte(0) == 0 )
+      {
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Ability to wake         Off" );
+      }
+      else if( recMsg.Byte(0) == 1 )
+      {
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Ability to wake         On" );
+      }
+      else if( recMsg.Byte(0) == 2 )
+      {
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Ability to wake         Critical" );
+      }
+      else
+      {
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Ability to wake         ERROR: Parameter out of range" );
+      }
+
+      // scan 'RetryParameters'
+      gScanStep = kScanStep_Retry_Parameters;
+      NextScanStep( selDev );
+      break;
+
+    case fbNB_RetryParams: // RetryParameter
+    
+      if( recMsg.OpType == 0xF )
+      {
+        if(recMsg.DLC > 0)
+          GetErrorInfo(recMsg.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Retry Time              %s", errInfo);
+      }
+      else
+      {
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Retry Time              %d", recMsg.Byte(0));
+      }
+    
+      if( recMsg.OpType == 0xF )
+      {
+        if(recMsg.DLC > 0)
+          GetErrorInfo(recMsg.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Retry Number            %s", errInfo);
+      }
+      else
+      {
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Retry Number            %d", recMsg.Byte(1));
+      }
+
+      // scan 'SourceHandles'
+      gScanStep = kScanStep_Source_Handles;
+      NextScanStep( selDev );
+      break;
+
+    case fbNB_SourceHandles: // SourceHandles
+
+      if( recMsg.OpType == 0x0F )
+      {
+        if(recMsg.DLC > 0)
+          GetErrorInfo(recMsg.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanDevice, kSeverity_Info, "   Source Handles          %s", errInfo);
+      }
+      else
+      {
+        if(length < 3)
+          writeLineEx(tabScanDevice, kSeverity_Info, "   Source Handles          none", errInfo);
+        else
+          writeLineEx(tabScanDevice, kSeverity_Info, "   Source Handles");
+        for( i=0; i<=length-3; i+=3 )
+        {
+          // handle
+          writeLineEx(tabScanDevice, kSeverity_Info, "      Handle:              %d", recMsg.BYTE(i));
+
+          // FBlockID
+          symMsg.FBlockId = recMsg.BYTE(i+1);
+          if(MostMsgGetSymbols(symMsg, fblock, function, optype, bufSize) > 0)
+          {
+             writeLineEx(tabScanDevice, kSeverity_Info, "      FBlockID:            %s", fblock);
+          }
+          else
+          {
+            writeLineEx(tabScanDevice, kSeverity_Info, "      FBlockID:            0x%02X", recMsg.BYTE(i+1));
+          }
+
+          // InstID
+          writeLineEx(tabScanDevice, kSeverity_Info, "      InstID:              0x%02X", recMsg.BYTE(i+2));
+
+          writeLineEx(tabScanDevice, kSeverity_Info, "");
+        }
+      }
+
+      // scan 'FBlockIDs'
+      gScanStep = kScanStep_FBlock_IDs;
+      NextScanStep( selDev );
+
+      break;
+
+  } // END: switch( functionID )
+}
+/*@@end*/
+
+/*@@stop:StopMeasurement:*/
+/*@@end*/
+
+/*@@caplFunc:query_GetRegisters_Remote():*/
+/*******************************************************************************
+ MOST Scanner
+
+ In 'Scan Device' context this function is used to query a node (not the scanner
+ node) for register values (using RemoteRead messages).
+*******************************************************************************/
+
+query_GetRegisters_Remote ()
+{
+  int i, selDev, currentRegister;
+  selDev = @sysvar::SelectedDevice;
+
+  //Use remote read on MOST 25 only
+  if (mostGetSpeedGrade(mostGetChannel()) != 1)
+  {
+    return;
+  }
+  // init
+  currentRegister = 0;
+
+  writeLineEx(tabScanDevice, kSeverity_Info, "");
+  writeLineEx(tabScanDevice, kSeverity_Info, "Register Dump (Page1)");
+  writeLineEx(tabScanDevice, kSeverity_Info, "  Routing Engine");
+
+  for( i=0; i<32; i++ )
+  {
+    transmit_RemRead( 0x400+selDev, currentRegister );
+    currentRegister += 8;
+  }
+}
+/*@@end*/
+
+/*@@mostRawMsg:mostRawMessage:*/
+on mostRawMessage
+{
+  mostrawmessage msg;
+
+  // do not handle any message if not scanning the devices
+  if(gbDeviceScan == 0)
+    return;
+
+  msg = this;
+
+  if( msg.most_rtype != 1 )
+    return;
+
+  handleAnswer_RemRead( msg );
+}
+/*@@end*/
+
+/*@@caplFunc:handleAnswer_RemRead(mostRawMessage*):*/
+handleAnswer_RemRead ( mostrawmessage recMsg )
+{
+  int i;
+  char info[100];
+
+  
+
+  for(i=0; i<100; ++i)
+    info[i] = '\0';
+
+  if( recMsg.byte(1) == 0x80 )
+  {
+    snprintf(info, elcount(info), "\n  Control Registers\n");
+    strncat(regBuffer, info, elcount(regBuffer));
+  }
+  else if( recMsg.byte(1) == 0xA0 )
+  {
+    snprintf(info, elcount(info), "\n  Receiving Messages\n");
+    strncat(regBuffer, info, elcount(regBuffer));
+  }
+  else if( recMsg.byte(1) == 0xC0 )
+  {
+    snprintf(info, elcount(info), "\n  Transmitting Messages\n");
+    strncat(regBuffer, info, elcount(regBuffer));
+  }
+  else if( recMsg.byte(1) == 0xE0 )
+  {
+    snprintf(info, elcount(info), "\n  Packet Data Transfer\n");
+    strncat(regBuffer, info, elcount(regBuffer));
+  }
+
+  snprintf(info, elcount(info), "   0x%02X   ", recMsg.byte(1));
+  strncat(regBuffer, info, elcount(regBuffer));
+
+  for( i=0; i<8; i++ )
+  {
+    if(i<7)
+      snprintf(info, elcount(info), "%02X   ", recMsg.byte(3+i) );
+    else
+      snprintf(info, elcount(info), "%02X\n", recMsg.byte(3+i) );
+    strncat(regBuffer, info, elcount(regBuffer));  
+  }
+
+  if( recMsg.byte(1) == 0xF8 )
+  {
+    // finish
+    writeLineEx(tabScanDevice, kSeverity_Info, regBuffer );
+    writeLineEx(tabScanDevice, kSeverity_Info, "" );
+
+    for(i=0; i<regBufferLength; ++i)
+      regBuffer[i] = '\0';
+
+    infoType = 0;
+    gbDeviceScan = 0;
+    sysSetVariableString( sysvar::ScanStatus, "ready" );
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:query_ScanDevice_ThisNode():*/
+/*******************************************************************************
+ MOST Scanner
+
+ In 'Scan Device' context this function is used to query the scanner node for
+ info provided by the NetBlock.
+********************************************************************************/
+
+query_ScanDevice_ThisNode ()
+{
+  byte data[ams_data_length];
+  byte temp[ams_data_length];
+  int i, length;
+  mostAMSMessage * AMSMsg;
+
+  // product name
+  AMSMsg.ID = 0x01001C;
+  length = convert_StringToByteArray( temp, "MOST Scanner Node" );
+  AMSMsg.Byte(0) = 0x01;
+  for( i=0; i<length; i++ )
+    AMSMsg.byte(i+1) = temp[i];
+  length++;
+  AMSMsg.DLC = length;
+  handleAnswer_ScanDevice( AMSMsg );
+  
+  // company name
+  AMSMsg.ID = 0x01001C;
+  length = convert_StringToByteArray( temp, "Vector Informatik" );
+  AMSMsg.Byte(0) = 0x00;
+  for( i=0; i<length; i++ )
+    AMSMsg.byte(i+1) = temp[i];
+  length++;
+  AMSMsg.DLC = length;
+  handleAnswer_ScanDevice( AMSMsg);
+
+  // node address
+  AMSMsg.ID = 0x01003C;
+  AMSMsg.DLC = 0x02;
+  AMSMsg.Byte(0) = MostGetNodeAdr(1)>>8;
+  AMSMsg.Byte(1) = MostGetNodeAdr(1) & 0xFF;
+  handleAnswer_ScanDevice( AMSMsg );
+  
+  // group address
+  AMSMsg.ID = 0x01004C;
+  AMSMsg.DLC = 0x02;
+  AMSMsg.Byte(0) = MostGetGroupAdr(1)>>8;
+  AMSMsg.Byte(1) = MostGetGroupAdr(1) & 0xFF;
+  handleAnswer_ScanDevice( AMSMsg );
+  
+  // ability to wake
+  AMSMsg.ID = 0x01005C;
+  AMSMsg.DLC = 0x01;
+  AMSMsg.Byte(0) = 0x00;
+  handleAnswer_ScanDevice( AMSMsg );
+
+  // read registers on MOST 25 only
+  if (mostGetSpeedGrade(mostGetChannel()) != 1)
+  {
+    return;
+  }
+
+  // retry time / retry number
+  MostReadReg( 1, 1, 0xBE, 2);
+}
+/*@@end*/
+
+/*@@caplFunc:query_GetRegisters_Local():*/
+/*******************************************************************************
+ MOST Scanner
+
+ In 'Scan Device' context this function is used to query the scanner node for
+ register values (using MostReadReg() function).
+*******************************************************************************/
+
+query_GetRegisters_Local ()
+{
+  int i, selDev, currentRegister;
+  selDev = @sysvar::SelectedDevice;
+
+  // read registers on MOST 25 only
+  if (mostGetSpeedGrade(mostGetChannel()) != 1)
+  {
+    return;
+  }
+
+  // init
+  currentRegister = 0;
+
+  writeLineEx(tabScanDevice, kSeverity_Info, "");
+  writeLineEx(tabScanDevice, kSeverity_Info, "Register Dump (Page1)");
+  writeLineEx(tabScanDevice, kSeverity_Info, "  Routing Engine");
+
+  for( i=0; i<32; i++ )
+  {
+    MostReadReg( 1, 1, currentRegister, 8);
+    currentRegister += 8;
+  }
+}
+/*@@end*/
+
+/*@@timer:noResponse:*/
+on timer noResponse
+{
+  if(gScanStep >= kScanStep_FBlock_IDs)
+  {
+    if(!@sysvar::HasINIC || (gScanStep >= kScanStep_INIC_NCState) )
+    {
+      sysSetVariableString( sysvar::ScanStatus, "ready" );
+      gbDeviceScan = 0;
+      return;
+    }
+  }
+
+  gScanStep++;
+  NextScanStep(@sysvar::SelectedDevice);
+}
+/*@@end*/
+
+/*@@mostNPR:OnMostNPR(long):*/
+OnMostNPR(long npr)
+{
+  NPR = npr;
+  MostSetNodeAdr(mostGetChannel(), 0x100+NPR); 
+}
+/*@@end*/
+
+/*@@mostReg:OnMostReg():*/
+OnMostReg()
+{
+  byte regData[8];
+  byte data[ams_data_length];
+  char info[10];
+  long i, offset;
+  mostAMSMessage * AMSMsg;
+  mostRawMessage rawMsg;
+
+  // get register content
+  MostRegGetData(regData, 8);
+
+  // get offset
+  offset = MostRegOffset();
+
+  // retry time and number (ScanDevice - 'Physical Info' Section)
+  if( offset == 0xBE )
+  {
+    AMSMsg.ID = 0x01007C;
+    // retry parameters
+    AMSMsg.Byte(0) = regData[0];
+    AMSMsg.Byte(1) = regData[1];
+    handleAnswer_ScanDevice( AMSMsg );
+
+    // SourceHandles
+    AMSMsg.ID = 0x011001;
+    AMSMsg.InstanceID = MostGetNPR(MostGetChannel());
+    AMSMsg.DA = 0x400+MostGetNPR(MostGetChannel());
+    AMSMsg.DLC = 1;
+    AMSMsg.BYTE(0) = 0xFF; // retrieve all handles
+    output(AMSMsg);
+
+    // FBlockIDs
+    AMSMsg.ID = 0x010001;
+    AMSMsg.DLC = 0;
+    output(AMSMsg); 
+
+    return;
+  }
+  else
+  {
+    rawMsg.BYTE(1) = offset;
+    for(i=0; i<8; ++i)
+      rawMsg.BYTE(i+2) = regData[i];
+
+    handleAnswer_RemRead( rawMsg );
+  }
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  MostApplicationNode();
+
+  // create new tabs
+  tabScanDevice = writeCreate("ScanDevice");
+}
+/*@@end*/
+
+/*@@mostAmsMsg:NetworkMaster.Configuration.Status (0x02A00C):*/
+on mostAMSMessage NetworkMaster.Configuration.Status
+{
+  if( this.DLC > 0 )
+  {
+    CentralRegistryStatus = this.byte(0);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:ScanFBlock:*/
+on sysvar ScanFBlock
+{
+  if(@this == 0)
+    return;
+
+  if(@sysvar::ScanFBlockStart == 1) // scan still processing
+    return;
+
+  @sysvar::ScanFBlockStart = 1;
+}
+/*@@end*/
+
+/*@@mostMPR:OnMostMPR(long):*/
+OnMostMPR(long mpr)
+{
+  MPR = mpr;
+}
+/*@@end*/
+
+/*@@timer:startupTimer:*/
+on timer startupTimer
+{
+  mostAMSMessage NetworkMaster.Configuration.Get msgCfg;
+
+  msgCfg.DA = 0x400;
+  msgCfg.InstanceID = 0x00;
+
+  if(MostGetLockEx(MostGetChannel()) == 2) // stable lock?
+    output (msgCfg);
+
+  sysSetVariableString( sysvar::ScanStatus, "ready" );
+}
+/*@@end*/
+
+/*@@timer:scanRegTimer:*/
+on timer scanRegTimer
+{
+  if(@sysvar::SelectedDevice == NPR)
+    query_GetRegisters_Local();
+  else
+    query_GetRegisters_Remote();
+}
+/*@@end*/
+
+/*@@caplFunc:EnableControls(byte,int):*///function
+/*******************************************************************************
+ * This function enables / disables the buttons in the panel.                  *
+ *                                                                             *
+ * bEnable    0: disable  1: enable control(s)                                 *
+ * control    control(s) to be enabled/disabled                                *
+  *******************************************************************************/
+EnableControls (byte bEnable, int control)
+{
+  switch (control)
+  {
+    case kAllControls: // all controls
+
+      EnableControl("MOST Scanner", "Btn_ScanDevice",   bEnable);
+      EnableControl("MOST Scanner", "Btn_ScanFBlock",   bEnable);
+      EnableControl("MOST Scanner", "Btn_ScanET",       bEnable);
+      break;
+
+    case kBtnScanDev:
+      
+      EnableControl("MOST Scanner", "Btn_ScanDevice",   bEnable);
+      break;
+
+    case kBtnScanFBlock:
+
+      EnableControl("MOST Scanner", "Btn_ScanFBlock",   bEnable);
+      break;
+
+    case kBtnScanET:
+
+      EnableControl("MOST Scanner", "Btn_ScanET",       bEnable);
+      break;
+  }
+}
+/*@@end*/
+
+/*@@mostNetOn:OnMostNetOn():*/
+OnMostNetOn()
+{
+  EnableControls(1, kAllControls);
+}
+/*@@end*/
+
+/*@@caplFunc:handleAnswer_ScanINIC(mostAmsMessage*):*///function
+handleAnswer_ScanINIC (mostAmsMessage * recMsg)
+{
+  int i, selDev, functionID, opType, length;
+  char temp[ams_data_length];
+  char temp2[100];
+  char errInfo[100];
+  byte adr[2];
+  long fktIDs[ams_data_length/2];
+    
+
+  // initialize
+  selDev     = @sysvar::SelectedDevice;
+  length     = recMsg.DLC;
+
+  switch( recMsg.FunctionID )
+  {
+    case fbINIC_FktIDs: // FktIDs
+    
+      writeLineEx(tabScanDevice, kSeverity_Info, "");
+      
+      if( recMsg.OpType == 0xF )
+      {
+        // check for FBlock not available
+          if( (recMsg.DLC > 0) && (recMsg.BYTE(0) == 0x01) )
+          {
+            writeLineEx(tabScanDevice, kSeverity_Info, "Function block INIC not available");
+            writeLineEx(tabScanDevice, kSeverity_Info, "");
+
+            cancelTimer( noResponse );
+
+            infoType = 0;
+            gbDeviceScan = 0;
+            sysSetVariableString( sysvar::ScanStatus, "ready" );
+            break;
+          }
+          else
+          {
+            if(recMsg.DLC > 0)
+              GetErrorInfo(recMsg.Byte(0), errInfo);
+            else
+              GetErrorInfo(-1, errInfo);
+
+            writeLineEx(tabScanDevice, kSeverity_Info, "FktIDs:     %s", errInfo);
+          }
+      }
+      else
+      {
+        length = mostMsgDecodeRLE(recMsg, fktIDs, ams_data_length/2);
+
+        for(i = 0; i < length; ++i)
+        {
+          // print FunctionId
+          if(i > 0)
+          {
+            if(i%9 == 0)
+            {
+              strncat(temp, "\n", elcount(temp));
+              snprintf(temp2, elcount(temp2), "%03X,", fktIDs[i]);
+            }
+            else
+              snprintf(temp2, elcount(temp2), "  %03X,", fktIDs[i]);
+          }
+          else
+            snprintf(temp2, elcount(temp2), "%03X,", fktIDs[i]);
+        
+          // complete the line
+          strncat(temp, temp2, elcount(temp));
+        }
+
+        i = 0;
+        while(temp[i] != '\0' && i < ams_data_length)
+          ++i;
+
+        if(i > 0 && i < ams_data_length)
+          temp[i-1] = '\n';
+
+        writeLineEx(tabScanDevice, kSeverity_Info, "FktIDs:");
+        writeLineEx(tabScanDevice, kSeverity_Info,temp );
+      }
+
+      // scan 'Device Mode'
+      gScanStep = kScanStep_INIC_DeviceMode;
+      NextScanStep( selDev );
+      break;
+
+    case fbINIC_DeviceMode: // DeviceMode
+
+      canceltimer( noResponse );
+
+      writeLineEx(tabScanDevice, kSeverity_Info, "");
+
+      if( recMsg.OpType == 0xF )
+      {
+        if(recMsg.DLC > 0)
+          GetErrorInfo(recMsg.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanDevice, kSeverity_Info, "DeviceMode: %s", errInfo);
+      }
+      else
+      {
+        if(recMsg.BYTE(0) == 0) // Slave mode
+        {
+          writeLineEx(tabScanDevice, kSeverity_Info, "DeviceMode: Slave");
+        }
+        else if(recMsg.BYTE(0) == 1) // Master mode
+        {
+          writeLineEx(tabScanDevice, kSeverity_Info, "DeviceMode: Master");
+        }
+        else // unknown mode
+        {
+          writeLineEx(tabScanDevice, kSeverity_Info, "DeviceMode: unknown");
+        }
+      }
+
+      // scan 'NIState'
+      gScanStep = kScanStep_INIC_NIState;
+      NextScanStep( selDev );
+      break;
+
+    case fbINIC_NIState: // NIState
+
+      writeLineEx(tabScanDevice, kSeverity_Info, "");
+
+      if( recMsg.OpType == 0xF)
+      {
+        if(recMsg.DLC > 0)
+          GetErrorInfo(recMsg.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanDevice, kSeverity_Info, "NIState:    %s", errInfo);
+      }
+      else
+      {
+        switch( recMsg.BYTE(0) )
+        {
+          case 0: // NetInterfacePowerOff
+            snprintf(temp, elcount(temp), "NIState:    NetInterfacePowerOff");
+            break;
+          case 1: // NetInterfaceInit
+            snprintf(temp, elcount(temp), "NIState:    NetInterfaceInit");
+            break;
+          case 2: // NetInterfaceRBD
+            snprintf(temp, elcount(temp), "NIState:    NetInterfaceRBD");
+            break;
+          case 3: // NetInterfaceNO
+            snprintf(temp, elcount(temp), "NIState:    NetInterfaceNO");
+            break;
+          default:
+            snprintf(temp, elcount(temp), "NIState:    unknown");
+            break;
+        }
+
+        writeLineEx(tabScanDevice, kSeverity_Info, temp);
+      }
+
+      // scan 'EHCIState'
+      gScanStep = kScanStep_INIC_EHCIState;
+      NextScanStep( selDev );
+      break;
+
+    case fbINIC_EHCIState: // EHCIState
+
+      writeLineEx(tabScanDevice, kSeverity_Info, "");
+
+      if( recMsg.OpType == 0xF )
+      {
+        if(recMsg.DLC > 0)
+          GetErrorInfo(recMsg.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanDevice, kSeverity_Info, "EHCIState:  %s", errInfo);
+      }
+      else
+      {
+        switch( recMsg.BYTE(0) )
+        {
+          case 0: // EHCI_Protected
+            snprintf(temp, elcount(temp), "EHCIState:  EHCI_Protected");
+            break;
+          case 1: // EHCI_SemiProtected
+            snprintf(temp, elcount(temp), "EHCIState:  EHCI_SemiProtected");
+            break;
+          case 2: // EHCI_Attached
+            snprintf(temp, elcount(temp), "EHCIState:  EHCI_Attached");
+            break;
+          default:
+            snprintf(temp, elcount(temp), "EHCIState:  unknown");
+            break;
+        }
+
+        writeLineEx(tabScanDevice, kSeverity_Info, temp);
+      }
+
+      // scan 'NCState'
+      gScanStep = kScanStep_INIC_NCState;
+      NextScanStep( selDev );
+      break;
+
+    case fbINIC_NCState: // NCState
+
+      writeLineEx(tabScanDevice, kSeverity_Info, "");
+
+      if( recMsg.OpType == 0xF)
+      {
+        if(recMsg.DLC > 0)
+          GetErrorInfo(recMsg.Byte(0), errInfo);
+        else
+          GetErrorInfo(-1, errInfo);
+
+        writeLineEx(tabScanDevice, kSeverity_Info, "NCState:    %s", errInfo);
+      }
+      else
+      {
+        switch( recMsg.BYTE(0) )
+        {
+          case 0: // SystemState NotOk
+            snprintf(temp, elcount(temp), "NCState:    NotOk");
+            break;
+          case 1: // SystemState Ok
+            snprintf(temp, elcount(temp), "NCState:    Ok");
+            break;
+          default:
+            snprintf(temp, elcount(temp), "NCState: unknown");
+            break;
+        }
+
+        adr[0] = recMsg.BYTE(1);
+        adr[1] = recMsg.BYTE(2);
+        snprintf(temp2, elcount(temp2), "    NetworkMaster Address: 0x%03x", (adr[0] << 8) | adr[1]);
+        strncat(temp, temp2,elcount(temp));
+        writeLineEx(tabScanDevice, kSeverity_Info, temp);
+      }
+
+      writeLineEx(tabScanDevice, kSeverity_Info, "");
+
+      infoType = 0;
+      gbDeviceScan = 0;
+      sysSetVariableString( sysvar::ScanStatus, "ready" );
+
+      cancelTimer( noResponse );
+
+      break;
+  } // END: switch( functionID )
+}
+/*@@end*/
+
+/*@@timer:scanINICTimer:*/
+on timer scanINICTimer
+{
+  query_ScanINIC();
+}
+/*@@end*/
+
+/*@@caplFunc:query_ScanINIC():*///function
+/*******************************************************************************
+ MOST Scanner
+
+ In 'Scan Device' context this function is used to query a node (not the scanner
+ node) for INIC FBlock values.
+*******************************************************************************/
+
+query_ScanINIC ()
+{
+  int i, selDev;
+  mostMessage * msg;
+  selDev = @sysvar::SelectedDevice;
+
+  writeLineEx(tabScanDevice, kSeverity_Info, "");
+  writeLineEx(tabScanDevice, kSeverity_Info, "INIC FBlock");
+
+  if(selDev == MostGetNPR(MostGetChannel()))
+  {
+    writeLineEx(tabScanDevice, kSeverity_Info,  "Function block INIC not available");
+    gbDeviceScan = 0;
+    sysSetVariableString( sysvar::ScanStatus, "ready" );
+    return;
+  }
+
+  cancelTimer( noResponse );
+  settimer( noResponse, noResponseDelay );
+
+  gScanStep = kScanStep_INIC_FktIDs;
+  NextScanStep( selDev );
+}
+/*@@end*/
+
+/*@@sysvarChange:HasINIC:*/
+on sysvar HasINIC
+{
+  if(@this > 0)
+  {
+    EnableControl("MOST Scanner", "Btn_ScanRegister", 0);
+  }
+  else
+  {
+    EnableControl("MOST Scanner", "Btn_ScanRegister", 1);
+  }
+}
+/*@@end*/
+
+/*@@mostLightLockError:mostLightLockError:*/
+on mostLightLockError
+{
+  if(this.most_light == 0)
+  {
+    EnableControls(0, kAllControls);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:WriteSymFBlock(char[],int,int):*///function
+/*******************************************************************************
+ * This function is used to write the symbolic function block name to the      *
+ * write window.                                                               *
+ *                                                                             *
+ * FBlock[]   symbolic function block name                                     *
+ * FBlockID   function block ID                                                *
+ * InstID     instance ID of the function block                                *
+ *******************************************************************************/
+WriteSymFBlock (char FBlock[], int FBlockID, int InstID)
+{
+  int j;
+  char temp2[100];
+
+  if( elcount(FBlock) > 16 )
+    FBlock[16] = '\0';
+
+  writeLineEx(tabScanDevice, kSeverity_Info, " %s (0x%02X)",FBlock, FBlockID);
+  for(j=0; j<elcount(FBlock); ++j)
+  {
+    if(FBlock[j] == '\0')
+      break;
+  }
+
+  temp2[0] = '\0';
+
+  while(j<19)
+  {
+    strncat(temp2, " ", elcount(temp2));
+    ++j;
+  }
+
+  writeEx(tabScanDevice, kSeverity_Info, "%s0x%02x",temp2, InstID );
+}
+/*@@end*/
+
+/*@@caplFunc:NextScanStep(int):*///function
+NextScanStep (int selDev)
+{
+  mostMessage * msg;
+
+  if(selDev == MostGetNPR(MostGetChannel()))
+    return;
+
+  // general message parameters
+  if(gScanStep <= kScanStep_FBlock_IDs)
+    msg.FBlockId = fblockID_NetBlock; // FBlockID  = NetBlock
+  else
+    msg.FBlockId = fblockID_INIC; // FBlockID  = INIC
+    
+  msg.InstanceID = selDev; // InstanceID  = node position
+  msg.OpType = opType_Get; // OpType      = Get
+  msg.DA = 0x400+selDev;   // Destination = node position address
+  msg.DLC = 0x00;          // DLC
+
+  switch (gScanStep)
+  {
+    case kScanStep_DevInfo_ProductName:
+
+      msg.FunctionId = fbNB_DeviceInfo; // FktID = DeviceInfo
+      msg.DLC     = 0x01;                       // DLC
+      msg.BYTE(0) = 0x01;                       // ProductName
+      break;
+
+    case kScanStep_DevInfo_CompanyName:
+
+      msg.FunctionId = fbNB_DeviceInfo; // FktID = DeviceInfo
+      msg.DLC     = 0x01;                       // DLC
+      msg.BYTE(0) = 0x00;                       // CompanyName
+      break;
+
+    case kScanStep_Node_Address:
+
+      msg.FunctionId = fbNB_NodeAddress; // FktID = NodeAddress
+      break;
+
+    case kScanStep_Group_Address:
+
+      msg.FunctionId = fbNB_GroupAddress; // FktID = GroupAddress
+      break;
+
+    case kScanStep_Ability_To_Wake:
+
+      msg.FunctionId = fbNB_AbilityToWake; // FktID = AbilityToWake
+      break;
+
+    case kScanStep_Retry_Parameters:
+
+      msg.FunctionId = fbNB_RetryParams; // FktID = RetryParameters
+      break;
+
+    case kScanStep_Source_Handles:
+
+      msg.FunctionId = fbNB_SourceHandles; // FktID = SourceHandles
+      msg.DLC     = 0x01;                  // DLC
+      msg.BYTE(0) = 0xFF;                  // retrieve all handles
+      break;
+
+    case kScanStep_FBlock_IDs:
+
+      msg.FunctionId = fbNB_FBlockIDs; // FktID = FBlockIDs
+      break;
+
+    case kScanStep_INIC_FktIDs:
+
+      msg.FunctionId = fbINIC_FktIDs; // FktID = FktIDs
+      break;
+
+    case kScanStep_INIC_DeviceMode:
+
+      msg.FunctionId = fbINIC_DeviceMode; // FktID = DeviceMode
+      break;
+
+    case kScanStep_INIC_NIState:
+
+      msg.FunctionId = fbINIC_NIState; // FktID = NIState
+      break;
+
+    case kScanStep_INIC_EHCIState:
+
+      msg.FunctionId = fbINIC_EHCIState; // FktID = EHCIState
+      break;
+
+    case kScanStep_INIC_NCState:
+
+      msg.FunctionId = fbINIC_NCState; // FktID = NCState
+      break;
+
+    default: return;
+
+  }
+
+  output(msg);
+  cancelTimer( noResponse );
+  settimer( noResponse, noResponseDelay );
+}
+/*@@end*/
+

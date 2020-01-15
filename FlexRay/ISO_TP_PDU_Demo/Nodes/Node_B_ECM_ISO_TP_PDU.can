@@ -1,0 +1,454 @@
+/*@!Encoding:1252*/
+variables {
+
+  char gECU[10] = "ECM";
+
+  long gConnectionHandle_2 = 0;
+
+  // TP Timing parameter are defined as constants here:
+  const int gkTimeoutAS_2 = 125;
+  const int gkTimeoutAR_2 = 125;
+  const int gkTimeoutBS_2 = 150;
+  const int gkTimeoutCR_2 = 150;
+  const int gkTimeBR_2 = 25;
+  const int gkTimeCS_2 = 25;
+
+  const long kRxSize = 65538;
+  byte gRxDataBuffer[kRxSize];
+
+  const long kTxSize = 65536;
+  byte gTxDataBuffer[kTxSize];
+
+  char gCaplRxStrBuffer[65538];
+
+  byte gConnectionMode = 1;
+
+  byte gClearData[10];
+ 
+  char gPrefix[20];
+ 
+  msTimer tSignalRcvdData; // Signal Received Data
+
+  const int kBufLen = 50;
+  char buf[kBufLen];
+}
+
+on timer tSignalRcvdData 
+{
+  // Switch off led for RcvdData 
+  @NodeB::RcvdData = 0;   
+}
+
+SetTPConnectionMode(byte connectionMode)
+{
+  switch (connectionMode)
+  {
+    case 1 : 
+    {
+      FRTP_SetConnMode(gConnectionHandle_2, 1); 
+      if (@NodeB::DLL::VerbosityLvl > 1)
+        write("CAPL: %s: uses connection mode Unicast", gECU); 
+      break;
+    }
+    case 2 : 
+    {
+      FRTP_SetConnMode(gConnectionHandle_2, 2); 
+      if (@NodeB::DLL::VerbosityLvl > 1)
+        write("CAPL: %s: uses connection mode AckUnicast", gECU); 
+      break;
+    }
+    case 3 : 
+    {
+      FRTP_SetConnMode(gConnectionHandle_2, 3); 
+      if (@NodeB::DLL::VerbosityLvl > 1)
+        write("CAPL: %s: uses connection mode AckRetryUnicast", gECU); 
+      break;
+    }
+    case 10 : 
+    {
+      FRTP_SetConnMode(gConnectionHandle_2, 10); 
+      if (@NodeB::DLL::VerbosityLvl > 1)
+        write("CAPL: %s: uses connection mode Multicast", gECU); 
+      break;
+    }
+    case 11 : 
+    {
+      FRTP_SetConnMode(gConnectionHandle_2, 11); 
+      if (@NodeB::DLL::VerbosityLvl > 1)
+        write("CAPL: %s: uses connection mode SegmentedMulticast", gECU); 
+      break;
+    }
+    default: 
+    {
+      if (@NodeB::DLL::VerbosityLvl > 1)
+        write("CAPL: %s: unknown connection mode %d", gECU, connectionMode); 
+      break;
+    }
+  }
+}
+
+on sysVar NodeB::DLL::ConnMode
+{
+  gConnectionMode = @this;
+  SetTPConnectionMode(gConnectionMode);
+}
+
+FrTP_ErrorInd(long connectionHdl, DWORD error)
+{
+  if (@NodeB::DLL::VerbosityLvl > 0)
+  {
+    switch (error)
+    {
+      case 1:     write("[%.3f %s] CAPL: Handle: 0x%X ==> Error (%d): Some mandatory settings are missing, e.g. the addresses to use", timeNow()/100000.0, gECU, connectionHdl, error);                                         break;
+      case 2:     write("[%.3f %s] CAPL: Handle: 0x%X ==> Error (%d): The value given contradicts another setting made earlier, e.g. payload length is larger than maximum", timeNow()/100000.0, gECU, connectionHdl, error);   break;
+      case 3:     write("[%.3f %s] CAPL: Handle: 0x%X ==> Error (%d): The request to send some data was rejected since another transmission is in progress", timeNow()/100000.0, gECU, connectionHdl, error);                   break;
+      case 4:     write("[%.3f %s] CAPL: Handle: 0x%X ==> Error (%d): A reception was active when FF or SF was received", timeNow()/100000.0, gECU, connectionHdl, error);                                                      break;
+      case 5:     write("[%.3f %s] CAPL: Handle: 0x%X ==> Error (%d): A negative ACK was received for acknowledged connections", timeNow()/100000.0, gECU, connectionHdl, error);                                               break;
+      case 6:     write("[%.3f %s] CAPL: Handle: 0x%X ==> Error (%d): The bus did not confirm transmission of a frame in time", timeNow()/100000.0, gECU, connectionHdl, error);                                                break;
+      case 7:     write("[%.3f %s] CAPL: Handle: 0x%X ==> Error (%d): The transmitter did not receive a FC (or AF) in time", timeNow()/100000.0, gECU, connectionHdl, error);                                                   break;
+      case 8:     write("[%.3f %s] CAPL: Handle: 0x%X ==> Error (%d): The receiver did not receive the next CF in time", timeNow()/100000.0, gECU, connectionHdl, error);                                                       break;
+      case 11:    write("[%.3f %s] CAPL: Handle: 0x%X ==> Error (%d): The peer rejected the data since it is too long", timeNow()/100000.0, gECU, connectionHdl, error);                                                        break;    
+      case 12:    write("[%.3f %s] CAPL: Handle: 0x%X ==> Error (%d): Peer sent an undefined Ack", timeNow()/100000.0, gECU, connectionHdl, error);                                                                             break;    
+      default:    write("[%.3f %s] CAPL: Handle: 0x%X ==> Error (%d): unknown error", timeNow()/100000.0, gECU, connectionHdl, error);                                                                                          break;
+    }
+  }
+}
+
+FrTP_FirstFrameInd (long connectionHdl, dword dataLength )
+{
+  if (@NodeB::DLL::VerbosityLvl > 1)
+    write("CAPL: %s: Handle: 0x%X ==> CALLBACK: FF indication, peer has started transfer of %d byte to handle 0x%02lx.", gECU, gConnectionHandle_2, dataLength, connectionHdl); 
+}
+
+FrTP_ReceptionInd(long connectionHdl, BYTE data[])
+{
+  if (@NodeB::DLL::VerbosityLvl > 1)
+  write("CAPL: %s: Handle: 0x%02lX ==> CALLBACK: ReceptionInd called, Handle= 0x%02lX, DLC= 0x%02lX", gECU, gConnectionHandle_2, connectionHdl, elcount(data)); 
+
+  sysSetVariableData(sysVar::NodeB::SendData, data, elcount(data));
+  @NodeB::RxData2 = elcount(data);
+
+  /* Signal received Data */
+  @NodeB::RcvdData = 1;
+  cancelTimer(tSignalRcvdData); setTimer(tSignalRcvdData, 500);
+}
+
+FrTP_TxConfirmationInd (long connectionHdl)
+{
+  if (@NodeB::DLL::VerbosityLvl > 1)
+    write("CAPL: %s: Handle: 0x%X ==> CALLBACK: Tx confirmation received for handle 0x%02lX", gECU, gConnectionHandle_2, connectionHdl); 
+}
+
+on sysVar NodeB::DLL::LocalAddr
+{
+  if (@this)
+  {
+    SetTPAddresses();
+  }
+}
+
+on start
+{
+  @NodeB::DLL::VerNoMajor = FrTP_GetDLLInfo(1);
+  @NodeB::DLL::VerNoMinor = FrTP_GetDLLInfo(2);
+  @NodeB::DLL::VerNoBuild = FrTP_GetDLLInfo(3);
+
+  if (@NodeB::DLL::MultiPduMode == 0)
+  { 
+    @NodeB::DLL::MaxPduLength = @NodeB::DLL::SendPDULenUni;
+  } 
+  else 
+  {
+    @NodeB::DLL::MaxPduLength = @NodeB::DLL::SendPDULenMulti;
+  }
+
+  @NodeB::DLL::BufferSize = 8 * @NodeA::DLL::MaxPduLength;
+
+  CreateTPConnection();
+
+  Init();
+  openPanel("Node B");
+}
+
+Init()
+{  
+  gConnectionMode = @NodeB::DLL::ConnMode;
+  SetTPConnectionMode(gConnectionMode);
+  
+  SetTPAddresses();
+  SetTPMaxPduLength();
+  SetTPBufferSize();
+  SetTPExpertMode();
+  SetTPPadding();
+  SetTPBandwidthControl();
+
+  FrTP_SetVerbosity(@NodeB::DLL::VerbosityLvl);  
+}
+
+on sysVar NodeB::DLL::RemoteAddr
+{
+  if (@this)
+  {
+    SetTPAddresses();
+  }
+}
+
+on sysVar NodeB::DLL::MaxPduLength
+{
+  SetTPMaxPduLength();
+}
+
+on sysVar NodeB::DLL::BufferSize
+{
+  SetTPBufferSize();
+}
+
+on sysVar NodeB::DLL::VerbosityLvl
+{
+  FrTP_SetVerbosity(@this);
+  write("CAPL: %s: Handle: 0x%X ==> Verbosity Level set: %d", gECU, gConnectionHandle_2, @this); 
+}
+
+on sysVar NodeB::ClearData
+{
+  if (@this)
+  {
+    sysSetVariableData(sysVar::NodeB::SendData, gClearData, 0);
+    @NodeB::RxData2 = 0;
+    if (@NodeB::DLL::VerbosityLvl > 1)
+      write("CAPL: %s: Handle: 0x%X ==> Data cleared!", gECU, gConnectionHandle_2); 
+  }
+}
+
+on sysVar NodeB::FillData
+{
+  long txCount,i;
+
+  // No action if button is released
+
+  if (@this == 0)
+    return;
+    
+  txCount = @NodeB::TxData2;
+
+  // don't write over array limits
+  // use maximum capacity of protocol
+    
+  if (txCount >= kTxSize)
+    txCount = kTxSize-1; 
+
+  for (i=0; i<txCount; i++) 
+  {
+    gTxDataBuffer[i] = 0x30+i;
+  }
+  
+  // show data in panel
+    
+  sysSetVariableData(sysVar::NodeB::SendData, gTxDataBuffer, txCount);
+  
+  // send data
+    
+  if (0 == FrTP_DataRequest(gConnectionHandle_2, gTxDataBuffer, txCount))
+  { 
+    if (@NodeB::DLL::VerbosityLvl > 1)
+      write("CAPL: %s: Handle: 0x%X ==> Data fill & send: %d Byte payload", gECU, gConnectionHandle_2, txCount); 
+  }
+  else
+  {
+    if (@NodeB::DLL::VerbosityLvl > 0)
+      write("CAPL: %s: Handle: 0x%X ==> FAILURE!! Data fill & send was not successful: %d Byte", gECU, gConnectionHandle_2, txCount); 
+  }
+}
+
+on sysVar NodeB::MsgSend
+{
+  long txCount, txArraySize;
+
+  // Prevent from sending when button is released
+
+  if (@this == 0)
+    return;
+
+  sysGetVariableData(sysVar::NodeB::SendData, gTxDataBuffer, txArraySize);
+  txCount = @NodeB::TxData2;
+
+  // Flexray Demo TP supports only up to 4095 bytes per transmission
+
+  if (txArraySize >= kTxSize)
+    txArraySize = kTxSize-1;  // don't write over array limits
+
+  if (0 == FrTP_DataRequest(gConnectionHandle_2, gTxDataBuffer, txArraySize))
+  {
+    if (@NodeB::DLL::VerbosityLvl > 1)
+      write("CAPL: %s: Handle: 0x%X ==> Data send: %d Byte payload", gECU, gConnectionHandle_2, txArraySize); 
+  }
+  else
+  {
+    if (@NodeB::DLL::VerbosityLvl > 0)
+      write("CAPL: %s: Handle: 0x%X ==> FAILURE!! Data send was not successful: %d Byte", gECU, gConnectionHandle_2, txArraySize); 
+  }
+}
+
+on sysVar NodeB::DLL::Expert
+{
+  SetTPExpertMode();
+}
+
+on sysVar NodeB::DLL::FillByte
+{
+  SetTPPadding();
+}
+
+on sysVar NodeB::DLL::EnablePadding
+{
+  SetTPPadding();
+}
+
+CreateTPConnection ()
+{
+  SetTPExpertMode();
+  SetTPPrefixString();
+
+  if (gConnectionHandle_2 != 0)
+  { // destroy old connection:
+    FrTP_DeleteConn(gConnectionHandle_2);
+    gConnectionHandle_2 = 0;
+  }
+
+  if (@NodeB::DLL::MultiPduMode == 0)
+  { 
+   // use only one PDU per 64 cycles and per direction:
+   gConnectionHandle_2 = FrTP_CreatePDUConnUnicast (@NodeB::DLL::SendPDULenUni, @NodeB::DLL::MaxSendPDUUni);
+  } 
+  else 
+  {
+    // use multiple PDUs per one cycle and per direction:
+    gConnectionHandle_2 = FrTP_CreatePDUConnUnicast (@NodeB::DLL::SendPDULenMulti, @NodeB::DLL::MaxSendPDUMulti);
+  }
+
+  if (@NodeB::DLL::VerbosityLvl > 1)
+    write("CAPL: %s: Created connection handle is: 0x%X", gECU, gConnectionHandle_2);
+
+  @NodeB::ConnectionHandle = gConnectionHandle_2;
+
+  SetTPConnectionMode(gConnectionMode);
+  SetTPTimingParams();
+  SetTPAddresses();
+  SetTPBufferSize();
+  SetTPBandwidthControl();
+  SetTPPadding();
+  SetTPMaxPduLength();
+}
+
+SetTPPrefixString()
+{
+  FrTP_GetNodeName(gCaplRxStrBuffer, elcount(gCaplRxStrBuffer));
+  if (@NodeB::DLL::VerbosityLvl > 1)
+    write("CAPL: %s: Handle: 0x%X ==> NodeName: %s ", gECU, gConnectionHandle_2, gCaplRxStrBuffer); 
+
+  sysSetVariableString(sysVar::NodeB::DLL::NodeName, gCaplRxStrBuffer);
+
+  snprintf( gPrefix, elcount(gPrefix), "[%.3f] %s ", timeNow()/100000.0, gECU);
+}
+
+on sysVar NodeB::DLL::MultiPduMode
+{
+  CreateTPConnection();
+}
+
+SetTPTimingParams ()
+{
+  FrTP_SetTimingParams (gConnectionHandle_2, gkTimeoutAS_2, gkTimeoutAR_2, gkTimeoutBS_2, gkTimeBR_2, gkTimeCS_2, gkTimeoutCR_2);
+  if (@NodeB::DLL::VerbosityLvl > 1)
+    write("CAPL: %s: Handle: 0x%X ==> Timings set to: ToAS=%d, ToAR=%d, ToBS=%d, tBR=%d, tCS=%d, ToCR=%d.", gECU, gConnectionHandle_2, 
+	                                         gkTimeoutAS_2, gkTimeoutAR_2, gkTimeoutBS_2, gkTimeBR_2, gkTimeCS_2, gkTimeoutCR_2);
+
+  @NodeB::DLL::TimeoutAR = gkTimeoutAR_2;
+  @NodeB::DLL::TimeoutAS = gkTimeoutAS_2;
+  @NodeB::DLL::TimeoutBS = gkTimeoutBS_2;
+  @NodeB::DLL::TimeBR    = gkTimeBR_2;
+  @NodeB::DLL::TimeCS    = gkTimeCS_2;
+  @NodeB::DLL::TimeoutCR = gkTimeoutCR_2;
+}
+
+SetTPAddresses ()
+{
+  FrTP_SetAddresses (gConnectionHandle_2, @NodeB::DLL::LocalAddr, @NodeB::DLL::RemoteAddr);
+  if (@NodeB::DLL::VerbosityLvl > 1)
+    write("CAPL: %s: Handle: 0x%X ==> Addresses set: Type: %d, Local Address: %d, Remote Address: %d.", gECU, gConnectionHandle_2, 2, @NodeB::DLL::LocalAddr, @NodeB::DLL::RemoteAddr); 
+}
+
+SetTPBufferSize ()
+{
+  FrTP_SetBufferSize (gConnectionHandle_2, @NodeB::DLL::BufferSize);
+  if (@NodeB::DLL::VerbosityLvl > 1)
+    write("CAPL: %s: Handle: 0x%X ==> Buffer size set: %d.", gECU, gConnectionHandle_2, @NodeB::DLL::BufferSize); 
+}
+
+SetTPPadding ()
+{
+  if (@NodeB::DLL::EnablePadding == 1)
+  {
+    FrTP_SetFillByte (gConnectionHandle_2, @NodeB::DLL::FillByte);
+    if (@NodeB::DLL::VerbosityLvl > 1)
+       write("CAPL: %s: Handle: 0x%X ==> Fillbyte set: 0x%02lX, padding: YES", gECU, gConnectionHandle_2, @NodeB::DLL::FillByte); 
+ }
+  else
+  {
+    FrTP_SetFillByte (gConnectionHandle_2, @NodeB::DLL::FillByte | 0x8000);
+    if (@NodeB::DLL::VerbosityLvl > 1)
+      write("CAPL: %s: Handle: 0x%X ==> Fillbyte set: 0x%02lX, padding: NO", gECU, gConnectionHandle_2, @NodeB::DLL::FillByte); 
+  }
+}
+
+SetTPMaxPduLength ()
+{
+  FrTP_SetMaxPDULength (gConnectionHandle_2, @NodeB::DLL::MaxPduLength);
+  if (@NodeB::DLL::VerbosityLvl > 1)
+    write("CAPL: %s: Handle: 0x%X ==> Max PDU length set: %d.", gECU, gConnectionHandle_2, @NodeB::DLL::MaxPduLength); 
+}
+
+SetTPExpertMode ()
+{
+  if (@NodeB::DLL::Expert)
+  {
+   FrTP_SetExpertParam (gConnectionHandle_2, 100, 1);
+   if (@NodeB::DLL::VerbosityLvl > 1)
+     write("CAPL: %s: Handle: 0x%X ==> Expert Param set: YES", gECU, gConnectionHandle_2); 
+  }
+  else
+  {
+   FrTP_SetExpertParam (gConnectionHandle_2, 100, 0);
+   if (@NodeB::DLL::VerbosityLvl > 1)
+     write("CAPL: %s: Handle: 0x%X ==> Expert Param set: NO", gECU, gConnectionHandle_2); 
+  }
+}
+
+SetTPBandwidthControl ()
+{
+  BYTE separationCycles, maxPDUsPerCycle;
+
+  separationCycles = _pow(2,@NodeB::DLL::FlowControlSCexp) - 1;
+  maxPDUsPerCycle = @NodeB::DLL::FlowControlMNPC;
+
+  FrTP_SetBandwidthControl(gConnectionHandle_2, separationCycles, maxPDUsPerCycle);
+  if (@NodeB::DLL::VerbosityLvl > 1)
+    write("CAPL: %s: Handle: 0x%X ==> MNPC = %d SCexp = %d.", gECU, gConnectionHandle_2, maxPDUsPerCycle, separationCycles);
+}
+
+on sysVar NodeB::DLL::FlowControlSCexp
+{
+  SetTPBandwidthControl();
+}
+
+on sysVar NodeB::DLL::FlowControlMNPC
+{
+  SetTPBandwidthControl();
+}
+
+on sysVar NodeB::TxDataMax
+{
+  if (@this == 1)
+    @NodeB::TxData2 = 65535;
+}
+

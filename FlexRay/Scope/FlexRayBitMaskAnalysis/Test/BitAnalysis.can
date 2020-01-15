@@ -1,0 +1,283 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "ScopeUtils.cin"
+  #include "scope\ScopeBitAnalyse.cin"
+}
+
+variables
+{
+  const long testStepNameLength = 256;
+  
+  char testStepName[testStepNameLength];
+  
+  frFrame (1,0,1) frTestFrame;  //place holder for frames under test
+  
+  //type of frames to be analyzed
+  enum eFrAnlyzFlags{
+    eFrAnlyzKeySlots = 0,
+    eFrAnlyzStaticSlots = 1,
+    eFrAnlyzDynamicSlots = 2,
+    eFrAnlyzAllSlots = 3
+  };
+
+  int showOnlyTheFirstErrorInEachFrame = 0;
+  long maxErrorsToShow = 10; //maximum count of error details in report
+}
+
+//default bit mask
+testfunction InitBitMaskDefault()
+{
+  bitMaskPolygon.maskPointCount = 5;
+  
+  bitMaskPolygon.timeOffset[0] = 26.5;
+  bitMaskPolygon.timeOffset[1] = 37.75;
+  bitMaskPolygon.timeOffset[2] = 50.0;
+  bitMaskPolygon.timeOffset[3] = 62.25;
+  bitMaskPolygon.timeOffset[4] = 73.5;
+  
+  bitMaskPolygon.data_0_Mask[0] = 0;
+  bitMaskPolygon.data_0_Mask[1] = -300;
+  bitMaskPolygon.data_0_Mask[2] = -400;
+  bitMaskPolygon.data_0_Mask[3] = -300;
+  bitMaskPolygon.data_0_Mask[4] = 0;
+  
+  bitMaskPolygon.data_1_Mask[0] = 0;
+  bitMaskPolygon.data_1_Mask[1] = 300;
+  bitMaskPolygon.data_1_Mask[2] = 400;
+  bitMaskPolygon.data_1_Mask[3] = 300;
+  bitMaskPolygon.data_1_Mask[4] = 0;
+}
+
+//a too big mask to provoke errors
+testfunction InitBitMaskLarge()
+{
+  bitMaskPolygon.maskPointCount = 5;
+  
+  bitMaskPolygon.timeOffset[0] = 26.5;
+  bitMaskPolygon.timeOffset[1] = 37.75;
+  bitMaskPolygon.timeOffset[2] = 50.0;
+  bitMaskPolygon.timeOffset[3] = 62.25;
+  bitMaskPolygon.timeOffset[4] = 73.5;
+  
+  bitMaskPolygon.data_0_Mask[0] = 0;
+  bitMaskPolygon.data_0_Mask[1] = -700;
+  bitMaskPolygon.data_0_Mask[2] = -1300;
+  bitMaskPolygon.data_0_Mask[3] = -700;
+  bitMaskPolygon.data_0_Mask[4] = 0;
+  
+  bitMaskPolygon.data_1_Mask[0] = 0;
+  bitMaskPolygon.data_1_Mask[1] = 700;
+  bitMaskPolygon.data_1_Mask[2] = 1300;
+  bitMaskPolygon.data_1_Mask[3] = 700;
+  bitMaskPolygon.data_1_Mask[4] = 0;
+}
+
+
+testfunction InitScope()
+{
+  strncpy(testStepName, "Test Preparation", testStepNameLength);
+  
+  if(isSimulated())
+  {
+    testStepFail(testStepName, "Test can only be executed in real mode.");
+    return;
+  }
+  if(!DoScopeConnect()) return;
+}
+
+testfunction ShowFrame()
+{
+  long res;
+  
+  res = testWaitForScopeFitDataFr(frTestFrame, eCAPLScopeDataField_FR_RECEIVE_MESSAGE, eCAPLScopeDataField_FR_RECEIVE_MESSAGE);
+
+  if(!CheckStatusInternal(res, "testWaitForScopeFitData")) return;
+  
+  TestReportAddWindowCapture("testStepName", testStepName, "Frame overview");
+
+}
+
+testfunction WaitForFrameAndTriggerScope()
+{
+  long res;
+  qword currTime;
+  const long nameLength = 256;
+  char ecuName[nameLength];
+  frConfiguration frcfg;
+  long frAnlyzFlags;
+  
+  frGetConfiguration(%CHANNEL%, frcfg); //used to distinguish between frames of static and dynamic segment
+  
+  SysGetVariableString("BitAnalysis", "ECUName", ecuName, nameLength);
+  frAnlyzFlags = @BitAnalysis::FrameType;
+  
+  testReportAddMiscInfoBlock("System under test");
+  testReportAddMiscInfo("ECU", ecuName);
+  if(frAnlyzFlags == eFrAnlyzAllSlots) testReportAddMiscInfo("Frames under test", "All");
+  else if(frAnlyzFlags == eFrAnlyzKeySlots) testReportAddMiscInfo("Frames under test", "Frames in key slots");
+  else if(frAnlyzFlags == eFrAnlyzStaticSlots) testReportAddMiscInfo("Frames under test", "Frames in static segment");
+  else if(frAnlyzFlags == eFrAnlyzDynamicSlots) testReportAddMiscInfo("Frames under test", "Frames in dynamic segment");
+  
+  currTime = timeNowInt64();
+  do
+  {
+    res = testWaitForFrFrame(500);
+    if(res < 1)
+    {
+      teststepfail(testStepName, "testWaitForFrFrame: no frame received");
+      return;
+    }
+    res = TestGetWaitFrFrameData(frTestFrame);
+    if(res != 0)
+    {
+      teststepfail(testStepName, "TestGetWaitFrFrameData: no frame received");
+      return;
+    }
+    
+    //check if the frame is tranmitted from the node under test
+    if(strlen(DBLookup(frTestFrame).Transmitter) == strlen(ecuName) && 0 == strncmp(DBLookup(frTestFrame).Transmitter, ecuName, strlen(ecuName) )) 
+    {
+      if((frAnlyzFlags == eFrAnlyzAllSlots)
+        || (frTestFrame.fr_slotID <= frcfg.gNumberOfStaticSlots && frAnlyzFlags == eFrAnlyzStaticSlots)
+        || (frTestFrame.fr_slotID > frcfg.gNumberOfStaticSlots && frAnlyzFlags == eFrAnlyzDynamicSlots)
+        || (((frTestFrame.fr_flags & 1) != 0) && frAnlyzFlags == eFrAnlyzKeySlots))
+      {
+        DoScopeTrigger();
+        return;
+      }
+    }
+    
+  }while(timeNowInt64() < (currTime + 100000000));
+
+  testStepFail(testStepName, "No frames from ECU %s received.", ecuName);
+}
+
+testfunction AnalyzeECUTxFrames()
+{
+  const long nameLength = 256;
+  char ecuName[nameLength];
+  
+  long res;
+  ScopeAnalyseResult analyzeResult;
+  const long bufferSize = 1024;
+  char buffer[bufferSize];
+  char buffer1[bufferSize];
+  char textResult[bufferSize];
+  long frAnlyzFlags;
+  
+  strncpy(testStepName, "Analyze", testStepNameLength);
+  
+  if(!scopeConnected)
+  {
+    testStepFail(testStepName, "Frames could not be analyzed. Scope ist not connected.");
+    return;
+  }
+
+  SysGetVariableString("BitAnalysis", "ECUName", ecuName, nameLength);
+  frAnlyzFlags = @BitAnalysis::FrameType;
+
+  TestReportAddMiscInfoBlock("Bit mask parameters");
+  AddSetupInfo(bitMaskPolygon, "Bit mask parameters");
+  
+  res =testWaitScopeAnalyseSignal (ecuName, frAnlyzFlags, bitMaskPolygon, analyzeResult, scopeAnlyzHandle); 
+
+  if(res < 0)
+  {
+    testStepFail(testStepName, "Frames could not be analyzed. Return code = %d", analyzeResult.result);
+    return;
+  }
+
+  snprintf(textResult, bufferSize, "Analysed frame count: %d. ", analyzeResult.analysedFrameCount);
+  snprintf(buffer, bufferSize, "Frames with decode failure: %d. ", analyzeResult.framesWithDecodeFailure);
+  strncat(textResult, buffer, bufferSize);
+  snprintf(buffer, bufferSize, "Frames with mask violations: %d. ", analyzeResult.framesWithMaskViolation);
+  strncat(textResult, buffer, bufferSize);
+  snprintf(buffer, bufferSize, "Bit failure count: %d. ", analyzeResult.bitFailureCount);
+  strncat(textResult, buffer, bufferSize);
+  
+  if(analyzeResult.bitFailureCount == 0)
+  {
+    testStepPass(testStepName, "%s No bit mask violations found.", textResult);
+
+    res = TestWaitScopeShowMask(scopeAnlyzHandle, frTestFrame, eCAPLScopeDataField_FR_RESERVE_BIT_FIELD, 0, 8);
+    
+    snprintf(buffer, bufferSize, "TestWaitScopeShowMask, frame =%s", DBLookup(frTestFrame).Name);
+    
+    if(!CheckStatusInternal(res, buffer)) return;
+
+    snprintf(buffer, bufferSize, " Frame: %s", DBLookup(frTestFrame).Name);
+    TestReportAddWindowCapture("Scope", "Start of first analyzed frame. ", buffer);
+  
+  }
+  else
+  {
+    ScopeMaskViolationData2 maskViolationData;
+    long i, j, fit1stfield, fit1stbit, fitbitcount;
+    qword timeOfLastError = 0;
+
+    if(showOnlyTheFirstErrorInEachFrame)
+    {
+      int k;
+      k = analyzeResult.framesWithDecodeFailure;
+      if(analyzeResult.framesWithDecodeFailure > maxErrorsToShow) k = maxErrorsToShow;
+      testStepFail(testStepName, "%s Showing details of the first error in %d frames.", textResult, k);
+    }
+    else
+    {
+      int k;
+      k = analyzeResult.bitFailureCount;
+      if(analyzeResult.bitFailureCount > maxErrorsToShow) k = maxErrorsToShow;
+      testStepFail(testStepName, "%s Showing details of the first %d errors.", textResult, k);
+    }
+    
+    //iterate through all bit mask violations and add a description to the report
+    j = 0;
+    for(i = 0; i < analyzeResult.bitFailureCount && j < maxErrorsToShow;++i)
+    {
+      const long psCorrection=1000;
+      const long bitLengthInPS = 100000;
+      
+      res = TestWaitScopeGetMaskViolation(scopeAnlyzHandle, i, frTestFrame, maskViolationData);
+      if(!CheckStatusInternal(res, "TestWaitScopeGetMaskViolation")) return;
+      
+      if(showOnlyTheFirstErrorInEachFrame && timeOfLastError == frTestFrame.time_ns) continue;  //show only the first error of each frame
+      
+      timeOfLastError = frTestFrame.time_ns;
+      ++j;
+  
+      fit1stfield = maskViolationData.bitField;
+      fit1stbit = maskViolationData.bitNo;
+  
+      res = TestWaitScopeShowMask(scopeAnlyzHandle, frTestFrame, fit1stfield, fit1stbit, 8);
+      if(!CheckStatusInternal(res, "TestWaitScopeShowMask")) return;
+      
+      buffer1[0]='\0';  //"null frame"- indicator for test report
+      if((frTestFrame.fr_flags & 0x400) !=0) strncpy(buffer1, "null frame, ", bufferSize);
+      
+      GetFrBitFieldName(maskViolationData.bitField, buffer, bufferSize);
+      
+      snprintf(textResult, bufferSize, 
+        "Error #%d: Time %.6f s, frame = %s:%s, slot %d, cycle %d, %s%s bit %d. The bit is disturbed from %d ns to %d ns. Disturbance starts at %.f%% of the bit, %.f%% of the bit is disturbed. Voltage over/undershoot is %dmV." 
+                  , i
+                  , frTestFrame.time/1e5
+                  , DBLookup(frTestFrame).Transmitter
+                  , DBLookup(frTestFrame).Name
+                  , frTestFrame.FR_SLOTID
+                  , frTestFrame.FR_cycle
+                  , buffer1
+                  , buffer
+                  , maskViolationData.bitNo
+                  , (long)(maskViolationData.disturbanceTimeStart/psCorrection)
+                  , (long)(maskViolationData.DisturbanceTimeEnd/psCorrection)
+                  , 1e2*maskViolationData.disturbanceTimeStart/bitLengthInPS
+                  , 1e2*(maskViolationData.disturbanceTimeEnd-maskViolationData.disturbanceTimeStart)/bitLengthInPS
+                  , maskViolationData.Vdist - maskViolationData.Vgiven);
+
+      TestReportAddWindowCapture("Scope", "", textResult);
+    }  
+  
+  }
+}
+
+

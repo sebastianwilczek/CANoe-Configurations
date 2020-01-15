@@ -1,0 +1,127 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "Car2xAPI.cin"
+  #include "Position.cin"
+  #include "..\DataSources_Templates\ASNV_Template_BaseDatatypes.cin"
+  #include "..\DataSources_Templates\ASNV_Template_MAP.cin"
+  #include "..\DataSources_Templates\ASNV_Template_SPAT.cin"
+
+   #include "RSU_Trafficlight.cin"
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Variables
+////////////////////////////////////////////////////////////////////////////////
+variables
+{
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// start / init packet
+////////////////////////////////////////////////////////////////////////////////
+on start
+{
+  C2xRegisterCallback(kRxIndication   , "OnRx");
+  C2xRegisterCallback(kPreTxIndication, "OnTxMAP" , "MAP" ) ;
+  C2xRegisterCallback(kPreTxIndication, "OnTxSPAT", "SPAT") ;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// On Rx
+////////////////////////////////////////////////////////////////////////////////
+void OnRx(LONG channel, LONG dir, LONG radioChannel, LONG signalStrength, LONG sigQuality, LONG packet)
+{
+  struct Pos2D pos2d;
+  // station info
+  long stationHdl ;
+  char stationName[128] ;
+
+  stationHdl = C2xGetStationHandle(packet) ;
+  C2xGetStationName(stationHdl, elcount(stationName), stationName) ;
+
+  if ((dir == RX) &&
+      !strncmp(stationName, "DUT", elcount(stationName))) // received from DUT
+  {
+    pos2d.latitude  = RSU_TrafficLight_Ctx.latitude ;
+    pos2d.longitude = RSU_TrafficLight_Ctx.longitude;
+
+    if (API_PosCalcDistance(packet, pos2d) <= @sysVar::DUT::Horizont)
+    {
+      C2xEnableMsg("MAP") ;
+      c2xEnableMsg("SPAT") ;
+    }
+    else
+    {
+      C2xDisableMsg("MAP") ;
+      C2xDisableMsg("SPAT") ;
+      @sysvar::RSU_TrafficLight::State = 0;
+      @sysvar::RSU_TrafficLight::TimeToSwitch = 0.0;
+    }
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// MAP
+////////////////////////////////////////////////////////////////////////////////
+void OnTxMAP(long packet)
+{
+  struct MAP mapPdu ;
+  byte first = 1 ;
+
+  if (first)
+  {
+    first = 0 ;
+    MapInit(packet, mapPdu) ;
+    API_SetMAPParams(packet, mapPdu) ;
+  }
+  else
+  {
+    // nothing
+  }
+
+  C2xSetTokenInt64(packet, "geo_bh", "version", 1);
+  C2xSetTokenInt64(packet, "geo_eh", "lpvTimeStamp", C2xConvertTimeToMSSinceUTC(C2xGetITSTimestamp(), 0));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// SPAT
+////////////////////////////////////////////////////////////////////////////////
+
+void OnTxSPAT(long packet)
+{
+  struct SPAT spatPdu ;
+  byte first = 1 ;
+
+  if (first)
+  {
+    first = 0 ;
+    SpatInit(packet, spatPdu) ;
+  }
+  else
+  {
+    API_GetSPATParams(packet, spatPdu) ;
+  }
+
+  C2xSetTokenInt64(packet, "geo_eh", "lpvTimeStamp", C2xConvertTimeToMSSinceUTC(C2xGetITSTimestamp(), 0));
+  UpdateSpat(spatPdu, 5, 0, signalGroup_1);
+  UpdateSpat(spatPdu, 4, 1, signalGroup_2);
+
+  API_SetSPATParams(packet, spatPdu) ;
+
+  switch (signalGroup_1[2].currentState)
+  {
+  case eRed:       @sysvar::RSU_TrafficLight::State = 1; break;
+  case eRedYellow: @sysvar::RSU_TrafficLight::State = 2; break;
+  case eGreen:     @sysvar::RSU_TrafficLight::State = 3; break;
+  case eYellow:    @sysvar::RSU_TrafficLight::State = 4; break;
+  }
+
+  @sysvar::RSU_TrafficLight::TimeToSwitch = (double)signalGroup_1[2].nextStateChange;
+  
+  C2xSetTokenInt64(packet, "geo_bh", "version", 1);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// EOF
+////////////////////////////////////////////////////////////////////////////////

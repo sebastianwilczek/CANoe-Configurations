@@ -1,0 +1,159 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+variables
+{
+  // UDP payload size
+  const int kUDP_MAX_DATA_LENGTH = 1472;
+  
+  struct _Token_UDP
+  {    
+    word wSource;
+    word wDestination;
+    word wLength;  
+    byte bPayload[kUDP_MAX_DATA_LENGTH];
+  };
+}
+
+/// <initialize>
+// inititalization UDP Token data
+void initUdpTokenData(struct _Token_UDP data)
+{
+  int i;
+  
+  data.wSource = 0;
+  data.wDestination = 0;
+  data.wLength = 0;
+
+  for(i=0; i<elCount(data.bPayload); i++)
+  {
+    data.bPayload[i] = 0;
+  }
+}
+
+/// <getPacketData>
+// get the udp packet data from received ethernet packet
+int getUdpPacket(struct _Token_UDP data, long handle)
+{  
+  int payloadlength;
+  
+  getUdpPacketHeaderData(data, handle);
+      
+  payloadlength = EthGetTokenData(handle, "udp", "data", elCount(data.bPayload), data.bPayload);
+
+  return 1;
+}
+
+/// <getPacketData>
+//
+void getUdpPacketHeaderData(struct _Token_UDP data, long handle)
+{
+  // UDP data
+  data.wSource = EthGetTokenInt(handle, "udp", "source");
+  data.wDestination = EthGetTokenInt(handle, "udp", "destination");
+  data.wLength = EthGetTokenInt(handle, "udp", "length");  
+}
+
+/// <sendPacket/constructHeader>
+// construct udp header packet handle
+void constructUdpHeader(int srcPort, int dstPort, long lPacketHandle)
+{
+  // construct UDP header
+  EthInitProtocol(lPacketHandle, "udp");
+  EthSetTokenInt(lPacketHandle, "udp", "source", srcPort);
+  EthSetTokenInt(lPacketHandle, "udp", "destination", dstPort);
+}
+
+/// <sendPacket>
+// construct udp payload packet handle
+void constructUdpPayload(byte data[], word dataLength, long lPacketHandle)
+{
+  // set payload
+  if(elCount(data) <= 0 || dataLength <= 0)
+  {
+    return;
+  }
+  
+  EthResizeToken(lPacketHandle, "udp", "data", dataLength * 8 /*bits*/);
+  EthSetTokenData(lPacketHandle, "udp", "data", dataLength, data);
+}
+
+/// <sendPacket>
+// construct udp payload packet handle
+void constructUdpPayloadAdd(byte data[], word dataLength, long lPacketHandle, dword dwByteOffset)
+{
+  // set payload
+  if(elCount(data) <= 0 || dataLength <= 0)
+  {
+    return;
+  }
+  
+  EthResizeToken(lPacketHandle, "udp", "data", (dataLength+dwByteOffset) * 8 /*bits*/);
+  EthSetTokenData(lPacketHandle, "udp", "data", dwByteOffset, dataLength, data);
+}
+
+
+
+/// <sendPacket>
+// construct udp packet handle
+// ret 1:succeed 0:failed
+int constructUdpPacket(struct _Token_UDP data, long lPacketHandle)
+{
+  int iRet;
+  
+  iRet = 0;
+  
+  constructUdpHeader(data.wSource, data.wDestination, lPacketHandle);
+
+  iRet = 1;
+    
+  return iRet;
+}
+
+/// <makePacketData>
+// return 1:receive is nessasary  0:receive is unnecessary
+int makeUdpPacket(struct _Token_UDP recvData, struct _Token_UDP sendData)
+{
+  int iRet;
+  
+  iRet = 0;
+  
+  sendData.wSource = recvData.wDestination;
+  sendData.wDestination = recvData.wSource;
+      
+  return iRet;
+}
+
+/// <Debug>
+void outputWaringMsg(char msg[])
+{
+  writeLineEx(1, 2, "<%BASE_FILE_NAME%> : %s", msg);
+  
+}
+
+/// <Debug>
+void outputErrorMsg(char msg[])
+{
+  writeLineEx(1, 3, "<%BASE_FILE_NAME%> : %s", msg);
+}

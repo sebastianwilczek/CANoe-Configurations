@@ -1,0 +1,363 @@
+/*@!Encoding:1252*/
+includes
+{
+#include "Diagnostics/CCI_CanTp.cin"
+}
+
+variables
+{
+  char gECU[10] = "ECU";
+  const cIsTester = 0;
+
+  int numberOfDTCs = 0;
+  int dtcs[10];
+}
+
+on sysvar sysvar::VTS_simulated::M3_SupInt::RefVoltage
+{
+  char string[32];
+
+  // The supply voltage has changed
+  if( @sysvar::VTS_simulated::M3_SupInt::RefVoltage < 11 ) {
+    // Now it's too low, power down
+    UnderVoltage();
+  }
+  else if( @sysvar::VTS_simulated::M3_SupInt::RefVoltage > 13 ) {
+    // Now it's too high, power down
+    OverVoltage();
+  }
+  else {
+    // Voltage is OK, refresh states/outputs
+    Refresh();
+  }//end if
+
+}
+
+on sysvar sysvar::VTS_simulated::M1_Ch1::Resistor
+{
+  // Remove any short circuits
+  if( @sysvar::VTS_simulated::M1_Ch1::Resistor != 0 ) @sysvar::VTS_simulated::M1_Ch1::RelayShortCircuit = 0;
+
+  // The input value has changed. If the ECU is powered correctly
+  // respond to the changes by refreshing all states/outputs
+  if( @sysvar::ECU::VoltageState == 2 )
+  {
+    // Write to fault memory on short circuit
+    if( @sysvar::VTS_simulated::M2_Ch2::RelayShortCircuit == 1 && @sysvar::ECU::OutAnalogHeating > 0.0 )
+      AddFaultMemoryEntry(4);
+
+      // Check if value has deviated too much from default
+    if( @sysvar::VTS_simulated::M2_Ch1::IntLoadResistor > 600 && @sysvar::ECU::OutAnalogCooling )
+      AddFaultMemoryEntry(5);
+
+    // Check if value has deviated too much from default
+    if( @sysvar::VTS_simulated::M2_Ch1::IntLoadResistor < 400 && @sysvar::ECU::OutAnalogCooling )
+      AddFaultMemoryEntry(6);
+
+    Refresh();
+  }//end if
+}
+
+UnderVoltage ()
+{
+  // Supply voltage is too low
+
+  // Set proper state
+  @sysvar::ECU::VoltageState = 0;
+
+  // Disable outputs
+  @sysvar::ECU::OutAnalogCooling = 0.0;
+  @sysvar::ECU::OutAnalogHeating = 0.0;
+  @sysvar::ECU::OutDigital = 0;
+
+  // Disable the state display
+  SysSetVariableString(sysvar::ECU::State_Power, "");
+  SysSetVariableString(sysvar::ECU::State_Sensor, "");
+  SysSetVariableString(sysvar::ECU::State_OutAnalog, "");
+  SysSetVariableString(sysvar::ECU::State_OutDigital, "");
+
+  // Add fault memory entry
+  AddFaultMemoryEntry(2);
+}
+
+Refresh ()
+{
+  char string[32];
+  float temperature;
+  
+  // Calculate the current temperature based on sensor measurement
+  temperature = @sysvar::VTS_simulated::M1_Ch1::Resistor*0.0097;
+
+
+  // In case of short circuit...
+  if( temperature == 0 )
+  {
+    // Display temperature in state display
+    SysSetVariableString(sysvar::ECU::State_Sensor, "Sensor error");
+
+    // Make sure cooling is turned off
+    @sysvar::ECU::OutAnalogCooling = 0.0;
+
+    // Make sure heating is turned off
+    @sysvar::ECU::OutAnalogHeating = 0.0;
+
+    SysSetVariableString(sysvar::ECU::State_OutAnalog, "Offline");
+
+
+    // Turn LED on and refresh state display
+    if( @sysvar::ECU::FaultyLEDControl == 0 )
+    {
+      @sysvar::ECU::OutDigital = 1;
+      snprintf( string, 32, "ON" );
+      SysSetVariableString(sysvar::ECU::State_OutDigital, string);
+    }//end if
+
+    return;
+  }//end if
+
+
+
+
+  // Display temperature in state display
+  snprintf( string, 32, "%1.1f°C", temperature );
+  SysSetVariableString(sysvar::ECU::State_Sensor, string);
+
+  if( temperature < 18.0 ) { // Case 1: Temperature is too low
+
+    // Only react if no short circuit is detected
+    if( @sysvar::VTS_simulated::M2_Ch2::RelayShortCircuit == 1 )
+    {
+      // Turn off heating
+      @sysvar::ECU::OutAnalogHeating = 0.0;
+
+      // Update state display
+      SysSetVariableString(sysvar::ECU::State_OutAnalog, "Heating shut down");
+    }
+    else
+    {
+      // Set heating intensity according to current temperature
+      @sysvar::ECU::OutAnalogHeating = 18.0-temperature;
+      if( @sysvar::ECU::OutAnalogHeating > 5.0 ) @sysvar::ECU::OutAnalogHeating = 5.0;
+
+      // Make sure cooling is turned off
+      @sysvar::ECU::OutAnalogCooling = 0.0;
+
+      // Update state display
+      snprintf( string, 32, "Heating at %d%%", (int)(@sysvar::ECU::OutAnalogHeating*20) );
+      SysSetVariableString(sysvar::ECU::State_OutAnalog, string);
+    }//end if
+  }
+  else if( temperature > 24.0 ) { // Case 2: Temperature is too high
+
+    // Check if value has deviated too much from default
+    if( @sysvar::VTS_simulated::M2_Ch1::IntLoadResistor > 600 || @sysvar::VTS_simulated::M2_Ch1::IntLoadResistor < 400 )
+    {
+      // Turn off cooling
+      @sysvar::ECU::OutAnalogCooling = 0.0;
+      SysSetVariableString(sysvar::ECU::State_OutAnalog, "Cooling shut down");
+    }
+    else
+    {
+
+      // Set cooling intensity according to current temperature
+      @sysvar::ECU::OutAnalogCooling = temperature-24.0;
+      if( @sysvar::ECU::OutAnalogCooling > 5.0 ) @sysvar::ECU::OutAnalogCooling = 5.0;
+
+      // Make sure heating is turned off
+      @sysvar::ECU::OutAnalogHeating = 0.0;
+
+      // Update state display
+      snprintf( string, 32, "Cooling at %d%%", (int)(@sysvar::ECU::OutAnalogCooling*20) );
+      SysSetVariableString(sysvar::ECU::State_OutAnalog, string);
+    }//end if
+  }
+  else { // Case 3: Temperature is OK
+    // Make sure heating and cooling are turned off
+    @sysvar::ECU::OutAnalogHeating = 0.0;
+    @sysvar::ECU::OutAnalogCooling = 0.0;
+
+    // Update state display
+    snprintf( string, 32, "Temp. OK" );
+    SysSetVariableString(sysvar::ECU::State_OutAnalog, string);
+  }//end if
+
+
+  // Digital output (warning LED)
+
+  // Check if temperature exceeds critical value
+  if( temperature > 40.0  ) {
+    // Turn LED on and refresh state display
+    @sysvar::ECU::OutDigital = 1;
+    snprintf( string, 32, "ON" );
+    SysSetVariableString(sysvar::ECU::State_OutDigital, string);
+  }
+  else {
+    // Turn LED off and refresh state display
+    @sysvar::ECU::OutDigital = 0;
+    snprintf( string, 32, "OFF" );
+    SysSetVariableString(sysvar::ECU::State_OutDigital, string);
+  }//end if
+
+
+  // Set voltage to OK and update state display
+  @sysvar::ECU::VoltageState = 2;
+  SysSetVariableString(sysvar::ECU::State_Power, "OK");
+}
+
+OverVoltage ()
+{
+  // Supply voltage is too high
+
+  // Set proper state
+  @sysvar::ECU::VoltageState = 1;
+
+  // Disable outputs
+  @sysvar::ECU::OutAnalogCooling = 0.0;
+  @sysvar::ECU::OutAnalogHeating = 0.0;
+  @sysvar::ECU::OutDigital = 0;
+
+  // Disable the state display
+  SysSetVariableString(sysvar::ECU::State_Power, "");
+  SysSetVariableString(sysvar::ECU::State_Sensor, "");
+  SysSetVariableString(sysvar::ECU::State_OutAnalog, "");
+  SysSetVariableString(sysvar::ECU::State_OutDigital, "");
+
+  // Add fault memory entry
+  AddFaultMemoryEntry(1);
+}
+
+on start
+{
+  // Do an initial refresh of all states/outputs
+  Refresh();
+}
+
+on sysvar sysvar::VTS_simulated::M1_Ch1::RelayShortCircuit
+{
+  // Check for short circuit on sensor
+  if( @sysvar::VTS_simulated::M1_Ch1::RelayShortCircuit == 1 )
+  {
+    // React to short circuit
+    if( @sysvar::ECU::VoltageState == 2 ) AddFaultMemoryEntry(3);
+    @sysvar::VTS_simulated::M1_Ch1::Resistor = 0;
+  }
+  else
+  {
+    // Back to normal
+    if( @sysvar::VTS_simulated::M1_Ch1::Resistor != 2310 ) @sysvar::VTS_simulated::M1_Ch1::Resistor = 2310;
+  }
+}
+
+AddFaultMemoryEntry ( int dtc )
+{
+  int i=0;
+
+
+  for( i=9; i>0; i-- )
+  {
+    dtcs[i] = dtcs[i-1];
+  }//end for
+
+  dtcs[0] = dtc;
+
+  numberOfDTCs = numberOfDTCs+1;
+  if( numberOfDTCs > 10 ) numberOfDTCs = 10;
+}
+
+on diagRequest DefaultSession_Start
+{
+  // The application functionality starts here the default session.
+  diagResponse this resp;
+
+  /* Sends the response object back to the tester. 
+  Can only be called in the ECU simulation. */
+  DiagSendResponse( resp);
+}
+
+on diagRequest SerialNumber_Read
+{
+  /* The server sends an identification datarecord included in the 
+  ReadECUIdentification positive response message. */
+  diagResponse this resp;
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "SerialNumber", 1234567);
+
+  /* Sends the response object back to the tester. 
+  Can only be called in the ECU simulation. */
+  DiagSendResponse(resp);
+}
+
+on diagRequest FaultMemory_Clear
+{
+  // The application functionality starts here the default session.
+  diagResponse this resp;
+
+  int i=0;
+
+  numberOfDTCs = 0;
+  for( i=0; i<10; i++ )
+  {
+    dtcs[i] = 0;
+  }//end for
+
+  /* Sends the response object back to the tester. 
+  Can only be called in the ECU simulation. */
+  DiagSendResponse( resp);
+}
+
+on diagRequest FaultMemory_ReadAllIdentified
+{
+  int i=0;
+  char desc = 0x08;
+  diagResponse this diagResp;
+
+  // Set number of errors
+  DiagSetParameter( diagResp, "NumberOfDtc", numberOfDTCs);
+  DiagResize( diagResp );
+
+  for( i=0; i<numberOfDTCs; i++ )
+  {
+    DiagSetComplexParameter( diagResp, "ListOfDtcAndStatus", i, "DTC", dtcs[i]);
+
+    if( dtcs[i] == 2 || dtcs[i] == 5 ) desc = 0x02;
+    else if( dtcs[i] == 1 || dtcs[i] == 6 || dtcs[i] == 4 ) desc = 0x01;
+    DiagSetComplexParameter( diagResp, "ListOfDtcAndStatus", i,  "DtcStatusbyte.DTCFaultSymptom", desc);
+  }//end for
+
+  DiagSendResponse(diagResp);
+}
+
+on sysvar sysvar::VTS_simulated::M2_Ch2::RelayShortCircuit
+{
+  if( @sysvar::ECU::VoltageState == 2 ) 
+  {
+    // Write to fault memory on short circuit
+    if( @sysvar::VTS_simulated::M2_Ch2::RelayShortCircuit == 1 && @sysvar::ECU::OutAnalogHeating > 0.0 )
+      AddFaultMemoryEntry(4);
+
+    Refresh();
+  }//end if
+}
+
+on sysvar sysvar::VTS_simulated::M2_Ch1::IntLoadResistor
+{
+  if( @sysvar::ECU::VoltageState == 2 )
+  {
+    // Check if value has deviated too much from default
+    if( @sysvar::VTS_simulated::M2_Ch1::IntLoadResistor > 600 && @sysvar::ECU::OutAnalogCooling )
+      AddFaultMemoryEntry(5);
+
+    // Check if value has deviated too much from default
+    if( @sysvar::VTS_simulated::M2_Ch1::IntLoadResistor < 400 && @sysvar::ECU::OutAnalogCooling )
+      AddFaultMemoryEntry(6);
+
+    Refresh();
+  }//end if
+}
+
+on sysvar sysvar::ECU::FaultyLEDControl
+{
+  if( @sysvar::ECU::VoltageState == 2 ) Refresh();
+}
+

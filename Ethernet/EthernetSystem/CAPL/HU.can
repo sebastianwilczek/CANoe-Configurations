@@ -1,0 +1,487 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "include\PDU-NM-ASR_Eth.cin"
+}
+
+variables
+{
+  //
+  // Constants
+  //
+  
+  const dword kMediaStreamIndex    = 0xFFFFFFFD; /* The first audio stream*/
+  const long  kBufferSize          = 32*1024;
+  const long  kBufferCount         = 2;
+  byte        kMulitcaseMacAddr[6] = { 0x01, 0x00, 0x00, 0x00, 0x00, 0x01 };
+  const word  kStreamUniqueId      = 0x0001;
+  
+  //
+  // Global variables
+  //
+  
+  dword   gMediaReaderHandle; // Handle for the media-reader, which reads the media file
+  dword   gTalkerHandle;      // Handle of the AVB talker, which sends the AVB stream
+  char    gTalkerFilename[200];
+  dword   gTalkerPlayingLoop;
+  
+  byte    gReadBuffer[kBufferCount][kBufferSize]; // Two buffers, which are toggled between
+                                                  // reading data from the media-reader and
+                                                  // sending the AVB stream with the talker
+  byte    gReadBufferSendingIndex = 0;            // Index of buffer which is just send
+}
+
+on start
+{
+  //
+  // Configure PTP
+  //
+  
+  PtpSetProperty( "VlanId", 1 );
+  PtpSetProperty( "PortRole", 4 /* DisabledPort */ );
+  
+  HU_SetControlVisible( 0 );
+  TalkerSelectRadioStation( 0, 1 );  
+}
+
+on preStop
+{
+  TalkerClose();
+}
+
+on sysvar sysvar::HeadUnit::Button::OnOff
+{
+  // if On/Off button is pressed...
+  if (@this == 1)
+  {
+    switch( @sysvar::_NMControl::Vehicle_Ethernet::Nodes::HU::State )
+    {
+      case 0:
+      case 1: // Bus sleep
+      case 7:
+        // ... wake up network management, if ECU is in bus-sleep
+        @sysvar::_NMControl::Vehicle_Ethernet::Nodes::HU::RequestBus   = 1;
+        @sysvar::_NMControl::Vehicle_Ethernet::Nodes::HU::RequestIL    = 1;
+        @sysvar::_NMControl::Vehicle_Ethernet::Nodes::HU::ApplActivity = 1;
+        break;
+      default:
+        // ... go to bus-sleep, if ECU is in active
+        @sysvar::_NMControl::Vehicle_Ethernet::Nodes::HU::RequestBus   = 0;
+        @sysvar::_NMControl::Vehicle_Ethernet::Nodes::HU::RequestIL    = 0;
+        @sysvar::_NMControl::Vehicle_Ethernet::Nodes::HU::ApplActivity = 0;
+        break;
+    }
+  }
+}
+
+on sysvar sysvar::HeadUnit::Button::_1
+{
+  if ((@this == 1) && (UdpNm_GetState() > 1))
+  {
+    TalkerSelectRadioStation( 0, 0 );
+  }
+}
+
+on sysvar sysvar::HeadUnit::Button::_2
+{
+  if ((@this == 1) && (UdpNm_GetState() > 1))
+  {
+    TalkerSelectRadioStation( 1, 0 );
+  }
+}
+
+on sysvar sysvar::HeadUnit::Button::_3
+{
+  if ((@this == 1) && (UdpNm_GetState() > 1))
+  {
+    TalkerSelectRadioStation( 2, 0 );
+  }
+}
+
+on sysvar sysvar::HeadUnit::Button::_4
+{
+  if ((@this == 1) && (UdpNm_GetState() > 1))
+  {
+    TalkerSelectRadioStation( 3, 0 );
+  }
+}
+
+on signal ExteriorTemperature
+{
+  char displayText[20];
+  
+  snprintf( displayText, elcount(displayText), "%d °C", (int)this );
+  
+  sysSetVariableString( sysvar::HeadUnit::Fields::ExteriorTemperature, displayText );
+}
+
+on signal Minute
+{
+  char displayText[20];
+  
+  snprintf( displayText, elcount(displayText), "%d:%.2d", (int)$Hour.phys, (int)$Minute.phys );
+  
+  sysSetVariableString( sysvar::HeadUnit::Fields::Time, displayText );
+}
+
+/// <NM>
+void UdpNm_NetworkModeInd()
+{
+  HU_SetControlVisible( 1 );
+
+  PtpSetProperty( "PortRole", 1 /* Master */ );
+
+  TalkerOpen();
+}
+
+/// <NM>
+void UdpNm_BusSleepModeInd()
+{
+  HU_SetControlVisible( 0 );
+
+  PtpSetProperty( "PortRole", 4 /* DisabledPort */ );
+  
+  TalkerClose();
+}
+
+void HU_SetControlVisible( long visible )
+{
+  if (visible == 0)
+  {
+    @sysvar::HeadUnit::PageIndex = 0;
+  }
+  
+  setControlVisibility( "Head Unit", "TimeControl"              , visible );
+  setControlVisibility( "Head Unit", "AmbientTemperatureControl", visible );
+  setControlVisibility( "Head Unit", "StationFrequenceControl"  , visible );
+  setControlVisibility( "Head Unit", "StationNameControl"       , visible );
+  setControlVisibility( "Head Unit", "StationInfoControl"       , visible );
+}
+
+/// <AVB_Talker>
+void TalkerOpen()
+{
+  dword result;
+  dword mediaTypeHandle;
+  
+  if (gTalkerHandle)
+  {
+    // talker already opened
+    return;
+  }
+
+  //
+  // Create Talker
+  //
+
+  gTalkerHandle = AvbOpenTalker( kStreamUniqueId );
+  
+  
+  if (gTalkerHandle == 0)
+  {
+    write( "<%BASE_FILE_NAME%> AvbOpenTalker failed, result %d", AvbGetLastError() );
+    return;
+  }
+  
+  // disable StreamReservation
+  result = AvbSetProperty( "StreamReservation", 0 );
+  
+  if (result != 0)
+  {
+    write( "<%BASE_FILE_NAME%> AvbSetProperty(StreamReservation) failed, result %d", AvbGetLastError() );
+    return;
+  }
+  
+  //
+  // Load file to replay
+  //
+  
+  TalkerLoadFile( gTalkerFilename );
+
+  //
+  // Get and set media type
+  //
+  
+  // get media type of first audio stream in file
+  mediaTypeHandle = MediaGetMediaType( gMediaReaderHandle, kMediaStreamIndex );
+  
+  if (result != 0)
+  {
+    write( "<%BASE_FILE_NAME%> MediaGetMediaType failed, result %d", MediaGetLastError() );    
+    return;
+  }
+  
+  // set the media type of the AVB talker stream to the
+  // format setting of the media file.
+  result = AvbSetMediaType( gTalkerHandle, mediaTypeHandle );
+  
+  if (result != 0)
+  {
+    write( "<%BASE_FILE_NAME%> AvbSetMediaType failed, result %d", AvbGetLastError() );
+    return;
+  }
+  
+  // release media type handle
+  result = MediaReleaseMediaType( mediaTypeHandle );    
+    
+  if (result != 0)
+  {
+    write( "<%BASE_FILE_NAME%> MediaReleaseMediaType failed, result %d", MediaGetLastError() );
+    return;
+  }
+
+  //
+  // Start sending stream
+  //
+  
+  result = AvbConnect( gTalkerHandle, kMulitcaseMacAddr, "OnTalkerConnect" );
+
+  if (result != 0 && result != 460609)
+  {
+    write( "<%BASE_FILE_NAME%> AvbConnect failed, result %d", AvbGetLastError() );
+    return;
+  }
+  
+  if (result != 460609)
+  {
+    // if result ist not operation-pending, we call OnTalkerConnect directly
+    // to start sending the AVB stream.
+    OnTalkerConnect(gTalkerHandle, 0);
+  }
+}
+
+/// <AVB_Talker>
+void TalkerClose()
+{
+  dword result;
+    
+  //
+  // Stop media-reader and release it
+  //
+
+  TalkerStopPlaying();
+
+  //
+  // Close AVB talker
+  //
+  
+  if (gTalkerHandle)
+  {
+    result = AvbCloseTalker( gTalkerHandle );
+
+    if (result != 0)
+    {
+      write( "<%BASE_FILE_NAME%> AvbCloseTalker failed, result %d", AvbGetLastError() );
+      return;
+    }
+    
+    gTalkerHandle = 0;
+  }
+}
+
+/// <AVB_Talker>
+void TalkerStopPlaying()
+{
+  dword result;
+  
+  if (gMediaReaderHandle)
+  {
+    // release media source reader
+    result = MediaReleaseSourceReader( gMediaReaderHandle );
+
+    if (result != 0)
+    {
+      write( "<%BASE_FILE_NAME%> MediaReleaseSourceReader failed, result", MediaGetLastError() );
+      return;
+    }
+
+    gMediaReaderHandle = 0;
+  }
+}
+
+/// <AVB_Talker>
+void TalkerLoadFile( char filename[] )
+{
+  dword mediaTypeHandle;
+  long  result;
+  
+  strncpy( gTalkerFilename, filename, elcount(gTalkerFilename) );
+  
+  if (!gTalkerHandle)
+  {
+    return;
+  }
+  
+  // Release previously loaded file
+  if (gMediaReaderHandle)
+  {
+    TalkerStopPlaying();
+  }
+  
+  //
+  // Load file
+  //
+  
+  gMediaReaderHandle = MediaCreateSourceReaderFromURL( filename );
+  
+  if (gMediaReaderHandle == 0)
+  {
+    write( "<%BASE_FILE_NAME%> MediaCreateSourceReaderFromURL failed, result %d", MediaGetLastError() );
+    return;
+  }
+}
+
+/// <AVB_Talker>
+void TalkerSelectRadioStation( dword station, dword silence )
+{
+  char stationName[4][6] = { "SWR1", "SWR2", "SWR3", "SWR4" };
+  char frequency[4][10]  = { "94.7 MHz", "105.7 MHz", "92.2 MHz", "90.1 MHz" };
+  char rds[4][20]        = { "News", "Top Charts", "Music", "Classic" };
+  char filename[4][20]   = { "Media/Station1.wav", "Media/Station2.wav", "Media/Station3.wav", "Media/Station4.wav" };
+
+  if (station < elcount(stationName))
+  {
+    sysSetVariableString( sysvar::HeadUnit::Fields::Text1, frequency[station] );
+    sysSetVariableString( sysvar::HeadUnit::Fields::Text2, stationName[station] );
+    sysSetVariableString( sysvar::HeadUnit::Fields::Text3, rds[station] );
+    if (silence)
+    {
+      TalkerLoadFile( "Media/Silence.wav" );
+    }
+    else
+    {
+      TalkerLoadFile( filename[station] );
+    }
+  }
+}
+
+/// <AVB_Talker_Callbacks>
+void OnTalkerConnect(dword talkerHandle, dword result)
+{
+  if (result != 0)
+  {
+    write( "<%BASE_FILE_NAME%> OnTalkerConnect returned an error, result %d", result );
+    return;
+  }
+  
+  TalkerMediaRead( gReadBuffer[0] );
+  TalkerMediaRead( gReadBuffer[1] );
+}
+
+/// <AVB_Talker_Callbacks>
+void OnTalkerSend(dword talkerHandle, long _result, byte buffer[], dword length)
+{
+  // toggle current active send buffer
+  gReadBufferSendingIndex = !gReadBufferSendingIndex;
+  
+  if (gMediaReaderHandle)
+  {
+    // if a media-reader is available, read more data.
+    TalkerMediaRead( buffer );
+  }
+  else
+  {
+    // if no media-reader is available, repeat sending the (empty) buffer.
+    TalkerSend( gReadBuffer[gReadBufferSendingIndex], kBufferSize );
+  }
+}
+
+/// <AVB_Talker_Callbacks>
+void OnReadComplete( dword readerHandle, long result, dword streamIndex, dword streamFlags, int64 timestamp, byte buffer[], dword length )
+{
+  if (result == 0)
+  {
+    // end of stream is reached, if stream-flag 2 is set
+    switch(streamFlags)
+    {
+      case 0x00000001: // SOURCE_READERF_ERROR
+        break;
+      case 0x00000002: //SOURCE_READERF_ENDOFSTREAM
+        {
+          if (gTalkerPlayingLoop)
+          {
+            byte endStreamCount = 0;
+            
+            // because, we have 2 buffers for reading, stream-flag end-of-stream (2)
+            // occurs twice. Only with the second call, we have to stop or restart.
+            endStreamCount += 1;
+
+            if (endStreamCount > 1)
+            {
+              endStreamCount = 0;
+             
+              // restart file
+              TalkerLoadFile( gTalkerFilename );
+            }
+          }
+          else
+          {
+            // stop playing. AVB stream will be continued to send, but with empty data.
+            TalkerStopPlaying();
+
+            // send buffer with silence
+            TalkerResetTxBuffer( 0 );
+            TalkerResetTxBuffer( 1 );
+            length = kBufferSize;
+          }
+
+          TalkerSend(buffer, length);
+        }
+        break;
+      case 0x00000004: // SOURCE_READERF_NEWSTREAM
+      case 0x00000010: // SOURCE_READERF_NATIVEMEDIATYPECHANGED
+      case 0x00000020: // SOURCE_READERF_CURRENTMEDIATYPECHANGED
+      case 0x00000100: // MF_SOURCE_READERF_STREAMTICK
+      case 0x00000200: // SOURCE_READERF_ALLEFFECTSREMOVED
+        break;
+      default:
+        TalkerSend(buffer, length);
+        break;
+    }
+  }
+}
+
+/// <AVB_Talker_Helper>
+void TalkerMediaRead(byte buffer[])
+{  
+  if (gMediaReaderHandle)
+  {
+    dword result;
+    
+    result = MediaRead( gMediaReaderHandle, kMediaStreamIndex, buffer, kBufferSize, "OnReadComplete" );
+
+    if (result != 0)
+    {
+      write( "<%BASE_FILE_NAME%> MediaRead failed, result %d", result );
+    }
+  }
+}
+
+/// <AVB_Talker_Helper>
+void TalkerSend(byte buffer[], dword length)
+{  
+  dword result;
+
+  result = AvbSend(gTalkerHandle, buffer, length, "OnTalkerSend");
+    
+  if ((result != 0) && (result != 460609/* pending*/))
+  {
+    write( "<%BASE_FILE_NAME%> AvbSend failed, result %d %d", AvbGetLastError(), length );
+  }
+  else if (result != 460609)
+  {
+    // if result is not operation-pending, we call OnTalkerSend directly
+    OnTalkerSend(gTalkerHandle, 0, buffer, length);
+  }
+}
+
+/// <AVB_Talker_Helper>
+void TalkerResetTxBuffer( word bufferIndex )
+{
+  dword i;
+  
+  for( i = 0; i < kBufferSize; i++ )
+  {
+    gReadBuffer[bufferIndex][i] = 0;
+  }
+}

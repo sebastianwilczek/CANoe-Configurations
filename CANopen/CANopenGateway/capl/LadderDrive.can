@@ -1,0 +1,566 @@
+/*@!Encoding:1252*/
+
+variables
+{
+  // ------------------------------------------------
+  // File information
+  // Copyright         : 2019, Vector Informatik GmbH
+  // ------------------------------------------------
+
+  // Globals for "LadderDrive" device
+  BYTE gNodeId          = 11;
+  char gNodeLabel[256]  = "LadderDrive";
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel         = kDbgInfo; // Set debug level for output to write window
+
+  // drive states
+  const int kNotReadyToSwitchOn = 1;
+  const int kSwitchOnDisabled   = 2;
+  const int kReadyToSwitchOn    = 3;
+  const int kSwitchedOn         = 4;
+  const int kOperationEnable    = 5;
+  const int kQuickStopActive    = 6;
+  const int kFault              = 8;
+
+  // mode of opertion constants
+  const int kVelocityMode       = 2;
+
+  // drive variables
+  dword gDriveState       = kNotReadyToSwitchOn;  // State of the drive
+  dword gDriveStatus      = 0;                    // see status word bits
+  dword gDriveMode        = kVelocityMode;        // Mode of operation
+
+  const int kSystemTime   = 100;                   // System time [ms]
+  const float kSystemTimeSec= kSystemTime/1000.0;  // System time [sec]
+
+  // variables for velocity mode
+  msTimer   gVelocityTimer;                       // Timer for velocity mode
+  float     gVM_TargetVelocity;                   // Target velocity in [rpm]
+  float     gVM_VelocityDemand;                   // Velocity demand in [rpm] 
+  float     gVM_Acceleration;                     // Acceleration in in [rpm/sec]
+  float     gVM_Deceleration;                     // Decceleration in in [rpm/sec]
+  float     gVM_VelocityMaxAmount;                // Velocity max amount
+
+  // control word bits
+  const int kSwitchOn        = 0x01;
+  const int kDisableVoltage  = 0x02;
+  const int kQuickStop       = 0x04;
+  const int kEnableOperation = 0x08;
+  const int kResetFault      = 0x80;
+
+  // status word bits
+  const int kBitReadyToSwitchOn     = 0x0001;
+  const int kBitSwitchedOn          = 0x0002;
+  const int kBitOperationEnable     = 0x0004;
+  const int kBitFault               = 0x0008;
+  const int kBitVoltageDisabled     = 0x0010;
+  const int kBitQuickStop           = 0x0020;
+  const int kBitSwitchOnDisabled    = 0x0040;
+  const int kBitRemote              = 0x0200;
+  const int kBitTargetReached       = 0x0400;
+  const int kBitInternalLimitActive = 0x0800;
+
+}
+
+on start
+{
+  // state: not ready to switch on
+  SetStatus( 0, kBitReadyToSwitchOn|kBitSwitchedOn|kBitOperationEnable|kBitFault|kBitSwitchOnDisabled );
+}
+
+on sysvar CANopen::CANopen::LadderDrive::Control::CommunicationState
+{
+  switch(@this)
+  {
+    case 0: // Not active
+      writeDbgLevel(kDbgInfo, "<%s>: Changed state to 'Not active'", gNodeLabel);
+      @sysvar::GUIControls::LadderDrive_CommState = 3;
+      break;
+    case 4: // Stopped
+      writeDbgLevel(kDbgInfo, "<%s>: Changed state to 'Stopped'", gNodeLabel);
+      @sysvar::GUIControls::LadderDrive_CommState = 3;
+      break;
+    case 5: // Operational
+      writeDbgLevel( kDbgInfo, "<%s> Changed state to 'Operational'", gNodeLabel );
+      DriveStateMachine(0);
+      @sysvar::GUIControls::LadderDrive_CommState = 1;
+      break;
+    case 6: // Reset Node
+      writeDbgLevel(kDbgInfo, "<%s>: 'Reset Node' command received", gNodeLabel);
+      @sysvar::GUIControls::LadderDrive_CommState = 3;
+      break;
+    case 7: // Reset Communication
+      writeDbgLevel(kDbgInfo, "<%s>: 'Reset Communication' command received", gNodeLabel);
+      EnterState_NotReadyToSwitchOn();
+      @sysvar::GUIControls::LadderDrive_CommState = 3;
+      break;
+    case 127: // Preoperational
+      writeDbgLevel(kDbgInfo, "<%s>: Changed state to 'Preoperational'", gNodeLabel);
+      @sysvar::GUIControls::LadderDrive_CommState = 2;
+      break;
+    default:
+      writeDbgLevel(kDbgInfo, "<%s>: Changed state (?)", gNodeLabel);
+      break;
+  }
+  // TODO: Implement additional handling here
+}
+
+//
+// System timer function for velocity mode
+//
+on timer gVelocityTimer
+{
+  float factor;
+
+  switch(gDriveState) {
+    case kOperationEnable:
+      //write( "ladder: target=%f actual=%f accel=%f decel=%f vmaxamount=%f", gVM_TargetVelocity, gVM_VelocityDemand, gVM_Acceleration, gVM_Deceleration, gVM_VelocityMaxAmount);
+      if ((gVM_VelocityDemand > 0.0) || (gVM_TargetVelocity > 0.0)) {  // positive direction
+        if (gVM_VelocityDemand < gVM_TargetVelocity)
+        {
+          factor = min( 1.0, (gVM_TargetVelocity - gVM_VelocityDemand) / 100 );
+          gVM_VelocityDemand += (gVM_Acceleration * kSystemTimeSec * factor);
+          gVM_VelocityDemand  = min( gVM_VelocityDemand, gVM_VelocityMaxAmount );
+        }
+        else {
+          factor = min( 1.0, (gVM_VelocityDemand - gVM_TargetVelocity) / 100 );
+          gVM_VelocityDemand -= (gVM_Deceleration * kSystemTimeSec * factor);
+          gVM_VelocityDemand  = max( gVM_VelocityDemand, 0.0 );
+        }
+      }
+      else if ((gVM_VelocityDemand < 0.0) || (gVM_TargetVelocity < 0.0)) { // negative direction
+        if (gVM_VelocityDemand < gVM_TargetVelocity)
+        {
+          factor = min( 1.0, (gVM_TargetVelocity - gVM_VelocityDemand) / 100 );
+          gVM_VelocityDemand += (gVM_Deceleration * kSystemTimeSec * factor);
+          gVM_VelocityDemand  = min( gVM_VelocityDemand, 0.0 );
+        }
+        else
+        {
+          factor = min( 1.0, (gVM_VelocityDemand - gVM_TargetVelocity) / 100 );
+          gVM_VelocityDemand -= (gVM_Acceleration * kSystemTimeSec * factor);
+          gVM_VelocityDemand  = max( gVM_VelocityDemand, -gVM_VelocityMaxAmount );
+        }
+      }
+      @sysvar::CANopen::CANopen::LadderDrive::vl_velocity_demand = gVM_VelocityDemand;
+    // fall through
+    case kSwitchedOn:
+    case kQuickStopActive:
+      setTimer( gVelocityTimer, kSystemTime );
+    break;
+  }
+}
+
+on sysvar CANopen::CANopen::LadderDrive::vl_velocity_acceleration::delta_speed
+{
+  UpdateDriveParameter();
+}
+
+on sysvar CANopen::CANopen::LadderDrive::vl_velocity_acceleration::delta_time
+{
+  UpdateDriveParameter();
+}
+
+on sysvar CANopen::CANopen::LadderDrive::vl_velocity_deceleration::delta_speed
+{
+  UpdateDriveParameter();
+}
+
+on sysvar CANopen::CANopen::LadderDrive::vl_velocity_deceleration::delta_time
+{
+  UpdateDriveParameter();
+}
+
+on sysvar GUIControls::LadderDrive_ErrorSwitch1
+{
+  byte  specificData[5] = { 1, 2, 3, 4, 5 };
+  DWORD active;
+  DWORD errCode;
+  
+  active = @this;
+  errCode = CANopenEmergency(gNodeId, active, 0x2300, specificData, elcount(specificData));
+  if (errCode != 0) {
+    writeDbgLevel( kDbgError, "<%s> cannot activate emergency, error code 0x%x", gNodeLabel, errCode); 
+  }
+  else {
+    if (active) {
+      writeDbgLevel( kDbgInfo, "<%s> emergency code 0x2300 active", gNodeLabel ); 
+    }
+    else {
+      writeDbgLevel( kDbgInfo, "<%s> emergency code 0x2300 not active", gNodeLabel ); 
+    }
+  }
+}
+
+on sysvar GUIControls::LadderDrive_ErrorSwitch2
+{
+  byte  specificData[5] = { 2, 2, 2, 2, 2 };
+  DWORD active;
+  DWORD errCode;
+
+  active = @this;
+  errCode = CANopenEmergency(gNodeId, active, 0x4200, specificData, elcount(specificData));
+  if (errCode != 0) {
+    writeDbgLevel( kDbgError, "<%s> cannot activate emergency, error code 0x%x", gNodeLabel, errCode); 
+  }
+  else {
+    if (active) {
+      writeDbgLevel( kDbgInfo, "<%s> emergency code 0x4200 active", gNodeLabel ); 
+    }
+    else {
+      writeDbgLevel( kDbgInfo, "<%s> emergency code 0x4200 not active", gNodeLabel ); 
+    }
+  }
+}
+
+on sysvar CANopen::CANopen::LadderDrive::vl_target_velocity
+{
+  gVM_TargetVelocity = @this;
+}
+
+on sysvar CANopen::CANopen::LadderDrive::vl_velocity_min_max_amount::vl_velocity_max_amount
+{
+  UpdateDriveParameter();
+}
+
+on sysvar CANopen::CANopen::LadderDrive::controlword
+{
+  DriveStateMachine( @this );
+}
+
+DriveStateMachine( DWORD control_word )
+{
+  dword oldState;
+  oldState = gDriveState;
+
+  switch(gDriveState) {
+    ///////////////////////////////////////////////////
+    case kNotReadyToSwitchOn:
+      DriveStateTrans_SelfTest();
+    break;
+    ///////////////////////////////////////////////////
+    case kSwitchOnDisabled:
+    if ((control_word & (kQuickStop|kDisableVoltage)) && !(control_word & (kSwitchOn|kResetFault))) {
+        // shutdown command received
+      DriveStateTrans_ShutdownCmd();
+    }
+    break;
+    ///////////////////////////////////////////////////
+    case kReadyToSwitchOn:
+    if ((control_word & (kQuickStop|kDisableVoltage|kSwitchOn)) && !(control_word & (kResetFault))) {
+        // switch on command received
+      DriveStateTrans_SwitchOnCmd();
+    }
+    else if ((control_word & (kDisableVoltage)) && !(control_word & (kResetFault|kQuickStop))) {
+        // quick stop command received
+      DriveStateTrans_QuickStopCmd();
+    }
+    break;
+    ///////////////////////////////////////////////////
+    case kSwitchedOn:
+    if ((control_word & (kEnableOperation|kQuickStop|kDisableVoltage|kSwitchOn)) && !(control_word & (kResetFault))) {
+        // enable operation command received
+      DriveStateTrans_EnableOperationCmd();
+    }
+    else if ((control_word & (kQuickStop|kDisableVoltage)) && !(control_word & (kSwitchOn|kResetFault))) {
+        // shutdown command received
+      DriveStateTrans_ShutdownCmd();
+    }
+    else if (!(control_word & (kDisableVoltage|kResetFault))) {
+        // disable voltage command received
+        DriveStateTrans_DisableVoltageCmd();
+      }
+    else if ((control_word & (kDisableVoltage)) && !(control_word & (kResetFault|kQuickStop))) {
+        // quick stop command received
+      DriveStateTrans_QuickStopCmd();
+    }
+    break;
+    ///////////////////////////////////////////////////
+    case kOperationEnable:
+    if ((control_word & (kQuickStop|kDisableVoltage|kSwitchOn)) && !(control_word & (kResetFault|kEnableOperation))) {
+        // disable operation command received
+      DriveStateTrans_DisableOperationCmd();
+    }
+    else if ((control_word & (kQuickStop|kDisableVoltage)) && !(control_word & (kSwitchOn|kResetFault))) {
+        // shutdown command received
+      DriveStateTrans_ShutdownCmd();
+    }
+    else if (!(control_word & (kDisableVoltage|kResetFault))) {
+        // disable voltage command received
+        DriveStateTrans_DisableVoltageCmd();
+      }
+    else if ((control_word & (kDisableVoltage)) && !(control_word & (kResetFault|kQuickStop))) {
+        // quick stop command received
+      DriveStateTrans_QuickStopCmd();
+    }
+    break;
+    ///////////////////////////////////////////////////
+    case kQuickStopActive:
+    if (!(control_word & (kDisableVoltage|kResetFault))) {
+        // disable voltage command received
+        DriveStateTrans_DisableVoltageCmd();
+      }
+    break;
+    ///////////////////////////////////////////////////
+    case kFault:
+    if (control_word & (kResetFault)) {
+        // reset fault command received
+      DriveStateTrans_ResetFaultCmd();
+    }
+    break;
+  }
+
+  writeDbgLevel( kDbgInfo, "<%s> drive state change %d->%d, control word = 0x%x", gNodeLabel, oldState, gDriveState, control_word ); 
+}
+
+//
+// Drive state transition
+//
+// kOperationEnable -> kSwitchedOn
+//
+DriveStateTrans_DisableOperationCmd()
+{
+  if (gDriveState == kOperationEnable) {
+    EnterState_SwitchedOn();
+  }
+}
+
+//
+// Drive state transition
+//
+// kOperationEnable -> kSwitchOnDisabled
+// kSwitchedOn -> kSwitchOnDisabled
+// kQuickStopActive -> kSwitchOnDisabled
+//
+DriveStateTrans_DisableVoltageCmd()
+{
+  switch(gDriveState) {
+    case kOperationEnable:
+    case kSwitchedOn:
+    case kQuickStopActive:
+    EnterState_SwitchOnDisabled();
+    break;
+  }
+}
+
+//
+// Drive state transition
+//
+// kSwitchedOn -> kOperationEnable
+//
+DriveStateTrans_EnableOperationCmd()
+{
+  if (gDriveState == kSwitchedOn) {
+    gDriveState = kOperationEnable;
+    SetStatus( kBitSwitchedOn|kBitQuickStop|kBitReadyToSwitchOn|kBitOperationEnable, kBitSwitchOnDisabled|kBitFault );
+
+    writeDbgLevel( kDbgInfo, "<%s> enter 'Enable operation' state", gNodeLabel ); 
+  }
+}
+
+//
+// Drive state transition
+//
+// all states -> kFault
+//
+DriveStateTrans_Fault()
+{
+  gDriveState = kFault;
+  SetStatus( kBitSwitchedOn|kBitReadyToSwitchOn|kBitOperationEnable|kBitFault, kBitSwitchOnDisabled );
+}
+
+//
+// Drive state transition
+//
+// kReadyToSwitchOn -> kSwitchOnDisabled
+// kOperationEnable -> kQuickStopActive
+// kSwitchedOn -> kSwitchOnDisabled
+//
+DriveStateTrans_QuickStopCmd()
+{
+  switch(gDriveState) {
+    case kReadyToSwitchOn:
+  case kSwitchedOn:
+    EnterState_SwitchOnDisabled();
+    break;
+    case kOperationEnable:
+      gDriveState = kQuickStopActive;
+      SetStatus( kBitSwitchedOn|kBitReadyToSwitchOn|kBitOperationEnable, kBitQuickStop|kBitSwitchOnDisabled|kBitFault );
+    break;
+  }
+}
+
+//
+// Drive state transition
+//
+// kFault -> kSwitchOnDisabled
+//
+DriveStateTrans_ResetFaultCmd()
+{
+  if (gDriveState == kFault) {
+    EnterState_SwitchOnDisabled();
+  }
+}
+
+//
+// Drive state transition
+//
+// kNotReadyToSwitchOn -> kSwitchOnDisabled
+//
+DriveStateTrans_SelfTest()
+{
+  if (gDriveState == kNotReadyToSwitchOn) {
+    EnterState_SwitchOnDisabled();
+  }
+}
+
+//
+// Drive state transition
+//
+// kSwitchOnDisabled -> kReadyToSwitchOn
+// kSwitchedOn -> kReadyToSwitchOn
+// kOperationEnable -> 
+//
+DriveStateTrans_ShutdownCmd()
+{
+  switch(gDriveState) {
+    case kSwitchOnDisabled:
+    case kSwitchedOn:
+    case kOperationEnable:
+      EnterState_ReadyToSwitchOn();
+    break;
+  }
+}
+
+//
+// Drive state transition
+//
+// kReadyToSwitchOn -> kSwitchedOn
+//
+DriveStateTrans_SwitchOnCmd()
+{
+  if (gDriveState == kReadyToSwitchOn) {
+    EnterState_SwitchedOn();
+  }
+}
+
+EnterState_NotReadyToSwitchOn()
+{
+  gDriveState = kNotReadyToSwitchOn;
+  SetStatus( 0, kBitSwitchOnDisabled|kBitReadyToSwitchOn|kBitSwitchedOn|kBitOperationEnable|kBitFault );
+
+  writeDbgLevel( kDbgInfo, "<%s> enter 'Not Ready To Switch On' state", gNodeLabel ); 
+
+  @sysvar::CANopen::CANopen::LadderDrive::vl_velocity_demand = 0;
+}
+
+//
+//
+//
+EnterState_ReadyToSwitchOn()
+{
+  if (@sysvar::CANopen::CANopen::LadderDrive::Control::CommunicationState == 5) 
+  { // node must be operational
+    gDriveState = kReadyToSwitchOn;
+    SetStatus( kBitQuickStop|kBitReadyToSwitchOn, kBitSwitchOnDisabled|kBitSwitchedOn|kBitOperationEnable|kBitFault );
+
+    writeDbgLevel( kDbgInfo, "<%s> enter 'ReadyToSwitchOn", gNodeLabel ); 
+  }
+  else {
+    writeDbgLevel( kDbgInfo, "<%s> ERROR, cannot switch to 'Ready to switch on' because node is not operational", gNodeLabel ); 
+  }
+}
+
+//
+//
+//
+EnterState_SwitchOnDisabled()
+{
+  gDriveState = kSwitchOnDisabled;
+  SetStatus( kBitSwitchOnDisabled, kBitReadyToSwitchOn|kBitSwitchedOn|kBitOperationEnable|kBitFault );
+
+  writeDbgLevel( kDbgInfo, "<%s> enter 'Switch on disabled' state", gNodeLabel ); 
+}
+
+EnterState_SwitchedOn()
+{
+  gDriveState = kSwitchedOn;
+  SetStatus( kBitSwitchedOn|kBitQuickStop|kBitReadyToSwitchOn, kBitSwitchOnDisabled|kBitOperationEnable|kBitFault );
+
+  writeDbgLevel( kDbgInfo, "<%s> enter 'Switched On' state", gNodeLabel ); 
+
+  switch(gDriveMode) {
+    case kVelocityMode:
+      gVM_TargetVelocity = 0;
+      gVM_VelocityDemand = 0;
+      UpdateDriveParameter();
+      @sysvar::CANopen::CANopen::LadderDrive::vl_target_velocity = gVM_TargetVelocity;
+      @sysvar::CANopen::CANopen::LadderDrive::vl_velocity_demand = gVM_VelocityDemand;
+      setTimer( gVelocityTimer, kSystemTime );
+      break;
+    default:
+      writeDbgLevel( kDbgError, "<%s> ERROR: drive mode not supported", gNodeLabel ); 
+      DriveStateTrans_Fault();
+    break;
+  }
+}
+
+SetStatus( DWORD setMask, DWORD resetMask )
+{
+  gDriveStatus |= setMask;
+  gDriveStatus &= ~resetMask;
+
+  @sysvar::CANopen::CANopen::LadderDrive::statusword = gDriveStatus;
+}
+
+UpdateDriveParameter()
+{
+  float deltaSpeed, deltaTime;
+
+  deltaSpeed = @sysvar::CANopen::CANopen::LadderDrive::vl_velocity_acceleration::delta_speed;
+  deltaTime  = @sysvar::CANopen::CANopen::LadderDrive::vl_velocity_acceleration::delta_time;
+  if (deltaTime > 0.0) {
+    gVM_Acceleration = deltaSpeed / deltaTime;
+  }
+  else {
+    gVM_Acceleration = 0;
+  }
+
+  deltaSpeed = @sysvar::CANopen::CANopen::LadderDrive::vl_velocity_deceleration::delta_speed; 
+  deltaTime  = @sysvar::CANopen::CANopen::LadderDrive::vl_velocity_deceleration::delta_time; 
+  if (deltaTime > 0.0) {
+    gVM_Deceleration = deltaSpeed / deltaTime;
+  }
+  else {
+    gVM_Deceleration = 0;
+  }
+
+  gVM_VelocityMaxAmount = @sysvar::CANopen::CANopen::LadderDrive::vl_velocity_min_max_amount::vl_velocity_max_amount;
+}
+
+float max ( float x, float y )
+{
+  if (x > y) {
+    return x;
+  }
+  else {
+    return y;
+  }
+}
+
+float min ( float x, float y )
+{
+  if (x < y) {
+    return x;
+  }
+  else {
+    return y;
+  }
+}

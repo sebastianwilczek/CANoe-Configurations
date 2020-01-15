@@ -1,0 +1,752 @@
+/*@!Encoding:1252*/
+
+variables
+{  
+  long  lTemp1, lTemp2, lTemp3;
+  dword dTemp1, dTemp2;
+  float fTemp1, fTemp2, fTemp3, fTemp4, fTemp5, fTemp6, fTemp7, fTemp8, fTemp9;
+  char strBuffer2[100], strBuffer3[100], strBuffer4[100], certBuffer[800];
+  byte  bbuffer1[100], bbuffer2[100];  
+}
+
+SCC_SECCDiscoveryRes( dword Security, dword TransportLayer )
+{    
+  SCC_GetEVSEIP(bbuffer1);    
+  lTemp1 = SCC_GetEVSEPort( );
+  
+  if (Security == 0)
+    snprintf(strBuffer2, 100, "No TLS");
+  else
+    snprintf(strBuffer2, 100, "TLS");
+  
+  if (ShallWrite())
+  {
+    WriteHexIPv6(strBuffer1, bbuffer1);
+    
+    WriteLineEx(writeTab, 0, "SECC Discovery Res (DIN/ISO) [%.3f]: IP = %s, Port = %i, Security = %s, Transport Layer = %i",
+      GetRxTimestamp(), strBuffer1, lTemp1, strBuffer2, TransportLayer);
+  }
+  
+  if (isPassiveMode)
+    SCC_SimulationWait();
+}
+
+SCC_SupportedAppProtocolRes( long ResponseCode, dword SchemaID )
+{
+  CheckFaultNotification();
+  
+  if (ShallWrite())
+    WriteLineEx(writeTab, 0, "Supported AppProtocol Res [%.3f]: SchemaID = %i", GetRxTimestamp(), SchemaID);
+}
+
+SCC_SessionSetupRes( byte SessionID[], long ResponseCode, char EVSEID[] )
+{  
+  HandleMessageGeneric(ResponseCode);
+  
+  memcpy(SessionId, SessionID, 8);
+
+  if (ShallWrite())
+  {
+    WriteHex(strBuffer1, SessionID);
+    
+    WriteLineEx(writeTab, 0, "Session Setup Res [%.3f]: Session Id = %s, EVSEID = %s, TCurrent = %i",
+      GetRxTimestamp(), strBuffer1, EVSEID, SCC_GetTimestamp());
+  }
+  
+  ReadEVStatus();
+
+  serviceDetailRequests = 0;
+  isPowerOn = 0;
+  chargeLoopEntered = 0;
+  
+  // Apply all values from the panel     
+  SCC_SetMaxPower(@sysVar::EV::SysEV_MaxPower * 1000);    // variable in [kW]
+  SCC_SetMinCurrent(@sysVar::EV::SysEV_MinCurrent);
+  SCC_SetMaxCurrent(@sysVar::EV::SysEV_MaxCurrent);
+  SCC_SetMaxVoltage(@sysVar::EV::SysEV_MaxVoltage);
+  SCC_SetTargetVoltage(@sysVar::EV::SysEV_TargetVoltage);
+  SCC_SetTargetCurrent(@sysVar::EV::SysEV_TargetCurrent);
+  
+  // Apply the selected charging mode and payment option (this is the only state that is entered in any case)
+  SetChargingModeAndPaymentOption();
+}
+
+SCC_ServiceDiscoveryRes( byte SessionID[], long ResponseCode, long ServiceCount )
+{
+  int i;
+  
+  HandleMessageGeneric(ResponseCode);  
+  
+  if (ShallWrite())
+  {  
+    lTemp1 = SCC_GetPaymentOptions();  
+    lTemp2 = SCC_GetEnergyTransferModeCount();    // only works for ISO IS  
+    
+    if (lTemp2 > 0)
+    {    
+      WriteLineEx(writeTab, 0, "Service Discovery Res [%.3f]: ServiceCount = %i, PaymentOption = %i",
+      GetRxTimestamp(), ServiceCount, lTemp1);
+      
+      for (i = 0; i < lTemp2; ++i)
+      {
+        SCC_GetEnergyTransferMode(i, strBuffer1);
+        WriteLineEx(writeTab, 0, "  EnergyTransferMode #%i : %s", i, strBuffer1);      
+      }
+    }
+    else
+    {
+      // Assume schema != ISO IS    
+      SCC_GetEnergyTransferType(strBuffer1);
+      
+      WriteLineEx(writeTab, 0, "Service Discovery Res [%.3f]: ServiceCount = %i, Charging Mode = %s, PaymentOption = %i",
+        GetRxTimestamp(), ServiceCount, strBuffer1, lTemp1);
+    }
+    
+    if (ServiceCount >= 1)
+    {    
+      SCC_GetServiceData( 0, lTemp1, strBuffer1, strBuffer2, strBuffer3, lTemp2 );    
+      
+      WriteLineEx(writeTab, 0, "  Service 0: ID = %i, Type = %s, FreeService = %i", lTemp1, strBuffer2, lTemp2);
+      WriteLineEx(writeTab, 0, "  Service 0: Name = %s, Scope = %s", strBuffer1, strBuffer3);
+    }
+    if (ServiceCount >= 2)
+    {
+      SCC_GetServiceData( 1, lTemp1, strBuffer1, strBuffer2, strBuffer3, lTemp2);
+      
+      WriteLineEx(writeTab, 0, "  Service 1: ID = %i, Type = %s, FreeService = %i", lTemp1, strBuffer2, lTemp2);
+      WriteLineEx(writeTab, 0, "  Service 1: Name = %s, Scope = %s", strBuffer1, strBuffer3);
+    }
+    if (ServiceCount >= 3)
+    {
+      SCC_GetServiceData( 2, lTemp1, strBuffer1, strBuffer2, strBuffer3, lTemp2 );
+      
+      WriteLineEx(writeTab, 0, "  Service 2: ID = %i, Type = %s, FreeService = %i", lTemp1, strBuffer2, lTemp2);
+      WriteLineEx(writeTab, 0, "  Service 2: Name = %s, Scope = %s", strBuffer1, strBuffer3);    
+    }
+  }
+
+  // Request service details for the certificate service, if selected (see [V2G2-422])
+  // ( == Service 2;  Service 1 == Charge Service)
+  if (certificateServiceRequested)
+  {
+    SCC_SetServiceDetailRequest(2);
+  }
+  
+  ++serviceDetailRequests;
+}
+
+SCC_ServiceDetailRes( byte SessionID[], long ResponseCode, dword ServiceID, long ParameterSetCount )
+{
+  int i,j;
+  HandleMessageGeneric(ResponseCode);
+
+  if (ShallWrite())
+    WriteLineEx(writeTab, 0, "Service Detail Res [%.3f]: ID = %i, Parameter Sets = %i",
+    GetRxTimestamp(), ServiceID, ParameterSetCount);
+  
+  // Might request another service's details...
+  /*
+  if (serviceDetailRequests < 2)
+    SCC_SetServiceDetailRequest(3);
+  */
+
+  ++serviceDetailRequests;  
+  
+  if (certificateServiceRequested == 1)
+  {
+    SCC_SetSelectedService(2, 1);     // certificate service with parameter set "installation"     
+	  SCC_StartCertificateInstallation();
+  }
+  else if (certificateServiceRequested == 2)
+  {
+    SCC_SetSelectedService(2, 2);     // certificate service with parameter set "update"    
+    SCC_StartCertificateUpdate();
+  }
+  
+  // Read parameters
+  if (ShallWrite())
+  {
+    for (i = 0; i < ParameterSetCount; ++i)
+    {    
+      SCC_GetServiceParameterSetData(i, lTemp1, lTemp2);      
+      WriteLineEx(writeTab, 0, "  Parameter Set %i: ID = %i, #Parameter = %i", i, lTemp1, lTemp2);
+      
+      for (j = 0; j < lTemp2; ++j)
+      {
+        SCC_GetServiceParameterData(i, j, strBuffer1, strBuffer2);       
+        if (strncmp(strBuffer2, "string", strlen("string")) == 0)
+        {
+          SCC_GetServiceParameterStringValue(i, j, strBuffer3);
+          WriteLineEx(writeTab, 0, "    Parameter: %s, type = %s, value = %s", strBuffer1, strBuffer2, strBuffer3);
+        }
+        else if (strncmp(strBuffer2, "physical value", strlen("physicalValue")) == 0)
+        {
+          fTemp1 = SCC_GetServiceParameterPhysicalValue(i, j);
+          WriteLineEx(writeTab, 0, "    Parameter: %s, type = %s, value = %.2f", strBuffer1, strBuffer2, fTemp1);
+        }
+        else
+        {
+          lTemp3 = SCC_GetServiceParameterNumericalValue(i, j);
+          WriteLineEx(writeTab, 0, "    Parameter: %s, type = %s, value = %i", strBuffer1, strBuffer2, lTemp3);
+        }
+      }
+    }  
+  }
+}
+
+SCC_PaymentServiceSelectionRes( byte SessionID[], long ResponseCode )
+{
+  HandleMessageGeneric(ResponseCode);
+
+  if (ShallWrite())
+    WriteLineEx(writeTab, 0, "Service Payment Selection Res [%.3f]", GetRxTimestamp());  
+}
+
+SCC_AuthorizationRes( byte SessionID[], long ResponseCode )
+{
+  CheckFaultNotification();  
+  
+  if (ShallWrite())
+    WriteLineEx(writeTab, 0, "Authorization / Contract Authentication Res [%.3f]: EVSEProcessing = %i",
+      GetRxTimestamp(), SCC_GetProcessing());
+}
+
+SCC_PaymentDetailsRes( byte SessionID[], long ResponseCode )
+{  
+  HandleMessageGeneric(ResponseCode);
+  
+  SCC_GetGenChallenge(bbuffer1);
+  lTemp1 = SCC_GetTimestamp();
+  
+  if (ShallWrite())
+    WriteLineEx(writeTab, 0, "Payment Details Res [%.3f]: Timestamp = %i, Challenge = %lX%lX%lX%lX...%lX%lX%lX%lX",
+      GetRxTimestamp(), lTemp1,
+      bbuffer1[0], bbuffer1[1], bbuffer1[2], bbuffer1[3],
+      bbuffer1[12], bbuffer1[13], bbuffer1[14], bbuffer1[15]);
+}
+
+SCC_ChargeParameterDiscoveryRes( byte SessionID[], long ResponseCode, long SAScheduleTupleCount )
+{
+  //-------------------------------------------------------------------
+  // VT access  
+  
+  nextStateChange_IECrelevant = 1;    // IEC Synchronisation
+  
+  if ((@sysvar::Common::SysUserChargingMode == 1 /* DC */ || SAScheduleTupleCount >= 1) && (0 == SCC_GetProcessing()))
+    @sysvar::EV::VT_Access::SysEV_S2close = 1;   // close S2 for State C or D
+  
+  //-------------------------------------------------------------------
+  
+  HandleMessageGeneric(ResponseCode);
+  
+  if (ShallWrite())
+  {
+    fTemp1 = SCC_GetMaxVoltage();
+    fTemp2 = SCC_GetMaxCurrent();
+    fTemp3 = SCC_GetMinCurrent();
+    fTemp4 = SCC_GetMaxPower();
+    fTemp5 = SCC_GetMinVoltage();
+    fTemp8 = SCC_GetCurrentRegulationTolerance();
+    fTemp6 = SCC_GetEnergyToBeDelivered();
+    fTemp7 = SCC_GetPeakCurrentRipple();
+    fTemp9 = SCC_GetNominalVoltage();
+
+    WriteLineEx(writeTab, 0, "Charge Parameter Discovery Res [%.3f]: TariffCount = %i, Processing = %i",
+      GetRxTimestamp(),
+      SAScheduleTupleCount,
+      SCC_GetProcessing()    
+    );
+
+    if (!isDCMode)
+    {
+      WriteLineEx(writeTab, 0, "  NominalVoltage = %.2f = %.2f, MaxCurrent = %.2f", fTemp9, fTemp2);
+    }
+    else
+    {
+      WriteLineEx(writeTab, 0, "  MaxPower = %.2f, MaxVoltage = %.2f, MinVoltage = %.2f, MaxCurrent = %.2f, MinCurrent = %.2f", fTemp4, fTemp1, fTemp5, fTemp2, fTemp3);
+      WriteLineEx(writeTab, 0, "  CurrentRegTolerance = %.2f, EnergyTBD = %.2f, PeakCurrentRipple = %.2f", fTemp8, fTemp6, fTemp7);
+      
+      SCC_GetEVSEStatusCode(strBuffer1);
+      SCC_GetEVSEIsolationStatus(strBuffer2);
+      
+      WriteLineEx(writeTab, 0, "  EVSE Status Code = %s, IsolationStatus = %i", strBuffer1, strBuffer2);
+    }
+
+    if (SAScheduleTupleCount >= 1)
+    {
+      lTemp1 = SCC_GetSAScheduleTupleID(0);      
+      SCC_GetSalesTariffData(0, strBuffer1, lTemp2, strBuffer1, lTemp3);
+      
+      WriteLineEx(writeTab, 0, "  Tuple 0: ID = %i, SalesTariff = %i, Description = %s", lTemp1, lTemp2, strBuffer1);
+    }
+    
+    if (SAScheduleTupleCount >= 2)
+    {
+      lTemp1 = SCC_GetSAScheduleTupleID(1);
+      SCC_GetSalesTariffData(1, strBuffer1, lTemp2, strBuffer1, lTemp3);
+      
+      WriteLineEx(writeTab, 0, "  Tuple 1: ID = %i, SalesTariff= %i, Description = %s", lTemp1, lTemp2, strBuffer1);
+    } 
+  
+    if (SAScheduleTupleCount >= 1)    
+      ReadSAScheduleList(SAScheduleTupleCount);
+  }
+  
+  ReadEVStatus();    // make the "ready" flag visible  
+  
+  ApplyChargeLoopInterval();
+  
+  DisplayVerificationStatus("CertChargePar", SCC_GetVerificationStatus());
+}
+
+void ReadSAScheduleList(int saScheduleTupleCount)
+{
+  int i, j, k, l;
+  long ccCount, costCount;
+  
+  for (i = 0; i < saScheduleTupleCount; ++i)
+  {
+    WriteLineEx(writeTab, 0, "Tariff %i:", i);
+    
+    // read PMaxSchedule
+    for (j = 0; j < SCC_GetPMaxScheduleEntryCount(i); ++j)
+    {
+      WriteLineEx(writeTab, 0, "  PMaxSchedule %i:", j);      
+      SCC_GetPMaxScheduleEntryData(i, j, lTemp1, lTemp2, fTemp1);      
+      WriteLineEx(writeTab, 0, "    start=%i, duration=%i, PMax=%.2f", lTemp1, lTemp2, fTemp1);
+    }
+    
+    // read SalesTariff
+    //  (note: SCC_GetScheduleTableEntryID and SCC_GetScheduleTableEntryDescription already read
+    //         some parts of SalesTariff!)
+    SCC_GetSalesTariffData(i, strBuffer1, lTemp1, strBuffer2, lTemp2);
+    
+    if (lTemp1 < 0) continue;   // no SalesTariff present
+    
+    WriteLineEx(writeTab, 0, "  SalesTariff: Id=%s, SalesTariffId=%i, NumEPriceLeves=%i", strBuffer1, lTemp1, lTemp2);     
+    
+    for (j = 0; j < SCC_GetSalesTariffEntryCount(i); ++j)
+    {  
+      SCC_GetSalesTariffEntryData(i, j, lTemp1, lTemp2, lTemp3, ccCount);
+      WriteLineEx(writeTab, 0, "    Entry %i: start=%i, duration=%i, EPriceLevels=%i", j, lTemp1, lTemp2, lTemp3);
+      
+      for (k = 0; k < ccCount; ++k)
+      {
+        SCC_GetConsumptionCostData(i, j, k, fTemp1, costCount);
+        WriteLineEx(writeTab, 0, "      ConsumptionCost %i: StartValue=%.2f", k, fTemp1);
+        
+        for (l = 0; l < costCount; ++l)
+        {
+          SCC_GetCostData(i, j, k, l, strBuffer1, dTemp1, lTemp1, lTemp2);
+          
+          if (lTemp2 >= 0)
+            WriteLineEx(writeTab, 0, "        Cost %i: CostKind=%s, Amount=%u, Multiplier=%i", l, strBuffer1, dTemp1, lTemp1);
+          else
+            WriteLineEx(writeTab, 0, "        Cost %i: CostKind=%s, Amount=%u, Multiplier=<none>", l, strBuffer1, dTemp1);
+        }
+      }
+    }
+  }
+}
+
+SCC_PowerDeliveryRes( byte SessionID[], long ResponseCode )
+{
+  // VT access
+  // ----------------------------------------------------------------------
+  
+  // during AC ReNegotiation the contactors stay closed; power is retained
+  if (@sysvar::Common::SysUserChargingMode == 1 /* DC */ | !reNegotiationRequested )
+    isPowerOn = !isPowerOn;   // assume power state changes every time
+    
+
+  if (reNegotiationRequested)
+  {
+    if (reNegotiationRunning)   // ReNeg is running; ending with PowerDeliveryRes
+    {
+      reNegotiationRequested = 0;
+      reNegotiationRunning = 0;
+    }
+    else // ReNeg starts
+    {
+      reNegotiationRunning = 1;
+    }
+  }
+  
+  // [V2G2-913]
+  if (!isPowerOn && @sysvar::Common::SysUserChargingMode == 1 /* DC */)
+  {
+    @sysvar::EV::VT_Access::SysEV_S2close = 0;
+  }
+
+  // ----------------------------------------------------------------------
+
+  HandleMessageGeneric(ResponseCode);
+
+  if (ShallWrite())
+  {
+    if (!isDCMode)
+    {
+      WriteLineEx(writeTab, 0, "Power Delivery Res [%.3f] ", GetRxTimestamp());  
+    }
+    else
+    {
+      SCC_GetEVSEStatusCode(strBuffer1);
+      SCC_GetEVSEIsolationStatus(strBuffer2);
+      
+      WriteLineEx(writeTab, 0, "Power Delivery Res [%.3f]: EVSE Status Code = %s, IsolationStatus = %s",
+        GetRxTimestamp(), strBuffer1, strBuffer2);
+    }
+  }
+  
+  ReadEVStatus();    // at stop of charge loop, get final charge state
+}
+
+SCC_MeteringReceiptRes( byte SessionID[], long ResponseCode )
+{  
+  HandleMessageGeneric(ResponseCode);
+
+  if (ShallWrite())
+  {
+    WriteLineEx(writeTab, 0, "Metering Receipt Res [%.3f]", GetRxTimestamp());
+  }
+}
+
+SCC_CableCheckRes( byte SessionID[], long ResponseCode )
+{
+  HandleMessageGeneric(ResponseCode);
+
+  if (ShallWrite())
+  {
+    SCC_GetEVSEStatusCode(strBuffer1);
+    SCC_GetEVSEIsolationStatus(strBuffer2);
+      
+    WriteLineEx(writeTab, 0, "Cable Check Res [%.3f] EVSE Status Code = %s, IsolationStatus = %i",
+      GetRxTimestamp(), strBuffer1, strBuffer2
+    );
+  }
+}
+
+SCC_PreChargeRes( byte SessionID[], long ResponseCode, double EVSEPresentVoltage )
+{
+  HandleMessageGeneric(ResponseCode);
+  
+  if (ShallWrite())
+  {
+    SCC_GetEVSEStatusCode(strBuffer1);
+    SCC_GetEVSEIsolationStatus(strBuffer2);
+
+    WriteLineEx(writeTab, 0, "PreCharge Res [%.3f]: Present Voltage = %.2f EVSEStatusCode = %s, IsolationStatus = %i",
+      GetRxTimestamp(),
+      EVSEPresentVoltage, strBuffer1, strBuffer2
+    );
+  }
+}
+
+SCC_CurrentDemandRes( byte SessionID[], long ResponseCode, double EVSEPresentVoltage, double EVSEPresentCurrent, byte LimitAchievedFlags[],
+  char EVSEID[], long SAScheduleTupleID, long ReceiptRequired )
+{
+  HandleMessageGeneric(ResponseCode);
+
+  if (ShallWrite())
+  {
+    WriteLineEx(writeTab, 0, "Current Demand Res [%.3f]: Present Voltage = %.2f, Present Current = %.2f, Limits Achieved = %i,%i,%i",
+      GetRxTimestamp(),
+      EVSEPresentVoltage, EVSEPresentCurrent, LimitAchievedFlags[0], LimitAchievedFlags[1], LimitAchievedFlags[2] 
+    );  
+    
+    WriteLineEx(writeTab, 0, "  EVSE ID = %s, SAScheduleTupleID = %i, ReceiptRequired = %i", EVSEID, SAScheduleTupleID, ReceiptRequired);
+
+    fTemp1 = SCC_GetMaxPower( );
+    fTemp2 = SCC_GetMaxVoltage( );
+    fTemp3 = SCC_GetMaxCurrent( );
+    
+    SCC_GetEVSEStatusCode(strBuffer1);
+    SCC_GetEVSEIsolationStatus(strBuffer2);
+    
+    WriteLineEx(writeTab, 0, "  MaxPower = %.2f, MaxVoltage = %.2f, MaxCurrent = %.2f", fTemp1, fTemp2, fTemp3 );  
+    WriteLineEx(writeTab, 0, "  EVSE Status Code = %s, IsolationStatus = %s", strBuffer1, strBuffer2);
+    
+    PrintMeterInfo();
+  }
+  
+  ReadEVStatus();
+}
+
+SCC_ChargingStatusRes ( byte SessionID[], long ResponseCode, char EVSEID[], long SAScheduleTupleID, long ReceiptRequired )
+{  
+  HandleMessageGeneric(ResponseCode);
+  
+  if (ShallWrite())
+  {
+    fTemp1 = SCC_GetMaxPower();  
+    
+  	WriteLineEx(writeTab, 0, "Charging Status Res [%.3f]: SAScheduleTupleID = %i, ReceiptRequired = %i, MaxPower = %i",
+      GetRxTimestamp(), SAScheduleTupleID, ReceiptRequired, fTemp1
+    );
+        
+    PrintMeterInfo();
+  }
+    
+  ReadEVStatus();
+
+  // VT Access: IEC Synchronisation
+  nextStateChange_IECrelevant = 1;
+}
+
+SCC_WeldingDetectionRes( byte SessionID[], long ResponseCode, float EVSEPresentVoltage )
+{
+  HandleMessageGeneric(ResponseCode);
+
+  SCC_GetEVSEStatusCode(strBuffer1);  
+  SCC_GetEVSEIsolationStatus(strBuffer2);
+    
+  if (ShallWrite())
+    WriteLineEx(writeTab, 0, "Welding Detection Res [%.3f]: Present Voltage = %.2f, EVSE Status Code = %s, IsolationStatus = %i",
+      GetRxTimestamp(), EVSEPresentVoltage, strBuffer1, strBuffer2
+    );
+}
+
+SCC_SessionStopRes( byte SessionID[], long ResponseCode )
+{
+  HandleMessageGeneric(ResponseCode);
+  
+  if (ShallWrite())
+    WriteLineEx(writeTab, 0, "Session Stop Res [%.3f]", GetRxTimestamp());
+}
+
+void SCC_CertificateInstallationRes( byte SessionID[], long ResponseCode, char ContractID[] )
+{
+  CheckFaultNotification();
+  
+  if (ShallWrite())
+  {
+    WriteLineEx(writeTab, 0, "Certificate Installation Res [%.3f]: ResponseCode = %i, Contract ID = %s",
+    GetRxTimestamp(), ResponseCode, ContractID);  
+  
+    PrintCertificateResponseData("Certificate Installation Res");
+  }
+  
+  DisplayVerificationStatus("CertUpdate", SCC_GetVerificationStatus());
+}
+
+void SCC_CertificateUpdateRes( byte SessionID[], long ResponseCode, char ContractID[] )
+{
+  CheckFaultNotification();
+  
+  if (ShallWrite())
+  {
+    lTemp1 = SCC_GetRetryCounter();  
+    WriteLineEx(writeTab, 0, "Certificate Update Res [%.3f]: ResponseCode = %i, Contract ID = %s, RetryCounter = %i",
+      GetRxTimestamp(), ResponseCode, ContractID, lTemp1 ); 
+    
+    PrintCertificateResponseData("Certificate Update Res");
+  }
+  
+  DisplayVerificationStatus("CertUpdate", SCC_GetVerificationStatus());
+}
+
+void SCC_FinePositioningSetupRes( byte SessionID[], long ResponseCode )
+{  
+  CheckFaultNotification();
+  
+  if (ShallWrite())
+  {  
+    WriteLineEx(writeTab, 0, "Fine Positioning Setup Res [%.3f]: ResponseCode = %i",
+      GetRxTimestamp(), ResponseCode ); 
+  }
+}
+
+void SCC_FinePositioningRes( byte SessionID[], long ResponseCode )
+{
+  CheckFaultNotification();
+  
+  if (ShallWrite())
+  {  
+    WriteLineEx(writeTab, 0, "Fine Positioning Res [%.3f]: ResponseCode = %i, EVSEProcessing = %i",
+      GetRxTimestamp(), ResponseCode, SCC_GetProcessing() ); 
+  }
+}
+
+void SCC_PairingRes( byte SessionID[], long ResponseCode )
+{
+  CheckFaultNotification();
+  
+  if (ShallWrite())
+  {  
+    WriteLineEx(writeTab, 0, "Pairing Res [%.3f]: ResponseCode = %i, EVSEProcessing = %i",
+      GetRxTimestamp(), ResponseCode, SCC_GetProcessing() ); 
+  }
+}
+
+void SCC_AlignmentCheckRes( byte SessionID[], long ResponseCode )
+{
+  CheckFaultNotification();
+  
+  if (ShallWrite())
+  {  
+    WriteLineEx(writeTab, 0, "Alignment Check Res [%.3f]: ResponseCode = %i, EVSEProcessing = %i",
+      GetRxTimestamp(), ResponseCode, SCC_GetProcessing() ); 
+  }  
+}
+
+void PrintCertificateResponseData(char name[])
+{  
+  int isIsoSchema;
+  isIsoSchema = (@sysvar::EV::Control::SysEV_Schema == 2);
+  
+  if (@sysvar::EV::Control::SysEV_Schema == 2)
+  {
+    SCC_GetEMAIDIdAttr(strBuffer1);
+    WriteLineEx(writeTab, 0, "%s: eMAID ID = %s", name, strBuffer1 );  
+  }
+  
+  SCC_GetEncryptedPrivateKey(bbuffer1, strBuffer1);  
+  WriteLineEx(writeTab, 0, "%s: Key ID = %s, Key = %X%X%X%X...%X%X%X%X, ", name, strBuffer1,
+    bbuffer1[0], bbuffer1[1], bbuffer1[2], bbuffer1[3], 
+    bbuffer1[44], bbuffer1[45], bbuffer1[46], bbuffer1[47] );   // key has 48 bytes
+    
+  SCC_GetDHPublicKey(bbuffer1, strBuffer1);  
+  WriteLineEx(writeTab, 0, "%s: DH PubKey ID = %s, DH PubKey = %X%X%X%X...%X%X%X%X, ", name, strBuffer1,
+    bbuffer1[0], bbuffer1[1], bbuffer1[2], bbuffer1[3], 
+    bbuffer1[61], bbuffer1[62], bbuffer1[63], bbuffer1[64] );   // key has 65 bytes
+    
+  WriteLineEx(writeTab, 0, "*** Contract Certificate Chain ***");
+  PrintCertificateChain(0, isIsoSchema);
+  
+  if (isIsoSchema)     // ISO IS
+  {
+    WriteLineEx(writeTab, 0, "*** SA Provisioning Certificate Chain ***");
+    PrintCertificateChain(1, isIsoSchema);
+  }
+}
+
+SCC_CM_SLAC_Parm_Cnf( byte RunId[], byte SourceMacAddress[], dword NumSounds, dword TimeOut, byte ForwardingSTA[] )
+{
+  if (ShallWrite())
+  { 
+    GetRunIdAndMacIds(RunId, SourceMacAddress);
+    WriteHexMacId(strBuffer1, ForwardingSTA);
+    
+    WriteLineEx(writeTab, 0, "EV1: CM_SLAC_Parm.Cnf [%.3f], RunId = %s, Source = %s, Dest = %s, NumSounds = %i, TimeOut = %i, ForwardingSTA = %s",
+      GetRxTimestamp(), strRunId, strSourceMac, strDestMac, NumSounds, TimeOut, strBuffer1);
+    
+    lTemp1 = SCC_SLAC_GetRespType();
+    
+    SCC_SLAC_GetMSoundTarget(bbuffer1);
+    WriteHexMacId(strBuffer1, bbuffer1);
+      
+    WriteLineEx(writeTab, 0, "EV1:   RespType = %i, MSoundTarget = %s", lTemp1, strBuffer1);
+  }
+}
+
+SCC_CM_Atten_Char_Ind( byte RunId[], byte SourceMacAddress[], byte SourceAddress[], dword NumSounds, dword NumGroups, byte AAG[] )
+{  
+  int i;
+  int attenuationSum;
+  double attenuationAvg;
+  
+  if (ShallWrite())
+  {      
+    GetRunIdAndMacIds(RunId, SourceMacAddress);
+    
+    WriteLineEx(writeTab, 0, "EV1: CM_Atten_Char.Ind [%.3f], RunId = %s, Source = %s, Dest = %s, NumSounds = %i, NumGroups = %i",
+      GetRxTimestamp(), strRunId, strSourceMac, strDestMac, NumSounds, NumGroups);
+  }
+    
+  attenuationSum = 0;
+  attenuationAvg = 0.0;
+  
+  for (i = 0; i < NumGroups; ++i)
+  {
+    attenuationSum += AAG[i];
+  }
+  
+  if (NumGroups > 0)
+    attenuationAvg = (double)attenuationSum / (double)NumGroups;
+  
+  WriteLineEx(writeTab, 0, "EV1:   Average attenuation = %.2f", attenuationAvg);    // printed always
+       
+  SCC_SLAC_GetSourceId(bbuffer1);
+  SCC_SLAC_GetResponseId(bbuffer2); 
+  
+  WriteHex(strBuffer1, bbuffer1, 17);
+  WriteHex(strBuffer2, bbuffer2, 17);
+  
+  if (ShallWrite())
+  {
+    WriteLineEx(writeTab, 0, "EV1:   ApplicationType = %i, SecurityType = %i, SourceId = %s, RespId = %s",
+      SCC_SLAC_GetApplicationType(), SCC_SLAC_GetSecurityType(), strBuffer1, strBuffer2);
+  }  
+}
+
+SCC_CM_Validate_Cnf( byte RunId[], byte SourceMacAddress[], dword Result, dword ToggleNum )
+{
+  if (ShallWrite())
+  {  
+    GetRunIdAndMacIds(RunId, SourceMacAddress);
+    
+    WriteLineEx(writeTab, 0, "EV1: CM_Validate.Cnf [%.3f], RunId = %s, Source = %s, Dest = %s, Result = %i, ToggleNum = %i",
+      GetRxTimestamp(), strRunId, strSourceMac, strDestMac, Result, ToggleNum);
+        
+    WriteLineEx(writeTab, 0, "EV1: C  SignalType = %i", SCC_SLAC_GetSignalType());
+  }
+}
+
+SCC_CM_SLAC_Match_Cnf( byte RunId[], byte SourceMacAddress[], byte PEVMAC[], byte EVSEMAC[], byte NID[], byte NMK[] )
+{
+  if (ShallWrite())
+  {  
+    GetRunIdAndMacIds(RunId, SourceMacAddress);
+    WriteHexMacId(strBuffer1, PEVMAC);
+    WriteHexMacId(strBuffer2, EVSEMAC);
+    WriteHex(strBuffer3, NID);
+    WriteHex(strBuffer4, NMK);
+    
+    WriteLineEx(writeTab, 0, "EV1: CM_SLAC_Match.Cnf [%.3f], RunId = %s, Source = %s, Dest = %s, PEVMAC = %s, EVSEMAC = %s, NID = %s, NMK = %s",
+      GetRxTimestamp(), strRunId, strSourceMac, strDestMac, strBuffer1, strBuffer2, strBuffer3, strBuffer4);
+            
+    SCC_SLAC_GetPEVAndEVSEId(bbuffer1, bbuffer2);
+    
+    WriteHex(strBuffer1, bbuffer1, 17);
+    WriteHex(strBuffer2, bbuffer2, 17);
+    
+    WriteLineEx(writeTab, 0, "EV1:   ApplicationType = %i, SecurityType = %i, MVF length = %i, PEV ID = %s, EVSE ID = %s",
+      SCC_SLAC_GetApplicationType(),
+      SCC_SLAC_GetSecurityType(),
+      SCC_SLAC_GetMVFLength(),
+      strBuffer1,
+      strBuffer2
+    );
+  }
+}
+
+SCC_CM_Set_Key_Cnf( byte RunId[], byte SourceMacAddress[], dword Result )
+{
+  dword dMyNonce, dYourNonce, dRID, dPRN, dPMN, dCCOCap;
+  
+  if (ShallWrite())
+  {  
+    GetRunIdAndMacIds(RunId, SourceMacAddress);
+    
+    WriteLineEx(writeTab, 0, "EV1: CM_Set_Key.Cnf [%.3f], RunId = %s, Source = %s, Dest = %s, Result = %i",
+      GetRxTimestamp(), strRunId, strSourceMac, strDestMac, Result);
+    
+    SCC_SLAC_GetCmSetKeyCnfData(dMyNonce, dYourNonce, dRID, dPRN, dPMN, dCCOCap);
+        
+    WriteLineEx(writeTab, 0, "EV1:   MyNonce = %u, YourNonce = %u, PID = %d, PRN = %u, PMN = %d, CCO Capability = %d",
+      dMyNonce, dYourNonce, dRID, dPRN, dPMN, dCCOCap);    
+  }
+}
+
+SCC_VS_PL_Lnk_Status_Cnf( byte SourceMacAddress[], dword MStatus, dword LinkStatus )
+{
+  byte zeroRunId[8];
+  
+  if (ShallWrite())
+  {  
+    GetRunIdAndMacIds(zeroRunId, SourceMacAddress);
+    
+    WriteLineEx(writeTab, 0, "EVSE: VS_PL_Lnk_Status.Cnf [%.3f], RunId = %s, Source = %s, Dest = %s, MStatus = %i, LinkStatus = %i",
+      GetRxTimestamp(), strRunId, strSourceMac, strDestMac, MStatus, LinkStatus);
+  }
+}

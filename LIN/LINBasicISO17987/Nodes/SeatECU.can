@@ -1,0 +1,66 @@
+/*@!Encoding:1252*/
+variables
+{
+  const dword cNormalTableIndex = 0;
+  const dword cInitTableIndex = 2;
+  
+  linFrame Motor1State_Event m1Evt;
+  linFrame Motor2State_Event m2Evt;
+}
+
+on preStart
+{
+  // send init table once on start
+  LinChangeSchedTable(cInitTableIndex);
+}
+
+on linSleepModeEvent
+{ 
+  // send init table once after wake-up
+  if (this.lin_wasAwake && !this.lin_isAwake)
+  {
+    LinChangeSchedTable(cInitTableIndex);
+  }
+}
+
+on linSchedulerModeChange
+{
+  dword prevSchedTable = cNormalTableIndex;
+  if (this.lin_oldMode != this.lin_newMode)
+  {
+    prevSchedTable = this.lin_oldMode;
+  }
+  
+  if (this.lin_firstEventAfterWakeUp)
+  {
+    // change back to the previously sent table after one execution of the init table
+    LinChangeSchedTable(prevSchedTable, 0, -1);
+  }
+}
+
+
+on sysvar sysvar::LINISO17987::ETFCollision
+{
+  if (@this == 1) // if button has been pushed...
+  {
+    m1Evt.Motor1ErrorCode += 1;
+    m2Evt.Motor2ErrorCode += 1;
+    output(m1Evt);
+    output(m2Evt);
+  }
+}
+
+on sysvar sysvar::LINISO17987::Motor1Selection
+{
+  linFrame Motor1Control m1SF;
+  $Motor1Selection = @this;
+  linSendAsSporadic (m1SF.id);
+}
+
+on sysvar sysvar::LINISO17987::Motor2Selection
+{
+  linFrame Motor2Control m2SF;
+  $Motor2Selection = @this;
+  linSendAsSporadic (m2SF.id);
+}
+

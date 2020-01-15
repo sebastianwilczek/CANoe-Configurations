@@ -1,0 +1,1742 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+variables
+{
+  enum Ethertype 
+  { 
+    kEthertype_IPv4 = 0x0800,
+    kEthertype_ARP  = 0x0806
+  };
+  
+  enum IPv4Protocol
+  {
+    kIPv4Protocol_ICMPv4 = 1,
+    kIPv4Protocol_IGMP   = 2,
+    kIPv4Protocol_TCP    = 6,
+    kIPv4Protocol_UDP    = 17
+  };
+  
+  const dword kMULTICAST_ADR_FLAG = 0xE0000000;
+  const dword kBROADCAST_ADR_FLAG = 0x000000FF;
+
+}
+
+/// <IPv4>
+word Ipv4InitHeader( ethernetPacket * pkt, word offset, word totalLength, byte protocol, dword sourceAddress, dword destinationAddress )
+{
+  pkt.Length = _max( pkt.Length, 20 );
+  
+  pkt.Byte (offset     ) = 0x45;                       // IP protocol version | header length (20 byte)
+  pkt.Word (offset +  2) = swapWord(totalLength + 20); // Total packet length (inklusive IPv4 header length)
+  pkt.Byte (offset +  8) = 0x40;                       // TTL 
+  pkt.Byte (offset +  9) = protocol;                   // Next protocol
+  pkt.Dword(offset + 12) = sourceAddress;              // Source IP address (in network byte order)
+  pkt.Dword(offset + 16) = destinationAddress;         // Destination IP address (in network byte order)
+  pkt.Word (offset + 10) = IPv4CalcChecksum(pkt);      // Checksum
+  
+  offset += 20;
+
+  return offset;
+}
+
+/// <IPv4>
+word IPv4CalcChecksum( ethernetPacket * pkt )
+{
+  dword sum;
+  dword offset;
+  dword count;
+
+  sum    = 0;
+  offset = 0;
+  count  = (pkt.Byte(0) & 0x0F) * 4;
+  
+  while (count > 1)
+  {
+    sum += pkt.WORD(offset);
+    
+    offset += 2;
+    if (sum & 0x80000000)
+    {
+      sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    
+    count -= 2;
+  }
+
+  if (count)
+  {
+    sum += pkt.Byte(offset);
+  }
+
+  while (sum >> 16)
+  {
+    sum = (sum & 0xFFFF) + (sum >> 16);
+  }
+
+  return ~sum & 0xffff;  
+}
+
+/// <IPv4>
+void Ipv4UpdateChecksum( ethernetPacket * pkt )
+{
+  //word offset;
+  pkt.Word(10)  = 0; //zero check sum  before calculate check sum 
+  pkt.Word (10) = IPv4CalcChecksum(pkt); // Checksum
+}
+
+/// <IPv4>
+byte IPv4IsEthTypeIPv4(ethernetPacket * pkt )
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    return 1;
+  }
+  return 0;
+}
+
+/// <IPv4>
+byte IPv4GetProtocol( ethernetPacket * pkt )
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    return pkt.Byte(9); // IPv4 Protocol info;
+  }
+  else
+  {
+    write( "<%FILE_NAME%> IPv4GetProtocol: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;
+  }
+}
+
+/// <TCP/set>
+dword IPv4GetSrcAddress( ethernetPacket * pkt )
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    return (pkt.dword(12)); // IPv4 srouce address;
+  }
+  else
+  {
+    write( "<%FILE_NAME%> IPv4GetSrcAddress: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;
+  }
+}
+
+/// <IPv4>
+dword IPv4GetDstAddress( ethernetPacket * pkt )
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    return (pkt.dword(16)); // IPv4 destination address;
+  }
+  else
+  {
+    write( "<%FILE_NAME%> IPv4GetDstAddress: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;
+  }
+}
+
+/// <IPv4>
+byte IPv4GetHeaderLength( ethernetPacket * pkt )
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    return (pkt.Byte(0) & 0x0F) * 4;
+  }
+  else
+  {
+    write( "<%FILE_NAME%> IPv4GetHeaderLength: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;
+  }
+}
+
+/// <IPv4>
+byte IPv4SetHeaderLength( ethernetPacket * pkt, byte bOctet)
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    pkt.Byte(0) = (pkt.Byte(0) & 0xF0) | ((bOctet >> 2) & 0x0F);
+    return 1;
+  }
+  else
+  {
+    write( "<%FILE_NAME%> IPv4SetHeaderLength: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;
+  }
+}
+
+/// <IPv4>
+word IPv4GetTotalLength( ethernetPacket * pkt )
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    return swapWord(pkt.Word(2)); // IPv4 totallength;
+  }
+  else
+  {
+    write( "<%FILE_NAME%> IPv4GetTotalLength: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;
+  }
+}
+
+/// <IPv4>
+long IPv4SetTotalLength( ethernetPacket * pkt, word  wTotalLen)
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    pkt.Word(2) = swapWord(wTotalLen); // IPv4 totallength;
+    return 1;
+  }
+  else
+  {
+    write( "<%FILE_NAME%> IPv4SetTotalLength: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;
+  }
+}
+
+/// <IPv4>
+byte IPv4IsExistIPv4Option(ethernetPacket * pkt )
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    if(IPv4GetHeaderLength(pkt) > 20){
+      return 1;
+    }
+    else{
+      return 0;
+    }
+  }
+  return 0;
+}
+
+/// <IPv4>
+byte IPv4IsMultiSecurityOption( ethernetPacket * pkt )
+{
+  byte i;
+  byte count;
+  byte headerLength;
+  
+  count = 0;
+  
+  if (pkt.type == kEthertype_IPv4)
+  {
+    // Get IPv4Option length
+    if(IPv4IsExistIPv4Option(pkt) == 1){
+      headerLength = IPv4GetHeaderLength(pkt);
+    }
+    else{
+      // pkt does not have IPv4Option
+      return 0;
+    }
+    
+    // return 0 if IPv4Option length is less than Security Option length(11) * 2
+    if(headerLength < 20 + 11 * 2) return 0;
+    
+    // check option data
+    for(i = 20;i < headerLength;i++){
+      // break if the check option data length is less than Security Option length(11)
+      if(headerLength - i < 11) break;
+      
+      // check whether Security option Type=130(0x82),Length=11(0x0B)
+      if((pkt.byte(i) == 0x82) && (pkt.byte(i + 1) == 0x0B)){
+        count = count + 1;
+        i = i + 10;   // Move the target check position to the first byte of the next option(11-1)
+      }
+    }
+    
+    // return 0 if Security option is 0 or 1
+    if(count < 2) return 0;
+    // return 1 if Security option is 2 or more
+    else          return 1;
+  }
+  else{
+    write( "<%FILE_NAME%> IPv4IsMultiSecurityOption: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;    
+  }
+}
+
+/// <IPv4>
+byte IPv4IsMultiTimestampOption( ethernetPacket * pkt , byte& bParamProblemPointer )
+{
+  byte i;
+  byte count;
+  byte headerLength;
+  
+  count = 0;
+  bParamProblemPointer = 0x00;
+  
+  if (pkt.type == kEthertype_IPv4)
+  {
+    // Get IPv4Option length
+    if(IPv4IsExistIPv4Option(pkt) == 1){
+      headerLength = IPv4GetHeaderLength(pkt);
+    }
+    else{
+      // pkt does not have IPv4Option
+      return 0;
+    }
+    
+    // check option data
+    for(i = 20;i < headerLength;i++){
+      // continue if the check option data is not Timestamp Option
+      if(pkt.byte(i) !=  0x44) continue;
+      if(pkt.byte(i + 1) > headerLength - i) continue;
+      
+      count = count + 1;
+      if(count > 1){
+        // Set the position of Timestamp option length
+        bParamProblemPointer = i;
+        // return 1 if Timestamp option is 2 or more
+        return 1;
+      }
+      i = i + pkt.byte(i + 1) - 1;  // Move the target check position to the first byte of the next option(length field-1)
+    }
+    // return 0 if Timestamp option is 0 or 1
+    return 0;
+  }
+  else{
+    write( "<%FILE_NAME%> IPv4IsMultiTimestampOption: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;    
+  }
+}
+
+/// <IPv4>
+byte IPv4IsExistTimestampOptionRoom( ethernetPacket * pkt , byte& bParamProblemPointer)
+{
+  byte i;
+  byte headerLength;
+  
+  bParamProblemPointer = 0x00;
+  
+  if (pkt.type == kEthertype_IPv4)
+  {
+    // Get IPv4Option length
+    if(IPv4IsExistIPv4Option(pkt) == 1){
+      headerLength = IPv4GetHeaderLength(pkt);
+    }
+    else{
+      // pkt does not have IPv4Option
+      return 0;
+    }
+    
+    // check option data
+    for(i = 20;i < headerLength;i++){
+      // contine if the check option data is not Timestamp Option
+      if(pkt.byte(i) !=  0x44) continue;
+      if(pkt.byte(i + 1) > headerLength - i) continue;
+      
+      // check whether the Timestamp option length is a multiple of 4
+      if(pkt.byte(i + 1) % 4 != 0){
+        // Set the position of Timestamp Option length
+        bParamProblemPointer = i + 1;
+        // return 0 if Timestamp option length is not a multiple of 4
+        return 0;
+      }
+      
+      // check whether the Timestamp option oflw is not overflow(=0xF)
+      if((pkt.byte(i + 3) & 0xF0) == 0xF0){
+        // Set the position of Timestamp Option overflow
+        bParamProblemPointer = i + 3;
+        // return 0 if Timestamp option oflow is overflow(=0x0F)
+        return 0;
+      }
+      
+      // check whether the Timestamp option pointer(i+2) is more than Timestamp option length(i+1)
+      if(pkt.byte(i + 1) < pkt.byte(i + 2)){
+        // return 1 if the Timestamp option pointer is more than Timestamp option length(oflw)
+        return 1;
+      }
+      
+      // check whether the Timestamp Option length(i+1) is more than Timestamp Option pointer + 4
+      if(pkt.byte(i + 1) - pkt.byte(i + 2) < 3){
+        // Set the position of Timestamp Option pointer
+        bParamProblemPointer = i + 2;
+        // return 0 if Timestamp option length is not enough(not 4 byte or more)
+        return 0;
+      }
+      else{
+        // return 1 if Timestamp option length is enough(4 byte or more)
+        return 1;
+      }
+    }
+    return 1;
+  }
+  else{
+    write( "<%FILE_NAME%> IPv4IsExistTimestampOptionRoom: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;    
+  }
+}
+
+/// <IPv4>
+long IPv4SetIdentificagtion(ethernetPacket * pkt, word wID)
+{
+  if(pkt.type == kEthertype_IPv4)
+  {
+    pkt.Word(4) = swapWord(wID); // IPv4 Identification;
+    return 1;
+  }
+  else
+  {
+    write( "<%FILE_NAME%> IPv4SetIdentificagtion: Ethertype not supported" );
+
+    return 0;
+  }
+}
+
+/// <IPv4>
+word IPv4GetIdentificagtion(ethernetPacket * pkt)
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    return (swapWord(pkt.word(4)));
+  }
+  else
+  {
+    write( "<%FILE_NAME%> IPv4GetIdentificagtion: Ethertype not supported" );
+
+    return 0;
+  }
+}
+
+/// <IPv4>
+word IPv4GetFragmentOffset(ethernetPacket * pkt)
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    return (swapWord(pkt.word(6)) & 0x1FFF);
+  }
+  else
+  {
+    write( "<%FILE_NAME%> IPv4GetFragmentOffset: Ethertype not supported" );
+
+    return 0;
+  }
+}
+
+/// <IPv4>
+word IPv4GetTimeToLive(ethernetPacket * pkt)
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    return pkt.Byte(8); // IPv4 Time to Live;
+  }
+  else
+  {
+    write( "<%FILE_NAME%> IPv4GetTimeToLive: Ethertype not supported" );
+
+    return 0;
+  }
+}
+
+/// <UDP>
+word UDPInitHeader( ethernetPacket * pkt, word offset, word dataLength, word sourcePort, word destinationPort )
+{
+  pkt.Length = _max( pkt.Length, offset + 8 + dataLength );
+  
+  pkt.Word(offset + 0) = swapWord(sourcePort);      // UDP source port
+  pkt.Word(offset + 2) = swapWord(destinationPort); // UDP destination port
+  pkt.Word(offset + 4) = swapWord(dataLength + 8);  // UDP length (inclusive UDP header)
+  pkt.Word(offset + 6) = 0;                         // UDP checksum
+  
+  offset += 8;
+  
+  return offset;
+}
+
+/// <UDP>
+word UDPCalcChecksum( ethernetPacket * pkt )
+{
+  dword sum;
+  dword offset;
+  dword count;
+  word  val;
+  word  i;
+
+  sum    = 0;
+  offset = UDPGetHeaderOffset( pkt );
+  count  = UDPGetDataLength( pkt );
+
+  // calc checkusm of pseudo header
+  sum += IPv4GetProtocol(pkt);            // IP protocol
+  sum += swapWord(pkt.Word(offset + 4 )); // UDP protocol length
+  sum += swapWord(pkt.Word( 12 ));        // IP addresses
+  sum += swapWord(pkt.Word( 14 ));        // IP addresses
+  sum += swapWord(pkt.Word( 16 ));        // IP addresses
+  sum += swapWord(pkt.Word( 18 ));        // IP addresses
+
+  // calc checksum over UDP header and payload
+  for( i = 0; i < count + 8; i += 2 )
+  {
+    if (i == 6)
+    {
+      // ignore checksum
+      val = 0;
+    }
+    else if (i + 1 >= count + 8)
+    {
+      val = ((((WORD)pkt.Byte(offset+i)) << 8) & 0xFF00);
+    }
+    else {
+      val  = swapWord( pkt.Word(offset+i) );
+    }
+    
+    sum += val;
+  }
+
+  while(sum >> 16)
+  {
+    sum = (sum & 0xFFFF) + ((sum >> 16) & 0xFFFF);
+  }
+
+  // set checksum of packet
+  sum = ~sum;
+
+  return sum; 
+}
+
+/// <UDP>
+void UDPUpdateChecksum( ethernetPacket * pkt )
+{
+  word offset;
+  offset = UDPGetHeaderOffset( pkt );
+  
+  pkt.Word (offset+6) = swapWord(UDPCalcChecksum(pkt)); // Checksum
+}
+
+/// <UDP>
+void UDPChangeChecksum( ethernetPacket * pkt, word wCheckSum )
+{
+  word offset;
+  offset = UDPGetHeaderOffset( pkt );
+  
+  pkt.Word (offset+6) = wCheckSum; // Checksum
+}
+
+/// <UDP>
+void UDPChangeChecksumIncorrect( ethernetPacket * pkt)
+{
+  word offset;
+  offset = UDPGetHeaderOffset( pkt );
+  
+  pkt.Word (offset+6) = ~(pkt.Word (offset+6)); // Checksum
+}
+
+/// <UDP>
+word UDPGetHeaderOffset( ethernetPacket * pkt )
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    return (pkt.Byte(0) & 0x0F) * 4; // IPv4 header length;
+  }
+  else
+  {
+    write( "<%FILE_NAME%> UDPGetHeaderOffset: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;
+  }
+}
+
+/// <UDP>
+word UDPGetDataLength( ethernetPacket * pkt )
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    word offset;
+    offset = UDPGetHeaderOffset( pkt );
+    return swapWord(pkt.Word(offset + 4)) - 8; // UDP data length;
+  }
+  else
+  {
+    write( "<%FILE_NAME%> UDPGetHeaderOffset: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;
+  }
+}
+
+/// <EthData>
+word EthDataAppendString( ethernetPacket * pkt, word offset, char str[] )
+{
+  word i;
+  
+  while(str[i])
+  {
+    pkt.Byte(offset) = str[i];
+    i++;
+    offset++;
+  }
+  
+  return offset;
+}
+
+
+/// <TCP>
+word TCPInitHeader( ethernetPacket * pkt, word offset, word dataLength, word sourcePort, word destinationPort )
+//word TCPInitHeader( ethernetPacket * pkt, word offset, word sourcePort, word destinationPort )
+{
+  pkt.Length = _max( pkt.Length, offset + 20 + dataLength/*TCP HeaderLength*/);
+  
+  pkt.Word(offset +  0) = swapWord(sourcePort);      // TCP source port
+  pkt.Word(offset +  2) = swapWord(destinationPort); // TCP destination port
+  pkt.Byte(offset + 12) = (5 << 4);                  // TCP data offset
+  
+  offset += 20;
+  
+  return offset;
+}
+
+/// <TCP>
+word TCPCalcChecksum( ethernetPacket * pkt )
+{
+  dword sum;
+  dword offset;
+  dword count;
+  word  val;
+  word  i;
+
+  sum    = 0;
+  offset = TCPGetHeaderOffset( pkt );
+  count  = IPv4GetTotalLength(pkt) - IPv4GetHeaderLength(pkt);
+
+  // calc checkusm of pseudo header
+  sum += pkt.Word( 12 );                         // source IP addresses
+  sum += pkt.Word( 14 );                         // source IP addresses
+  sum += pkt.Word( 16 );                         // destination IP addresses
+  sum += pkt.Word( 18 );                         // destination IP addresses
+  sum += (word)IPv4GetProtocol(pkt) << 8;        // IP protocol
+  sum += swapWord(IPv4GetTotalLength(pkt) - IPv4GetHeaderLength(pkt)); // Total length
+  
+  // calc checksum over UDP header and payload
+  for( i = 0; i < count; i += 2 )
+  {
+    // checksum region
+    if (i == 16)
+    {
+      // ignore checksum
+      val = 0;
+    }
+    // last byte
+    else if (i + 1 >= count)
+    {
+      val = ((((WORD)pkt.Byte(offset+i))) & 0x00FF);
+    }
+    else
+    {
+      val = pkt.Word(offset+i);
+    }
+    
+    sum += val;
+  }
+
+  while(sum >> 16)
+  {
+    sum = (sum & 0xFFFF) + ((sum >> 16) & 0xFFFF);
+  }
+
+  // set checksum of packet
+  sum = ~sum;
+
+  return sum; 
+}
+
+/// <TCP>
+void TCPUpdateChecksum( ethernetPacket * pkt )
+{
+  word offset;
+  offset = TCPGetHeaderOffset( pkt );
+  
+  pkt.Word (offset+16) = TCPCalcChecksum(pkt); // Checksum
+}
+
+/// <TCP/get>
+word TCPGetHeaderOffset( ethernetPacket * pkt )
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    return (pkt.Byte(0) & 0x0F) * 4; // IPv4 header length;
+  }
+  else
+  {
+    write( "<%FILE_NAME%> UDPGetHeaderOffset: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;
+  }
+}
+
+/// <TCP/get>
+long TCPGetDataLength( ethernetPacket * pkt )
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    return IPv4GetTotalLength(pkt) - IPv4GetHeaderLength(pkt) - TcpGetDataOffset(pkt); // TCP data length, considering TCP option data
+  }
+  else
+  {
+    write( "<%FILE_NAME%> UDPGetHeaderOffset: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;
+  }
+}
+
+/// <TCP>
+// 1:tcp 0:other protocol
+byte isTcp( ethernetPacket * pkt )
+{
+  if(IPv4IsEthTypeIPv4(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  if(pkt.byte(9) != kIPv4Protocol_TCP)
+  {
+    return 0;
+  }
+  
+  return 1;
+}
+
+/// <TCP/get>
+byte TCPGetFlags( ethernetPacket * pkt )
+{
+  long offset;
+  
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  return pkt.byte(offset+13);
+}
+
+/// <TCP/get>
+word TcpGetMss(ethernetPacket * pkt)
+{
+  long offset;
+  word mss;
+  
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  // get offset
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+
+  // get mss
+  return swapWord(pkt.word(offset+22));
+}
+
+/// <TCP/get>
+word TCPgetPortDst( ethernetPacket * pkt )
+{
+  word wRet;
+  long offset;
+  
+  wRet = 0;
+  
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  wRet = swapWord(pkt.word(offset + 2));
+  
+  return wRet;
+}
+
+/// <TCP/get>
+dword TCPgetSequence( ethernetPacket * pkt )
+{
+  long offset;
+    
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+    
+  return swapDWord(pkt.dword(offset + 4));
+}
+
+/// <TCP/get>
+dword TCPgetAckNumber( ethernetPacket * pkt )
+{
+  long offset;
+    
+  // check protocol
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+    
+  return swapDWord(pkt.dword(offset + 8));
+}
+
+/// <TCP/set>
+dword TCPsetAckNumber( ethernetPacket * pkt, dword dwAckNum)
+{
+  long offset;
+    
+  // check protocol
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  pkt.dword(offset + 8) = swapDWord(dwAckNum);
+
+  // set checksum
+  TCPUpdateChecksum(pkt);
+  
+  return 1;
+}
+
+/// <TCP/set>
+byte TcpSetUrgPointer(ethernetPacket * pkt, word urg)
+{
+  long offset;
+  word checksum;
+  byte flags;
+  
+  // check protocol
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  // get offset
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  // check urg flags
+  flags = TCPGetFlags(pkt);
+  if((flags & 32) != 32)
+  {
+    return 0;
+  }
+  
+  // set urg pointer
+  pkt.word(offset+18) = swapWord(urg);
+  
+  // set checksum
+  TCPUpdateChecksum(pkt);
+  
+  return 1;
+}
+
+/// <TCP/set>
+byte TcpSetMssOptions(ethernetPacket *pkt, byte bId, byte bLength, word wMss)
+{
+  long lHeaderOffset;
+  long lDataOffset;
+  byte bFlags;
+  
+  // check protocol
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+    
+  // get TCP header offset
+  lHeaderOffset = TCPGetHeaderOffset(pkt);
+  if(lHeaderOffset < 20)
+  {
+    return 0;
+  }
+  
+  // get TCP data offset
+  lDataOffset = TcpGetDataOffset(pkt);
+  if(lDataOffset < 20)
+  {
+    // offset number error
+    return 0;
+  }
+  
+  // check syn/ack flags
+  bFlags = TCPGetFlags(pkt);
+  if( ((bFlags & 0x02) != 0x02) && ((bFlags & 0x10) != 0x10) )
+  {
+    return 0;
+  }
+  
+  //first check if length is enoght to change for MSS options
+  if(lDataOffset < 24)
+  {
+    //change eth frame length and ipv4 total length
+    //update IPv4 length and IPv4 offset
+    pkt.Length = pkt.Length + 4;
+    IPv4SetTotalLength(pkt, IPv4GetTotalLength(pkt) + 4);    
+    TcpSetDataOffset(pkt, 24);
+  }
+  
+
+  // set option id, length, mss
+  pkt.byte(lHeaderOffset+20) = bId;
+  pkt.byte(lHeaderOffset+21) = bLength;
+  pkt.word(lHeaderOffset+22) = swapWord(wMss);
+  
+  if(bLength > 4)
+  {
+    TcpSetMssAddData(pkt, bLength);
+  }
+  
+  // set checksum
+  TCPUpdateChecksum(pkt);    
+  Ipv4UpdateChecksum(pkt);
+  
+  
+  return 1;
+}
+
+/// <TCP/set>
+byte TcpRemoveMssOptions(ethernetPacket *pkt)
+{
+  long lHeaderOffset;
+  long lDataOffset;
+  byte bFlags;
+  
+  // check protocol
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+    
+  // get TCP header offset
+  lHeaderOffset = TCPGetHeaderOffset(pkt);
+  if(lHeaderOffset < 20)
+  {
+    return 0;
+  }
+  
+  // get TCP data offset
+  lDataOffset = TcpGetDataOffset(pkt);
+  if(lDataOffset < 20)
+  {
+    // offset number error
+    return 0;
+  }
+  
+  // check syn/ack flags
+  bFlags = TCPGetFlags(pkt);
+  if( ((bFlags & 0x02) != 0x02) && ((bFlags & 0x10) != 0x10) )
+  {
+    return 0;
+  }
+  
+  //first check if length is enoght to change for MSS options
+  if(lDataOffset >= 24)
+  {
+    //change eth frame length and ipv4 total length
+    //update IPv4 length and IPv4 offset
+    pkt.Length = pkt.Length - 4;
+    IPv4SetTotalLength(pkt, IPv4GetTotalLength(pkt) - 4);    
+    TcpSetDataOffset(pkt, 20);
+  }
+    
+  // update checksum
+  TCPUpdateChecksum(pkt);    
+  Ipv4UpdateChecksum(pkt);
+  
+  
+  return 1;
+}
+
+
+/// <TCP/set>
+byte TcpSetWindow(ethernetPacket * pkt, word window)
+{
+  long offset;
+  word checksum;
+  byte flags;
+  
+  // check protocol
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  // get offset
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  // set window
+  pkt.word(offset+14) = swapWord(window);
+  
+  // set checksum
+  TCPUpdateChecksum(pkt);
+  
+  return 1;
+}
+
+/// <TCP/get>
+word TcpGetWindow(ethernetPacket * pkt)
+{
+  long offset;
+    
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+    
+  return swapWord(pkt.word(offset+14));
+}
+
+/// <TCP/get>
+byte TcpGetDataOffset(ethernetPacket * pkt)
+{
+  long offset;
+    
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+    
+  return (pkt.byte(offset+12)) >> 2;
+}
+
+/// <TCP/set>
+byte TcpSetReserved(ethernetPacket * pkt, byte reservedNum)
+{
+  long offset;
+  word checksum;
+  byte baseNum;
+  
+  // check protocol
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  // get offset
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  baseNum = pkt.byte(offset+12);
+    
+  // set reserved number
+  pkt.byte(offset+12) = (reservedNum & 0x0F) | (baseNum & 0xF0);
+
+  // set checksum
+  TCPUpdateChecksum(pkt);
+  
+  return 1;
+}
+
+/// <TCP/set>
+byte TcpSetDataOffset(ethernetPacket * pkt, byte offset)
+{
+  long hOffset;
+  byte reserved;
+  
+  // check protocol
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  // get header offset
+  hOffset = TCPGetHeaderOffset(pkt);
+  if(hOffset == 0)
+  {
+    return 0;
+  }
+
+  // get reserved number
+  reserved = pkt.byte(hOffset+12) & 0x0F;
+  
+  // set offset
+  pkt.byte(hOffset+12) = ((offset/4) << 4 & 0xF0) | (reserved & 0x0F);
+
+  // update checksum
+  TCPUpdateChecksum(pkt);
+  
+  return 1;
+}
+
+/// <TCP/set>
+byte TcpSetPayload(ethernetPacket * pkt, char str[], word length)
+{
+  long offset;
+  word checksum;
+  word i,j;
+  
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  // get offset
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  // set data
+  j = 0;
+  for(i=pkt.Length; i<pkt.Length + length; i++)
+  {
+    pkt.Byte(i) = str[j];
+    j++;
+  }
+  pkt.Length += length;
+  
+  // set data length
+  IPv4SetTotalLength(pkt, IPv4GetTotalLength(pkt) + length);
+
+  // set checksum
+  TCPUpdateChecksum(pkt);
+  Ipv4UpdateChecksum(pkt);
+  
+  return 1;
+}
+
+/// <ICMPv4>
+byte ICMPv4IsExist( ethernetPacket * pkt )
+{
+  if (IPv4GetProtocol(pkt) == kIPv4Protocol_ICMPv4)
+  {
+    return 1;
+  }
+  return 0;
+}
+
+/// <ICMPv4>
+byte ICMPv4IsDstUnreachMsg( ethernetPacket * pkt )
+{
+  word offset;
+  offset = ICMPv4GetHeaderOffset(pkt);
+  
+  if(pkt.byte(offset) == 0x03)
+  {
+    return 1;
+  }
+  return 0;
+}
+
+/// <ICMPv4>
+byte ICMPv4IsDstPortUnreach( ethernetPacket * pkt )
+{
+  word offset;
+  offset = ICMPv4GetHeaderOffset(pkt);
+  
+  if(pkt.byte(offset+1) == 0x03)
+  {
+    return 1;
+  }
+  return 0;
+}
+
+/// <ICMPv4>
+byte ICMPv4IsFragmentNeeded( ethernetPacket * pkt )
+{
+  word offset;
+  offset = ICMPv4GetHeaderOffset(pkt);
+  
+  if(pkt.byte(offset+1) == 0x04)
+  {
+    return 1;
+  }
+  return 0;
+}
+
+/// <ICMPv4>
+byte ICMPv4IsParamProblemMsg( ethernetPacket * pkt )
+{
+  word offset;
+  offset = ICMPv4GetHeaderOffset(pkt);
+  
+  if(pkt.byte(offset) == 0x0C)
+  {
+    return 1;
+  }
+  return 0;
+}
+
+/// <ICMPv4>
+byte ICMPv4GetCode( ethernetPacket * pkt )
+{
+  word offset;
+  offset = ICMPv4GetHeaderOffset(pkt);
+  
+  return (pkt.byte(offset+1));
+}
+
+/// <ICMPv4>
+byte ICMPv4GetType( ethernetPacket * pkt )
+{
+  word offset;
+  offset = ICMPv4GetHeaderOffset(pkt);
+  
+  return (pkt.byte(offset));
+}
+
+/// <ICMPv4>
+word ICMPv4GetCheckSum( ethernetPacket * pkt )
+{
+  word offset;
+  offset = ICMPv4GetHeaderOffset(pkt);
+  
+  return (swapWord(pkt.word(offset+2)));
+}
+
+/// <ICMPv4>
+word ICMPv4GetNextHopMTU( ethernetPacket * pkt )
+{
+  word offset;
+  offset = ICMPv4GetHeaderOffset(pkt);
+  
+  return (swapWord(pkt.word(offset+6)));
+}
+
+/// <ICMPv4>
+word ICMPv4GetDataOffset( ethernetPacket * pkt )
+{
+  const word kLEN_ICMPv4_HEADER_LEN = 4;
+  
+  word offset;
+  offset = ICMPv4GetHeaderOffset(pkt) + kLEN_ICMPv4_HEADER_LEN;
+  return offset;
+}
+
+/// <ICMPv4>
+word ICMPv4GetHeaderOffset( ethernetPacket * pkt )
+{
+  if (pkt.type == kEthertype_IPv4)
+  {
+    return (pkt.Byte(0) & 0x0F) * 4; // IPv4 header length;
+  }
+  else
+  {
+    write( "<%FILE_NAME%> UDPGetHeaderOffset: Ethertype not supported. Measurement is stopped!" );
+    stop();
+    
+    return 0;
+  }
+}
+
+/// <TCP/set>
+// set mss length
+byte TcpSetMssAddData(ethernetPacket * pkt, byte length)
+{
+  long offset;
+  long lIdx;
+  word checksum;
+  byte flags;
+  long lAddtionalLen;
+  long lPaddingLen;
+  long lTotalAddrLen;
+  
+  lAddtionalLen = length - 4;
+  lTotalAddrLen = ((lAddtionalLen + 3) /4) * 4;
+  
+  if(lAddtionalLen <= 0)
+  {
+    // nothing to do
+    return 1;
+  }
+  
+  // set packet len;
+  pkt.Length = pkt.Length + lTotalAddrLen;
+  IPv4SetTotalLength(pkt, IPv4GetTotalLength(pkt) + lTotalAddrLen);
+  
+  // set MSS
+  offset += 24;
+  for(lIdx = 0; lIdx < lAddtionalLen;  lIdx++)
+  {
+    pkt.byte(offset+lIdx) = 0x55;
+  }
+  //Pading
+  if( (lAddtionalLen % 4) > 0)
+  {
+    lPaddingLen = 4 - (lAddtionalLen % 4);
+    for(lIdx = 0; lIdx < lPaddingLen; lIdx++)
+    {
+      pkt.byte(offset+lAddtionalLen+lIdx) = 0x00;    
+    }
+  }
+  offset += lTotalAddrLen;
+  //update IPv4 length and IPv4 offset
+  TcpSetDataOffset(pkt, 24+lTotalAddrLen);
+  
+  
+  // set checksum
+  Ipv4UpdateChecksum(pkt);
+  TCPUpdateChecksum(pkt);
+  
+  return 1;
+}
+
+/// <TCP/set>
+byte TcpSetSequence(ethernetPacket * pkt, dword seq)
+{
+  long offset;
+  word checksum;
+  byte flags;
+  
+  // check protocol
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  // get offset
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  // set sequence
+  pkt.dword(offset+4) = swapDWord(seq);
+  
+  // set checksum
+  TCPUpdateChecksum(pkt);
+  
+  return 1;
+}
+
+
+/// <TCP/set>
+word TcpGetData(ethernetPacket * pkt, byte data[])
+{
+  word i,j;
+  word length;
+  long offset;
+  
+  length = j = 0;
+  
+  // check protocol
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  // get offset  
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  offset += TcpGetDataOffset(pkt);
+  length = TCPGetDataLength(pkt);
+  
+  // copy payload data
+  for(i = offset; i < offset + length && j < elCount(data); i++)
+  {
+    data[j++] = pkt.Byte(i);
+  }
+    
+  return j;
+}
+
+
+void TcpRemoveAckFlag(ethernetPacket* packet)
+{
+  word wTcpHeaderOffset;
+  
+  wTcpHeaderOffset = TCPGetHeaderOffset(packet);
+  
+  packet.byte(wTcpHeaderOffset+13) &= 0xEF;
+
+  TCPUpdateChecksum(packet);
+  
+}
+
+void TcpRemovePshFlag(ethernetPacket* packet)
+{
+  word wTcpHeaderOffset;
+  
+  wTcpHeaderOffset = TCPGetHeaderOffset(packet);
+  
+  packet.byte(wTcpHeaderOffset+13) &= 0xF7;
+
+  TCPUpdateChecksum(packet);
+  
+}
+
+/// <TCP/get>
+word TCPgetPortSrc( ethernetPacket * pkt )
+{
+  word wRet;
+  long offset;
+  
+  wRet = 0;
+  
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  wRet = swapWord(pkt.word(offset));
+  
+  return wRet;
+}
+
+/// <TCP/set/flags>
+byte TcpSetFlagsFin(ethernetPacket * pkt, byte flag)
+{
+  long offset;
+  word checksum;
+  byte /*bFlagb0,*/ bFlagb1, bFlagb2, bFlagb3, bFlagb4, bFlagb5, bFlagb6, bFlagb7; 
+  
+  offset = checksum = 0;
+  
+  // check tcp
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  // get offset
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  // get flags
+  bFlagb1 = TCPGetFlags(pkt) & 2;
+  bFlagb2 = TCPGetFlags(pkt) & 4;
+  bFlagb3 = TCPGetFlags(pkt) & 8;
+  bFlagb4 = TCPGetFlags(pkt) & 16;
+  bFlagb5 = TCPGetFlags(pkt) & 32;
+  bFlagb6 = TCPGetFlags(pkt) & 64;
+  bFlagb7 = TCPGetFlags(pkt) & 128;
+
+  // set flags
+  pkt.byte(offset+13) = (flag & 1) | bFlagb1 | bFlagb2 | bFlagb3 | bFlagb4 | bFlagb5 | bFlagb6 | bFlagb7;
+
+  // set checksum
+  TCPUpdateChecksum(pkt);
+  
+  return 1;
+}
+
+/// <TCP/set/flags>
+byte TcpSetFlagsSyn(ethernetPacket * pkt, byte flag)
+{
+  long offset;
+  word checksum;
+  byte bFlagb0, bFlagb2, bFlagb3, bFlagb4, bFlagb5, bFlagb6, bFlagb7;
+  
+  offset = checksum = 0;
+  
+  // check tcp
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  // get offset
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  // get flags
+  bFlagb0 = TCPGetFlags(pkt) & 1;
+  bFlagb2 = TCPGetFlags(pkt) & 4;
+  bFlagb3 = TCPGetFlags(pkt) & 8;
+  bFlagb4 = TCPGetFlags(pkt) & 16;
+  bFlagb5 = TCPGetFlags(pkt) & 32;
+  bFlagb6 = TCPGetFlags(pkt) & 64;
+  bFlagb7 = TCPGetFlags(pkt) & 128;
+  
+  // set flags
+  pkt.byte(offset+13) = bFlagb0 | (flag & 2) | bFlagb2 | bFlagb3 | bFlagb4 | bFlagb5 | bFlagb6 | bFlagb7;
+
+  // set checksum
+  TCPUpdateChecksum(pkt);
+  
+  return 1;
+}
+
+/// <TCP/set/flags>
+byte TcpSetFlagsRst(ethernetPacket * pkt, byte flag)
+{
+  long offset;
+  word checksum;
+  byte bFlagb0, bFlagb1, bFlagb3, bFlagb4, bFlagb5, bFlagb6, bFlagb7;
+  
+  offset = checksum = 0;
+  
+  // check tcp
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  // get offset
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  // get flags
+  bFlagb0 = TCPGetFlags(pkt) & 1;
+  bFlagb1 = TCPGetFlags(pkt) & 2;
+  bFlagb3 = TCPGetFlags(pkt) & 8;
+  bFlagb4 = TCPGetFlags(pkt) & 16;
+  bFlagb5 = TCPGetFlags(pkt) & 32;
+  bFlagb6 = TCPGetFlags(pkt) & 64;
+  bFlagb7 = TCPGetFlags(pkt) & 128;
+  
+  // set flags
+  pkt.byte(offset+13) = bFlagb0 | bFlagb1 | (flag & 4) | bFlagb3 | bFlagb4 | bFlagb5 | bFlagb6 | bFlagb7;
+
+  // set checksum
+  TCPUpdateChecksum(pkt);
+  
+  return 1;
+}
+
+/// <TCP/set/flags>
+byte TcpSetFlagsPsh(ethernetPacket * pkt, byte flag)
+{
+  long offset;
+  word checksum;
+  byte bFlagb0, bFlagb1, bFlagb2, bFlagb4, bFlagb5, bFlagb6, bFlagb7;
+  
+  offset = checksum = 0;
+  
+  // check tcp
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  // get offset
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  // get flags
+  bFlagb0 = TCPGetFlags(pkt) & 1;
+  bFlagb1 = TCPGetFlags(pkt) & 2;
+  bFlagb2 = TCPGetFlags(pkt) & 4;
+  bFlagb4 = TCPGetFlags(pkt) & 16;
+  bFlagb5 = TCPGetFlags(pkt) & 32;
+  bFlagb6 = TCPGetFlags(pkt) & 64;
+  bFlagb7 = TCPGetFlags(pkt) & 128;
+  
+  // set flags
+  pkt.byte(offset+13) = bFlagb0 | bFlagb1 | bFlagb2 | (flag & 8) | bFlagb4 | bFlagb5 | bFlagb6 | bFlagb7;
+
+  // set checksum
+  TCPUpdateChecksum(pkt);
+  
+  return 1;
+}
+
+/// <TCP/set/flags>
+byte TcpSetFlagsAck(ethernetPacket * pkt, byte flag)
+{
+  long offset;
+  word checksum;
+  byte bFlagb0, bFlagb1, bFlagb2, bFlagb3, bFlagb5, bFlagb6, bFlagb7;
+  
+  offset = checksum = 0;
+  
+  // check tcp
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  // get offset
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  // get flags
+  bFlagb0 = TCPGetFlags(pkt) & 1;
+  bFlagb1 = TCPGetFlags(pkt) & 2;
+  bFlagb2 = TCPGetFlags(pkt) & 4;
+  bFlagb3 = TCPGetFlags(pkt) & 8;
+  bFlagb5 = TCPGetFlags(pkt) & 32;
+  bFlagb6 = TCPGetFlags(pkt) & 64;
+  bFlagb7 = TCPGetFlags(pkt) & 128;
+  
+  // set flags
+  pkt.byte(offset+13) = bFlagb0 | bFlagb1 | bFlagb2 | bFlagb3 | (flag & 16) | bFlagb5 | bFlagb6 | bFlagb7;
+
+  // set checksum
+  TCPUpdateChecksum(pkt);
+  
+  return 1;
+}
+
+/// <TCP/set/flags>
+byte TcpSetFlagsUrg(ethernetPacket * pkt, byte flag)
+{
+  long offset;
+  word checksum;
+  byte bFlagb0, bFlagb1, bFlagb2, bFlagb3, bFlagb4, bFlagb6, bFlagb7;
+  
+  offset = checksum = 0;
+  
+  // check tcp
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  // get offset
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  // get flags
+  bFlagb0 = TCPGetFlags(pkt) & 1;
+  bFlagb1 = TCPGetFlags(pkt) & 2;
+  bFlagb2 = TCPGetFlags(pkt) & 4;
+  bFlagb3 = TCPGetFlags(pkt) & 8;
+  bFlagb4 = TCPGetFlags(pkt) & 16;
+  bFlagb6 = TCPGetFlags(pkt) & 64;
+  bFlagb7 = TCPGetFlags(pkt) & 128;
+  
+  // set flags
+  pkt.byte(offset+13) = bFlagb0 | bFlagb1 | bFlagb2 | bFlagb3 | bFlagb4 | (flag & 32) | bFlagb6 | bFlagb7;
+
+  // set checksum
+  TCPUpdateChecksum(pkt);
+  
+  return 1;
+}
+
+/// <TCP/get>
+word TCPgetPointer( ethernetPacket * pkt )
+{
+  word wRet;
+  long offset;
+  
+  wRet = 0;
+  
+  if(isTcp(pkt) == 0)
+  {
+    return 0;
+  }
+  
+  offset = TCPGetHeaderOffset(pkt);
+  if(offset == 0)
+  {
+    return 0;
+  }
+  
+  wRet = swapWord(pkt.word(offset + 18));
+  
+  return wRet;
+}

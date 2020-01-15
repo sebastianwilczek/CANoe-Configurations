@@ -1,0 +1,294 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "GenericConn1.cin"
+  #include "GenericConn2.cin"
+}
+
+variables
+{
+  char gECU[10] = "%NODE_NAME%";
+
+  enum AddressModes { kNormal = 0,
+                      kExtendedBased = 1,
+                      kNormalFixed = 2,
+                      kMixed = 3,
+                      kMixed11Bit = 4,
+                      kExtendedFree = 5
+                    };
+
+  const     kBufferSizeJumbo = 256 * 1024;  // Jumbo frames
+  const int kDuration_RxLEDOn_ms = 2000;
+  const int kDuration_TxLEDOn_ms = 2000;
+  const int kDuration_ErrLEDOn_ms = 4000;
+  const int kDuration_RxLEDFlashOff_ms = 30000;
+  const int kDuration_TxLEDFlashOff_ms = 30000;
+  const int kDuration_LEDFlash_ms = 400;
+  const int kIdConn1 = 1;
+  const int kIdConn2 = 2;
+  
+  BYTE gbCANFDactive = 0;
+}
+
+on start
+{
+  long dbHandle;
+  dbHandle = CanTpGetDBConnection();
+  if (dbHandle > 0) {
+    CanTpCloseConnection(dbHandle);
+  }
+
+  setwriteDbgLevel(@sysvar::sysDbgLevel);
+  CanTpSetVerbosity(@sysvar::sysTPVerboseLevel);
+  InitConn1();
+  InitConn2();
+  
+  {
+    // Check if CAN FD is active for this bus
+    CANSettings arbitration;
+    CANSettings data;
+    canFdGetConfiguration( 1, arbitration, data);
+    gbCANFDactive = ((arbitration.flags & 0x100) != 0 ? 1 : 0);
+  }
+  
+  if( 0 == gbCANFDactive)
+  {
+    // Disable CAN FD controls when CAN FD is not active
+    enableControl( "GeneralConnectionSettings", "cboGeneral_CANFDFrameLen", 0);
+    enableControl( "GeneralConnectionSettings", "chkGeneral_CANFDBRS", 0);
+    enableControl( "Settings_%NODE_NAME%_Conn1", "cboCANFD_%NODE_NAME%Conn1", 0);
+    enableControl( "Settings_%NODE_NAME%_Conn1", "chkCANFDBRS_%NODE_NAME%Conn1", 0);
+    enableControl( "Settings_%NODE_NAME%_Conn2", "cboCANFD_%NODE_NAME%Conn2", 0);
+    enableControl( "Settings_%NODE_NAME%_Conn2", "chkCANFDBRS_%NODE_NAME%Conn2", 0);
+  }
+}
+
+on sysVar sysvar::%NODE_NAME%::sysClearData
+{
+  if (@this)
+  {
+     ClearReceivedData();
+  }
+}
+
+on sysVar sysvar::%NODE_NAME%::sysFillData
+{
+  long txCount,i;
+  byte sendString[kBufferSizeJumbo + 1];  // add 1 for zero termination
+
+  // No action if button is released
+
+  if (@this==0)
+      return;
+
+  txCount = @sysvar::%NODE_NAME%::sysNoOfBytesToFill;
+
+  // don't write over array limits
+  // limit size to prevent extremely long transfers
+
+  if( txCount>kBufferSizeJumbo)
+  {
+    txCount=kBufferSizeJumbo;
+    @sysvar::%NODE_NAME%::sysNoOfBytesToFill = txCount;
+    writeDbgLevel(1,"%s: Length of data string to be sent is limited to %d bytes",
+                  gECU, kBufferSizeJumbo);
+  }
+
+  for( i=0; i<txCount; i++ )
+  {
+    sendString[i] = '0'+i%75;
+  }
+  sendString[txCount] = 0;
+
+  sysSetVariableData(sysvar::%NODE_NAME%::sysDataToTransmit, sendString, elcount(sendString));
+}
+
+on sysvar sysvar::%NODE_NAME%::sysDataToTransmit
+{
+  byte sendString[kBufferSizeJumbo + 1];  // add 1 for zero termination
+  long copiedBytes;
+
+  if (sysGetVariableArrayLength(this) >= elcount( sendString)) {
+    writeDbgLevel(1,"%s: Data string to be sent is too large (%d), truncated to %d bytes",
+                  gECU, sysGetVariableArrayLength(this), kBufferSizeJumbo);
+    sysGetVariableData(this, sendString, copiedBytes);
+    sysSetVariableData(this, sendString, elcount( sendString));
+    // sysVar handler will be called again
+  } else {
+    sysGetVariableData(this, sendString, copiedBytes);
+    @sysvar::%NODE_NAME%::sysNoOfBytesToSend = copiedBytes;
+  }
+}
+
+on sysVar sysvar::sysDbgLevel
+{
+  setwriteDbgLevel(@this);
+}
+
+on sysVar sysvar::sysTPVerboseLevel
+{
+  CanTpSetVerbosity(@this);
+}
+
+on sysVar sysvar::Global::GeneralSettings::sysResetToDefaultSettings
+{
+  if (@this > 0) {
+    ResetGeneralSettingsToDefaults();
+  }
+}
+
+on sysVar_update sysvar::Global::GeneralSettings::sysApplySettingsToAllConns
+{
+  if (@this > 0) {
+    ResetToGeneralSettingsConn1();
+    ResetToGeneralSettingsConn2();
+  }
+}
+
+CanTp_SendCon(long connHandle, dword count)
+{
+  byte connId;
+
+  if (connHandle == gHandleConn1) {
+    connId = kIdConn1;
+    SendConConn1();
+  } else  if (connHandle == gHandleConn2){
+    connId = kIdConn2;
+    SendConConn2();
+  }
+
+  writeDbgLevel(1,"%s, connection %d: Send confirmation for %d data bytes",
+                gECU, connId, count);
+}
+
+CanTp_ReceptionInd(long connHandle, byte data[])
+{
+  // Output of Source Address
+  long rxCount;
+  byte connId;
+
+  rxCount = elcount(data);
+  @sysvar::%NODE_NAME%::sysNoOfBytesReceived = rxCount;
+
+  if (connHandle == gHandleConn1) {
+    connId = kIdConn1;
+    ReceptionIndConn1();
+  } else  if (connHandle == gHandleConn2){
+    connId = kIdConn2;
+    ReceptionIndConn2();
+  }
+
+  /* Print message to write window */
+  writeDbgLevel(1,"%s, connection %d: Reception indication for %d bytes",
+                gECU, connId, rxCount);
+
+  // put data to panel
+  SetDataReceived(data, rxCount);
+}
+
+CanTp_ErrorInd(long connHandle, long error)
+{
+  byte connId;
+
+  if (connHandle == gHandleConn1) {
+    connId = kIdConn1;
+    ErrorIndConn1();
+  } else  if (connHandle == gHandleConn2){
+    connId = kIdConn2;
+    ErrorIndConn2();
+  }
+
+  switch (error)
+  {
+    case 1:     writeDbgLevel(1,"%s, connection %d: Error (%d): Timeout while waiting for CF", gECU, connId, error);     break;
+    case 2:     writeDbgLevel(1,"%s, connection %d: Error (%d): Timeout while waiting for FC", gECU, connId, error);     break;
+    case 3:     writeDbgLevel(1,"%s, connection %d: Error (%d): Undefined error", gECU, connId, error);            break;
+    case 4:     writeDbgLevel(1,"%s, connection %d: Error (%d): TP DLL is busy; only one transmission at the same time", gECU, connId, error);                      break;
+    case 5:     writeDbgLevel(1,"%s, connection %d: Error (%d): Unexpected PDU received", gECU, connId, error);                   break;
+    case 6:     writeDbgLevel(1,"%s, connection %d: Error (%d): Timeout while trying to send a CAN message", gECU, connId, error); break;
+    case 7:     writeDbgLevel(1,"%s, connection %d: Error (%d): Too many wait frames sent", gECU, connId, error);                      break;
+    case 8:     writeDbgLevel(1,"%s, connection %d: Error (%d): Receiver buffer overflow", gECU, connId, error); break;
+    case 9:     writeDbgLevel(1,"%s, connection %d: Error (%d): Wrong parameter", gECU, connId, error);                      break;
+    case 10:    writeDbgLevel(1,"%s, connection %d: Error (%d): Invalid status in FC frame", gECU, connId, error);                      break;
+    default:    writeDbgLevel(1,"%s, connection %d: Error (%d): Unknown error", gECU, connId, error);                    break;
+  }
+}
+
+CanTp_FirstFrameInd(long connHandle, dword length)
+{
+  byte connId;
+
+  if (connHandle == gHandleConn1) {
+    connId = kIdConn1;
+    setTimerCyclic(tFlashRxLEDConn1, kDuration_LEDFlash_ms);
+    setTimer(tSwitchOffRxLEDConn1, kDuration_RxLEDFlashOff_ms);
+  } else  if (connHandle == gHandleConn2){
+    connId = kIdConn2;
+    setTimerCyclic(tFlashRxLEDConn2, kDuration_LEDFlash_ms);
+    setTimer(tSwitchOffRxLEDConn2, kDuration_RxLEDFlashOff_ms);
+  }
+
+  ClearReceivedData();
+
+  writeDbgLevel(1,"%s, connection %d: FF indication",
+         gECU, connId);
+}
+
+void SetDataReceived(byte data[], long count)
+{
+  byte sendString[kBufferSizeJumbo];
+
+  count = _min( kBufferSizeJumbo-1, count);
+  memcpy( sendString, data, count);
+  sendString[count] = 0;
+
+  sysSetVariableData(sysvar::%NODE_NAME%::sysDataReceived, sendString, elCount(sendString));
+}
+
+long GetDataToTransmit(byte data[])
+{
+  byte sendString[kBufferSizeJumbo + 1];
+  long copiedBytes;
+  long count;
+
+  count = 0;
+  if (sysGetVariableData(sysvar::%NODE_NAME%::sysDataToTransmit, sendString, copiedBytes) == 0) {
+    count=copiedBytes;
+    memcpy( data, sendString, count);
+  }
+
+  return count;
+}
+
+void ResetGeneralSettingsToDefaults()
+{
+  //addressing
+  @sysvar::Global::GeneralSettings::sysAddrMode =         @sysvar::Global::DefaultSettings::sysAddrMode;
+  @sysvar::Global::GeneralSettings::sysBaseAddress =      @sysvar::Global::DefaultSettings::sysBaseAddress;
+  @sysvar::Global::GeneralSettings::sysAddrExtension =    @sysvar::Global::DefaultSettings::sysAddrExtension;
+  @sysvar::Global::GeneralSettings::sysUseExtId =         @sysvar::Global::DefaultSettings::sysUseExtId;
+
+  // flow control
+  @sysvar::Global::GeneralSettings::sysBlockSize =        @sysvar::Global::DefaultSettings::sysBlockSize;
+  @sysvar::Global::GeneralSettings::sysSTmin =            @sysvar::Global::DefaultSettings::sysSTmin;
+  @sysvar::Global::GeneralSettings::sysFlowControlDelay = @sysvar::Global::DefaultSettings::sysFlowControlDelay;
+  @sysvar::Global::GeneralSettings::sysUseFC =            @sysvar::Global::DefaultSettings::sysUseFC;
+
+  // miscellaneous
+  @sysvar::Global::GeneralSettings::sysStartSN =          @sysvar::Global::DefaultSettings::sysStartSN;
+  @sysvar::Global::GeneralSettings::sysPaddingValue =     @sysvar::Global::DefaultSettings::sysPaddingValue;
+  @sysvar::Global::GeneralSettings::sysMaxReceiveLength = @sysvar::Global::DefaultSettings::sysMaxReceiveLength;
+  @sysvar::Global::GeneralSettings::sysMaxFDFrameLen =    @sysvar::Global::DefaultSettings::sysMaxFDFrameLen;
+  @sysvar::Global::GeneralSettings::sysBitRateSwitch =    @sysvar::Global::DefaultSettings::sysBitRateSwitch;
+}
+
+void ClearReceivedData()
+{
+    long size = 0;
+    byte empty_buffer[1] = 0;
+    sysSetVariableData(sysvar::%NODE_NAME%::sysDataReceived, empty_buffer, size);
+    sysSetVariableData(sysvar::%NODE_NAME%::sysDataToTransmit, empty_buffer, size);
+    @sysvar::%NODE_NAME%::sysNoOfBytesReceived = 0;
+    @sysvar::%NODE_NAME%::sysNoOfBytesToSend = 0;
+}
+

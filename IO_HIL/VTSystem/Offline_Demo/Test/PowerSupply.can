@@ -1,0 +1,189 @@
+/*@@var:*/
+variables
+{
+  DiagResponse FaultMemory_ReadAllIdentified response;
+  int gotResponse = 0;
+}
+/*@@end*/
+
+/*@@mainTest:MainTest():*/
+void MainTest()
+{
+  /* Test description:
+  // In this test case the VT2004's resistor decade is set to a very high resistance value.
+  // This should make the ECU turn on the cooling and turn off the heating unit. That
+  // behavior is then validated. After that the power supply is set to an overvoltage value.
+  // This should make the ECU and thus the cooling unit shut down. This behavior is then
+  // validated, too.
+  // After that the same test is repeated by setting the power supply to an undervoltage state.
+  // The same behavior is expected here.
+  // The remaining two testcases craete an under/overvoltage and read out the fault memory.
+  */
+
+  // Prepare system by bringing it to the default state
+  @sysvar::VTS_simulated::M1_Ch1::RelayShortCircuit = 0;
+  @sysvar::VTS_simulated::M1_Ch1::Resistor = 2300;
+  @sysvar::VTS_simulated::M2_Ch2::RelayShortCircuit = 0;
+  @sysvar::VTS_simulated::M2_Ch1::IntLoadResistor = 500;
+  @sysvar::VTS_simulated::M3_SupInt::RefVoltage = 12;
+  TestWaitForTimeout(100);
+
+
+
+  // Add test case information to the test report
+  TestCaseTitle ("Test 1", "Power supply Test overpower");
+  TestCaseDescription("In this test case the VT2004's resistor decade is set to a very high resistance value. This should make the ECU turn on the cooling and turn off the heating unit. That behavior is then validated. After that the power supply is set to an overvoltage value. This should make the ECU and thus the cooling unit shut down. This behavior is then validated, too.");
+
+  // Start test case
+  PowerSupplyTest1();
+
+
+  // Add test case information to the test report
+  TestCaseTitle ("Test 2", "Power supply Test underpower");
+  TestCaseDescription("In this test case the VT2004's resistor decade is set to a very high resistance value. This should make the ECU turn on the cooling and turn off the heating unit. That behavior is then validated. After that the power supply is set to an undervoltage value. This should make the ECU and thus the cooling unit shut down. This behavior is then validated, too.");
+  
+  // Start test case
+  PowerSupplyTest2();
+
+
+  // Add test case information to the test report
+  TestCaseTitle ("Test 3", "Diagnostics test");
+  TestCaseDescription("In this test case an over- and undervoltage are created. Afterwards the fault memory is checked for entries.");
+  
+
+  // Start test case
+  @sysvar::VTS_simulated::M3_SupInt::RefVoltage = 12;
+  TestWaitForTimeout(100);
+  DiagnosticsTest(10, 2);
+
+  @sysvar::VTS_simulated::M3_SupInt::RefVoltage = 12;
+  TestWaitForTimeout(100);
+  DiagnosticsTest(15, 1);
+}
+/*@@end*/
+
+/*@@testcase:PowerSupplyTest1():*/
+testcase PowerSupplyTest1 ()
+{
+  // Set test case title
+  TestCaseTitle ("PowerSupplyTest1", "Simulating an overvoltage at the ECU.");
+  TestCaseDescription("Simulating an overvoltage at the ECU.");
+
+  // Step 1: Set the decade resistor of the simulated VT2004 module to a very high resistance value
+  @sysvar::VTS_simulated::M1_Ch1::Resistor = 4000;
+
+  // Step 2: Wait 100ms to make sure the settings take effect
+  TestWaitForTimeout(100);
+
+  // Step 3: Check if cooling is at full power and heating is turned off
+  if( @sysvar::VTS_simulated::M2_Ch1::Cur != 5.0 || @sysvar::VTS_simulated::M2_Ch2::Cur != 0.0 ) {
+    write("%d  %d", @sysvar::VTS_simulated::M2_Ch1::Cur, @sysvar::VTS_simulated::M2_Ch2::Cur );
+    TestStepFail("Cooling not at full power or heating turned off");
+    return;
+  }//end if
+
+  // Step 4: Now set voltage state to overpower
+  @sysvar::VTS_simulated::M3_SupInt::RefVoltage = 15.0;
+
+  // Step 5: Wait 100ms to make sure the settings take effect
+  TestWaitForTimeout(100);
+
+  // Step 6: Check if cooling and heating is turned off
+  if( @sysvar::VTS_simulated::M2_Ch1::Cur != 0.0 || @sysvar::VTS_simulated::M2_Ch2::Cur != 0.0 ) {
+    TestStepFail("Cooling or heating not turned off");
+    return;
+  }//end if
+
+  TestStepPass("PowerSupplyTest1 completed successfully");
+}
+/*@@end*/
+
+/*@@testcase:PowerSupplyTest2():*/
+testcase PowerSupplyTest2 ()
+{
+  // Set test case title
+  TestCaseTitle ("PowerSupplyTest2", "Simulating an undervoltage at the ECU.");
+  TestCaseDescription("Simulating an undervoltage at the ECU.");
+
+  // Step 0: Reset voltage
+  @sysvar::VTS_simulated::M3_SupInt::RefVoltage = 12.0;
+
+  // Step 1: Set the decade resistor of the simulated VT2004 module to a very high resistance value
+  @sysvar::VTS_simulated::M1_Ch1::Resistor = 4000;
+
+  // Step 2: Wait 100ms to make sure the settings take effect
+  TestWaitForTimeout(100);
+
+  // Step 3: Check if cooling is at full power and heating is turned off
+  if( @sysvar::VTS_simulated::M2_Ch1::Cur != 5.0 || @sysvar::VTS_simulated::M2_Ch2::Cur != 0.0 ) {
+    TestStepFail("Cooling not at full power or heating turned off");
+    return;
+  }//end if
+
+  // Step 4: Now set voltage state to underpower
+  @sysvar::VTS_simulated::M3_SupInt::RefVoltage = 10.0;
+
+  // Step 5: Wait 100ms to make sure the settings take effect
+  TestWaitForTimeout(100);
+
+  // Step 6: Check if cooling and heating is turned off
+  if( @sysvar::VTS_simulated::M2_Ch1::Cur != 0.0 || @sysvar::VTS_simulated::M2_Ch2::Cur != 0.0 ) {
+    TestStepFail("Cooling or heating not turned off");
+    return;
+  }//end if
+
+  TestStepPass("PowerSupplyTest2 completed successfully");
+}
+/*@@end*/
+
+/*@@testcase:DiagnosticsTest(int,int):*/
+testcase DiagnosticsTest ( int voltage, int expectedErrorCode )
+{
+  DiagRequest FaultMemory_Clear re1;
+  DiagRequest FaultMemory_ReadAllIdentified re2;
+  
+
+
+  // Set test case title
+  TestCaseTitle ("DiagnosticsTest", "Diagnostic test on the ECU.");
+  TestCaseDescription("This Testcase creates two errors and then checks the fault meory for entries.");
+
+
+  // Step 1: Clear the fault memory
+  DiagSetTarget("ECU");
+  DiagSendRequest(re1);
+  TestWaitForTimeout(100);
+
+  // Step 2: Create an errors
+  @sysvar::VTS_simulated::M3_SupInt::RefVoltage = voltage;
+  TestWaitForTimeout(100);
+
+  // Step 3: Read the fault memory
+  gotResponse = 0;
+  DiagSendRequest(re2);
+  TestWaitForTimeout(100);
+
+  if( gotResponse == 0 )
+  {
+    TestStepFail("Got no response from ECU");
+    return;
+  }//end if
+
+  if( (int)(DiagGetParameter (response, 0, "DTC")) != expectedErrorCode )
+  {
+      TestStepFail("Wrong DTC");
+
+  }//end if
+
+  TestStepPass("DiagnosticsTest completed successfully");
+}
+/*@@end*/
+
+/*@@diagResponse:FaultMemory_ReadAllIdentified:*/
+on diagResponse FaultMemory_ReadAllIdentified
+{
+  gotResponse = 1;
+  DiagGetLastResponse(response);
+}
+/*@@end*/
+

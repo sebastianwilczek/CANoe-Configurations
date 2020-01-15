@@ -1,0 +1,119 @@
+/*@@var:*/
+variables{
+   double mTemperatur; // temperatur
+   double mSpeed; // car speed
+
+   // this is a proprietary PG number
+   PG PropGateway msg1 = { DLC=2, SA = 1};
+
+   msTimer mIgnitionTimer;
+   const int kIgnitionCycle = 100; // ms
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+   write("Gateway");
+ 
+   CallAllOnEnvVar();
+
+   cancelTimer(mIgnitionTimer); // because setTimer
+                                // in fct StartEngine also
+	setTimer(mIgnitionTimer,0);
+
+  
+}
+/*@@end*/
+
+/*@@envVar:evGwStarterOn:*/
+on envVar evGwStarterOn
+{
+
+   // evGwStarterState is used to keep the
+   // last system state across measurements
+   if ((getValue(this) == 1) && (
+        getValue(evGwSwitchIgnition) == 3)) {
+     // StartEngine(); // now in evGwStarterState
+      putValue(  evGwStarterState, 1);
+   }	
+}
+/*@@end*/
+
+/*@@caplFunc:StartEngine():*/
+void StartEngine()
+{
+   cancelTimer(mIgnitionTimer);
+   setTimer(mIgnitionTimer,0);
+
+   putValue(evGwEngRunningInd,1);
+   msg1.EngineRunning = 1;
+}
+/*@@end*/
+
+/*@@timer:mIgnitionTimer:*/
+on timer mIgnitionTimer
+{
+   output(msg1);
+   setTimer(mIgnitionTimer,kIgnitionCycle);
+}
+/*@@end*/
+
+/*@@envVar:evGwSwitchIgnition:*/
+on envVar evGwSwitchIgnition
+{
+
+   switch(getValue(this)) {
+      case 0:
+	      // Klemme 15 löschen
+	      msg1.StarterKey = 0;
+	      msg1.Ig_15R = 0;
+	      msg1.Ig_15 = 0;
+         StopEngine();
+         break;
+      case 1:
+	      // Kleme 15c Schlüssel steckt
+	      msg1.StarterKey = 1;
+	      msg1.Ig_15R = 0;
+	      msg1.Ig_15 = 0;
+         break;
+      case 2:
+	     // Klemme 15R Radio Stellung
+	      msg1.StarterKey = 1;
+	      msg1.Ig_15R = 1;
+	      msg1.Ig_15 = 0;
+         break;
+      case 3: 
+        // Klemme 15 
+	      msg1.StarterKey = 1;
+	      msg1.Ig_15R = 1;
+	      msg1.Ig_15 = 1;
+         break;
+   } // switch
+
+}
+/*@@end*/
+
+/*@@caplFunc:StopEngine():*/
+void StopEngine(void)
+{
+   putValue(evGwEngRunningInd,0);
+   msg1.EngineRunning = 0;
+
+   putValue(  evGwStarterState, 0);
+   mSpeed=0;
+   mTemperatur=0;
+}
+/*@@end*/
+
+/*@@envVar:evGwStarterState:*/
+
+on envVar evGwStarterState
+{
+   if ( getValue(this) == 1) {
+      StartEngine();
+   }	
+}
+
+/*@@end*/
+

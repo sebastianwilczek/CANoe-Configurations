@@ -1,0 +1,227 @@
+/*@@var:*/
+variables
+{
+  // Program: Peak Load Generator V 1.0
+
+  // Global variables:
+  DWORD       gPeakLoadCounter;
+  QWORD       gPeakLoadLevel;
+
+  // Constants:
+  const DWORD cFRCyclePeriod         = 5;   // ms
+  const DWORD cPeakLoadGenPeriod     = 2;   // ms
+  const int   cResetLoadDisplayDelay = 300; // ms
+
+  // Load that is to be generated:
+  const QWORD cPeakLoadBase          = 20000;
+  const QWORD cPeakLoadScale         = 3000;
+
+  // Length of the interval for the peak:
+  const DWORD cMaxPeakLoadPeriod     = 400; // ms
+
+  // Assumed base load:
+  const QWORD cBaseLevel = 5.0 * (cPeakLoadBase + 10 * cPeakLoadScale) / 100.0; // 5 % of a maximum peak
+
+  // Controlling of the trigger that is generating the load:
+  const int   cPeakLoadTrigger    = 1; // 0 == timer; 1 == start of FR cycle
+
+  // Helping variables:
+  QWORD       gTmpVar;
+  int         gDoPeakLoad = 0;
+
+  // Timers:
+  msTimer     tLoadLevelReset;
+  msTimer     tPeakLoadGenTimer;
+}
+/*@@end*/
+
+/*@@sysvarChange:Control_PC_Load::DecreaseLoad:*/
+on sysvar sysvar::Control_PC_Load::DecreaseLoad
+{
+  if (@this == 1)
+  {
+    @sysvar::Control_PC_Load::Load -= 1;
+    if (@sysvar::Control_PC_Load::Load < 0)
+    {
+      @sysvar::Control_PC_Load::Load = 0;
+    }
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:Control_PC_Load::IncreaseLoad:*/
+on sysvar sysvar::Control_PC_Load::IncreaseLoad
+{
+  if (@this == 1)
+  {
+    @sysvar::Control_PC_Load::Load += 1;
+    if (@sysvar::Control_PC_Load::Load > 10)
+    {
+      @sysvar::Control_PC_Load::Load = 10;
+    }
+  }
+}
+/*@@end*/
+
+/*@@timer:tPeakLoadGenTimer:*/
+on timer tPeakLoadGenTimer
+{
+  genPeakLoad();
+}
+/*@@end*/
+
+/*@@sysvarChange:Control_PC_Load::Generate_Peak:*/
+on sysvar sysvar::Control_PC_Load::Generate_Peak
+{
+  if (@this == 1)
+  {
+    startPeakLoad();
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:displayLoad():*///function
+void displayLoad ()
+{
+  double load;
+  load = gPeakLoadLevel;
+  load *= 100.0 / (cPeakLoadBase + 10 * cPeakLoadScale);
+  @sysvar::Control_PC_Load::LoadLevelDisp = load;
+  //write ("Load: %lld %d", gPeakLoadLevel, @sysvar::Control_PC_Load::LoadLevelDisp);
+}
+/*@@end*/
+
+/*@@caplFunc:genPeakLoad():*///function
+void genPeakLoad ()
+{
+  QWORD i;
+  QWORD peakInnerLoops;
+  DWORD peakOuterLoops;
+
+  gPeakLoadCounter++;
+
+  // Calculate inner and outer number of loops for the peak:
+  if (cPeakLoadTrigger == 0)
+  {
+    peakOuterLoops = cMaxPeakLoadPeriod / cPeakLoadGenPeriod;
+    peakInnerLoops = (double)1.8 * gPeakLoadLevel * cPeakLoadGenPeriod;
+  }
+  else
+  {
+    peakOuterLoops = cMaxPeakLoadPeriod / cFRCyclePeriod;
+    peakInnerLoops = gPeakLoadLevel * cFRCyclePeriod;
+  }
+
+  // Generate load:
+  for (i=0; i < peakInnerLoops; i++)
+  {
+    gTmpVar = i;
+  }
+
+  // Is the peak interval expired (in number of outer loops)?
+  if (gPeakLoadCounter < peakOuterLoops)
+  {
+    // No: do another outer loop:
+    if (cPeakLoadTrigger == 0)
+    {
+      setTimer(tPeakLoadGenTimer, cPeakLoadGenPeriod);
+    }
+    else
+    {
+      gDoPeakLoad = 1;
+    }
+  }
+  else
+  {
+    // Yes: stop generating load:
+    gDoPeakLoad = 0;
+    resetDisplayLoad();
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:startPeakLoad():*///function
+void startPeakLoad ()
+{
+  int   scale;
+
+  gPeakLoadCounter = 0;
+
+  gPeakLoadLevel = cPeakLoadBase;
+  scale = @sysvar::Control_PC_Load::Load;
+  gPeakLoadLevel += (cPeakLoadScale * scale);
+
+  displayLoad();
+
+  if (cPeakLoadTrigger == 0)
+  {
+    cancelTimer(tPeakLoadGenTimer);
+    setTimer(tPeakLoadGenTimer, cPeakLoadGenPeriod);
+  }
+  else
+  {
+    gDoPeakLoad = 1;
+  }
+}
+/*@@end*/
+
+/*@@frStartCycle:*:*/
+on FRStartCycle *
+{
+  if ((gDoPeakLoad > 0) && (cPeakLoadTrigger != 0))
+  {
+    genPeakLoad();
+  }
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // Initialization:
+  gDoPeakLoad = 0;
+  gPeakLoadLevel = cBaseLevel;
+  displayLoad();
+
+  @sysvar::Control_PC_Load::Load = 5;
+}
+/*@@end*/
+
+/*@@caplFunc:resetDisplayLoad():*///function
+void resetDisplayLoad ()
+{
+  gPeakLoadLevel = cBaseLevel;
+
+  if (cResetLoadDisplayDelay > 0)
+  {
+    cancelTimer(tLoadLevelReset);
+    setTimer(tLoadLevelReset, cResetLoadDisplayDelay);
+  }
+  else
+  {
+    displayLoad();
+  }
+}
+/*@@end*/
+
+/*@@timer:tLoadLevelReset:*/
+on timer tLoadLevelReset
+{
+  displayLoad();
+}
+/*@@end*/
+
+/*@@key:' ':*/
+on key ' '
+{
+  startPeakLoad();
+}
+/*@@end*/
+
+/*@@key:'p':*/
+on key 'p'
+{
+  startPeakLoad();
+}
+/*@@end*/
+

@@ -1,0 +1,127 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "CANDisturbanceCaplLibs\CANdisturbance.cin"
+  #include "TriggerConfigurationPanel.cin"
+  #include "SequenceConfigurationPanel.cin"
+}
+
+variables
+{
+  msTimer DeviceUpdateTimer;
+}
+
+on start
+{
+  @sysvar::CanDisturbanceMainPanel::ControllerState = sysvar::CanDisturbanceMainPanel::ControllerState::Active;
+  SetChannelName(@sysvar::CanDisturbanceMainPanel::DeviceID);
+}
+
+/// <Buttons>
+on sysvar sysvar::CanDisturbanceMainPanel::BtnConfigTriggerSeq
+{
+  if(@this == 1)
+  {
+    if(CheckSequenceLength())
+    {
+      SetFrameTrigger();
+    }
+  }
+}
+
+void SetFrameTrigger()
+{
+  long status;
+  char outputSeq[320];
+  dword flags;
+  canDisturbanceTriggerRepetitions reps;
+  
+  
+  frmTrigger.TriggerFieldType   = @sysvar::CanDisturbanceTriggerPanel::CurrTriggerField;
+  frmTrigger.TriggerFieldOffset = @sysvar::CanDisturbanceTriggerPanel::CurrTriggerPosition;
+  
+  reps.Cycles             = @sysvar::CanDisturbanceMainPanel::Cycles;
+  reps.HoldOffCycles      = @sysvar::CanDisturbanceMainPanel::HoldOffCycles;
+  reps.Repetitions        = @sysvar::CanDisturbanceMainPanel::Repetitions;
+  reps.HoldOffRepetitions = @sysvar::CanDisturbanceMainPanel::HoldOffRepetitions;
+  
+  flags |= sysvar::CanDisturbance::Enums::TriggerEnable::TriggerIfBitMissing;
+  
+  status = canDisturbanceTriggerEnable(@sysvar::CanDisturbanceMainPanel::DeviceID, frmTrigger, outputSequence, reps, flags);
+  
+  if(status <= 0)
+  {
+    WriteToStatus("Error by enable trigger on device", status);
+  }
+  else
+  {
+    WriteToStatus("Trigger is enabled on device", 0);
+  }
+}
+
+on errorActive 
+{
+  if(CommonCANDisturbanceLibrary_Get_ChannelNo(@sysvar::CanDisturbanceMainPanel::DeviceID) == this.can)
+  {
+    @sysvar::CanDisturbanceMainPanel::ControllerState = sysvar::CanDisturbanceMainPanel::ControllerState::Active;
+  }
+}
+
+
+on errorPassive 
+{
+  if(CommonCANDisturbanceLibrary_Get_ChannelNo(@sysvar::CanDisturbanceMainPanel::DeviceID) == this.can)
+  {
+    @sysvar::CanDisturbanceMainPanel::ControllerState = sysvar::CanDisturbanceMainPanel::ControllerState::Passive;
+  }
+}
+
+on busOff
+{
+  if(CommonCANDisturbanceLibrary_Get_ChannelNo(@sysvar::CanDisturbanceMainPanel::DeviceID) == this.can)
+  {
+    @sysvar::CanDisturbanceMainPanel::ControllerState = sysvar::CanDisturbanceMainPanel::ControllerState::Bus_Off;
+  }
+}
+
+
+void SetChannelName(long deviceId)
+{
+  char channelName[32];
+  long channelNumber;
+  
+  channelNumber = CommonCANDisturbanceLibrary_Get_ChannelNo(deviceId);
+  
+  if(channelNumber <= 0)
+  {
+     sysSetVariableString(sysvar::CanDisturbanceMainPanel::ChannelName, "Invalid DeviceId");
+     cancelTimer(DeviceUpdateTimer);
+  }
+  else
+  {
+    snprintf(channelName, elCount(channelName), "CAN %d", channelNumber);    
+    sysSetVariableString(sysvar::CanDisturbanceMainPanel::ChannelName, channelName);
+    setTimerCyclic(DeviceUpdateTimer,10);
+  }
+}
+  
+
+on sysvar sysvar::CanDisturbanceMainPanel::DeviceID
+{
+  
+  SetChannelName(@this);
+  
+}
+
+on timer DeviceUpdateTimer
+{
+  char triggerSourceAsString[128];
+  
+  @sysvar::CanDisturbanceMainPanel::DeviceRepCount = CommonCANDisturbanceLibrary_Get_Trigger_Count(@sysvar::CanDisturbanceMainPanel::DeviceID);
+  @sysvar::CanDisturbanceMainPanel::DeviceCycle    = CommonCANDisturbanceLibrary_Get_Trigger_Cycle(@sysvar::CanDisturbanceMainPanel::DeviceID);
+  @sysvar::CanDisturbanceMainPanel::DeviceState    = CommonCANDisturbanceLibrary_Get_Trigger_State(@sysvar::CanDisturbanceMainPanel::DeviceID);
+  
+  CommonCANDisturbanceLibrary_Get_Trigger_Source(@sysvar::CanDisturbanceMainPanel::DeviceID, triggerSourceAsString);
+  sysSetVariableString(sysvar::CanDisturbanceMainPanel::DeviceSource, triggerSourceAsString);
+  
+}

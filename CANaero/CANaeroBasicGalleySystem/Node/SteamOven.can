@@ -1,0 +1,229 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "GAIN.cin"
+}
+
+/*
+ * SteamOven - Galley Insert Steam Oven System     Version 1.0
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Pr) Created 
+ */
+variables
+{
+  char gSteamOven_NodeName[32] = "Steam Oven";   // Name of the node, is used for output to write window
+
+  // process handling
+  const int gSteamOven_LoopCycleMs = 500;
+  mstimer gSteamOven_Loop;
+
+  // temperature management (unit is 1/100 deg celcius)
+  const char kSteamOven_WarmPerCycle           = 50;
+  const char kSteamOven_ColdPerCycle           = 20;
+  const word kSteamOven_EnvironmentTemp        = 2000;
+  const word kSteamOven_HysterisisTemp         = 500;
+
+  long gSteamOven_Temperature = kSteamOven_EnvironmentTemp;
+
+  const char kSteamOven_MealRemoved  = 0;
+  const char kSteamOven_MealInserted = 1;
+
+  dword gSteamOven_TimeRemainingMs = 0;
+}
+
+on preStart
+{
+  strncpy(gNode_FuncRO         , SteamOven.CFG2_0_0_GAIN_REMOTE_FUNCTION, 32);
+  strncpy(gNode_FuncPC_CENTR   , SteamOven.CFG2_1_0_CENTRALIZED_POWER_CONTR, 32);
+  strncpy(gNode_FuncPC_DECENTR , SteamOven.CFG2_2_0_DECENTRALIZED_POWER_CON, 32);
+  strncpy(gNode_FuncDIAG       , SteamOven.CFG2_3_0_DIAGNOSIS_FUNCTION, 32);
+
+  gNode_LevelId                = SteamOven.GAINCFG5_1_0_FEEDER_NUMBER;
+  gNode_DeviceId               = SteamOven.GAINCFG5_2_0_DEVICE_NUMBER;
+
+  gNode_NM_STA_CycleTimeMs     = SteamOven.GAINCFG9_9_0_TIMER_STA_GAIN;
+  gNode_NM_STA_TimeoutTimeMs   = SteamOven.GAINCFG9_9_1_TIMER_STA_TIMEOUT_G;
+
+  gNode_CounterDeltaInc        = SteamOven.GAINCFG12_1_0_GAIN_COUNTER_DELTA;
+  gNode_CounterDeltaDec        = SteamOven.GAINCFG12_1_1_GAIN_COUNTER_DELTA;
+  gNode_CounterThreshold       = SteamOven.GAINCFG12_1_2_GAIN_COUNTER_THRES;
+
+  gNode_SequenceTimeoutMs      = SteamOven.GAINCFG9_2_0_SEQUENCE_TIMEOUT_TI;
+
+  gGAIN_MaxPowerBudget         = SteamOven.GAINCFG3_0_0_MAXIMUM_POWER_BUDGE;
+  gGAIN_StandbyPowerBudget     = SteamOven.GAINCFG3_3_0_STANDBY_POWER_THRES;
+}
+
+on start
+{
+  @SteamOven_Feeder = gNode_LevelId;
+  @SteamOven_Device = gNode_DeviceId;
+  putValue(SteamOven_TimeText, "00:00");
+  @SteamOven_TempCurrent = (float)gSteamOven_Temperature / 100.;
+}
+
+on envVar SteamOven_Power
+{
+  if (getValue(this) > 0) {
+    GAIN_PowerUp();
+  }
+  else {
+    GAIN_PowerDown();
+  }
+}
+
+on timer gSteamOven_Loop
+{
+  char showColon;
+  int  counter = 0;
+  int  targetTemp;
+  int  timeRemaining10Ms;
+
+  showColon = counter++ % (1000 / gSteamOven_LoopCycleMs);
+  
+  if (gGAIN_State == kGAINStateOn) {
+    targetTemp = _max(getvalue(SteamOven_Temp) * 100 + (kSteamOven_HysterisisTemp / 2), kSteamOven_EnvironmentTemp);
+
+    gSteamOven_Temperature += kSteamOven_WarmPerCycle;
+
+    if (gSteamOven_Temperature > targetTemp) {
+      GAIN_ChangeState(kGAINStateStandbyOn);
+    }
+    else {
+      gGAIN_PBRemainingTime10ms = (targetTemp - gSteamOven_Temperature) * gSteamOven_LoopCycleMs / kSteamOven_WarmPerCycle / 10;
+    }
+  }
+  else {
+    targetTemp = _max(getvalue(SteamOven_Temp) * 100 - (kSteamOven_HysterisisTemp / 2), kSteamOven_EnvironmentTemp);
+
+    if (gSteamOven_Temperature > kSteamOven_EnvironmentTemp) {
+      gSteamOven_Temperature -= kSteamOven_ColdPerCycle;
+    }
+
+    if (gSteamOven_Temperature < targetTemp) {
+      timeRemaining10Ms = (targetTemp - gSteamOven_Temperature) * gSteamOven_LoopCycleMs / kSteamOven_WarmPerCycle / 10;
+      GAIN_PBR_Send(PBTypeNotInterruptable, gGAIN_MaxPowerBudget, (float)timeRemaining10Ms / 100 + 0.5, gGAIN_MaxPowerBudget, (float)timeRemaining10Ms / 100 + 0.5);
+    }
+    else {
+      gGAIN_PBRemainingTime10ms = (kSteamOven_HysterisisTemp - (targetTemp - gSteamOven_Temperature)) * gSteamOven_LoopCycleMs / kSteamOven_ColdPerCycle / 10;
+    }
+  }
+
+  if (getValue(SteamOven_Meal) != 0) {
+    gSteamOven_TimeRemainingMs = _max(0, gSteamOven_TimeRemainingMs - gSteamOven_LoopCycleMs);
+    SteamOven_UpdateTimeText(1);
+  }
+
+  @SteamOven_Time        = gSteamOven_TimeRemainingMs / 100;
+  @SteamOven_TempCurrent = (float)gSteamOven_Temperature / 100.;
+  @SteamOven_PowerUsed   = gGAIN_UsedPowerBudget;
+
+  if (gGAIN_State != kGAINStateStandbyOff) {
+	  setTimer(gSteamOven_Loop, gSteamOven_LoopCycleMs);
+  }
+}
+
+on envVar SteamOven_Insert
+{
+  int meal = 0;
+
+  if (@this == 0) {
+    meal++;
+    meal %= 2;
+
+    @SteamOven_Meal = meal;
+  }
+}
+
+on envVar SteamOven_Time
+{
+  gSteamOven_TimeRemainingMs = getValue(this) * 100;
+
+  if (gSteamOven_TimeRemainingMs == 0 && @SteamOven_Meal != 0) {
+    @SteamOven_Serve = 1;
+  }
+  else {
+    @SteamOven_Serve = 0;
+  }
+
+  SteamOven_UpdateTimeText(0);
+}
+
+void SteamOven_UpdateTimeText (byte fromTimer)
+{
+  long timeLastUpdate;
+  long count = 0; 
+  char timeText[32];
+
+  if (fromTimer == 0 && abs(timeLastUpdate - gSteamOven_TimeRemainingMs) < 10) {
+    return;
+  }
+
+  if (fromTimer == 1) {
+    if (gSteamOven_TimeRemainingMs == 0) {
+      return;
+    }
+    count++;
+  }
+
+  if (count % 2 == 0) {
+    snprintf(timeText, elcount(timeText), "%.2d %.2d", (gSteamOven_TimeRemainingMs / 1000) / 60, (gSteamOven_TimeRemainingMs / 1000) % 60);
+  }
+  else {
+    snprintf(timeText, elcount(timeText), "%.2d:%.2d", (gSteamOven_TimeRemainingMs / 1000) / 60, (gSteamOven_TimeRemainingMs / 1000) % 60);
+  }
+
+  putValue(SteamOven_TimeText, timeText);
+
+  timeLastUpdate = gSteamOven_TimeRemainingMs;
+}
+
+void OnNode_NMAvailabilityChanged(BYTE levelId, BYTE deviceId, int newAvailability)
+{
+}
+
+void OnGAIN_ChangeState (int oldState, int newState)
+{
+  switch (oldState) {
+    case kGAINStateOn:
+      @SteamOven_On = 0;
+      break;
+    case kGAINStateError:
+      @SteamOven_Fault = 0;
+      break;
+  }
+
+  switch (newState) {
+    case kGAINStateStandbyOn:
+      if (oldState == kGAINStateInitialization) {
+        setTimer(gSteamOven_Loop, gSteamOven_LoopCycleMs);
+      }
+      break;
+    case kGAINStateOn:
+      @SteamOven_On = 1;
+      break;
+    case kGAINStateError:
+      @SteamOven_Fault = 1;
+      break;
+    case kGAINStateStandbyOff:
+      @SteamOven_On    = 0;
+      @SteamOven_Fault = 0;
+      @SteamOven_Serve = 0;
+      break;
+  }
+}
+
+void OnGAIN_PBM(word power, word time)
+{
+  if (abs(gGAIN_MaxPowerBudget - power) <= kPBResolution) {
+	  // we got the power
+	  gGAIN_UsedPowerBudget = power;
+    gGAIN_PBRemainingTime10ms = time * 100;
+
+    GAIN_ChangeState(kGAINStateOn);
+  }
+}
+

@@ -1,0 +1,189 @@
+/*@@var:*/
+variables
+{
+  msTimer tPollVarIdentStatus;
+  char gTargetList[20][200];
+  int  gNextTarget = -1;
+}
+/*@@end*/
+
+/*@@sysvarUpdate:DiagIdentifier::Target:*/
+on sysvar_update sysvar::DiagIdentifier::Target
+{
+  WORD tnr, targetStart, targetEnd, i;
+  char targetsBuff[1000];
+  int  bStartPolling;
+  long status;
+
+  // Start variant identification for a list of targets, given as semi-colon separated list
+  if( gNextTarget >= 0)
+  {
+    SetError( "Already performing identification!");
+    return;
+  }
+
+  SysGetVariableString( sysvar::DiagIdentifier::Target, targetsBuff, elcount( targetsBuff));
+
+  write( "Identifier: received target string '%s'", targetsBuff);
+
+  tnr = 0;
+  targetStart = 0;
+
+  while( tnr < elcount( gTargetList) && targetsBuff[ targetStart])
+  {
+    targetEnd = targetStart;
+    while( targetsBuff[ targetEnd] != 0 && targetsBuff[ targetEnd] != ';')
+    {
+      ++targetEnd;
+    }
+
+    if( targetStart < targetEnd)
+    {
+      i = 0;
+
+      while( targetStart < targetEnd && i < elcount( gTargetList[tnr])-1)
+      {
+        gTargetList[tnr][i++] = targetsBuff[targetStart++];
+      }
+
+      gTargetList[tnr][i] = 0;  // Mark end of string
+
+      if( targetsBuff[ targetStart])
+      {
+        ++targetStart;          // Skip over semi-colon
+      }
+      ++tnr;
+    }
+  }
+
+  while( tnr < elcount( gTargetList))
+  {
+    gTargetList[tnr++][0] = 0;
+  }
+
+  if( !gTargetList[0][0])
+  {
+    SetError( "No ECU qualifier given to perform variant identification for!");
+    SetDone();
+    return;
+  }
+
+  // Continue in the timer handler
+  cancelTimer( tPollVarIdentStatus);
+  setTimer( tPollVarIdentStatus, 0);
+}
+/*@@end*/
+
+/*@@caplFunc:SetError(char[]):*///function
+SetError( char text[])
+{
+  char line[200];
+  
+  write( "Error: %s", text);
+  snprintf( line, elcount( line), "/Error: %s", text);
+  SysSetVariableString( sysvar::DiagIdentifier::ResultOfIdentification, line);
+}
+/*@@end*/
+
+/*@@timer:tPollVarIdentStatus:*/
+on timer tPollVarIdentStatus
+{
+  char line[200];
+  long status;
+
+  if( gNextTarget >= 0 && gTargetList[gNextTarget][0])
+  {
+    status = DiagGetIdentifiedVariant( gTargetList[gNextTarget], line, elcount(line));
+    switch( status)
+    {
+      case -99: // Try again later
+        setTimer( this, 10);
+        return;
+      case -98: // Error
+        SetError( "No variant was identified for target %s, e.g. the algorithm was not started or failed", gTargetList[gNextTarget]);
+        break;
+      default:
+        if( status <= 0)
+        {
+          SetError( status, gTargetList[gNextTarget]);
+        }
+        else  // Success!
+        {
+          SetResult( gTargetList[gNextTarget], line);
+        }
+    }
+    gTargetList[gNextTarget][0] = 0;  // Remove target from list
+    setTimer( this, 10); // Continue later with following block
+    return;
+  }
+
+  // Continue with the next ECU, or be done
+  while( gTargetList[++gNextTarget][0])
+  {
+    status = diagStartVariantIdentification( gTargetList[gNextTarget]);
+    switch( status)
+    {
+      case -98: 
+        SetError( "No communication channel could be found for target %s", gTargetList[gNextTarget]);
+        break;
+      case -97: 
+        SetError( "Automatic variant identification is not defined in the diagnostics description of target %s", gTargetList[gNextTarget]);
+        break;
+      case -91: // Fall through
+        SetError( "The variant identification algorithm is already running for target %s", gTargetList[gNextTarget]);
+        break;
+      case 0:   // OK
+        write( "Starting status poll timer");
+        setTimer( this, 10);
+        return;
+      default:  SetError( status, gTargetList[gNextTarget]);
+    }
+
+    gTargetList[gNextTarget][0] = 0;  // Remove target from list
+    setTimer( this, 10); // Continue later
+    return;
+  }
+
+  // No running identification, so be done
+  SetDone();
+}
+/*@@end*/
+
+/*@@caplFunc:SetResult(char[],char[]):*///function
+SetResult( char target[], char result[])
+{
+  char line[200];
+  
+  snprintf( line, elcount(line), "%s: %s", target, result);
+  SysSetVariableString( sysvar::DiagIdentifier::ResultOfIdentification, line);
+}
+/*@@end*/
+
+/*@@caplFunc:SetError(long,char[]):*///function
+SetError( long code, char target[])
+{
+  char line[50];
+  
+  snprintf( line, elcount( line), "<%d> at target %s", code, target);
+  SetError( line);
+}
+/*@@end*/
+
+/*@@caplFunc:SetDone():*///function
+SetDone()
+{
+  gNextTarget = -1;
+  SysSetVariableString( sysvar::DiagIdentifier::ResultOfIdentification, "Done.");
+}
+/*@@end*/
+
+/*@@caplFunc:SetError(char[],char[]):*///function
+SetError( char text[], char argument[])
+{
+  char line[200];
+  
+  snprintf( line, elcount( line), text, argument);
+  SetError( line);
+}
+/*@@end*/
+

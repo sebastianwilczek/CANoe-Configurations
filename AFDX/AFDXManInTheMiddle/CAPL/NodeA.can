@@ -1,0 +1,258 @@
+/*@!Encoding:1252*/
+// -------------------------------------------------------------------------
+// Module: NodeA.can
+// Interfaces: -
+// -------------------------------------------------------------------------
+// Implementation of the Class NodeA
+// -------------------------------------------------------------------------
+// Copyright (c) Vector Informatik GmbH. All rights reserved.
+// -------------------------------------------------------------------------
+
+includes
+{
+  #include "AFDX\Utils.cin"
+}
+
+variables
+{  
+  // variables               
+  a664Message DEMOMSG_INT3 gA664Packet; // our one and only AFDX packet for this demo
+  INT     gPreventOutput;         // control for button [Output]
+  int     gOutputScheduled = 0;   // schedule output if <> 0, i.e. which of both buttons was activated
+  
+  msTimer oilTempA32Timer;        // timer of signal "VFG_OIL_TEMP_A_32"
+  LONG    oilTempA32MinFrequ;     // the minimum frequency of signal "VFG_OIL_TEMP_A_32"
+  LONG    oilTempA32Value;        // the actual temperature value
+  INT     oilTempA32updateSignal; // specifies whether the signal should be updated or not
+  INT     oilTempA32forceSend;    // force sending of signal value
+  
+  msTimer oilTempA33Timer;        // timer of signal "VFG_OIL_TEMP_A_33"
+  LONG    oilTempA33Frequ;        // the frequency of signal "VFG_OIL_TEMP_A_33"
+  INT     oilTempA33MinValue;     // the mimimum signal value
+  INT     oilTempA33MaxValue;     // the maximum signal value
+  INT     oilTempA33Direction;    // determine whether the signal value is to be increased or decreased (1 = increase, 0 = decrease)
+  
+  // definitions
+  INT NO = 3;                     // normal operation
+  
+  INT UPDATE_SIGA31 = 1;          // update signal 31 only
+  INT UPDATE_SIGA32 = 2;          // update signal 32 only
+  INT UPDATE_SIGA33 = 4;          // update signal 33 only
+  INT UPDATE_ALL    = 8;          // update all signals
+  
+  INT DECREASE      = 0;          // decrease "VFG_OIL_TEMP_A_33" value
+  INT INCREASE      = 1;          // increase "VFG_OIL_TEMP_A_33" value
+}
+
+on preStart
+{  
+  // initiate "VFG_OIL_TEMP_A_32" variables
+  oilTempA32updateSignal = 1;
+  oilTempA32forceSend = 0;
+  oilTempA32MinFrequ = 2000;
+  
+  // initiate "VFG_OIL_TEMP_A_33" variables
+  oilTempA33Frequ = 200;
+  oilTempA33MinValue = 20;
+  oilTempA33MaxValue = 50;
+  oilTempA33Direction = 1;
+}
+
+on start
+{
+  gA664Packet.msgChannel = 1;
+  
+  SetMessagePayloadFromSysVar(UPDATE_ALL);
+  
+  gPreventOutput = 1;
+  
+  // signal "VFG_OIL_TEMP_A_33" is send cyclically, so initialize timer here
+  setTimer(oilTempA33Timer, oilTempA33Frequ);
+}
+
+on timer oilTempA33Timer
+{ 
+  LONG actSysVarValue;
+  
+  // first of all check if signal has to be send
+  if(SysGetVariableInt(sysvar::NodeA::SendOilTempA33) == 1)
+  { 
+    // get the actual system variable value
+    actSysVarValue = @NodeA::VFG_OIL_TEMP_A_33;
+  
+    // set new signal value
+    if(oilTempA33Direction == INCREASE)
+    { 
+      // check if maximum value has been reached
+      if(actSysVarValue == oilTempA33MaxValue)
+      { 
+        // the maximum value has been reached, so change direction and decrease variable value
+        oilTempA33Direction = DECREASE;
+        actSysVarValue--;
+      } // if
+      else
+      {  
+        // the maximum value has not been reached jet, so keep on increasing
+        actSysVarValue++;
+      } // else    
+    } // if
+    else
+    { 
+      // asume that we are decreasing so check if maximum value has been reached
+      if(actSysVarValue == oilTempA33MinValue)
+      { 
+        // the minimum value has been reached, so change direction and increase variable value
+        oilTempA33Direction = INCREASE;
+        actSysVarValue++;
+      } // if
+      else
+      { 
+        // the minimum value has not been reached jet, so keep on decreasing
+        actSysVarValue--;
+      } // else
+    } // else
+  
+    // set the new variable value and send packet
+    @NodeA::VFG_OIL_TEMP_A_33 = actSysVarValue;
+    if (gOutputScheduled == 0)
+      OutputPacket(UPDATE_SIGA33);
+    else
+      OutputPacketScheduled(UPDATE_SIGA33, 1);
+  } // if
+   
+  // ensure that timer keeps running
+  setTimer(oilTempA33Timer, oilTempA33Frequ);
+}
+
+on sysvar sysvar::NodeA::OutputPacket
+{
+  gOutputScheduled = 0;
+  if(gPreventOutput == 1)
+  { 
+    OutputPacket(UPDATE_ALL);
+    gPreventOutput = 0;
+  } // if
+  else
+  { 
+    gPreventOutput = 1;
+  } // else  
+}
+
+on sysvar sysvar::NodeA::SendPacket
+{
+  gOutputScheduled = 1;
+  if(gPreventOutput == 1)
+  { 
+    write("Scheduling started");    
+    OutputPacketScheduled(UPDATE_ALL, 2);
+    gPreventOutput = 0;
+  } // if
+  else
+  { 
+    write("Scheduling stoped");    
+    OutputPacketScheduled(UPDATE_ALL, 3);    
+    gPreventOutput = 1;
+  } // else    
+}
+
+on sysvar sysvar::NodeA::VFG_OIL_TEMP_A_31
+{
+  if (gOutputScheduled == 0)
+    OutputPacket(UPDATE_SIGA31);
+  else
+    OutputPacketScheduled(UPDATE_SIGA31, 1);    
+}
+
+on sysvar sysvar::NodeA::VFG_OIL_TEMP_A_32
+{
+	if (oilTempA32updateSignal == 1)
+  { 
+    // ensure that signal "VFG_OIL_TEMP_A_32" is send
+    UpdateOilTempA32();
+    
+    // guarantee that the signal is not sent within the minimum update rate 
+    oilTempA32updateSignal = 0;
+    setTimer(oilTempA32Timer, oilTempA32MinFrequ);
+  } // if
+  else
+  { 
+    // the signal has been updated while timer "oilTempA32Timer" was running,
+    // so force sending after timer elapses
+    oilTempA32forceSend = 1;
+  } // else
+}
+
+on timer oilTempA32Timer
+{
+  // signal "VFG_OIL_TEMP_A_32" can now be updated again
+  oilTempA32updateSignal = 1;
+  
+  // check if signal "VFG_OIL_TEMP_A_32" has been changed while timer was runnung
+  if (oilTempA32forceSend == 1)
+  { 
+    // ensure that signal "VFG_OIL_TEMP_A_32" is send
+    oilTempA32forceSend = 0;
+    UpdateOilTempA32();
+    
+    // ensure that the signal is send earliest after the minimum frequence
+    setTimer(oilTempA32Timer, oilTempA32MinFrequ);
+    oilTempA32updateSignal = 0;
+  } // if
+}
+
+void UpdateOilTempA32()
+{
+	// get the signal value and ensure that it will be sent
+  oilTempA32Value = @NodeA::VFG_OIL_TEMP_A_32;
+  
+  if (gOutputScheduled == 0)
+  {
+    OutputPacket(UPDATE_SIGA32);
+  }
+  else
+  {
+    OutputPacketScheduled(UPDATE_SIGA32, 1);
+  }
+}
+
+void SetMessagePayloadFromSysVar(INT sigType)
+{
+	// Collect all signal values from the corresponding system variables and initialize packet
+  if(sigType == UPDATE_SIGA31 || sigType == UPDATE_ALL)
+  { 
+    gA664Packet.IOM_DEMO_VFG_OIL_TEMP_A_31 = SysGetVariableInt(sysvar::NodeA::VFG_OIL_TEMP_A_31);
+    gA664Packet.FS_FDS_1_HSMU_DEMO_INT3 = VtSig_FS_FDS_1_HSMU_DEMO_INT3::NO; 
+  } // if
+  
+  if(sigType == UPDATE_SIGA32 || sigType == UPDATE_ALL)
+  { 
+    gA664Packet.IOM_DEMO_VFG_OIL_TEMP_A_32 = SysGetVariableInt(sysvar::NodeA::VFG_OIL_TEMP_A_32);
+    gA664Packet.FS_FDS_2_HSMU_DEMO_INT3 = VtSig_FS_FDS_2_HSMU_DEMO_INT3::NO; 
+  } // if
+  
+  if(sigType == UPDATE_SIGA33 || sigType == UPDATE_ALL)
+  { 
+    gA664Packet.IOM_DEMO_VFG_OIL_TEMP_A_33 = SysGetVariableInt(sysvar::NodeA::VFG_OIL_TEMP_A_33);
+    gA664Packet.FS_FDS_3_HSMU_DEMO_INT3 = VtSig_FS_FDS_3_HSMU_DEMO_INT3::NO; 
+  } // if 
+}
+
+void OutputPacket(INT sigType)
+{
+  SetMessagePayloadFromSysVar(sigType);
+  a664TriggerMessage(gA664Packet, 1);
+}
+
+void OutputPacketScheduled(INT sigType, INT schedule)
+{
+  SetMessagePayloadFromSysVar(sigType);
+  a664TriggerMessage( gA664Packet, schedule);
+}
+
+on a664Message msgChannel1.*
+{
+  if (this.DIR == tx)
+  {
+    @NodeA::TxPacketCount++;
+  }
+}

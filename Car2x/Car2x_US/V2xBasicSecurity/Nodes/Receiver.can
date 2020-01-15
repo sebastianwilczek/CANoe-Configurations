@@ -1,0 +1,187 @@
+/*@!Encoding:1252*/
+includes
+{
+  
+}
+
+variables
+{
+  char wssPcolDesc[16] ; // either "wss2011d9", "wss2013" or "wssv3"
+  long version ; // 3, 2011, 2013
+}
+
+on start
+{
+  // register the receive callback
+  C2xRegisterCallback(0, "OnC2xPacket");
+
+  evalWssVersion() ;
+  sysVarReset() ;  
+}
+
+void evalWssVersion()
+{
+  // the configuration contains three root certificates, "Demo Root CAC 2011d9", "Demo Root CAC 2013" and "Demo Root CAC v3"
+  // depending on the version configured in CANoe one of them is visible.
+  if (C2xSecCertificateGetHandle("Vector Demo Root CAC v3") != 0)
+  {
+    strncpy(wssPcolDesc, "wssv3", elcount(wssPcolDesc)) ;
+    SysSetVariableString(sysvar::WssVersion, "IEEE 1609.2-2016") ;
+    version = 3 ;
+  }
+  else if (C2xSecCertificateGetHandle("Vector Demo Root CAC 2013") != 0)
+  {
+    strncpy(wssPcolDesc, "wss2013", elcount(wssPcolDesc)) ;
+    SysSetVariableString(sysvar::WssVersion, "IEEE 1609.2-2013") ;
+    version = 2013 ;
+  }
+  else if (C2xSecCertificateGetHandle("Vector Demo Root CAC 2011d9") != 0)
+  {
+    strncpy(wssPcolDesc, "wss2011d9", elcount(wssPcolDesc)) ;
+    SysSetVariableString(sysvar::WssVersion, "IEEE 1609.2-2011d9") ;
+    version = 2011 ;
+  } 
+}
+
+void sysVarReset()
+{
+  sysSetVariableString(sysvar::Receiver::certName, "") ;
+  sysSetVariableString(sysvar::Receiver::certDigest, "") ;
+  sysSetVariableString(sysvar::Receiver::icaName, "") ;
+  sysSetVariableString(sysvar::Receiver::icaDigest, "") ;
+  sysSetVariableString(sysvar::Receiver::rcaName, "") ;
+  sysSetVariableString(sysvar::Receiver::rcaDigest, "") ;
+  SysSetVariableString(sysvar::Receiver::signerType, "") ;
+  SysSetVariableString(sysvar::Receiver::signatureStatus, "") ;
+}
+
+// output signature status
+void SignatureStatus(long packet)
+{
+  long signatureStatus ;
+  char buffer[100] ;
+  long buffOffset ;
+
+  buffOffset = 0 ;
+  
+  signatureStatus = C2xSecPacketGetStatus(packet);
+
+  switch (signatureStatus & 0x0f00) // mask the certificate subject type
+  {
+  case 0x0100: strncpy(buffer, "Root CA certificate: "  , elcount(buffer)) ; break;
+  case 0x0200: strncpy(buffer, "PCA certificate: "      , elcount(buffer)) ; break;
+  case 0x0300: strncpy(buffer, "LTCA certificate: "     , elcount(buffer)) ; break;
+  case 0x0400: strncpy(buffer, "Pseudonym certificate: ", elcount(buffer)) ; break;
+  case 0x0500: strncpy(buffer, "Longterm certificate: " , elcount(buffer)) ; break;
+  case 0x0600: strncpy(buffer, "CRL certificate: "      , elcount(buffer)) ; break;
+  case 0x0700: strncpy(buffer, "Message: "              , elcount(buffer)) ; break;
+  default: buffer[0] = 0 ; break ;
+  }
+
+  buffOffset = strlen(buffer) ;
+  
+  switch (signatureStatus & 0xf000) // mask the signature status
+  {
+  case 0x1000: // unknown
+    strncpy_off(buffer, + buffOffset, "unknown", elcount(buffer) - buffOffset);
+    break;
+
+  case 0x2000: // invalid
+    switch (signatureStatus & 0x00ff) // mask the signature status sub cause
+    {
+    case 0x0001: strncpy_off(buffer, + buffOffset, "invalid signature"  , elcount(buffer) - buffOffset) ; break;
+    case 0x0002: strncpy_off(buffer, + buffOffset, "invalid signer type", elcount(buffer) - buffOffset) ; break;
+    case 0x0003: strncpy_off(buffer, + buffOffset, "root untrusted"     , elcount(buffer) - buffOffset) ; break;
+    default:     strncpy_off(buffer, + buffOffset, "invalid"            , elcount(buffer) - buffOffset) ; break;
+    }
+    break;
+
+  case 0x3000: // valid
+    strncpy_off(buffer, + buffOffset, "trusted"  , elcount(buffer) - buffOffset);
+    break;
+
+  default: // error
+    strncpy_off(buffer, + buffOffset, "error"  , elcount(buffer) - buffOffset);
+    break;
+  }
+  SysSetVariableString(sysvar::Receiver::signatureStatus, buffer) ;
+}
+
+void CertInfo(long packet)
+{
+  long certHdl ;
+  byte hashedId8[8] ;
+  char buffer[100] ;
+  
+  // its certificate
+  certHdl = C2xSecPacketGetSignerHandle(packet) ; // get signer cert of message
+  if (!certHdl)
+    return ;
+  
+  C2xSecCertificateGetName(certHdl, elcount(buffer), buffer) ; // get name
+  sysSetVariableString(sysvar::Receiver::certName, buffer) ;
+
+  C2xSecCertificateGetHashedId8(certHdl, hashedId8) ; // get hashedId8
+  snprintf(buffer, elcount(buffer), "%02X %02X %02X %02X %02X %02X %02X %02X ",
+    hashedId8[0], hashedId8[1], hashedId8[2], hashedId8[3], 
+    hashedId8[4], hashedId8[5], hashedId8[6], hashedId8[7]) ;
+  sysSetVariableString(sysvar::Receiver::certDigest, buffer) ;
+
+  // ica certificate
+  if (version == 3)
+  {
+    certHdl = C2xSecCertificateGetSignerHandle(certHdl) ; // get signer cert of its cert
+    if (!certHdl)
+      return ;
+  
+    C2xSecCertificateGetName(certHdl, elcount(buffer), buffer) ; // get name
+    sysSetVariableString(sysvar::Receiver::icaName, buffer) ;
+  
+    C2xSecCertificateGetHashedId8(certHdl, hashedId8) ; // get hashedId8
+    snprintf(buffer, elcount(buffer), "%02X %02X %02X %02X %02X %02X %02X %02X ",
+             hashedId8[0], hashedId8[1], hashedId8[2], hashedId8[3], 
+             hashedId8[4], hashedId8[5], hashedId8[6], hashedId8[7]) ;
+    sysSetVariableString(sysvar::Receiver::icaDigest, buffer) ;
+  }
+  else
+  {
+    sysSetVariableString(sysvar::Receiver::icaName, "n/a") ;
+    sysSetVariableString(sysvar::Receiver::icaDigest, "n/a") ;
+  }
+  
+  // rca certificate  
+  certHdl = C2xSecCertificateGetSignerHandle(certHdl) ; // get signer cert of its/ica cert
+  if (!certHdl)
+    return ;
+  
+  C2xSecCertificateGetName(certHdl, elcount(buffer), buffer) ; // get name
+  sysSetVariableString(sysvar::Receiver::rcaName, buffer) ;
+  
+  C2xSecCertificateGetHashedId8(certHdl, hashedId8) ; // get hashedId8
+  snprintf(buffer, elcount(buffer), "%02X %02X %02X %02X %02X %02X %02X %02X ",
+    hashedId8[0], hashedId8[1], hashedId8[2], hashedId8[3], 
+    hashedId8[4], hashedId8[5], hashedId8[6], hashedId8[7]) ;
+  sysSetVariableString(sysvar::Receiver::rcaDigest, buffer) ;
+}
+
+void OnC2xPacket( LONG channel, LONG dir, LONG radioChannel, LONG signalStrength, LONG signalQuality, LONG packet )
+{
+  long signerType ;
+  long securityProfile ;
+  
+  // reset receiver panel fields
+  sysVarReset() ;
+  
+  SignatureStatus(packet) ; // calculate status
+  CertInfo(packet) ;        // calculate cert hierarchy
+  
+  // signer type
+  signerType = C2xGetTokenInt(packet, wssPcolDesc, "signerType") ;
+  switch (signerType)
+  {
+    case 1: sysSetVariableString(sysvar::Receiver::signerType, "HashedId8 (Digest)") ; break ;
+    case 2: sysSetVariableString(sysvar::Receiver::signerType, "Certificate"       ) ; break ;
+    case 3: sysSetVariableString(sysvar::Receiver::signerType, "Certificate Chain" ) ; break ;
+  }
+  
+}

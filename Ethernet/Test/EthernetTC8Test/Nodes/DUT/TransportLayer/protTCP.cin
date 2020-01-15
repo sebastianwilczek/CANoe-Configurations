@@ -1,0 +1,492 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+variables
+{
+  // TCP payload size
+  const int kTCP_MAX_DATA_LENGTH = 1460;
+  const int kTCP_RETRANSMIT_BUFFER = 30;
+  
+  struct _Token_TCP
+  {
+    word wSource;
+    word wDestination;
+    dword dwSequence;
+    dword dwAckNumber;
+    byte bOffset;
+    byte bFlags;
+    word wWindow;
+    word wChecksum;
+    word wPointer;
+    
+    byte bPayload[kTCP_MAX_DATA_LENGTH];
+  };
+  
+  ethernetPacket gEthPacketSendDataPacket[kTCP_RETRANSMIT_BUFFER];
+  long glSendDataPacketNum = 0;
+  word gwMssValueSynAck;
+  
+  
+  long glBlockSegmentCnt = 0;
+  long glSendPacketCnt = 0;
+  
+}
+
+/// <initialize>
+// initialization of the TCP token data
+void initTcpTokenData(struct _Token_TCP data)
+{ 
+  int i;
+  
+  data.wSource = 0;
+  data.wDestination = 0;  
+  data.dwSequence = 0;
+  data.dwAckNumber = 0;
+  data.bOffset = 0;
+  data.bFlags = 0;
+  data.wWindow = 0;
+  data.wChecksum = 0;
+  data.wPointer = 0;
+  
+  for(i=0; i<elCount(data.bPayload); i++)
+  {
+    data.bPayload[i] = 0;
+  }
+}
+
+
+/// <getPacketData>
+// get the Tcp packet data from received ethernet packet
+int getTcpPacket(struct _Token_TCP data, long handle)
+{  
+  int payloadlength;
+  
+  // TCP data
+  data.wSource = EthGetTokenInt(handle, "tcp", "source");
+  data.wDestination = EthGetTokenInt(handle, "tcp", "destination");
+  data.dwSequence = EthGetTokenInt(handle, "tcp", "sequence");
+  data.dwAckNumber = EthGetTokenInt(handle, "tcp", "ackNumber");
+  data.bOffset = EthGetTokenInt(handle, "tcp", "offset");
+  data.bFlags = EthGetTokenInt(handle, "tcp", "flags");
+  data.wWindow = EthGetTokenInt(handle, "tcp", "window");
+  data.wChecksum = EthGetTokenInt(handle, "tcp", "checksum");
+  data.wPointer = EthGetTokenInt(handle, "tcp", "pointer");
+    
+  payloadlength = EthGetTokenData(handle, "tcp", "data", elCount(data.bPayload), data.bPayload);
+  
+  return 1;
+}
+
+
+/// <sendPacket>
+// construct tcp packet handle
+// ret 1:succeed 0:failed
+int constructTcpPacket(struct _Token_TCP data, long lPacketHandle)
+{
+  int iRet;
+  
+  iRet = 0;
+    
+  return iRet;
+}
+
+/// <processPacketData>
+// process when tcp protocol received
+int procTcp(struct _Token_TCP recvData)
+{
+  int iRet;
+  
+  iRet = 0;
+    
+  return iRet;
+}
+
+
+/// <getPacketData/flag>
+byte isTcpFlagFin(byte flag)
+{
+  byte bRet;
+  
+  bRet = flag & TcpFlagFin;
+  
+  return bRet;
+}
+
+/// <getPacketData/flag>
+byte isTcpFlagSyn(byte flag)
+{
+  byte bRet;
+  const byte _offset = 1;
+  
+  bRet = (flag & TcpFlagSyn) >> _offset;
+  
+  return bRet;
+}
+
+/// <getPacketData/flag>
+byte isTcpFlagRst(byte flag)
+{
+  byte bRet;
+  const byte _offset = 2;
+  
+  bRet = (flag & TcpFlagRst) >> _offset;
+  
+  return bRet;
+}
+
+/// <getPacketData/flag>
+byte isTcpFlagPsh(byte flag)
+{
+  byte bRet;
+  const byte _offset = 3;
+  
+  bRet = (flag & TcpFlagPsh) >> _offset;
+  
+  return bRet;
+}
+
+/// <getPacketData/flag>
+byte isTcpFlagAck(byte flag)
+{
+  byte bRet;
+  const byte _offset = 4;
+  
+  bRet = (flag & TcpFlagAck) >> _offset;
+  
+  return bRet;
+}
+
+/// <getPacketData/flag>
+byte isTcpFlagUrg(byte flag)
+{
+  byte bRet;
+  const byte _offset = 4;
+  
+  bRet = (flag & TcpFlagUrg) >> _offset;
+  
+  return bRet;
+}
+
+/// <Retransmission>
+void changeRetransmitPacketSameID(ethernetPacket *packet)
+{
+  byte bFlag;
+  word wID;
+  
+  bFlag = TCPGetFlags(packet);
+  
+  //ACK, PSH
+  if( (bFlag & TcpFlagPshAck) == TcpFlagPshAck && TCPGetDataLength(packet) > 0 )
+  {
+    if(checkIfRetransmitPacket(packet, wID) == 1)
+    {
+      changeIPIdentification(packet, wID);
+    }
+  }
+}
+
+/// <Retransmission>
+//Log TCP data
+int checkIfRetransmitPacket(ethernetPacket* packet, word& wID)
+{
+  long lPos;
+  
+  if(glSendDataPacketNum <= elCount(gEthPacketSendDataPacket))
+  {
+    for(lPos = 0; lPos < glSendDataPacketNum; lPos++)
+    {
+      if(gEthPacketSendDataPacket[lPos].Length == packet.Length &&
+         TCPgetPortSrc(gEthPacketSendDataPacket[lPos]) == TCPgetPortSrc(packet) &&
+         TCPgetPortDst(gEthPacketSendDataPacket[lPos]) == TCPgetPortDst(packet) &&
+         TCPgetSequence(gEthPacketSendDataPacket[lPos]) == TCPgetSequence(packet) &&
+         TCPgetAckNumber(gEthPacketSendDataPacket[lPos]) == TCPgetAckNumber(packet)
+        )
+      {
+        //match
+        wID = IPv4GetIdentificagtion(gEthPacketSendDataPacket[lPos]);
+        return 1;
+      }
+    }
+    Write("CheckIfRetransmitPacket() lPos[%d] glSendDataPacketNum[%d]", lPos, glSendDataPacketNum);
+    //not found in data segment log
+    if(lPos == glSendDataPacketNum && lPos < elCount(gEthPacketSendDataPacket))
+    {
+      gEthPacketSendDataPacket[lPos] = packet;
+      glSendDataPacketNum++;
+    }
+    else
+    {
+      Write("Warning Retransmit packet monitoring buffer is overflown. ");    
+    }
+  }
+  else //if(
+  {
+    Write("Warning Retransmit packet monitoring buffer is overflown. ");
+  }
+  return 0;
+}
+
+/// <Retransmission>
+void changeIPIdentification(ethernetPacket* packet, word wID)
+{
+  IPv4SetIdentificagtion(packet, wID);
+  Ipv4UpdateChecksum(packet);
+}
+
+/// <Retransmission>
+long checkIfPacketReceived(ethernetPacket* packet)
+{
+  long lPos;
+  
+  if(isTcpFlagAck(TCPGetFlags(packet)) != 1)
+  {
+    return 0;
+  }
+  if(glSendDataPacketNum <= elCount(gEthPacketSendDataPacket))
+  {
+    for(lPos = 0; lPos < glSendDataPacketNum; lPos++)
+    {
+      if(TCPgetPortSrc(gEthPacketSendDataPacket[lPos]) == TCPgetPortDst(packet) &&
+         TCPgetPortDst(gEthPacketSendDataPacket[lPos]) == TCPgetPortSrc(packet) &&
+         TCPgetAckNumber(gEthPacketSendDataPacket[lPos]) == TCPgetSequence(packet) &&
+         TCPgetSequence(gEthPacketSendDataPacket[lPos]) + TCPGetDataLength(gEthPacketSendDataPacket[lPos])
+            <= TCPgetAckNumber(packet)
+        )
+      {
+        ethernetPacket emptyPacket;
+        //Remove data from buffer because the packet was received 
+        glSendDataPacketNum--;
+        gEthPacketSendDataPacket[lPos] = emptyPacket;
+        Write("checkIfPacketReceived() Packet received glSendDataPacketNum[%d] lPos[%d]", glSendDataPacketNum, lPos);
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+/// <WindowSize>
+void changeOfferedWindowSize(ethernetPacket* packet)
+{
+  byte bFlag;
+  word wWinSize;
+  
+  bFlag = TCPGetFlags(packet);
+  
+  //write("called changeOfferedWindowSize()");
+  
+  //ACK packet and no length, assuming ack packet to data segment
+  if(isTcpFlagAck(bFlag) == 1 && TCPGetDataLength(packet) == 0)
+  {
+    wWinSize = TcpGetWindow(packet);
+    //write("changeOfferedWindowSize before winsize[%d]", wWinSize);
+    TcpSetWindow(packet, @sysvar::TC8_DUT_Config::TCPOfferedWinowSizeValue);
+    wWinSize = TcpGetWindow(packet);
+    //write("changeOfferedWindowSize after winsize[%d]", wWinSize);
+  }
+}
+
+/// <MSSOptions>
+void addMssOptionForDataPacket(ethernetPacket* packet)
+{
+  byte bFlag;
+  
+  bFlag = TCPGetFlags(packet);
+  
+  //check if the packet is SYN, ACK, then get MSS value for SYN,ACK packet
+  if(isTcpFlagAck(bFlag) == 1 && isTcpFlagSyn(bFlag) == 1)
+  {
+    gwMssValueSynAck = TcpGetMss(packet);
+  }
+  //check if the packet is data packet, then add MSS options
+  else if(isTcpFlagAck(bFlag) == 1 && TCPGetDataLength(packet) > 0)
+  {
+    TcpSetMssOptions(packet, 2, 4, gwMssValueSynAck);
+  }
+}
+
+
+on sysvar_update TC8_DUT_Config::RetransmitPacketSameIPID
+{
+  long lPos;
+  ethernetPacket packet;
+  
+  //Initialize All data;
+  for(lPos = 0; lPos < elCount(gEthPacketSendDataPacket); lPos++)
+  {
+    gEthPacketSendDataPacket[lPos] = packet;
+  }
+  glSendDataPacketNum = 0;
+}
+
+
+  
+on sysvar_update TC8_DUT_Config::TcpSetIW2SMSS
+{
+  if(@this == 1)
+  {
+    ipSetStackParameter("net.inet.tcp.rfc3390", 0);
+    ipSetStackParameter("net.inet.tcp.local_slowstart_flightsize", 2);
+  }
+  else if(@this == 0)
+  {
+    //Set to Default value
+    ipSetStackParameter("net.inet.tcp.rfc3390", kDEF_TCP_RFC3390_SETTING);
+    ipSetStackParameter("net.inet.tcp.local_slowstart_flightsize", 4);    
+  }
+}
+
+on sysvar_update TC8_DUT_Config::TcpLayerAction04
+{
+  //Reset to previous values
+  if(@this == 1)
+  {
+    ipSetStackParameter("net.inet.tcp.rfc3390", 0);
+    ipSetStackParameter("net.inet.tcp.slowstart_flightsize", 1);    
+    ipSetStackParameter("net.inet.tcp.local_slowstart_flightsize", 2);
+    glBlockSegmentCnt = 0;
+    glSendPacketCnt = 0;
+    
+  }
+  else if(@this == 0)
+  {
+    //Set to Default value
+    ipSetStackParameter("net.inet.tcp.rfc3390", kDEF_TCP_RFC3390_SETTING);
+    ipSetStackParameter("net.inet.tcp.slowstart_flightsize", kDEF_TCP_SLOW_START_FLIGHT_SIZE);
+    ipSetStackParameter("net.inet.tcp.local_slowstart_flightsize", kDEF_TCP_LOCAL_SLOW_START_FLIGHT_SIZE);    
+  }
+}
+
+long blockSendingSegments(ethernetPacket* packet)
+{  
+  glBlockSegmentCnt++;
+  Write("### [%f] blockSendingSegments() %d, SEQ[%x]", timeNow()/100000.0, glBlockSegmentCnt, TCPgetSequence(packet));    
+  if(glBlockSegmentCnt != 1)
+  {
+    if(glBlockSegmentCnt == 4)
+    { //only support IW = 2 seg
+      @sysvar::TC8_DUT_Config::TcpLayerAction04 = 3;
+    }
+    
+    Write("### Packet blocked");    
+    return 0;
+  }
+  Write("### Packet NOT blocked");    
+  return 1;
+}
+
+void countDataPacket(ethernetPacket* packet)
+{
+  byte bTcpFlag;
+  dword dwLen;
+  
+  bTcpFlag = TCPGetFlags(packet);
+  dwLen = TCPGetDataLength(packet);
+  WriteLineEx(1, 2, "[%f] countDataPacket() data packet hooked Len[%d]", TimeNow()/100000.0, dwLen);
+  //ACK or ACK/PSH and data exist
+  if( (bTcpFlag == 0x18 || bTcpFlag == 0x10) && dwLen > 0 )
+  {
+    glSendPacketCnt++;
+    if(glSendPacketCnt == 6)
+    {
+      WriteLineEx(1, 2, "countDataPacket() Cnt[%d]", glSendPacketCnt);
+      @sysvar::TC8_DUT_Config::TcpLayerAction04 = 2;
+      ipSetStackParameter("net.inet.tcp.rfc3390",0);
+      ipSetStackParameter("net.inet.tcp.slowstart_flightsize", 1);    
+      ipSetStackParameter("net.inet.tcp.local_slowstart_flightsize", 1);
+    }
+  }
+}
+
+on sysvar_update TC8_DUT_Config::TcpDelayAckTime
+{
+  long lResult;
+  
+  lResult = ipSetStackParameter("net.inet.tcp.delacktime", @sysvar::TC8_DUT_Config::TcpDelayAckTime);
+  if(lResult != 0)
+  {
+    writeLineEx(1, 3, "Failed to set delacktime to %d. Result: %d", @sysvar::TC8_DUT_Config::TcpDelayAckTime, lResult);
+    writeLineEx(1, 3, "IpGetLastError: %d", IpGetLastError());
+  }
+  else
+  {
+    writeLineEx(1, 0, "Success to set delacktime to %d . Result: %d", @sysvar::TC8_DUT_Config::TcpDelayAckTime, lResult);
+  }
+}
+
+on sysvar_update TC8_DUT_Config::TcpRetransmitSlop
+{
+  long lResult;
+  
+  lResult = ipSetStackParameter("net.inet.tcp.rexmit_slop", @sysvar::TC8_DUT_Config::TcpRetransmitSlop);
+  if(lResult != 0) {
+    writeLineEx(1, 3, "Failed to set rexmit_slop to %d byte. Result: %d", @sysvar::TC8_DUT_Config::TcpRetransmitSlop, lResult);
+    writeLineEx(1, 3, "IpGetLastError: %d", IpGetLastError());
+  }
+  else
+  {
+    writeLineEx(1, 0, "Success to set rexmit_slop to %d . Result: %d", @sysvar::TC8_DUT_Config::TcpRetransmitSlop, lResult);
+  }
+}
+
+on sysvar_update TC8_DUT_Config::TcpRetransmitMin
+{
+  long lResult;
+  
+  lResult = ipSetStackParameter("net.inet.tcp.rexmit_min", @sysvar::TC8_DUT_Config::TcpRetransmitMin);
+  if(lResult != 0) {
+    writeLineEx(1, 3, "Failed to set rexmit_min to %d byte. Result: %d", @sysvar::TC8_DUT_Config::TcpRetransmitMin, lResult);
+    writeLineEx(1, 3, "IpGetLastError: %d", IpGetLastError());
+  }  
+  else
+  {
+    writeLineEx(1, 0, "Success to set rexmit_min to %d . Result: %d", @sysvar::TC8_DUT_Config::TcpRetransmitMin, lResult);
+  }
+}
+
+void setTcpPointer(ethernetPacket *packet, word setData)
+{
+  int _offset;
+  
+  // urg
+  if(isTcpFlagUrg(packet.tcp.flags) == 0)
+  {
+    return;
+  }
+  
+  // get urgent offset information
+  if(@sysvar::TC8_DUT_Config::tcpUrgPtrOfst == 1)
+  {
+    // obey RFC793
+    _offset = 0;
+  }
+  else
+  {
+    // obey RFC1122
+    _offset = -1;
+  }
+  
+  // set urg pointer
+  TcpSetUrgPointer(packet, setData + _offset);
+}

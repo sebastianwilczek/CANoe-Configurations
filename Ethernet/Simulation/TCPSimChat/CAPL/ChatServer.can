@@ -1,0 +1,446 @@
+/*@!Encoding:1252*/
+/*
+ * Chat Server
+ *
+ * Copyright 2010, Vector Informatik GmbH - All right reserved
+ *
+ * The Chat server opens a listen TCP socket and wait for incomming
+ * connections from clients. When text messages are received from
+ * clients the text is dispatched to all register clients.
+ *
+ * 1. On measurement start, the function ServerStart is called. In this
+ *    function opens a TCP socket and starts listening for incomming
+ *    connections.
+ *
+ * 2. When a client wants to connect to the server, the callback function
+ *    OnTcpListen ist called. The server accepts the connections and
+ *    starts receiving data from the new created socket connection.
+ *
+ * 3. When a text message is received from client, the text message
+ *    is forwarded to all registerer client in OnTcpReceive.
+ *
+ */
+variables
+{
+  //
+  // Constants
+  //
+
+  CHAR      kPanelName[32] = "Chat Server";   // Name of the panel
+  const INT kMaxClients    = 3;               // Max. number of chat clients
+  const INT kVerbosity     = 0;               // 1=information to write window, 0=no output to write window
+
+  //
+  // Structures
+  //
+
+  struct Client                               // Structure to store information of registered clients
+  {
+    CHAR  name[32];                           // Display name of the client
+    DWORD socket;                             // Socket handle
+  };
+
+  //
+  // Global Variables
+  //
+
+  DWORD         gServerSocketV4;              // Socket of the listening server on IPv4
+  DWORD         gServerSocketV6;              // Socket of the listening server on IPv6
+  CHAR          gReceiveBuffer[200];          // Receive buffer
+  LONG          gChatClientCount        = 0;  // Number of registered clients
+  struct Client gChatClients[kMaxClients];    // Array of registered clients
+}
+
+on start
+{
+  if (@sysvar::ChatServer::Enable > 0)
+  {
+    ServerStart();
+  }
+}
+
+/*
+  Start Chat Server and listen for incomming connections
+*/
+void ServerStart()
+{
+  CHAR errorText[200];
+  long result;
+  IP_Endpoint 0.0.0.0 localEndpointV4;
+  IP_Endpoint ::      localEndpointV6;
+  
+
+  //
+  // Setup Panel Data
+  //
+  enableControl( kPanelName, "TCPPort"    , 0 );
+  enableControl( kPanelName, "ClientLimit", 0 );
+
+  //
+  // Create TCP socket and listen for IPv4
+  //
+  if (kVerbosity > 0)
+  {
+    write( "<%BASE_FILE_NAME%> Starting..." );
+  }
+
+  localEndpointV4.PortNumber = @sysvar::ChatServer::PortNumber;
+  gServerSocketV4 = TcpOpen( localEndpointV4 );
+  if (IpGetLastSocketError(gServerSocketV4) != 0)
+  {
+    IpGetLastSocketErrorAsString( gServerSocketV4, errorText, elcount(errorText) );
+    write( "<%BASE_FILE_NAME%> TcpSocket::open for IPv4 failed, %s (Result %d)", errorText, IpGetLastSocketError(gServerSocketV4) );
+    return;
+  }
+
+  result = TcpListen(gServerSocketV4);
+  if (result != 0 || IpGetLastSocketError(gServerSocketV4) !=  0 )
+  {
+    IpGetLastSocketErrorAsString( gServerSocketV4, errorText, elcount(errorText) );
+    write( "<%BASE_FILE_NAME%> TcpSocket::listen for IPv4 failed, %s (Result %d)", errorText, IpGetLastSocketError(gServerSocketV4) );
+    return;
+  }
+  
+  //
+  // Create TCP socket and listen for IPv6
+  //
+  localEndpointV6.PortNumber = @sysvar::ChatServer::PortNumber;
+  gServerSocketV6 = TcpOpen( localEndpointV6 );
+  if (IpGetLastSocketError(gServerSocketV6) != 0)
+  {
+    IpGetLastSocketErrorAsString( gServerSocketV6, errorText, elcount(errorText) );
+    write( "<%BASE_FILE_NAME%> TcpSocket::open for IPv6 failed, %s (Result %d)", errorText, IpGetLastSocketError(gServerSocketV6) );
+    return;
+  }
+
+  result = TcpListen(gServerSocketV6);
+  if (result != 0 || IpGetLastSocketError(gServerSocketV6) != 0)
+  {
+    IpGetLastSocketErrorAsString( gServerSocketV6, errorText, elcount(errorText) );
+    write( "<%BASE_FILE_NAME%> TcpSocket::listen for IPv6 failed, %s (Result %d)", errorText, IpGetLastSocketError(gServerSocketV6) );
+    return;
+  }
+
+  if (kVerbosity > 0)
+  {
+    write( "<%BASE_FILE_NAME%> Started" );
+  }
+}
+
+/*
+  Stop Chat Server and close connection to clients
+*/
+void ServerStop()
+{
+  CHAR errorText[200];
+  LONG result;
+
+  //
+  // Setup Panel Data
+  //
+
+  enableControl( kPanelName, "TCPPort"    , 1 );
+  enableControl( kPanelName, "ClientLimit", 1 );
+
+  //
+  // Stop IL
+  //
+  ServerOutputToClients( 0, "Server is shutting down");
+
+  // close registered client sockets
+  while( gChatClientCount > 0)
+  {
+    ServerRemoveClient( 0 );
+  }
+
+  // close server sockets
+  result = TcpClose(gServerSocketV4);
+
+  if (result != 0)
+  {
+    IpGetLastSocketErrorAsString( gServerSocketV4, errorText, elcount(errorText) );
+    write( "<%BASE_FILE_NAME%> TcpClose for IPv4 server socket failed, %s (Result %d)", errorText, IpGetLastSocketError(gServerSocketV4) );
+  }
+  
+  result = TcpClose(gServerSocketV6);
+
+  if (result != 0)
+  {
+    IpGetLastSocketErrorAsString( gServerSocketV6, errorText, elcount(errorText) );
+    write( "<%BASE_FILE_NAME%> TcpClose for IPv6 server socket failed, %s (Result %d)", errorText, IpGetLastSocketError(gServerSocketV6) );
+  }
+}
+
+/*
+  Callback function for incomming IPv4 data from the clients.
+
+  socket  - Socket handle of the client
+  result  - Result of the operation, 0 on success
+  address - Remote IPv4 address of the client (in network byte-order!)
+  port    - Remote port number of the client
+  buffer  - Buffer which contains the received data
+  size    - Size in bytes of the received data
+ */
+void OnTcpReceive( dword socket, long result, IP_Endpoint remoteEndpoint, char buffer[], dword size)
+{
+  CHAR errorText[200];
+  CHAR receiveText[512];
+  CHAR response[512];
+  LONG responseSocket; // do not send reponse to this socket
+  LONG index;
+
+  //
+  // Get received message and put it to the panel
+  //
+
+  index = ServerFindClientIndex( socket );
+
+  if (kVerbosity > 0)
+  {
+    write( "<%BASE_FILE_NAME%> TCP receive %d bytes, socket 0x%x", size, socket );
+  }
+
+  if (result == 0)
+  {
+    strncpy( receiveText, buffer, size+1 );
+
+    if (index >= 0)
+    {
+      if (gChatClients[index].name[0] == 0)
+      {
+        strncpy( gChatClients[index].name, receiveText, 32 );
+
+        putValueToControl( kPanelName, "ChatOutput", gChatClients[index].name );
+        putValueToControl( kPanelName, "ChatOutput", " logged in\n" );
+
+        // send welcome
+        snprintf( response, elCount(response), "%s joined the chat", gChatClients[index].name );
+        TcpSend( socket, response,  strlen(response) );
+        if (IpGetLastSocketError(socket) != 0)
+        {
+          write( "<%BASE_FILE_NAME%> TcpSend(0x%x,'%s') to %s failed, gResult %d", socket, response, buffer, IpGetLastSocketError(socket) );
+        }
+
+        // create annoncement for other clients
+        snprintf( response, elCount(response), "%s is in the house", gChatClients[index].name );
+        responseSocket = socket;
+      }
+      else
+      {
+        putValueToControl( kPanelName, "ChatOutput", gChatClients[index].name );
+        putValueToControl( kPanelName, "ChatOutput", ":" );
+        putValueToControl( kPanelName, "ChatOutput", receiveText );
+        putValueToControl( kPanelName, "ChatOutput", "\n" );
+
+        snprintf( response, elCount(response), "%s:%s", gChatClients[index].name, receiveText );
+        responseSocket = 0;
+      }
+    }
+  }
+  else
+  {
+    write( "<%BASE_FILE_NAME%> OnTcpReceive failed, Result %d", result );
+    return;
+  }
+
+  //
+  // Now send message to clients
+  //
+  ServerOutputToClients( responseSocket, response );
+
+  //
+  // Receive next data
+  //
+  TcpReceive( socket, gReceiveBuffer, elcount(gReceiveBuffer) );
+
+  if (IpGetLastSocketError(socket) != 997)
+  {
+    IPGetLastSocketErrorAsString(socket, errorText, elcount(errorText) );
+    write( "<%BASE_FILE_NAME%> TcpReceive failed, %s (Result %d)", errorText, IpGetLastSocketError(socket) );
+  }
+}
+
+/*
+ * Callback function, if a client has closed the connection.
+ *
+ * socket - Socket handle of the client
+ * result - Result of the operation, 0 on success.
+ */
+void OnTcpClose( dword socket, long result)
+{
+  CHAR response[50];
+  LONG index;
+
+  index = ServerFindClientIndex( socket );
+
+  if (index >= 0)
+  {
+    // info message to text buffer
+    putValueToControl( kPanelName, "ChatOutput", gChatClients[index].name );
+    putValueToControl( kPanelName, "ChatOutput", " logged out\n" );
+
+    // send godbye message to other clients
+    snprintf( response, elCount(response), "%s left the house", gChatClients[index].name );
+    ServerOutputToClients( socket, response );
+
+    // close client socket and remove it from registerd list
+    ServerRemoveClient( index );
+  }
+
+  if (kVerbosity > 0)
+  {
+    write( "<%BASE_FILE_NAME%> TCP state close, socket 0x%x", socket );
+  }
+}
+
+/*
+  Find the socket handle in the list or registered clients.
+
+  Return -1 if not found.
+*/
+LONG ServerFindClientIndex( DWORD socket )
+{
+  LONG i;
+
+  for( i = 0; i < gChatClientCount; i++ )
+  {
+    if (gChatClients[i].socket == socket)
+    {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+/*
+  Removes a client from the registered client list.
+
+  index - Index in of the client to remove
+ */
+void ServerRemoveClient( LONG index )
+{
+  LONG result; 
+  CHAR errorText[200];
+  LONG i;
+
+  if (index < gChatClientCount)
+  {
+    result = TcpClose( gChatClients[index].socket );
+
+    if (result != 0)
+    {
+      IpGetLastSocketErrorAsString( gChatClients[index].socket, errorText, elcount(errorText) );
+      write( "<%BASE_FILE_NAME%> TcpClose of client socket (index %d) failed, %s (Result %d)", index, errorText, IpGetLastSocketError(gChatClients[index].socket) );
+    }
+
+    for( i = index; i < gChatClientCount-1; i++ )
+    {
+      strncpy( gChatClients[i].name, gChatClients[i+1].name, 32 );
+      gChatClients[i].socket = gChatClients[i+1].socket;
+    }
+
+    gChatClientCount -= 1;
+  }
+}
+
+/*
+  Add a client to registered clients list.
+*/
+LONG ServerAddClient( DWORD socket )
+{
+  LONG index;
+
+  index = -1;
+
+  if (gChatClientCount < kMaxClients)
+  {
+    index             = gChatClientCount;
+    gChatClientCount += 1;
+
+    strncpy( gChatClients[index].name, "", 32 );
+    gChatClients[index].socket = socket;
+  }
+
+  return index;
+}
+
+/*
+  Output a text to all registered clients
+*/
+void ServerOutputToClients( DWORD ignoreSocket, CHAR text[] )
+{
+  LONG i;
+
+  for( i = 0; i < gChatClientCount; i++ )
+  {
+    if (ignoreSocket != gChatClients[i].socket )
+    {
+      TcpSend( gChatClients[i].socket, text, strlen(text) );
+
+      if (IpGetLastSocketError(gChatClients[i].socket) != 0)
+      {
+        write( "<%BASE_FILE_NAME%> TcpSend(0x%x,'%s') to %s failed, gResult %d", gChatClients[i].socket, text, gChatClients[i].name, IpGetLastSocketError(gChatClients[i].socket) );
+      }
+    }
+  }
+}
+
+on sysvar sysvar::ChatServer::Enable
+{
+  if (@this == 1)
+  {
+    ServerStart();
+  }
+  else
+  {
+    ServerStop();
+  }
+}
+
+/*
+  Callback for accepting in comming connections. This function is called, if a client
+  wants to connect to the server. The server must accept the connection and add the
+  client to the client list (gChatClients).
+
+  socket - The socket handle of the server
+  result - Result of the operation, 0 on success
+*/
+void OnTcpListen( dword socket, long result)
+{
+  CHAR  errorText[200];
+  DWORD clientHandle;
+
+  if ((gChatClientCount <= @sysvar::ChatServer::ClientLimit) && (gChatClientCount < kMaxClients))
+  {
+    if (kVerbosity > 0)
+    {
+      write( "<%BASE_FILE_NAME%> Accepted TCP connection, socket 0x%x", socket );
+    }
+
+    // Accept the connection
+    clientHandle = TcpAccept( socket );
+    if (IpGetLastSocketError(socket) != 0)
+    {
+      IpGetLastSocketErrorAsString(socket, errorText, elcount(errorText) );
+      write( "<%BASE_FILE_NAME%> TcpSocket::accept failed, %s (Result %d)", errorText, IpGetLastSocketError(socket) );
+    }
+    else
+    {
+      ServerAddClient( clientHandle );
+
+      TcpReceive( clientHandle, gReceiveBuffer, elcount(gReceiveBuffer) );
+
+      if (IpGetLastSocketError(clientHandle) != 997)
+      {
+        IpGetLastSocketErrorAsString(clientHandle, errorText, elcount(errorText) );
+        write( "<%BASE_FILE_NAME%> TcpReceive failed, %s (Result %d)", errorText, IpGetLastSocketError(clientHandle) );
+      }
+    }
+  }
+  else
+  {
+    write( "<%BASE_FILE_NAME%> Refused TCP connection due to client limit, socket 0x%x", socket );
+  }
+}
+

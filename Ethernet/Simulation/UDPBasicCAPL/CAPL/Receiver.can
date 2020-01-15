@@ -1,0 +1,82 @@
+/*@!Encoding:1252*/
+
+variables
+{
+  UdpSocket gSocket;
+  char      gRxBuffer[1500];
+}
+
+on sysvar_update sysvar::Receiver::Open
+{
+  // on open button down...
+  if (@this == 1)
+  {
+    // Open an UDP socket. As source address 0.0.0.0 is used, this means that
+    // the configure address of the TCP/IP stack is used. See TCP/IP stack
+    // configuration dialog in the simulation setup
+    // On UDP port 40001 we want to receive UDP pacekts.
+    gSocket = UdpSocket::Open( IP_Endpoint(0.0.0.0:40001) );
+    
+    if (IpGetLastError() != 0)
+    {
+      // if UdpSocket::Open fails, we print a message to the write window
+      write( "<%BASE_FILE_NAME%> UdpSocket::Open failed with reauls %d", IpGetLastError() );
+      return;
+    }
+    
+    // To receive data with the created socket, we have to call ReceiveFrom.
+    gSocket.ReceiveFrom( gRxBuffer, elcount(gRxBuffer) );
+    
+    // if ReceiveFrom does not immediatelly copy to to gRxBuffer, it returns 997 to
+    // indicate it will call the callback function OnUdpReceiveFrom later.
+    if ((gSocket.GetLastSocketError() != 0) && (gSocket.GetLastSocketError()  != 997))
+    {
+      char errorString[100];
+      // if ReceiveFrom fails, we print a message to the write window
+      gSocket.GetLastSocketErrorAsString( errorString, elcount(errorString) );
+      write( "<%BASE_FILE_NAME%> ReceiveFrom failed with result %d (%s)", IpGetLastError(), errorString );
+    }
+    
+    // update panel controls state
+    EnableControl( "Receiver", "OpenButton", 0 );
+    EnableControl( "Receiver", "CloseButton", 1 );
+  }
+}
+
+on sysvar_update sysvar::Receiver::Close
+{
+  // on open button down...
+  if (@this == 1)
+  {
+    // Close socket
+    gSocket.Close();
+
+    // update panel controls state
+    EnableControl( "Receiver", "OpenButton", 1 );
+    EnableControl( "Receiver", "CloseButton", 0 );
+  }
+}
+
+on preStop
+{
+  // Close socket on measurement stop
+  gSocket.Close();
+}
+
+// Callback function, which is called if a UDP packet is received
+void OnUdpReceiveFrom( dword socket, long result, ip_Endpoint remoteEndpoint, char buffer[], dword size)
+{
+  if (result == 0)
+  {
+    char endpointString[30];
+    
+    remoteEndpoint.PrintEndpointToString( endpointString );
+    
+    // set sysvars to display receive data in panels
+    sysSetVariableString( sysvar::Receiver::RxAddress, endpointString );
+    sysSetVariableString( sysvar::Receiver::RxText, buffer );
+  }
+
+  // To receive more data, we have to call ReceiveFrom again.
+  gSocket.ReceiveFrom( gRxBuffer, elcount(gRxBuffer) );
+}

@@ -1,0 +1,1342 @@
+/*@!Encoding:1252*/
+includes
+{
+   
+}
+
+variables
+{
+  canDisturbanceFrameTrigger       frmTrigger;
+  canDisturbanceTriggerRepetitions triggerRepetitions;
+  
+  struct FieldDefinition defBeforeField;
+  char streamBeforeValue[32];
+  
+  struct FieldDefinition defCurrField;
+  char streamCurrValue[32];
+  
+  struct FieldDefinition defNextField;
+  char streamNextValue[32];
+
+  enum FieldStatus
+  {
+    kNothingToDo = 0,
+    kSysVarCorrectionNeeded = 1
+  };
+  
+  mstimer        UpdateTriggerPosTimer;
+  int            TriggerIndex;
+  int            TriggerOffset;
+  sysvarString * CurrTriggerPosition;
+  int            isTriggerManualConfigurable;
+  
+  mstimer        CorrectionSysVarTimer;
+  char           correctedSysVar[32];
+  sysvarString * CorrectionSysVar;
+  
+  
+}
+
+on timer CorrectionSysVarTimer
+{
+  sysSetVariableString(CorrectionSysVar, correctedSysVar);
+  
+}
+
+on timer UpdateTriggerPosTimer
+{  
+  isTriggerManualConfigurable = 1;
+  
+  if(@sysvar::CanDisturbanceTriggerPanel::CurrTriggerField != TriggerIndex)
+  {
+    isTriggerManualConfigurable = 0;
+  }
+  
+  @sysvar::CanDisturbanceTriggerPanel::CurrTriggerField = TriggerIndex;
+  sysSetVariableString(sysvar::CanDisturbanceTriggerPanel::CurrTriggerFieldName, CurrTriggerPosition.name);  
+  
+   if(@sysvar::CanDisturbanceTriggerPanel::CurrTriggerPosition != TriggerOffset)
+  {
+    isTriggerManualConfigurable = 0;
+  }
+  
+  @sysvar::CanDisturbanceTriggerPanel::CurrTriggerPosition = TriggerOffset;
+}
+
+on start
+{
+  int i;
+  int isSOFTrigger;
+  isTriggerManualConfigurable = 1;
+  
+  isSOFTrigger = 1;
+  
+  for(i = 1; i < 80; ++i)
+  {
+    CheckSysVarValue(i);
+    sysGetVariableString(defCurrField.sysVarName, streamCurrValue, elCount(streamCurrValue));  
+    
+    if(strlen(streamCurrValue) > 0)
+    {
+      CorrectDependedFields();
+      sysSetVariableString(sysvar::CanDisturbanceTriggerPanel::CurrTriggerFieldName, defCurrField.sysVarName.name);
+      isSOFTrigger = 0;
+    }
+    
+    WriteCurrentSysVarToFrameTriggerField(defCurrField);
+  }
+  
+  if(isSOFTrigger == 1)
+  {
+    Get_FieldDefinition_For(@sysvar::CanDisturbance::Enums::FieldType::SOF, defCurrField);    
+    TriggerIndex = 0;
+    TriggerOffset = 0;
+    CurrTriggerPosition = defCurrField.sysVarName;
+    sysSetVariableString(sysvar::CanDisturbanceTriggerPanel::CurrTriggerFieldName, defCurrField.sysVarName.name);  
+    @sysvar::CanDisturbanceTriggerPanel::CurrTriggerField    = 0;
+    @sysvar::CanDisturbanceTriggerPanel::CurrTriggerPosition = 0;
+  }
+  
+  CheckSequenceLength();
+}
+
+
+//------------------------------------------------------------------------------------------------------------
+//Sysvar depended functions
+//------------------------------------------------------------------------------------------------------------
+/// <SysVarUtilityFunctions>
+void CheckSysVarValue(int field)
+{
+  int    currLength;
+  char   currValueAsString[32];
+  char   correctedValueAsString[32];
+  int    i;
+  int    correctedLength;
+  enum   FieldStatus fieldStatus;
+  
+  
+  if(Get_FieldDefinition_For(field, defCurrField))
+  {
+    sysGetVariableString(defCurrField.sysVarName, currValueAsString, elCount(currValueAsString));
+    currLength  = strlen(currValueAsString);
+    fieldStatus = kNothingToDo;
+    
+    if(currLength > 0)
+    {
+      correctedLength = currLength > defCurrField.length ? defCurrField.length : currLength;
+      
+      if(correctedLength != currLength)
+      {
+        fieldStatus = kSysVarCorrectionNeeded;
+      }
+      
+      for(i = 0; i < correctedLength; ++i)
+      {
+        switch(currValueAsString[i])
+        {
+          case '0' :
+          case '1' :
+          case 'x' :
+            correctedValueAsString[i] =  currValueAsString[i];
+            break;
+          default:
+            correctedValueAsString[i] =  'x';
+            fieldStatus = kSysVarCorrectionNeeded;
+            break;
+        }
+      }
+      
+      correctedValueAsString[correctedLength] = '\0';
+    }
+    
+    if(fieldStatus == kSysVarCorrectionNeeded)
+    {
+      CorrectionSysVar = defCurrField.sysVarName;
+      strncpy(correctedSysVar, correctedValueAsString, elCount(correctedSysVar));
+      setTimer(CorrectionSysVarTimer, 10);
+    }
+  }
+}
+
+/// <SysVarUtilityFunctions>
+void FillUpFieldExt(struct FieldDefinition field, char sysvarAsstring[])
+{
+  FillUpFieldExt(field, sysvarAsstring, field.length);
+}
+
+/// <SysVarUtilityFunctions>
+void FillUpFieldExt(struct FieldDefinition field, char sysvarAsstring[], int lengthToFillUp)
+{
+  long currStringLength;
+  int i;
+  
+  if(field.fieldIndex != @sysvar::CanDisturbance::Enums::FieldType::Invalid)
+  {
+    sysGetVariableString(field.sysVarName, sysvarAsstring, elCount(sysvarAsstring));  
+    currStringLength = strlen(sysvarAsstring);
+    if(currStringLength == 0)
+    {
+      for(i = 0; i < lengthToFillUp ; ++i)
+      {
+        sysvarAsstring[i] = 'x';
+      }
+    }
+    else
+    {
+      for(i = currStringLength; i < lengthToFillUp ; ++i)
+      {
+        sysvarAsstring[i] = 'x';
+      }
+    }
+    
+    sysvarAsstring[lengthToFillUp] = '\0';
+  }
+}
+
+/// <SysVarUtilityFunctions>
+void WriteCurrentSysVarToFrameTriggerField(struct FieldDefinition fieldDef)
+{
+  char sysVarValueAsString[32];
+  long result;
+  sysGetVariableString(fieldDef.sysVarName, sysVarValueAsString, elCount(sysVarValueAsString));
+  
+  result = CommonCANDisturbanceLibrary_Set_FrameTrigger_Field(fieldDef, sysVarValueAsString, frmTrigger);
+  
+  if(result < 0)
+  {
+    WriteToStatus("Frame Trigger Field couldn't be set!", result);
+  }
+}
+
+//------------------------------------------------------------------------------------------------------------
+
+//------------------------------------------------------------------------------------------------------------
+//Field depended functions
+//------------------------------------------------------------------------------------------------------------
+/// <FieldUtilityFunctions>
+void FindFieldBeforeAndUntilCurrField()
+{
+   int searchFieldIndex;
+   int startField;
+  
+   //-------------------------------------------------------------------------------
+   //Hack to get the correct start position if field is equals IDExtended
+   //-------------------------------------------------------------------------------
+   if(defCurrField.fieldIndex == @sysvar::CanDisturbance::Enums::FieldType::IDExtended)
+   {
+     startField = @sysvar::CanDisturbance::Enums::FieldType::IDE;
+   }
+   else
+   {
+     startField = defCurrField.fieldIndex - 1;
+   }
+   //-------------------------------------------------------------------------------
+  
+   //-------------------------------------------------------------------------------
+   //Find field before and fill this field
+   //-------------------------------------------------------------------------------
+   for(searchFieldIndex = startField; searchFieldIndex >= 0 ; --searchFieldIndex)
+   {
+     if((Get_FieldDefinition_For(searchFieldIndex , defBeforeField) > 0) 
+         && (defBeforeField.offsetStream + defBeforeField.length  == defCurrField.offsetStream))
+     {
+       break;
+     }
+     ResetFieldDefFor(defBeforeField);
+   }
+   //-------------------------------------------------------------------------------
+     
+   //-------------------------------------------------------------------------------
+   //Find field after current field
+   //-------------------------------------------------------------------------------
+   for(searchFieldIndex = 0; searchFieldIndex < @sysvar::CanDisturbance::Enums::FieldType::EndOfFrame ; ++searchFieldIndex)
+   {
+     if((Get_FieldDefinition_For(searchFieldIndex , defNextField) > 0) 
+         && defCurrField.offsetStream + defCurrField.length  == defNextField.offsetStream)
+     {
+      break;
+     }
+     ResetFieldDefFor(defNextField);
+   }
+}
+
+/// <FieldUtilityFunctions>
+void CorrectTriggerPosition()
+{
+  //--------------------------------------------------------------------------------------------
+  //Current field is not empty
+  //--------------------------------------------------------------------------------------------
+  if(strlen(streamCurrValue) > 0)
+  {
+    //------------------------------------------------------------------------------------------
+    //Next field is empty set trigger position to current field, if trigger index lower
+    //------------------------------------------------------------------------------------------
+    if(strlen(streamNextValue) == 0)
+    {
+      if(defCurrField.fieldIndex >= TriggerIndex 
+         || (defCurrField.fieldIndex == @sysvar::CanDisturbance::Enums::FieldType::IDExtended)
+             && (TriggerIndex == sysvar::CanDisturbance::Enums::FieldType::RemoteBase || TriggerIndex == sysvar::CanDisturbance::Enums::FieldType::IDE))
+      {
+        TriggerIndex = defCurrField.fieldIndex;
+        CurrTriggerPosition = defCurrField.sysVarName;
+        TriggerOffset  = strlen(streamCurrValue)-1; 
+      }
+    }
+    //------------------------------------------------------------------------------------------
+    //Next field is not empty set trigger position to current field, if trigger index lower
+    //------------------------------------------------------------------------------------------
+    else
+    {      
+      if((defNextField.fieldIndex >= TriggerIndex && TriggerIndex != @sysvar::CanDisturbance::Enums::FieldType::IDExtended)
+          || (TriggerIndex == @sysvar::CanDisturbance::Enums::FieldType::IDExtended 
+              && defNextField.fieldIndex == sysvar::CanDisturbance::Enums::FieldType::RemoteExtended))             
+      {
+        TriggerIndex = defNextField.fieldIndex;
+        CurrTriggerPosition = defNextField.sysVarName;
+        TriggerOffset  = strlen(streamNextValue)-1;  
+      } 
+    }
+  }
+  //--------------------------------------------------------------------------------------------
+  //Current field is empty
+  //--------------------------------------------------------------------------------------------
+  else
+  {
+    if((defCurrField.fieldIndex <= TriggerIndex 
+         && TriggerIndex != @sysvar::CanDisturbance::Enums::FieldType::IDExtended
+         && defCurrField.fieldIndex != @sysvar::CanDisturbance::Enums::FieldType::IDExtended)
+        || (TriggerIndex == @sysvar::CanDisturbance::Enums::FieldType::IDExtended 
+            && (defCurrField.fieldIndex == sysvar::CanDisturbance::Enums::FieldType::RemoteBase || defCurrField.fieldIndex == @sysvar::CanDisturbance::Enums::FieldType::IDE )))
+    {
+      TriggerIndex = defBeforeField.fieldIndex;
+      CurrTriggerPosition = defBeforeField.sysVarName;
+      TriggerOffset  = defBeforeField.length - 1;
+    }
+  }
+  
+  setTimer(UpdateTriggerPosTimer, 10);
+}
+
+/// <FieldUtilityFunctions>
+void CorrectDependedFields()
+{
+  FindFieldBeforeAndUntilCurrField();
+  
+  sysGetVariableString(defCurrField.sysVarName, streamCurrValue, elCount(streamCurrValue));  
+  sysGetVariableString(defNextField.sysVarName, streamNextValue, elCount(streamNextValue));  
+  
+  if(strlen(streamCurrValue) == 0)
+  {
+    //Update next value only 
+    streamNextValue[0] = '\0';
+    sysSetVariableString(defNextField.sysVarName, streamNextValue);
+  }
+  else 
+  {
+    //Update value of field before and if needed fill up curr field
+    //if next value is not 0
+    if(defBeforeField.fieldIndex != @sysvar::CanDisturbance::Enums::FieldType::Invalid)
+    {
+      FillUpFieldExt(defBeforeField, streamBeforeValue);
+      sysSetVariableString(defBeforeField.sysVarName, streamBeforeValue);
+    }
+  }
+  
+  CorrectTriggerPosition();
+  
+}
+
+/// <FieldUtilityFunctions>
+void ResetFieldDefFor(struct FieldDefinition fieldDef)
+{
+  fieldDef.fieldIndex = -1;
+  fieldDef.length = 0;
+  fieldDef.offsetInField = 0;
+  fieldDef.offsetStream = 0;
+}
+
+//------------------------------------------------------------------------------------
+//Write the field definition 
+//
+//@param field - the index value of the field [in]
+//@param def   - the struct definition for the field parameter [inout]
+//@return      - the start position of the field within the stream without stuff bits
+//------------------------------------------------------------------------------------
+int Get_FieldDefinition_For(int field, struct FieldDefinition def)
+{
+  int returnValue;
+  
+  returnValue = CommonCANDisturbanceLibrary_Get_FieldDefinition_For(field, def);
+  
+  if(returnValue >= 0)
+  {
+    switch(field)
+    {
+      case 0:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::SOF;
+        break;
+      case 1:       
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::IDBase;
+        break;
+      case 2:       
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::IDExtended;
+        break;
+      case 3:       
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::RemoteBase;
+        break;
+      case 4: 
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::IDEBit;
+        break;
+      case 5: 
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::RemoteExtended;
+        break;
+      case 6: 
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::FDFBit;
+        break;
+      case 7: 
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::Reserved;
+        break;
+      case 8: 
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::BRSBit;
+        break;
+      case 9: 
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::ESIBit;
+        break;
+      case 10:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DLC;
+        break;
+      case 11:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte0;
+        break;
+      case 12:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte1;
+        break;
+      case 13:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte2;
+        break;
+      case 14:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte3;
+        break;
+      case 15:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte4;
+        break;
+      case 16:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte5;
+        break;
+      case 17:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte6;
+        break;
+      case 18:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte7;
+        break;
+      case 19:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte8;
+        break;
+      case 20:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte9;
+        break;
+      case 21:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte10;
+        break;
+      case 22:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte11;
+        break;
+      case 23:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte12;
+        break;
+      case 24:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte13;
+        break;
+      case 25:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte14;
+        break;
+      case 26:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte15;
+        break;
+      case 27:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte16;
+        break;
+      case 28:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte17;
+        break;
+      case 29:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte18;
+        break;
+      case 30:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte19;
+        break;
+      case 31:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte20;
+        break;
+      case 32:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte21;
+        break;
+      case 33:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte22;
+        break;
+      case 34:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte23;
+        break;
+      case 35:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte24;
+        break;
+      case 36:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte25;
+        break;
+      case 37:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte26;
+         break;
+      case 38:
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte27;
+         break;
+      case 39:
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte28;
+         break;
+      case 40:
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte29;
+         break;                                                
+      case 41:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte30;
+         break;                                                
+      case 42:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte31;
+         break;                                                
+      case 43:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte32;
+         break;                                                
+      case 44:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte33;
+         break;                                                
+      case 45:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte34;
+         break;                                                
+      case 46:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte35;
+         break;                                                
+      case 47:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte36;
+         break;
+      case 48:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte37;
+         break;
+      case 49:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte38;
+         break;
+      case 50:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte39;
+         break;
+      case 51:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte40;
+         break;
+      case 52:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte41;
+         break;
+      case 53:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte42;
+         break;
+      case 54:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte43;
+         break;
+      case 55:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte44;
+         break;
+      case 56:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte45;
+         break;
+      case 57:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte46;
+         break;
+      case 58:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte47;
+         break;
+      case 59:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte48;
+         break;
+      case 60:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte49;
+         break;
+      case 61:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte50;
+         break;
+      case 62:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte51;
+         break;
+      case 63:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte52;
+         break;
+      case 64:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte53;
+         break;
+      case 65:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte54;
+         break;
+      case 66:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte55;
+         break;
+      case 67:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte56;
+         break;
+      case 68:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte57;
+         break;
+      case 69:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte58;
+         break;
+      case 70:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte59;
+         break;
+      case 71:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte60;
+         break;
+      case 72:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte61;
+         break;
+      case 73:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte62;
+         break;
+      case 74:                                             
+         def.sysVarName = sysvar::CanDisturbanceCommonLibrary::DataByte63;
+         break;      
+      case 75:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::StuffCount;
+        break;
+      case 76:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::CRC;
+        break;
+      case 77:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::CRCDelimiter;
+        break;
+      case 78:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::AckSlot;
+        break;
+      case 79:
+        def.sysVarName = sysvar::CanDisturbanceCommonLibrary::AckDelimiter;
+        break;
+      default:
+        break;
+    }
+  } 
+  
+  if(returnValue < 0)
+  {
+    def.fieldIndex = @sysvar::CanDisturbance::Enums::FieldType::Invalid;
+  }
+  else
+  {
+    def.fieldIndex = field;
+  }
+  
+  return returnValue;
+  
+}
+
+
+//------------------------------------------------------------------------------------------------------------
+
+/// <Field_1_ArbitrationField>
+//------------------------------------------------------------------------------------------------------------
+//Sysvar listener
+//------------------------------------------------------------------------------------------------------------
+on sysvar sysvar::CanDisturbanceCommonLibrary::IDBase
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::IDBase);
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);  
+}
+
+/// <Field_1_ArbitrationField>
+on sysvar sysvar::CanDisturbanceCommonLibrary::RemoteBase
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::RemoteBase);
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_1_ArbitrationField>
+on sysvar sysvar::CanDisturbanceCommonLibrary::IDExtended
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::IDExtended);
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_1_ArbitrationField>
+on sysvar sysvar::CanDisturbanceCommonLibrary::IDEBit
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::IDE);
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_1_ArbitrationField>
+on sysvar sysvar::CanDisturbanceCommonLibrary::RemoteExtended
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::RemoteExtended);
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_2_ControlField>
+on sysvar sysvar::CanDisturbanceCommonLibrary::FDFBit
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::FDF);
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_2_ControlField>
+on sysvar sysvar::CanDisturbanceCommonLibrary::Reserved
+{
+   CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::Reserved);
+   CorrectDependedFields();
+   WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_2_ControlField>
+on sysvar sysvar::CanDisturbanceCommonLibrary::BRSBit
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::BRS);
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_2_ControlField>
+on sysvar sysvar::CanDisturbanceCommonLibrary::ESIBit
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::ESI);
+  CorrectDependedFields();  
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_2_ControlField>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DLC
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DLC); 
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte0
+{ 
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte0); 
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte1
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte1);   
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte2
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte2);   
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte3
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte3); 
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte4
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte4);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte5
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte5);
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte6
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte6);   
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte7
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte7);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte8
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte8);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte9
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte9);   
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte10
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte10);    
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte11
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte11);   
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte12
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte12); 
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte13
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte13);    
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte14
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte14);   
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte15
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte15);      
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte16
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte16);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte17
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte17);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte18
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte18);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte19
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte19);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte20
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte20);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte21
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte21);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte22
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte22); 
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte23
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte23);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte24
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte24);   
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte25
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte25);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte26
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte26);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte27
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte27);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte28
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte28);    
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte29
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte29);   
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte30
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte30);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte31
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte31);
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte32
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte32);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte33
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte33);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte34
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte34);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte35
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte35);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte36
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte36);    
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte37
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte37); 
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte38
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte38); 
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte39
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte39);     
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte40
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte40);     
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte41
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte41);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte42
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte42);
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte43
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte43);
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte44
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte44); 
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte45
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte45); 
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte46
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte46); 
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte47
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte47);
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte48
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte48);
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte49
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte49);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte50
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte50);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte51
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte51);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte52
+{ 
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte52);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte53
+{ 
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte53);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte54
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte54);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte55
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte55);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte56
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte56);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte57
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte57); 
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte58
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte58); 
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte59
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte59);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte60
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte60);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte61
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte61);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte62
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte62);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+/// <Field_3_Payload>
+on sysvar sysvar::CanDisturbanceCommonLibrary::DataByte63
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::DataByte63);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_4_CRCField>
+on sysvar sysvar::CanDisturbanceCommonLibrary::StuffCount
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::StuffCount);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_4_CRCField>
+on sysvar sysvar::CanDisturbanceCommonLibrary::CRC
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::CRC);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_4_CRCField>
+on sysvar sysvar::CanDisturbanceCommonLibrary::CRCDelimiter
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::CRCDel);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_5_AckField>
+on sysvar sysvar::CanDisturbanceCommonLibrary::AckSlot
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::AckSlot);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+
+/// <Field_5_AckField>
+on sysvar sysvar::CanDisturbanceCommonLibrary::AckDelimiter
+{
+  CheckSysVarValue(@sysvar::CanDisturbance::Enums::FieldType::AckDelimiter);  
+  CorrectDependedFields();
+  WriteCurrentSysVarToFrameTriggerField(defCurrField);
+}
+//------------------------------------------------------------------------------------------------------------
+
+
+/// <Buttons>
+on sysvar sysvar::CanDisturbanceTriggerPanel::CurrTriggerField
+{
+  struct FieldDefinition fieldDef;
+  char sysVarToFillUp[32];
+  char sysVarToReset[2];
+  
+  
+  if(isTriggerManualConfigurable == 1)
+  {
+    if(@this >= 0 && @this < 80)
+    {
+      Get_FieldDefinition_For(@this, defCurrField);
+      FindFieldBeforeAndUntilCurrField();
+      
+      
+      if(defCurrField.fieldIndex == sysvar::CanDisturbance::Enums::FieldType::SOF)
+      {
+        TriggerOffset = 0;
+        TriggerIndex = defCurrField.fieldIndex;
+        CurrTriggerPosition = defCurrField.sysVarName;
+        
+        if(defNextField.fieldIndex >= 0)
+        {
+         sysSetVariableString(defNextField.sysVarName, sysVarToReset);  
+        }
+      }
+      else
+      {
+        sysGetVariableString(defCurrField.sysVarName, sysVarToFillUp, elCount(sysVarToFillUp));
+        
+        sysVarToReset[0] = '\0';    
+        
+        if(strlen(sysVarToFillUp) == 0)
+        {
+          sysVarToFillUp[0] = 'x';
+          sysVarToFillUp[1] = '\0';
+          sysSetVariableString(defCurrField.sysVarName, sysVarToFillUp);  
+        }
+        else
+        { 
+          TriggerOffset = strlen(sysVarToFillUp)-1;
+          TriggerIndex = defCurrField.fieldIndex;
+          CurrTriggerPosition = defCurrField.sysVarName;
+          if(defNextField.fieldIndex >= 0)
+          {
+           sysSetVariableString(defNextField.sysVarName, sysVarToReset);  
+          }
+        }
+      }
+    }
+    
+    setTimer(UpdateTriggerPosTimer, 100);
+  }
+  
+  isTriggerManualConfigurable = 1;
+}
+
+/// <Buttons>
+on sysvar sysvar::CanDisturbanceTriggerPanel::CurrTriggerPosition
+{
+  char sysVarToFillUp[32];
+  if(isTriggerManualConfigurable == 1)
+  {
+   Get_FieldDefinition_For(@sysvar::CanDisturbanceTriggerPanel::CurrTriggerField, defCurrField);
+  
+   sysGetVariableString(defCurrField.sysVarName, sysVarToFillUp, elCount(sysVarToFillUp));
+  
+   if(defCurrField.length > @this && @this >= 0)
+   {
+     if(strlen(sysVarToFillUp) != @this)
+     {
+       FillUpFieldExt(defCurrField, sysVarToFillUp, @this+1);
+       sysSetVariableString(defCurrField.sysVarName, sysVarToFillUp);
+     }
+   }
+   else
+   {
+     if(@this != defCurrField.length-1)
+     {
+       TriggerOffset = defCurrField.length-1;
+       setTimer(UpdateTriggerPosTimer, 200);
+     }
+   }
+  }
+  
+  isTriggerManualConfigurable = 1;
+  
+}

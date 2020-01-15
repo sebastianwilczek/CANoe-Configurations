@@ -1,0 +1,2530 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "..\ShareableFolders\CaplLibrary\Tc8TestLib\BasicFunctionsTestLib.cin"
+  #include "..\ShareableFolders\CaplLibrary\StubFunctionLib\Layer2StubFunctions.cin"
+}
+
+variables
+{
+  struct PhysicalPort
+  {
+    char name[50];
+    char macAddress[18];
+    char ipAddr[16];
+  };
+  
+  struct ChannelMacPair
+  {
+    char channel[30];
+    char macAddress[18];
+  };
+  
+  _align(1) struct IgmpV1Header
+  {
+    byte  type;
+    byte  reserved;
+    word  checksum;
+    dword groupAddress;
+  };
+  
+  enum IgmpType
+  {
+    kIgmpQuery  = 0x11,
+    kIgmpReport = 0x12
+  };
+  
+  //Sent Frames to the DUT with information of the DUTChannel and the source MAC of the frame
+  struct ChannelMacPair gSentFrames[10000];
+  int gSentFramesIndex;
+  qword gGeneratedMacCounter;
+  qword gGeneratedMulticastMacCounter;
+  
+  int kReservedVlanId1 = 0;
+  int kReservedVlanId2 = 4095;
+  
+  enum TestGroup gCurrentTestGroup;
+  char gCurrentTestGroupName[128];
+  
+  enum Bool gCheckMacSec; // if this is kTrue, received ethernet frames will be checked if they are correctly encrypted via MACsec
+  
+  enum Bool gMessageSent; // if a message has been sent, this will be kTrue (needed for 8021AE_MACsec_frames_forwarded)
+
+}
+
+/**
+ * This function should be called in the preparation of each test fixture
+ * @param testGroup the testgroup according to TC8 specification
+ * @param testGroupName the name of the testgroup according to TC8 specification
+ */
+export void InitTestFixture(enum TestGroup testGroup, char testGroupName[])
+{
+  Internal_InitTestFixture(kVlanTesting, "OnEthPacketLayer2", elcount(syspar::TestPorts));
+  gCurrentTestGroup = testGroup;
+  strncpy(gCurrentTestGroupName, testGroupName, elcount(gCurrentTestGroupName));
+  
+}
+
+/**
+ * This function should be called in the preparation of each test case
+ * @param testCaseName the name of the test case
+ * @param testCaseNumber the number of the testcase
+ * @param isStubRequired kTrue if testcase uses a stub function, kFlase if testcase doesn't use a stub function
+ */
+export void InitTestCase(char testCaseName[], int testCaseNumber, enum Bool isStubRequired)
+{
+  Internal_InitTestCase(testCaseName, gCurrentTestGroup, gCurrentTestGroupName, testCaseNumber, isStubRequired);
+  gGeneratedMacCounter = 0;
+  gGeneratedMulticastMacCounter = 0x5E0001;
+  gSentFramesIndex = 0;
+  gCheckMacSec = kFalse;
+}
+
+/**
+ * This function should be called in the completion of each testcase
+ */
+export void EndTestCase()
+{
+  Internal_EndTestCase();
+}
+
+/**
+ * This function should be called in the completion of each test fixture
+ */
+export void EndTestFixture()
+{
+  Internal_EndTestFixture();
+}
+
+/**
+ * This function will be called by CANoe whenever an ehternet packet arrives
+ * @param channel The channel of the ethernet packet
+ * @param dir The direction of the ethernet packet 0: RX, 1: TX
+ * @param packetHandle the handle of the ethernet packet
+ */
+void OnEthPacketLayer2(long channel, long dir, long packetHandle)
+{
+  if (!gObservingEthPackets || gExpectedMessagesPerChannel[channel] == -1 || dir != 0)
+  {
+    return;
+  }
+  
+  if(CompareParameters(packetHandle, channel, gReportOnFailure))
+  {
+    if(gCheckMacSec)
+    {
+      if(Stub_CheckMacSec(packetHandle))
+      {
+        EthernetPacketReceived(channel);
+      }
+      else
+      {
+        TestStepFail("Packet is not correctly encrypted via MACsec");
+      }
+    }
+    else
+    {
+      EthernetPacketReceived(channel);
+    }
+  }
+}
+
+/**
+ * Sends IGMP Join message
+ * @param srcMac the source mac address
+ * @param srcIp the source IP address
+ * @param multicastIp The multicast IP address
+ */ 
+export void JoinMulticastGroup(char srcMac[], char srcIp[], char multicastIp[])
+ {
+  SendIgmpV1Message(kIgmpReport, srcMac, srcIp, multicastIp);
+ }
+
+/**
+ * Sends IGMP Join message
+ * @param srcMac the source mac address
+ * @param srcIp the source IP address
+ * @param multicastIp The multicast IP address
+ */ 
+export void SendIgmpQuery(char srcMac[], char srcIp[], char multicastIp[])
+ {
+  SendIgmpV1Message(kIgmpQuery, srcMac, srcIp, multicastIp);
+ }
+
+
+/**
+ * Sends IGMP message
+ * @param igmpType the type of the IGMP message
+ * @param srcMac the source mac address
+ * @param srcIp the source IP address
+ * @param multicastIp The multicast IP address
+ */ 
+void SendIgmpV1Message(enum IgmpType igmpType, char srcMac[], char srcIp[], char multicastDstIp[])
+{
+  char destMac[18];
+  ethernetPacket frame;
+  struct IgmpV1Header igmpHeader;
+  
+  frame.source = ethGetMacAddressAsNumber(srcMac);
+  GetMulticastMacAddressFromMulticastIp(multicastDstIp, destMac);
+  frame.destination = ethGetMacAddressAsNumber(destMac);
+  
+  if(!frame.ipv4.IsAvailable())
+  {
+    frame.ipv4.Init();
+    frame.ipv4.protocol = 0x02;
+    frame.ipv4.ttl = 1;
+  }
+  
+  frame.ipv4.source = ipGetAddressAsNumber(srcIp);
+  igmpHeader.type   = igmpType;
+  
+  if(igmpType == kIgmpQuery)
+  {
+    frame.ipv4.destination  = ipGetAddressAsNumber(multicastDstIp);
+    igmpHeader.groupAddress = 0;
+  }
+  else
+  {
+    frame.ipv4.destination  = ipGetAddressAsNumber(multicastDstIp);
+    igmpHeader.groupAddress = ipGetAddressAsNumber(multicastDstIp);
+  }
+  
+  frame.ipv4.SetData(0, igmpHeader);
+  frame.CompletePacket();
+  output(frame);
+}
+
+/**
+ * gets the multicast mac address from a multicast ip address according to RFC7042 2.1.1
+ * @param ipAddr the input ip address
+ * @param macAddress The output mac address
+ */
+void GetMulticastMacAddressFromMulticastIp(char ipAddr[], char macAddress[])
+{
+  qword mac;
+
+  mac = ConvertMacAddressStringToInt64("01:00:5E:00:00:00");
+  mac += (ConvertIpAddressStringToInt64(ipAddr) & 0x7FFFFF); // insert the low 23 Bits of the multicast IPv4 Address into the Ethernet Address
+  ConvertMacAddressInt64ToString(mac, macAddress);
+}
+
+/**
+ * Sends an untagged ICMPv4 echo request
+ * @param channel The channel on which the echo request should be sent
+ * @param sourceMac The source MAC address of the echo request
+ * @param destinationMac The destination MAC address of the echo request
+ * @param sourceIP The source IP address of the echo request
+ * @param destinationIP The destination IP address of the echo request
+ */
+export testfunction SendUntaggedEchoRequest(int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[])
+{
+  InternalSendEchoRequest(channel, sourceMac, destinationMac, sourceIp, destinationIp, -1, -1);
+}
+
+/**
+ * Sends an untagged ICMPv4 echo request to the extracted mac address
+ * @param channel The channel on which the echo request should be sent
+ * @param sourceMac The source MAC address of the echo request
+ * @param destinationMac The destination MAC address of the echo request
+ * @param sourceIP The source IP address of the echo request
+ * @param destinationIP The destination IP address of the echo request
+ */
+export void SendUntaggedEchoRequestToExtractedMacAddress(int channel, char sourceMac[], char sourceIp[], char destinationIp[])
+{
+  char destinationMac[18];
+  ConvertMacAddressInt64ToString(gExtractingParameters[0].Value, destinationMac);
+  SendUntaggedEchoRequest(channel, sourceMac, destinationMac, sourceIp, destinationIp);
+}
+
+/**
+ * Sends a tagged ICMPv4 echo request
+ * @param channel The channel on which the echo request should be sent
+ * @param sourceMac The source MAC address of the echo request
+ * @param destinationMac The destination MAC address of the echo request
+ * @param sourceIP The source IP address of the echo request
+ * @param destinationIP The destination IP address of the echo request
+ * @param vlanId The vlan ID of the ethernet tag
+ */
+export testfunction SendSingleTaggedEchoRequest(int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int vlanId)
+{
+  InternalSendEchoRequest(channel, sourceMac, destinationMac, sourceIp, destinationIp, vlanId, -1);
+}
+
+/**
+ * Sends an  double tagged ICMPv4 echo request
+ * @param channel The channel on which the echo request should be sent
+ * @param sourceMac The source MAC address of the echo request
+ * @param destinationMac The destination MAC address of the echo request
+ * @param sourceIP The source IP address of the echo request
+ * @param destinationIP The destination IP address of the echo request
+ * @param vlanIdInner The vlan ID of the inner ethernet tag
+ * @param vlanIdOuter The vlan ID of the outer ethernet tag
+ */
+export testfunction SendDoubleTaggedEchoRequest(int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int vlanIdInner, int vlanIdOuter)
+{
+  InternalSendEchoRequest(channel, sourceMac, destinationMac, sourceIp, destinationIp, vlanIdInner, vlanIdOuter);
+}
+
+
+/**
+ * Sends an ICMPv4 echo request
+ * @param channel The channel on which the echo request should be sent
+ * @param sourceMac The source MAC address of the echo request
+ * @param destinationMac The destination MAC address of the echo request
+ * @param sourceIP The source IP address of the echo request
+ * @param destinationIP The destination IP address of the echo request
+ * @param vlanIdInner The vlan ID of the inner ethernet tag. If -1, the tag will be ommitted
+ * @param vlanIdOuter The vlan ID of the outer ethernet tag. If -1, the tag will be ommitted
+ */
+void InternalSendEchoRequest(int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int vlanIdInner, int vlanIdOuter)
+{
+  long packetHandle;
+  char channelName[11];
+  
+  snprintf(channelName, elcount(channelName), "Ethernet_%d", channel);
+  setBusContext(GetBusNameContext(channelName));
+  
+  packetHandle = EthInitPacket("icmpv4", "echo");
+  EthSetTokenInt64(packetHandle, "eth", "source", ConvertMacAddressStringToInt64(sourceMac));
+  EthSetTokenInt64(packetHandle, "eth", "destination", ConvertMacAddressStringToInt64(destinationMac));
+  EthSetTokenInt64(packetHandle, "ipv4", "source", ConvertIpAddressStringToInt64(sourceIp));
+  EthSetTokenInt64(packetHandle, "ipv4", "destination", ConvertIpAddressStringToInt64(destinationIp));
+  
+  if(vlanIdInner >= 0)
+  {
+    EthAddToken(packetHandle, "eth", "vlanTpid");
+    EthSetTokenInt(packetHandle, "eth", "vlanId", vlanIdInner);
+  }
+  if(vlanIdOuter >= 0)
+  {
+    EthAddToken(packetHandle, "eth", "vlan1Tpid");
+    EthSetTokenInt(packetHandle, "eth", "vlan1Id", vlanIdOuter);
+  }
+  
+  EthCompletePacket(packetHandle);
+  EthOutputPacket(packetHandle);
+  EthReleasePacket(packetHandle);
+}
+
+/**
+ * Sends UDP messages to the generated mac addresses an waits for answers (needed for testcase Address_Learning_write_ARL_table)
+ * @param channel The channel
+ * @param timeout The timeout
+ * @param sourceMac The source mac address
+ * @param sourceIp The source IP address
+ * @param destinationIp The destination IP address
+ * @param sourcePort The source UDP port
+ * @param destinationPort The destination UDP port
+ */
+export void SendUdpMessagesToGeneratedMacAddressesAndWaitForAnswer(int channel, int timeout, char sourceMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort)
+{
+ int i, j;
+ int channelOfAnswer;
+ char allowedVlans[128];
+ int allowedVlansConverted[30];
+ int vlanCount;
+ int vlan;
+  
+ for(i = 0; i < gSentFramesIndex; i++)
+  {
+    channelOfAnswer = GetChannelFromDutChannel(gSentFrames[i].channel);
+    GetAllowedVlanIdsFromChannel(channelOfAnswer, allowedVlans);
+    GetAllowedVlanIds(allowedVlans, allowedVlansConverted, vlanCount);
+    //Send untagged message if target port is configured appropiately
+    if(IsInArray(0, allowedVlansConverted, vlanCount))
+    {
+      SendUntaggedUdpMessage(channel, sourceMac, gSentFrames[i].macAddress, sourceIp, destinationIp, sourcePort, destinationPort);
+      WaitForUdpMessageOnlyOnChannel(timeout, channelOfAnswer, sourceMac, gSentFrames[i].macAddress, sourceIp, destinationIp, sourcePort, destinationPort);
+    }
+    //Send tagged message if target port is configured appropiately
+    vlan = GetFirstElementFromArrayNotZero(allowedVlansConverted, vlanCount);
+    if(vlan != -1)
+    {
+        SendTaggedUdpMessage(channel, sourceMac, gSentFrames[i].macAddress, sourceIp, destinationIp, sourcePort, destinationPort, vlan);
+        WaitForUdpMessageOnlyOnChannel(timeout, channelOfAnswer, sourceMac, gSentFrames[i].macAddress, sourceIp, destinationIp, sourcePort, destinationPort);
+    }
+  }
+}
+
+/**
+ * Sends untagged UDP messages with different mac source addresses (needed for Address_Learning_with_untagged_frames_at_external_ports)
+ * @param amount The amount of messages that should be sent
+ * @param channel The channel
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The destination IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ */
+export void SendUntaggedUdpMessagesWithDifferentMacSourceAddresses(int amount, int channel, char destinationMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort)
+{
+  int i;
+  char sourceMac[18];
+  qword macCounter;
+  macCounter = 1;
+  
+  for(i = 0; i < amount; i++)
+  {
+    ethGetMacAddressAsString(macCounter, sourceMac, elcount(sourceMac));
+    macCounter++;
+    SendUntaggedUdpMessage(channel, sourceMac, destinationMac, sourceIp, destinationIp, sourcePort, destinationPort);
+  }
+}
+
+/**
+ * Sends echo requests to a port, which are addressed to all other ports, and wait for unexpected messages
+ * @param channel The channel
+ * @param sourceMac The source MAC address
+ * @param sourceIp The source IP address
+ */
+export void SendEchoRequestsToPortAddressedToAllOtherPortsAndDontExpectForwarding(int channel, char sourceMac[], char sourceIp[])
+{
+  char destinationMac[18], destinationIp[16];
+  int i;
+  char allowedVlansIngress[256], allowedVlansEgress[256];
+  int allowedVlansConvertedIngress[256], allowedVlansConvertedEgress[256], allowedVlansConvertedBoth[256];
+  int vlanCountIngress, vlanCountEgress, vlanCountBoth;
+  
+  for(i = 0; i < elcount(syspar::TestPorts); i++)
+  {
+    if(syspar::TestPorts[i].Channel != channel)
+    {
+      strncpy(destinationMac, syspar::TestPorts[i].MacAddressTesterSide, elcount(destinationMac));
+      strncpy(destinationIp, syspar::TestPorts[i].IpAddressTesterSide, elcount(destinationIp));
+      
+      GetAllowedVlanIdsFromChannel(channel, allowedVlansIngress);
+      GetAllowedVlanIds(allowedVlansIngress, allowedVlansConvertedIngress, vlanCountIngress);
+      GetAllowedVlanIdsFromChannel(syspar::TestPorts[i].Channel, allowedVlansEgress);
+      GetAllowedVlanIds(allowedVlansEgress, allowedVlansConvertedEgress, vlanCountEgress);
+      vlanCountBoth = Intersect(allowedVlansConvertedIngress, vlanCountIngress, allowedVlansConvertedEgress, vlanCountEgress, allowedVlansConvertedBoth);
+      if(vlanCountBoth == 0)
+      {
+        continue;
+      }
+      
+      if(allowedVlansConvertedBoth[0] == 0)
+      {
+       SendUntaggedEchoRequest(channel, sourceMac, destinationMac, sourceIp, destinationIp);
+      }
+      else
+      {
+        SendSingleTaggedEchoRequest(channel, sourceMac, destinationMac, sourceIp, destinationIp, allowedVlansConvertedBoth[0]);
+      }
+      WaitForUnexpectedEchoRequest(syspar::ParamListenTimeMs, syspar::TestPorts[i].Channel, sourceMac, destinationMac, sourceIp, destinationIp);
+    }
+  }
+  for(i = 0; i < elcount(syspar::Addresses); i++)
+  {
+    if(syspar::Addresses[i].UsedByDut == 1)
+    {
+      strncpy(destinationMac, syspar::Addresses[i].MacAddress, elcount(destinationMac));
+      strncpy(destinationIp, syspar::Addresses[i].IpAddr, elcount(destinationIp));
+      SendUntaggedEchoRequest(channel, sourceMac, destinationMac, sourceIp, destinationIp);
+      WaitForUnexpectedEchoReply(syspar::ParamListenTimeMs, channel, destinationMac, sourceMac, destinationIp, sourceIp);
+    }
+  }
+}
+
+/**
+ * Sends echo requests to a port, which are addressed to all other ports, and wait for answers (forwarded at external port, echo replies at internal port)
+ * @param channel The channel
+ * @param sourceMac The source MAC address
+ * @param sourceIp The source IP address
+ */
+export void SendEchoRequestsToPortAddressedToAllOtherPortsAndExpectForwarding(int channel, char sourceMac[], char sourceIp[])
+{
+  char destinationMac[18], destinationIp[16];
+  int i;
+  char allowedVlansIngress[256], allowedVlansEgress[256];
+  int allowedVlansConvertedIngress[128], allowedVlansConvertedEgress[128], allowedVlansConvertedBoth[128];
+  int vlanCountIngress, vlanCountEgress, vlanCountBoth;
+  
+  GetAllowedVlanIdsFromChannel(syspar::TestPorts[i].Channel, allowedVlansIngress);
+  GetAllowedVlanIds(allowedVlansIngress, allowedVlansConvertedIngress, vlanCountIngress);
+  
+  for(i = 0; i < elcount(syspar::TestPorts); i++)
+  {
+    if(syspar::TestPorts[i].Channel != channel)
+    {
+      strncpy(destinationMac, syspar::TestPorts[i].MacAddressTesterSide, elcount(destinationMac));
+      strncpy(destinationIp, syspar::TestPorts[i].IpAddressTesterSide, elcount(destinationIp));
+      GetAllowedVlanIdsFromChannel(syspar::TestPorts[i].Channel, allowedVlansEgress);
+      GetAllowedVlanIds(allowedVlansEgress, allowedVlansConvertedEgress, vlanCountEgress);
+      vlanCountBoth = Intersect(allowedVlansConvertedIngress, vlanCountIngress, allowedVlansConvertedEgress, vlanCountEgress, allowedVlansConvertedBoth);
+      if(vlanCountBoth == 0)
+      {
+        continue;
+      }
+      
+      if(allowedVlansConvertedBoth[0] == 0)
+      {
+       SendUntaggedEchoRequest(channel, sourceMac, destinationMac, sourceIp, destinationIp);
+      }
+      else
+      {
+        SendSingleTaggedEchoRequest(channel, sourceMac, destinationMac, sourceIp, destinationIp, allowedVlansConvertedBoth[0]);
+      }
+      WaitForEchoRequest(syspar::ParamListenTimeMs, syspar::TestPorts[i].Channel, sourceMac, destinationMac, sourceIp, destinationIp);
+    }
+  }
+  for(i = 0; i < elcount(syspar::Addresses); i++)
+  {
+    if(syspar::Addresses[i].UsedByDut == 1)
+    {
+      strncpy(destinationMac, syspar::Addresses[i].MacAddress, elcount(destinationMac));
+      strncpy(destinationIp, syspar::Addresses[i].IpAddr, elcount(destinationIp));
+      SendUntaggedEchoRequest(channel, sourceMac, destinationMac, sourceIp, destinationIp);
+      WaitForEchoReply(syspar::ParamListenTimeMs, channel, destinationMac, sourceMac, destinationIp, sourceIp);
+    }
+  }
+}
+
+/**
+ * Sends echo requests to all ports which are addressed to one port and don't expect forwarding
+ * @param channel The channel
+ */
+export void SendEchoRequestsToAllPortsAddressedToOnePortAndDontExpectedForwarding(int channel)
+{
+  int i;
+  char destinationMac[18], destinationIp[16];
+  char allowedVlansIngress[256], allowedVlansEgress[256], allowedVlansBoth[256];
+  int allowedVlansConvertedIngress[256], allowedVlansConvertedEgress[256], allowedVlansConvertedBoth[256];
+  int vlanCountIngress, vlanCountEgress, vlanCountBoth;
+  
+  GetMacAddressFromChannel(channel, destinationMac);
+  GetIpAddressFromChannel(channel, destinationIp);
+  GetAllowedVlanIdsFromChannel(channel, allowedVlansEgress);
+  GetAllowedVlanIds(allowedVlansEgress, allowedVlansConvertedEgress, vlanCountEgress);
+  
+  for(i = 0; i < elcount(syspar::TestPorts); i++)
+  {
+    if(syspar::TestPorts[i].Channel != channel)
+    {
+     GetAllowedVlanIdsFromChannel(channel, allowedVlansIngress);
+     GetAllowedVlanIds(allowedVlansIngress, allowedVlansConvertedIngress, vlanCountIngress);
+     vlanCountBoth = Intersect(allowedVlansConvertedEgress, vlanCountEgress, allowedVlansConvertedIngress, vlanCountIngress, allowedVlansConvertedBoth);
+     if(vlanCountBoth == 0)
+     {
+       continue;
+     }
+      
+     if(allowedVlansConvertedBoth[0] == 0)
+     {
+      SendUntaggedEchoRequest(syspar::TestPorts[i].Channel, syspar::TestPorts[i].MacAddressTesterSide, destinationMac, syspar::TestPorts[i].IpAddressTesterSide, destinationIp);
+     }
+     else
+     {
+      SendSingleTaggedEchoRequest(syspar::TestPorts[i].Channel, syspar::TestPorts[i].MacAddressTesterSide, destinationMac, syspar::TestPorts[i].IpAddressTesterSide, destinationIp, allowedVlansConvertedBoth[0]);
+     } 
+     WaitForUnexpectedEchoRequest(syspar::ParamListenTimeMs, channel, syspar::TestPorts[i].MacAddressTesterSide, destinationMac, syspar::TestPorts[i].IpAddressTesterSide, destinationIp);
+    }
+  }
+}
+
+/**
+ * Sends echo requests to all ports which are addressed to one port and expect forwarding
+ * @param channel The channel
+ */
+export void SendEchoRequestsToAllPortsAddressedToOnePortAndExpectedForwarding(int channel)
+{
+  int i;
+  char destinationMac[18], destinationIp[16];
+  int allowedVlansConverted[128];
+  char allowedVlans[256];
+  int vlanCount;
+  
+  GetMacAddressFromChannel(channel, destinationMac);
+  GetIpAddressFromChannel(channel, destinationIp);
+  GetAllowedVlanIdsFromChannel(channel, allowedVlans);
+  GetAllowedVlanIds(allowedVlans, allowedVlansConverted, vlanCount);
+  for(i = 0; i < elcount(syspar::TestPorts); i++)
+  {
+    if(syspar::TestPorts[i].Channel != channel)
+    {
+     if(allowedVlansConverted[0] == 0)
+     {
+      SendUntaggedEchoRequest(syspar::TestPorts[i].Channel, syspar::TestPorts[i].MacAddressTesterSide, destinationMac, syspar::TestPorts[i].IpAddressTesterSide, destinationIp);
+     }
+     else
+     {
+      SendSingleTaggedEchoRequest(syspar::TestPorts[i].Channel, syspar::TestPorts[i].MacAddressTesterSide, destinationMac, syspar::TestPorts[i].IpAddressTesterSide, destinationIp, allowedVlansConverted[0]);
+     } 
+     WaitForEchoRequest(syspar::ParamListenTimeMs, channel, syspar::TestPorts[i].MacAddressTesterSide, destinationMac, syspar::TestPorts[i].IpAddressTesterSide, destinationIp);
+    }
+  }
+}
+
+/**
+ * Sends tagged UDP messages with generated MAC source addressses (need for Address_Learning_with_tagged_frames_at_external_ports)
+ * @param amount The amount of messages
+ * @param channel The channel
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The source IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ */
+export void SendTaggedUdpMessagesWithDifferentMacSourceAddresses(int amount, int channel, char destinationMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort)
+{
+  int i;
+  char sourceMac[18], allowedVlans[128];
+  int allowedVlansConverted[32];
+  qword macCounter;
+  int vlanCount, sentVlan;
+  macCounter = 1;
+  
+  for(i = 0; i < amount; i++)
+  {
+    ethGetMacAddressAsString(macCounter, sourceMac, elcount(sourceMac));
+    macCounter++;
+    GetAllowedVlanIdsFromChannel(channel, allowedVlans);
+    GetAllowedVlanIds(allowedVlans, allowedVlansConverted, vlanCount);
+    sentVlan = GetFirstElementFromArrayNotZero(allowedVlansConverted, vlanCount);
+    if(sentVlan == -1)
+    {
+      teststep("SendTaggedUdpMessagesWithDifferentMacSourceAddresses", "No VLAN defined for channel %d, sending untagged messages instead", channel);
+      SendUntaggedUdpMessage(channel, sourceMac, destinationMac, sourceIp, destinationIp, sourcePort, destinationPort);
+    }
+    else
+    {
+      SendTaggedUdpMessage(channel, sourceMac, destinationMac, sourceIp, destinationIp, sourcePort, destinationPort, sentVlan);
+    }
+  }
+}
+
+/**
+ * Sends untagged UDP messages with generated MAC source addressses and wait for an answer
+ * @param amount The amount of messages
+ * @param channel The channel
+ * @param channelForAnswer The channel on which the answer is expected
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The source IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ */
+export void SendUntaggedUdpMessagesWithDifferentMacSourceAddressesAndWaitForAnswer(int timeout, int amount, int channel, int channelForAnswer, char sourceMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort)
+{
+  int i;
+  char destinationMac[18];
+  qword macCounter;
+  char allowedVlans[256];
+  int allowedVlansConverted[128];
+  int vlanCount;
+  macCounter = 1;
+  
+  for(i = 0; i < amount; i++)
+  {
+    ethGetMacAddressAsString(macCounter, destinationMac, elcount(destinationMac));
+    macCounter++;
+    GetAllowedVlanIdsFromChannel(channelForAnswer, allowedVlans);
+    GetAllowedVlanIds(allowedVlans, allowedVlansConverted, vlanCount);
+    if(IsInArray(0, allowedVlansConverted, vlanCount))
+    {
+      SendUntaggedUdpMessage(channel, sourceMac, destinationMac, sourceIp, destinationIp, sourcePort, destinationPort);
+      WaitForUdpMessageOnlyOnChannel(timeout, channelForAnswer, sourceMac, destinationMac, sourceIp, destinationIp, sourcePort, destinationPort);
+    }
+    else
+    {
+      testStep("SendUntaggedUdpMessagesWithDifferentMacSourceAddressesAndWaitForAnswer", "Untagged VLAN not configured for channel %d, skipping sending untagged message (step 4)", channelForAnswer);
+    }
+  }
+}
+
+/**
+ * Sends tagged UDP messages with generated MAC source addressses and wait for an answer
+ * @param amount The amount of messages
+ * @param channel The channel
+ * @param channelForAnswer The channel on which the answer is expected
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The source IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ */
+export void SendTaggedUdpMessagesWithDifferentMacSourceAddressesAndWaitForAnswer(int timeout, int amount, int channel, int channelForAnswer, char destinationMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort)
+{
+  int i;
+  char sourceMac[18], allowedVlans[128];
+  int allowedVlansConverted[32];
+  int vlanCount, sentVlan;
+  qword macCounter;
+  macCounter = 1;
+  
+  for(i = 0; i < amount; i++)
+  {
+    ethGetMacAddressAsString(macCounter, sourceMac, elcount(sourceMac));
+    macCounter++;
+    GetAllowedVlanIdsFromChannel(channelForAnswer, allowedVlans);
+    GetAllowedVlanIds(allowedVlans, allowedVlansConverted, vlanCount);
+    sentVlan = GetFirstElementFromArrayNotZero(allowedVlansConverted, vlanCount);
+    if(sentVlan == -1)
+    {
+      testStep("SendTaggedUdpMessagesWithDifferentMacSourceAddressesAndWaitForAnswer", "No VLAN tag configured for channel %d, skipping sending tagged message (teststep 6)");
+      continue;
+    }
+    SendTaggedUdpMessage(channel, sourceMac, destinationMac, sourceIp, destinationIp, sourcePort, destinationPort, sentVlan);
+    WaitForUdpMessageOnlyOnChannel(timeout, channelForAnswer, sourceMac, destinationMac, sourceIp, destinationIp, sourcePort, destinationPort);
+  }
+}
+
+/**
+ * Sends tagged UDP messages to generated MAC source addressses and wait for an answer
+ * @param amount The amount of messages
+ * @param channel The channel
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The source IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ */
+export void SendTaggedUdpMessagesToGeneratedMacAddressesAndWaitForAnswer(int channel, int timeout, char sourceMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort)
+{
+  int i;
+  int channelOfAnswer;
+  char allowedVlans[128];
+  int vlanCount, sentVlan;
+  int allowedVlansConverted[32];
+  
+ for(i = 0; i < gSentFramesIndex; i++)
+  {
+    GetAllowedVlanIdsFromChannel(channel, allowedVlans);
+    GetAllowedVlanIds(allowedVlans, allowedVlansConverted, vlanCount);
+    sentVlan = allowedVlansConverted[vlanCount-1];
+    SendTaggedUdpMessage(channel, sourceMac, gSentFrames[i].macAddress, sourceIp, destinationIp, sourcePort, destinationPort, sentVlan);
+    
+    channelOfAnswer = GetChannelFromDutChannel(gSentFrames[i].channel);
+    GetAllowedVlanIdsFromChannel(channelOfAnswer, allowedVlans);
+    GetAllowedVlanIds(allowedVlans, allowedVlansConverted, vlanCount);
+    if(IsInArray(sentVlan, allowedVlansConverted, vlanCount))
+    {
+      WaitForUdpMessageOnlyOnChannel(timeout, channelOfAnswer, sourceMac, gSentFrames[i].macAddress, sourceIp, destinationIp, sourcePort, destinationPort);
+    }
+    else
+    {
+      WaitForUnexpectedUdpMessageOnAllChannels(timeout, sourceMac, gSentFrames[i].macAddress, sourceIp, destinationIp, sourcePort, destinationPort);
+    }
+  }
+}
+
+export void SendUdpMessageWithCorrectVlan(int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort, char allowedVlansEgress[])
+{
+  char allowedVlansIngress[256];
+  int allowedVlansConvertedEgress[128], allowedVlansConvertedIngress[128], allowedVlansConvertedBoth[128];
+  int vlanCountIngress, vlanCountEgress, vlanCountBoth;
+  
+  GetAllowedVlanIds(allowedVlansEgress, allowedVlansConvertedEgress, vlanCountEgress);
+  
+  GetAllowedVlanIdsFromChannel(channel, allowedVlansIngress);
+  GetAllowedVlanIds(allowedVlansIngress, allowedVlansConvertedIngress, vlanCountIngress);
+  vlanCountBoth = Intersect(allowedVlansConvertedIngress, vlanCountIngress, allowedVlansConvertedEgress, vlanCountEgress, allowedVlansConvertedBoth);
+  
+  if(vlanCountBoth == 0)
+  {
+    gMessageSent = kFalse;
+    return;
+  }
+  gMessageSent = kTrue;
+  if(allowedVlansConvertedBoth[0] == 0)
+  {
+    SendUntaggedUdpMessage(channel, sourceMac, destinationMac, sourceIp, destinationIp, sourcePort, destinationPort);
+  }
+  else
+  {
+    SendTaggedUdpMessage(channel, sourceMac, destinationMac, sourceIp, destinationIp, sourcePort, destinationPort, allowedVlansConvertedBoth[0]);
+  }
+}
+
+/**
+ * Sends double tagged UDP message
+ * @param channel The channel
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The source IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ * @param vlanIdInner The vlan ID of the inner Ethernet tag
+ * @param vlanIdInner The vlan ID of the outer Ethernet tag
+ */
+export testfunction SendDoubleTaggedUdpMessage(int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort, int vlanIdInner, int vlanIdOuter)
+{
+  InternalSendUdpMessage(channel, sourceMac, destinationMac, sourceIp, destinationIp, sourcePort, destinationPort, vlanIdInner, vlanIdOuter);
+}
+
+/**
+ * Sends tagged UDP message
+ * @param channel The channel
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The source IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ * @param vlanId The vlan ID of the Ethernet tag
+ */
+export testfunction SendTaggedUdpMessage(int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort, int vlanId)
+{
+  InternalSendUdpMessage(channel, sourceMac, destinationMac, sourceIp, destinationIp, sourcePort, destinationPort, vlanId, -1);
+}
+
+/**
+ * Sends untagged UDP message
+ * @param channel The channel
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The source IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ */
+export testfunction SendUntaggedUdpMessage(int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort)
+{
+  InternalSendUdpMessage(channel, sourceMac, destinationMac, sourceIp, destinationIp, sourcePort, destinationPort, -1, -1);
+}
+
+/**
+ * Sends double tagged UDP message
+ * @param channel The channel
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The source IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ * @param vlanIdInner The vlan ID of the inner Ethernet tag. If -1, inner tag will be ommitted
+ * @param vlanIdInner The vlan ID of the outer Ethernet tag. If -1, outer tag will be ommitted
+ */
+void InternalSendUdpMessage(int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort, int vlanIdInner, int vlanIdOuter)
+{
+  long packetHandle;
+  char channelName[11];
+  byte dummyData[10];
+  int i;
+  
+  for(i = 0; i < elcount(dummyData); i++)
+  {
+    dummyData[i] = i;
+  }
+  
+  snprintf(channelName, elcount(channelName), "Ethernet_%d", channel);
+  setBusContext(GetBusNameContext(channelName));
+  
+  packetHandle = EthInitPacket("udp");
+  EthSetTokenInt64(packetHandle, "eth", "source", ConvertMacAddressStringToInt64(sourceMac));
+  EthSetTokenInt64(packetHandle, "eth", "destination", ConvertMacAddressStringToInt64(destinationMac));
+  if(vlanIdInner >= 0)
+  {
+    EthAddToken(packetHandle, "eth", "vlanTpid");
+    EthSetTokenInt64(packetHandle, "eth", "vlanId", vlanIdInner);
+  }
+  if(vlanIdOuter >= 0)
+  {
+    EthAddToken(packetHandle, "eth", "vlan1Tpid");
+    EthSetTokenInt64(packetHandle, "eth", "vlan1Id", vlanIdOuter);
+  }
+  EthSetTokenInt64(packetHandle, "ipv4", "source", ConvertIpAddressStringToInt64(sourceIp));
+  EthSetTokenInt64(packetHandle, "ipv4", "destination", ConvertIpAddressStringToInt64(destinationIp));
+  EthSetTokenInt64(packetHandle, "udp", "source", sourcePort);
+  EthSetTokenInt64(packetHandle, "udp", "destination", destinationPort);
+  EthResizeToken(packetHandle, "udp", "data", elcount(dummyData)*8);
+  EthSetTokenData(packetHandle, "udp", "data", elcount(dummyData), dummyData);
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(packetHandle, "eth", "vlanId");
+    EthSetTokenInt(packetHandle, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+
+  EthCompletePacket(packetHandle);
+  EthOutputPacket(packetHandle);
+  EthReleasePacket(packetHandle);
+}
+
+/**
+ * Waits for UDP message
+ * @param timeout The timeout
+ * @param channel The channel
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The destination IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ */
+export testfunction WaitForUdpMessage(int timeout, int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort)
+{
+  PrepareWaitForEthernet(destinationMac, sourceMac);
+  PrepareWaitForIpv4(destinationIp, sourceIp, 0x11);
+  PrepareWaitForUdp(destinationPort, sourcePort);
+  
+  StartObservationOfIncomingPackets(channel, kAnswerExpected);
+  if(WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForUdpMessage", "UDP message received on channel %d", channel);
+  }
+  
+  else
+  {
+    testStepFail("WaitForUdpMessage", "No UDP message received on channel %d", channel);
+  }
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an unexpected UDP message
+ * @param timeout The timeout
+ * @param channel The channel
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The destination IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ */
+export testfunction WaitForUnexpectedUdpMessage(int timeout, int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort)
+{
+  PrepareWaitForEthernet(destinationMac, sourceMac);
+  PrepareWaitForIpv4(destinationIp, sourceIp, 0x11);
+  PrepareWaitForUdp(destinationPort, sourcePort);
+  
+  StartObservationOfIncomingPackets(channel, kNoAnswerExpected);
+  if(WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForUdpMessage", "No UDP message received on channel %d", channel);
+  }
+  
+  else
+  {
+    testStepFail("WaitForUdpMessage", "UDP message received on channel %d", channel);
+  }
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an unexpected UDP message
+ * @param timeout The timeout
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The destination IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ */
+export testfunction WaitForUnexpectedUdpMessageOnAllChannels(int timeout, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort)
+{
+  long i;
+  PrepareWaitForEthernet(destinationMac, sourceMac);
+  PrepareWaitForIpv4(destinationIp, sourceIp, 0x11);
+  PrepareWaitForUdp(destinationPort, sourcePort);
+ 
+  for(i = 1; i < gMaximumChannelNumber; i++)
+  {
+    gExpectedMessagesPerChannel[i] = 0;
+  }
+  StartObservationOfIncomingPackets(kNoCheck);
+  if(WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForUdpMessage", "No UDP message received");
+  }
+  
+  else
+  {
+    testStepFail("WaitForUdpMessage", "UDP message received");
+  }
+}
+  
+/**
+ * Waits for UDP message on all channels
+ * @param timeout The timeout
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The destination IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ */
+export testfunction WaitForUdpMessageOnAllChannels(int timeout, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort)
+{
+  long i;
+  
+  PrepareWaitForEthernet(destinationMac, sourceMac);
+  PrepareWaitForIpv4(destinationIp, sourceIp, 0x11);
+  PrepareWaitForUdp(destinationPort, sourcePort);
+  
+  for(i = 0; i <= gMaximumChannelNumber; i++)
+  {
+    gExpectedMessagesPerChannel[i] = 1;
+  }
+  StartObservationOfIncomingPackets(kNoCheck);
+  if(WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForUdpMessageOnAllChannels", "UDP message received on all channels");
+  }
+  
+  else
+  {
+    testStepFail("WaitForUdpMessageOnAllChannels", "No UDP message received on all channels");
+  }
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for UDP message only on a certain channel
+ * @param timeout The timeout
+ * @param channel The channel
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The destination IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ */
+export testfunction WaitForUdpMessageOnlyOnChannel(int timeout, int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort)
+{
+  long i;
+  
+  PrepareWaitForEthernet(destinationMac, sourceMac);
+  PrepareWaitForIpv4(destinationIp, sourceIp, 0x11);
+  PrepareWaitForUdp(destinationPort, sourcePort);
+  
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    gExpectedMessagesPerChannel[i] = (i == channel) ? 1 : 0;
+  }
+  StartObservationOfIncomingPackets(kNoCheck);
+  if(WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForUdpMessageOnAllChannels", "UDP message received only on channel %d", channel );
+  }
+  
+  else
+  {
+    testStepFail("WaitForUdpMessageOnAllChannels", "No UDP message received on channel %d or received message on any other channel", channel);
+  }
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an encrypted frame only on a certain channel (no encrypted nor unecrypted frame expected on other channesl)
+ * @param timeout The timeout
+ * @param channel The channel
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ */
+export testfunction WaitForEncryptedFrameOnlyOnChannel(int timeout, int channel, char sourceMac[], char destinationMac[])
+{
+  long i, j;
+  
+  if(!gMessageSent)
+  {
+    return;
+  }
+  
+  PrepareWaitForEthernet(destinationMac, sourceMac);
+  InternalAddExpectedParameter("eth", "type", 0x88E5);
+  InternalAddExpectedParameter("eth", "destination", ConvertMacAddressStringToInt64(destinationMac), kEquals, 1);
+  InternalAddExpectedParameter("eth", "source", ConvertMacAddressStringToInt64(sourceMac), kEquals, 1);
+  
+  j = 1;
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    if(i == channel)
+    {
+      gExpectedMessagesPerChannel[i] = 1;
+    }
+    else
+    {
+      gExpectedMessagesPerChannel[i] = 0;
+      gExpectedParametersChannel[j] = i;
+      CopyExpectedParameters(1, j);
+      j++;
+    }
+  }
+  
+  gCheckMacSec = kTrue;
+  StartObservationOfIncomingPackets(kNoCheck);
+  if(WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForEncryptedFrameOnlyOnChannel", "Encrypted frame received only on channel %d", channel );
+  }
+  
+  else
+  {
+    testStepFail("WaitForEncryptedFrameOnlyOnChannel", "No encrypted frame received on channel %d or received message on any other channel", channel);
+  }
+  gCheckMacSec = kFalse;
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for UDP message on all host channels
+ * @param timeout The timeout
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The destination IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ */
+export testfunction WaitForUdpMessageOnHostChannels(int timeout, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int sourcePort, int destinationPort)
+{
+  long i;
+  char type[8];
+  
+  PrepareWaitForEthernet(destinationMac, sourceMac);
+  PrepareWaitForIpv4(destinationIp, sourceIp, 0x11);
+  PrepareWaitForUdp(destinationPort, sourcePort);
+  
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    GetTypeFromChannel(i, type);
+    if(strncmp(type, "Host", elcount(type)) == 0)
+    {
+      gExpectedMessagesPerChannel[i] = 1;
+    }
+    if(strncmp(type, "Querier", elcount(type)) == 0)
+    {
+      gExpectedMessagesPerChannel[i] = 0;
+    }
+    
+  }
+  
+  StartObservationOfIncomingPackets(kNoCheck);
+  if(WaitForIncomingPacket(kNoCheck, timeout) == 0)
+  {
+    testStepPass("WaitForUdpMessageOnHostChannels", "UDP messages received on Host channels");
+  }
+  
+  else
+  {
+    testStepFail("WaitForUdpMessageOnHostChannels", "No Udp messages received on Host channels");
+  }
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for expected or unexpected UDP message on host channel depending whether the VLAN ID is valid or invalid
+ * @param timeout The timeout
+ * @param channel The channel
+ * @param vlanId1 The first VLAN ID
+ * @param vlanId2 The second VLAN ID
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The destination IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ */
+export testfunction WaitForUdpMessageOnHostChannelsDependingOnVlan(
+  int timeout, 
+  int channel, 
+  int vlanId1, 
+  int vlanId2, 
+  char sourceMac[], 
+  char destinationMac[], 
+  char sourceIp[], 
+  char destinationIp[], 
+  int sourcePort, 
+  int destinationPort)
+{
+  long i;
+  char type[8], allowedVlanIdsIngress[256], allowedVlanIdsEgress[256];
+  int allowedVlanIdsConvertedIngress[128], allowedVlanIdsConvertedEgress[128];
+  int vlanCountIngress, vlanCountEgress;
+  
+  PrepareWaitForEthernet(destinationMac, sourceMac);
+  PrepareWaitForIpv4(destinationIp, sourceIp, 0x11);
+  PrepareWaitForUdp(destinationPort, sourcePort);
+  
+  GetAllowedVlanIdsFromChannel(channel, allowedVlanIdsIngress);
+  GetAllowedVlanIds(allowedVlanIdsIngress, allowedVlanIdsConvertedIngress, vlanCountIngress);
+  
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    GetTypeFromChannel(i, type);
+    GetAllowedVlanIdsFromChannel(i, allowedVlanIdsEgress);
+    GetAllowedVlanIds(allowedVlanIdsEgress, allowedVlanIdsConvertedEgress, vlanCountEgress);
+    
+    if(((IsInArray(vlanId1, allowedVlanIdsConvertedIngress, vlanCountIngress) == kTrue)  ||
+        (IsInArray(vlanId2, allowedVlanIdsConvertedIngress, vlanCountIngress) == kTrue)) &&
+       ((IsInArray(vlanId1, allowedVlanIdsConvertedEgress, vlanCountEgress) == kTrue)  ||
+        (IsInArray(vlanId2, allowedVlanIdsConvertedEgress, vlanCountEgress) == kTrue)) &&
+         strncmp(type, "Host", elcount(type)) == 0)
+    {
+      gExpectedMessagesPerChannel[i] = 1;
+    }
+    else
+    {
+      gExpectedMessagesPerChannel[i] = 0;
+    } 
+  }
+  
+  StartObservationOfIncomingPackets(kNoCheck);
+  if(WaitForIncomingPacket(kNoCheck, timeout) == 0)
+  {
+    testStepPass("WaitForUdpMessageOnHostChannelsDependingOnVlan", "UDP messages received on Host channels");
+  }
+  
+  else
+  {
+    testStepFail("WaitForUdpMessageOnHostChannelsDependingOnVlan", "No Udp messages received on Host channels");
+  }
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for expected or unexpected UDP message on host channel depending whether the VLAN ID is valid or invalid
+ * @param timeout The timeout
+ * @param channel The channel
+ * @param vlanId The VLAN ID
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The destination IP address
+ * @param sourcePort The UDP source port
+ * @param destinationPort The UDP destination port
+ */
+export testfunction WaitForUdpMessageOnHostChannelsDependingOnVlan(
+  int timeout, 
+  int channel, 
+  int vlanId, 
+  char sourceMac[], 
+  char destinationMac[], 
+  char sourceIp[], 
+  char destinationIp[], 
+  int sourcePort, 
+  int destinationPort)
+{
+  long i;
+  char type[8], allowedVlanIdsIngress[256], allowedVlanIdsEgress[256];
+  int allowedVlanIdsConvertedIngress[128], allowedVlanIdsConvertedEgress[128];
+  int vlanCountIngress, vlanCountEgress;
+  
+  PrepareWaitForEthernet(destinationMac, sourceMac);
+  PrepareWaitForIpv4(destinationIp, sourceIp, 0x11);
+  PrepareWaitForUdp(destinationPort, sourcePort);
+  
+  GetAllowedVlanIdsFromChannel(channel, allowedVlanIdsIngress);
+  GetAllowedVlanIds(allowedVlanIdsIngress, allowedVlanIdsConvertedIngress, vlanCountIngress);
+  
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    GetTypeFromChannel(i, type);
+    GetAllowedVlanIdsFromChannel(i, allowedVlanIdsEgress);
+    GetAllowedVlanIds(allowedVlanIdsEgress, allowedVlanIdsConvertedEgress, vlanCountEgress);
+    if((IsInArray(vlanId, allowedVlanIdsConvertedIngress, vlanCountIngress) == kTrue) &&
+       (IsInArray(vlanId, allowedVlanIdsConvertedEgress, vlanCountEgress) == kTrue) &&
+        strncmp(type, "Host", elcount(type)) == 0)
+    {
+      gExpectedMessagesPerChannel[i] = 1;
+    }
+    else
+    {
+      gExpectedMessagesPerChannel[i] = 0;
+    } 
+  }
+  
+  StartObservationOfIncomingPackets(kNoCheck);
+  if(WaitForIncomingPacket(kNoCheck, timeout) == 0)
+  {
+    testStepPass("WaitForUdpMessageOnHostChannelsDependingOnVlan", "UDP messages received on Host channels");
+  }
+  
+  else
+  {
+    testStepFail("WaitForUdpMessageOnHostChannelsDependingOnVlan", "No Udp messages received on Host channels");
+  }
+  InternalClearAllParameters();
+}
+
+/**
+ * Send two untagged and two tagged frames to the given port. Fails if there are less than two vlans configured.
+ * The source MAC addresses and channel pair will be saved in gSentFrames.
+ * @param channel The channel number of the port.
+ */
+export void Send2FramesPerVlanId(int channel, char DUTChannel[])
+{
+  char generatedMac[20];
+  char vlanIdsString[50];
+  int vlanIds[30];
+  int vlanIdsCounter = 0;
+  int i, j;
+  int maxIndex = 0;
+  const int kFramesPerVlan = 2;
+  
+  GetAllowedVlanIdsFromChannel(channel, vlanIdsString);
+  GetAllowedVlanIds(vlanIdsString, vlanIds, vlanIdsCounter);
+  
+  for(i = 0; i < vlanIdsCounter; i++)
+  {
+    for(j = 0; j < kFramesPerVlan; j++)
+    {
+      GenerateMAC(generatedMac);
+      if(vlanIds[i] == 0)
+      {
+        SendUntaggedEchoRequest(channel, generatedMac, syspar::MacAddressZeros, syspar::AllZeroIPAddress, syspar::AllZeroIPAddress);
+      }
+      else
+      {
+        SendSingleTaggedEchoRequest(channel, generatedMac, syspar::MacAddressZeros, syspar::AllZeroIPAddress, syspar::AllZeroIPAddress, vlanIds[i]);
+      }
+    }
+    AddSentFrame(DUTChannel, generatedMac);
+  }
+}
+
+/**
+ * Sends an untagged arp request
+ * @param channel The channel
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The destination IP address
+ */
+export testfunction SendUntaggedArpRequest(int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[])
+{
+  InternalSendArpRequest(channel, sourceMac, destinationMac, sourceIp, destinationIp, -1, -1);
+}
+
+/**
+ * Sends a double tagged arp request
+ * @param channel The channel
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The destination IP address
+ * @param vlanIdInner The vlan ID of the inner ethernet tag
+ * @param vlanIdOuter The vlan ID of the outer ethernet tag
+ */
+export testfunction SendDoubleTaggedArpRequest(
+  int channel,
+  char sourceMac[],
+  char destinationMac[],
+  char sourceIp[],
+  char destinationIp[],
+  int vlanIdInner,
+  int vlanIdOuter)
+{
+  InternalSendArpRequest(channel, sourceMac, destinationMac, sourceIp, destinationIp, vlanIdInner, vlanIdOuter);
+}
+
+/**
+ * Sends a single tagged arp request
+ * @param channel The channel
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The destination IP address
+ * @param vlanId The vlan ID of the inner ethernet tag
+ */
+export testfunction SendSingleTaggedArpRequest(int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int vlanId)
+{
+  InternalSendArpRequest(channel, sourceMac, destinationMac, sourceIp, destinationIp, vlanId, -1);
+}
+
+/**
+ * Sends an arp request
+ * @param channel The channel
+ * @param sourceMac The source MAC address
+ * @param destinationMac The destination MAC address
+ * @param sourceIp The source IP address
+ * @param destinationIp The destination IP address
+ * @param vlanIdInner The vlan ID of the inner ethernet tag. If -1, tag will be omitted
+ * @param vlanIdOuter The vlan ID of the outer ethernet tag. If -1, tag will be omitted
+ */
+void InternalSendArpRequest(int channel, char sourceMac[], char destinationMac[], char sourceIp[], char destinationIp[], int vlanIdInner, int vlanIdOuter)
+{
+  long packetHandle;
+  char channelName[11];
+  
+  snprintf(channelName, elcount(channelName), "Ethernet_%d", channel);
+  setBusContext(GetBusNameContext(channelName));
+  
+  packetHandle = EthInitPacket("arp");
+  EthSetTokenInt64(packetHandle, "eth", "source", ConvertMacAddressStringToInt64(sourceMac));
+  EthSetTokenInt64(packetHandle, "eth", "destination", ConvertMacAddressStringToInt64(syspar::MacAddressBroadcast));
+  EthSetTokenInt64(packetHandle, "arp", "hwType", 1);
+  EthSetTokenInt64(packetHandle, "arp", "protType", 0x800);
+  EthSetTokenInt64(packetHandle, "arp", "hwSize", 6);
+  EthSetTokenInt64(packetHandle, "arp", "protSize", 4);
+  EthSetTokenInt64(packetHandle, "arp", "operation", 1);
+  EthSetTokenInt64(packetHandle, "arp", "hwSourceAddr", ConvertMacAddressStringToInt64(sourceMac));
+  EthSetTokenInt64(packetHandle, "arp", "protSourceAddr", ConvertIpAddressStringToInt64(sourceIp));
+  EthSetTokenInt64(packetHandle, "arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(destinationMac));
+  EthSetTokenInt64(packetHandle, "arp", "protDestinationAddr", ConvertIpAddressStringToInt64(destinationIp));
+  
+  if(vlanIdInner >= 0)
+  {
+    EthAddToken(packetHandle, "eth", "vlanTpid");
+    EthSetTokenInt(packetHandle, "eth", "vlanId", vlanIdInner);
+  }
+  if(vlanIdOuter >= 0)
+  {
+    EthAddToken(packetHandle, "eth", "vlan1Tpid");
+    EthSetTokenInt(packetHandle, "eth", "vlan1Id", vlanIdOuter);
+  }
+  
+  EthCompletePacket(packetHandle);
+  EthOutputPacket(packetHandle);
+  EthReleasePacket(packetHandle);
+}
+
+/**
+ * Starts observation of all ports for ICMP messages
+ * @param srcMac The source MAC address of the expected packet
+ * @param destMac The destination MAC address of the expected packet
+ * @param srcIp The source IP address of the expected packet
+ * @param destIp The source IP address of the expected packet
+ * @param icmpType The ICMP type of the expected message
+ */
+export testfunction StartObservationOfAllPorts(char srcMac[], char destMac[], char srcIp[], char destIp[], char icmpType[])
+{
+  long i;
+  
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 1);
+  PrepareWaitForIcmp(icmpType);
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    gExpectedMessagesPerChannel[i] = 0;
+  }
+  StartObservationOfIncomingPackets(kNoCheck);
+}
+
+/**
+ * Sends ICMP echo requests
+ * @param channel The channel
+ * @param amount The amount of messages which should be sent
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export void SendEchoRequests(int channel, int amount, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  long i;
+  for(i = 0; i < amount; i++)
+  {
+    SendUntaggedEchoRequest(channel, srcMac, destMac, srcIp, destIp);
+  }
+}
+
+/**
+ * Checks if frames are forwarded after calling StartObservationOfAllPorts
+ * @param timeout The timeout
+ */
+export testfunction CheckIfFramesAreBeingForwarded(int timeoutMilliseconds)
+{
+  if(WaitForIncomingPacket(kNoAnswerExpected, timeoutMilliseconds) == 0)
+  {
+    testStepPass("All frame were being blocked (none of the frames sent in step 2 was captured on any egress port)");
+  }
+  else
+  {
+    testStepFail("Not all frame were being blocked (at least one of the frames sent in step 2 was captured on any egress port)");
+  }
+}
+
+/**
+ * Waits for echo requests except on a given channel 
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel on which should not be checked for echo request
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForEchoRequestExceptOnCertainChannel(int timeout, int channel, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  long i;
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(syspar::Wildcard, syspar::Wildcard, 0x01);
+  PrepareWaitForIcmp("8");
+  
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    gExpectedMessagesPerChannel[i] = 1;
+  }
+  StartObservationOfIncomingPackets(channel, kNoAnswerExpected);
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForEchoRequest", "DUT sent echo requests on all channel except %d", channel);
+  }
+  
+  else
+  {
+    testStepFail("WaitForEchoRequest", "DUT did not send echo requests on all channel except %d", channel);
+  }
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for arp requests except on a given channel 
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel on which should not be checked for arp request
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForArpRequestExceptOnCertainChannel(int timeout, int channel, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  long i;
+  PrepareWaitForEthernet(syspar::MacAddressBroadcast, srcMac);
+  InternalAddExpectedParameter("eth", "type", 0x806);
+  InternalAddExpectedParameter("arp", "operation", 1, kEquals, 0);
+  InternalAddExpectedParameter("arp", "hwSourceAddr", ConvertMacAddressStringToInt64(srcMac), kEquals, 0);
+  InternalAddExpectedParameter("arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(destMac), kEquals, 0);
+  InternalAddExpectedParameter("arp", "protSourceAddr", ConvertIpAddressStringToInt64(srcIp), kEquals, 0);
+  InternalAddExpectedParameter("arp", "protDestinationAddr", ConvertIpAddressStringToInt64(destIp), kEquals, 0);
+  
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    gExpectedMessagesPerChannel[i] = 1;
+  }
+  StartObservationOfIncomingPackets(channel, kNoAnswerExpected);
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForEchoRequest", "DUT sent echo requests on all channel except %d", channel);
+  }
+  
+  else
+  {
+    testStepFail("WaitForEchoRequest", "DUT did not send echo requests on all channel except %d", channel);
+  }
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for echo requests. The expected channel is determined by vlan id depending on the vlan id
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param vlanId The VLAN ID 
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForEchoRequestDependingOnVlan(int timeout, int channel, int vlanId, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  char allowedVlanIdsIngress[256], allowedVlanIdsEgress[256];
+  int allowedVlanIdsIngressConverted[128], allowedVlanIdsEgressConverted[128];
+  int i;
+  int vlanCountIngress, vlanCountEgress;
+
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x01);
+  PrepareWaitForIcmp("8");
+  
+  GetAllowedVlanidsFromChannel(channel, allowedVlanIdsIngress);
+  GetAllowedVlanIds(allowedVlanIdsIngress, allowedVlanIdsIngressConverted, vlanCountIngress);
+  
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    GetAllowedVlanIdsFromChannel(i, allowedVlanIdsEgress);
+    GetAllowedVlanIds(allowedVlanIdsEgress, allowedVlanIdsEgressConverted, vlanCountEgress);
+    if(IsInArray(vlanId, allowedVlanIdsIngressConverted, vlanCountIngress) == kTrue && IsInArray(vlanId, allowedVlanIdsEgressConverted, vlanCountEgress) == kTrue && i != channel)
+    {
+      gExpectedMessagesPerChannel[i] = 1;
+    }
+    else
+    {
+      gExpectedMessagesPerChannel[i] = 0;
+    }
+  }
+  StartObservationOfIncomingPackets(kNoCheck);
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForEchoRequestDependingOnVlan", "ICMP echo requests received as expected.", channel);
+  }
+  
+  else
+  {
+    testStepFail("WaitForEchoRequestDependingOnVlan", "No ICMP echo requests received as expected.", channel);
+  }
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for arp request depending on the vlan id
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param vlanId The VLAN ID 
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForArpRequestDependingOnVlan(int timeout, int channel, int vlanId, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  char allowedVlanIdsIngress[256], allowedVlanIdsEgress[256];
+  int allowedVlanIdsConvertedIngress[128], allowedVlanIdsConvertedEgress[128];
+  int i;
+  int vlanCountIngress, vlanCountEgress;
+
+  PrepareWaitForEthernet(syspar::MacAddressBroadcast, srcMac);
+  InternalAddExpectedParameter("eth", "type", 0x0806);
+  InternalAddExpectedParameter("arp", "operation", 1, kEquals, 0);
+  InternalAddExpectedParameter("arp", "hwSourceAddr", ConvertMacAddressStringToInt64(srcMac), kEquals, 0);
+  InternalAddExpectedParameter("arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(destMac), kEquals, 0);
+  InternalAddExpectedParameter("arp", "protSourceAddr", ConvertIpAddressStringToInt64(srcIp), kEquals, 0);
+  InternalAddExpectedParameter("arp", "protDestinationAddr", ConvertIpAddressStringToInt64(destIp), kEquals, 0);
+  
+  GetAllowedVlanIdsFromChannel(channel, allowedVlanIdsIngress);
+  GetAllowedVlanIds(allowedVlanIdsIngress, allowedVlanIdsConvertedIngress, vlanCountIngress);
+  
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    GetAllowedVlanIdsFromChannel(i, allowedVlanIdsEgress);
+    GetAllowedVlanIds(allowedVlanIdsEgress, allowedVlanIdsConvertedEgress, vlanCountEgress);
+    if(IsInArray(vlanId, allowedVlanIdsConvertedIngress, vlanCountIngress) == kTrue &&
+       IsInArray(vlanId, allowedVlanIdsConvertedEgress, vlanCountEgress) == kTrue &&
+       i != channel)
+    {
+      gExpectedMessagesPerChannel[i] = 1;
+    }
+    else
+    {
+      gExpectedMessagesPerChannel[i] = 0;
+    }
+  }
+  StartObservationOfIncomingPackets(kNoCheck);
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForArpRequestDependingOnVlan", "ARP requests received as expected.", channel);
+  }
+  
+  else
+  {
+    testStepFail("WaitForArpRequestDependingOnVlan", "No ARP requests received as expected.", channel);
+  }
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for echo request. The expected channel is determined via the vlan id
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param vlanId1 The VLAN ID 
+ * @param vlanId2 The second VLAN ID 
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForEchoRequestDependingOnVlan(int timeout, int channel, int vlanId1, int vlanId2, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  char allowedVlanIdsIngress[256], allowedVlanIdsEgress[256];
+  int allowedVlanIdsIngressConverted[128], allowedVlanIdsEgressConverted[128];
+  int i;
+  int vlanCountIngress, vlanCountEgress;
+
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x01);
+  PrepareWaitForIcmp("8");
+  
+  GetAllowedVlanidsFromChannel(channel, allowedVlanIdsIngress);
+  GetAllowedVlanIds(allowedVlanIdsIngress, allowedVlanIdsIngressConverted, vlanCountIngress);
+  
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    GetAllowedVlanIdsFromChannel(i, allowedVlanIdsEgress);
+    GetAllowedVlanIds(allowedVlanIdsEgress, allowedVlanIdsEgressConverted, vlanCountEgress);
+    if((IsInArray(vlanId1, allowedVlanIdsEgressConverted, vlanCountEgress) == kTrue ||
+        IsInArray(vlanId2, allowedVlanIdsEgressConverted, vlanCountEgress) == kTrue) &&
+       (IsInArray(vlanId1, allowedVlanIdsIngressConverted, vlanCountIngress) == kTrue ||
+        IsInArray(vlanId2, allowedVlanIdsIngressConverted, vlanCountIngress) == kTrue) &&
+      i != channel)
+    {
+      gExpectedMessagesPerChannel[i] = 1;
+    }
+    else
+    {
+      gExpectedMessagesPerChannel[i] = 0;
+    }
+  }
+  StartObservationOfIncomingPackets(kNoCheck);
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForEchoRequestDependingOnVlan", "ICMP echo requests received as expected.", channel);
+  }
+  
+  else
+  {
+    testStepFail("WaitForEchoRequestDependingOnVlan", "No ICMP echo requests received as expected.", channel);
+  }
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for arp request. The expected channel is determined via the vlan id
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param vlanId1 The VLAN ID 
+ * @param vlanId2 The second VLAN ID 
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForArpRequestDependingOnVlan(int timeout, int channel, int vlanId1, int vlanId2, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  char allowedVlanIdsIngress[256], allowedVlanIdsEgress[256];
+  int allowedVlanIdsConvertedIngress[128], allowedVlanIdsConvertedEgress[128];
+  int i;
+  int vlanCountIngress, vlanCountEgress;
+  
+  PrepareWaitForEthernet(syspar::MacAddressBroadcast, srcMac);
+  InternalAddExpectedParameter("eth", "type", 0x0806);
+  InternalAddExpectedParameter("arp", "operation", 1, kEquals, 0);
+  InternalAddExpectedParameter("arp", "hwSourceAddr", ConvertMacAddressStringToInt64(srcMac), kEquals, 0);
+  InternalAddExpectedParameter("arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(destMac), kEquals, 0);
+  InternalAddExpectedParameter("arp", "protSourceAddr", ConvertIpAddressStringToInt64(srcIp), kEquals, 0);
+  InternalAddExpectedParameter("arp", "protDestinationAddr", ConvertIpAddressStringToInt64(destIp), kEquals, 0);
+  
+  GetAllowedVlanIdsFromChannel(channel, allowedVlanIdsIngress);
+  GetAllowedVlanIds(allowedVlanIdsIngress, allowedVlanIdsConvertedIngress, vlanCountIngress);
+  
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    GetAllowedVlanIdsFromChannel(i, allowedVlanIdsEgress);
+    GetAllowedVlanIds(allowedVlanIdsEgress, allowedVlanIdsConvertedEgress, vlanCountEgress);
+    if((IsInArray(vlanId1, allowedVlanIdsConvertedIngress, vlanCountIngress) == kTrue ||
+        IsInArray(vlanId2, allowedVlanIdsConvertedIngress, vlanCountIngress) == kTrue) &&
+       (IsInArray(vlanId1, allowedVlanIdsConvertedEgress, vlanCountEgress) == kTrue ||
+        IsInArray(vlanId2, allowedVlanIdsConvertedEgress, vlanCountEgress) == kTrue) &&
+        i != channel)
+    {
+      gExpectedMessagesPerChannel[i] = 1;
+    }
+    else
+    {
+      gExpectedMessagesPerChannel[i] = 0;
+    }
+  }
+  StartObservationOfIncomingPackets(kNoCheck);
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForArpRequestDependingOnVlan", "ARP requests received as expected.", channel);
+  }
+  
+  else
+  {
+    testStepFail("WaitForArpRequestDependingOnVlan", "No ARP requests received as expected.", channel);
+  }
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for echo reply and extracts the source MAC address
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export void WaitForEchoReplyAndExtractSourceMac(int timeout, int channel, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  InternalSetExtractedParameter("eth", "source", kExtractInt64);
+  WaitForEchoReply(timeout, channel, srcMac, destMac, srcIp, destIp);
+}
+
+/**
+ * Waits for echo reply
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForEchoReply(int timeout, int channel, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x01);
+  PrepareWaitForIcmp("0");
+  
+  StartObservationOfIncomingPackets(channel, kAnswerExpected);
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForEchoRequest", "ICMP echo reply receveid on channel %d", channel);
+  }
+  
+  else
+  {
+    testStepFail("WaitForEchoRequest", "No ICMP echo reply receveid on channel %d", channel);
+  }
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for arp reply and extracts the source MAC address
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForArpReply(int timeout, int channel, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  PrepareWaitForEthernet(destMac, srcMac);
+  InternalAddExpectedParameter("eth", "type", 0x0806);
+  InternalAddExpectedParameter("arp", "operation", 2, kEquals);
+  InternalAddExpectedParameter("arp", "hwSourceAddr", ConvertMacAddressStringToInt64(srcMac), kEquals);
+  InternalAddExpectedParameter("arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(destMac), kEquals);
+  InternalAddExpectedParameter("arp", "protSourceAddr", ConvertIpAddressStringToInt64(srcIp), kEquals);
+  InternalAddExpectedParameter("arp", "protDestinationAddr", ConvertIpAddressStringToInt64(destIp), kEquals);
+
+  
+  StartObservationOfIncomingPackets(channel, kAnswerExpected);
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForEchoRequest", "ARP reply receveid on channel %d", channel);
+  }
+  
+  else
+  {
+    testStepFail("WaitForEchoRequest", "No ARP reply receveid on channel %d", channel);
+  }
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for echo reply depending on vlan
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param vlanId The VLAN ID
+ * @param allowedVlanIds The allowed Vlan IDs (string, ids separated by comma)
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export void WaitForEchoReplyDependingOnVlan(int timeout, int channel, int vlanId, char allowedVlanIds[], char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  int allowedVlanIdsConverted[20];
+  int vlanCount;
+  
+ 
+  GetAllowedVlanIds(allowedVlanIds, allowedVlanIdsConverted, vlanCount);
+  if(IsInArray(vlanId, allowedVlanIdsConverted, vlanCount))
+  {
+    WaitForEchoReply(timeout, channel, destMac, srcMac, destIp, srcIp);
+  }
+  else
+  {
+    WaitForUnexpectedEchoRequestOrReplyOnAllChannels(timeout, srcMac, destMac, srcIp, destIp);
+  } 
+}
+
+/**
+ * Waits for arp reply depending on vlan
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param vlanId The VLAN ID
+ * @param allowedVlanIds The allowed Vlan IDs (string, ids separated by comma)
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export void WaitForArpReplyDependingOnVlan(int timeout, int channel, int vlanId, char allowedVlanIds[], char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  int allowedVlanIdsConverted[20];
+  int vlanCount;
+  
+ 
+  GetAllowedVlanIds(allowedVlanIds, allowedVlanIdsConverted, vlanCount);
+  if(IsInArray(vlanId, allowedVlanIdsConverted, vlanCount))
+  {
+    WaitForArpReply(timeout, channel, destMac, srcMac, destIp, srcIp);
+  }
+  else
+  {
+    WaitForUnexpectedArpRequestOrReplyOnAllChannels(timeout, srcMac, destMac, srcIp, destIp);
+  } 
+}
+
+/**
+ * Waits for arp reply depending on vlan
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param vlanId1 The VLAN ID
+ * @param vlanId2 The second VLAN ID
+ * @param allowedVlanIds The allowed Vlan IDs (string, ids separated by comma)
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export void WaitForArpReplyDependingOnVlan(int timeout, int channel, int vlanId1, int vlanId2, char allowedVlanIds[], char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  int allowedVlanIdsConverted[20];
+  int vlanCount;
+  
+ 
+  GetAllowedVlanIds(allowedVlanIds, allowedVlanIdsConverted, vlanCount);
+  if(IsInArray(vlanId1, allowedVlanIdsConverted, vlanCount) == kTrue || IsInArray(vlanId2, allowedVlanIdsConverted, vlanCount) == kTrue)
+  {
+    WaitForArpReply(timeout, channel, destMac, srcMac, destIp, srcIp);
+  }
+  else
+  {
+    WaitForUnexpectedArpRequestOrReplyOnAllChannels(timeout, srcMac, destMac, srcIp, destIp);
+  } 
+}
+
+/**
+ * Waits for echo reply depending on vlan
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param vlanId1 The VLAN ID
+ * @param vlanId2 The second VLAN ID
+ * @param allowedVlanIds The allowed Vlan IDs (string, ids separated by comma)
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export void WaitForEchoReplyDependingOnVlan(int timeout, int channel, int vlanId1, int vlanId2, char allowedVlanIds[], char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  int allowedVlanIdsConverted[20];
+  int vlanCount;
+  
+ 
+  GetAllowedVlanIds(allowedVlanIds, allowedVlanIdsConverted, vlanCount);
+  if(IsInArray(vlanId1, allowedVlanIdsConverted, vlanCount) == kTrue || IsInArray(vlanId2, allowedVlanIdsConverted, vlanCount) == kTrue)
+  {
+    WaitForEchoReply(timeout, channel, destMac, srcMac, destIp, srcIp);
+  }
+  else
+  {
+    WaitForUnexpectedEchoRequestOrReplyOnAllChannels(timeout, srcMac, destMac, srcIp, destIp);
+  } 
+}
+
+/**
+ * Waits for arp reply and unexpected echo requests on all other channels 
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param allowedVlanIds The allowed Vlan IDs (string, ids separated by comma)
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForEchoReplyOnChannelAndUnexpectedEchoRequestsOnAllOtherChannels(int timeout, int channel, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  long i, j;
+  PrepareWaitForEthernet(destMac, srcMac, 0);
+  PrepareWaitForIpv4(destIp, srcIp, 0x01, 0);
+  InternalAddExpectedParameter("icmpv4", "type", 0, kEquals, 0);
+  
+  PrepareWaitForEthernet(srcMac, destMac, 1);
+  PrepareWaitForIpv4(srcIp, destIp, 0x01, 1);
+  InternalAddExpectedParameter("icmpv4", "type", 8, kEquals, 1);
+  
+  gExpectedParametersChannel[0] = channel;
+  j = 1;
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    if(i == channel)
+    {
+      gExpectedMessagesPerChannel[i] = 1;
+    }
+    else
+    {
+      gExpectedMessagesPerChannel[i] = 0;
+      gExpectedParametersChannel[j] = i;
+      CopyExpectedParameters(1, j);
+      j++;
+    }
+  }
+  
+  StartObservationOfIncomingPackets(kNoCheck);
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForEchoReplyOnChannelAndUnexpectedEchoRequestsOnAllOtherChannels", "ICMP echo reply receveid on channel %d and no echo requests received on any other channel", channel);
+  }
+  
+  else
+  {
+    testStepFail("WaitForEchoReplyOnChannelAndUnexpectedEchoRequestsOnAllOtherChannels", "ICMP echo reply receveid on channel %d or echo requests received on any other channel", channel);
+  }
+  
+  InternalClearAllParameters();
+  
+  
+}
+
+/**
+ * Waits for echo request
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param allowedVlanIds The allowed Vlan IDs (string, ids separated by comma)
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForEchoRequest(int timeout, int channel, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(syspar::Wildcard, syspar::Wildcard, 0x01);
+  PrepareWaitForIcmp("8");
+  
+  StartObservationOfIncomingPackets(channel, kAnswerExpected);
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForEchoRequest", "ICMP echo request receveid on channel %d", channel);
+  }
+  
+  else
+  {
+    testStepFail("WaitForEchoRequest", "No ICMP echo request receveid on channel %d", channel);
+  }
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for unexpected echo request
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param allowedVlanIds The allowed Vlan IDs (string, ids separated by comma)
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForUnexpectedEchoRequest(int timeout, int channel, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  PrepareWaitForIpv4(syspar::Wildcard, syspar::Wildcard, 0x01);
+  PrepareWaitForIcmp("8");
+  
+  StartObservationOfIncomingPackets(channel, kNoAnswerExpected);
+  if (WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForUnexpectedEchoRequest", "No ICMP echo request receveid on channel %d", channel);
+  }
+  
+  else
+  {
+    testStepFail("WaitForUnexpectedEchoRequest", "ICMP echo request receveid on channel %d", channel);
+  }
+ 
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for unexpected echo reply
+ * @param timeout The timeout in milliseconds
+ * @param channel The channel
+ * @param allowedVlanIds The allowed Vlan IDs (string, ids separated by comma)
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForUnexpectedEchoReply(int timeout, int channel, char srcMac[], char DestMac[], char srcIp[], char destIp[])
+{
+  PrepareWaitForIpv4(syspar::Wildcard, syspar::Wildcard, 0x01);
+  PrepareWaitForIcmp("0");
+  
+  StartObservationOfIncomingPackets(channel, kNoAnswerExpected);
+  if (WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForUnexpectedEchoRequest", "No ICMP echo request receveid on channel %d", channel);
+  }
+  
+  else
+  {
+    testStepFail("WaitForUnexpectedEchoRequest", "ICMP echo request receveid on channel %d", channel);
+  }
+ 
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for unexpected echo request on all channels
+ * @param timeout The timeout in milliseconds
+ * @param allowedVlanIds The allowed Vlan IDs (string, ids separated by comma)
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForUnexpectedEchoRequestOnAllChannels(int timeout, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  long i;
+  
+  PrepareWaitForIpv4(syspar::Wildcard, syspar::Wildcard, 0x01);
+  PrepareWaitForIcmp("8");
+  
+  for(i = 0; i <= gMaximumChannelNumber; i++)
+  {
+    gExpectedMessagesPerChannel[i] = 0;
+  }
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+  if (WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForUnexpectedEchoRequest", "No ICMP echo request receveid ");
+  }
+  
+  else
+  {
+    testStepFail("WaitForUnexpectedEchoRequest", "ICMP echo request receveid ");
+  }
+ 
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for unexpected arp request on all channels
+ * @param timeout The timeout in milliseconds
+ * @param allowedVlanIds The allowed Vlan IDs (string, ids separated by comma)
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForUnexpectedArpRequestOrReplyOnAllChannels(int timeout, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  long i;
+  
+  PrepareWaitForEthernet(srcMac, syspar::MacAddressBroadcast, 0);
+  InternalAddExpectedParameter("eth", "type", 0x0806); // ARP Ethertype
+  InternalAddExpectedParameter("arp", "operation", 1, kEquals, 0);
+  InternalAddExpectedParameter("arp", "hwSourceAddr", ConvertMacAddressStringToInt64(srcMac), kEquals, 0);
+  InternalAddExpectedParameter("arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(destMac), kEquals, 0);
+  InternalAddExpectedParameter("arp", "protSourceAddr", ConvertIpAddressStringToInt64(srcIp), kEquals, 0);
+  InternalAddExpectedParameter("arp", "protDestinationAddr", ConvertIpAddressStringToInt64(destIp), kEquals, 0);
+  
+  PrepareWaitForEthernet(destMac, srcMac, 1);
+  InternalAddExpectedParameter("eth", "type", 0x0806, kEquals, 1); // ARP Ethertype
+  InternalAddExpectedParameter("arp", "operation", 2, kEquals, 1);
+  InternalAddExpectedParameter("arp", "hwSourceAddr", ConvertMacAddressStringToInt64(destMac), kEquals, 0);
+  InternalAddExpectedParameter("arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(srcMac), kEquals, 0);
+  InternalAddExpectedParameter("arp", "protSourceAddr", ConvertIpAddressStringToInt64(destIp), kEquals, 0);
+  InternalAddExpectedParameter("arp", "protDestinationAddr", ConvertIpAddressStringToInt64(srcIp), kEquals, 0);
+  
+  for(i = 0; i <= gMaximumChannelNumber; i++)
+  {
+    gExpectedMessagesPerChannel[i] = 0;
+  }
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+  if (WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForUnexpectedEchoRequest", "No ARP request or reply receveid ");
+  }
+  
+  else
+  {
+    testStepFail("WaitForUnexpectedEchoRequest", "ARP request or reply receveid ");
+  }
+ 
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for unexpected echo request or reply on all channels
+ * @param timeout The timeout in milliseconds
+ * @param allowedVlanIds The allowed Vlan IDs (string, ids separated by comma)
+ * @param srcMac The source MAC address
+ * @param destMac The destination MAC address
+ * @param srcIp The source IP address
+ * @param destIp The destination IP address
+ */
+export testfunction WaitForUnexpectedEchoRequestOrReplyOnAllChannels(int timeout, char srcMac[], char destMac[], char srcIp[], char destIp[])
+{
+  long i;
+  
+  PrepareWaitForEthernet(syspar::Wildcard, syspar::Wildcard);
+  PrepareWaitForIpv4(syspar::Wildcard, syspar::Wildcard, 0x01);
+  InternalAddExpectedParameter("icmpv4", "type", 8, kEqualsOrZero);
+  
+  for(i = 0; i <= gMaximumChannelNumber; i++)
+  {
+    gExpectedMessagesPerChannel[i] = 0;
+  }
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+  if (WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+  {
+    testStepPass("WaitForUnexpectedEchoRequest", "No ICMP echo request or reply receveid ");
+  }
+  
+  else
+  {
+    testStepFail("WaitForUnexpectedEchoRequest", "ICMP echo request or reply receveid ");
+  }
+ 
+  InternalClearAllParameters();
+}
+
+/**
+ * Checks if a channel is up
+ * @param channel The channel which should be checked
+ */
+export testfunction CheckIfChannelIsUp(int channel)
+{
+  long status;
+  //Is there really no array which contains the state? This seems very cumbersome
+  switch(channel)
+  {
+    case 1:
+      status = Eth1.status;
+      break;
+    case 2:
+      status = Eth2.status;
+      break;
+    case 3:
+      status = Eth3.status;
+      break;
+    case 4:
+      status = Eth4.status;
+      break;
+    case 5:
+      status = Eth5.status;
+      break;
+    case 6:
+      status = Eth6.status;
+      break;
+    case 7:
+      status = Eth7.status;
+      break;
+    case 8:
+      status = Eth8.status;
+      break;
+    case 9:
+      status = Eth9.status;
+      break;
+    default:
+      status = -1;
+      break;
+  }
+  if(status == 0)
+  {
+    testStepFail("CheckIfChannelIsUp", "Port at channel %d is down", channel);
+  }
+  else if(status == 1)
+  {
+    testStepPass("CheckIfChannelIsUp", "Port at channel %d is up", channel);
+  }
+  else
+  {
+    testStep("CheckIfChannelIsUp", "Unknown status of port at channel %d", channel);
+  }
+    
+}
+
+/**
+ * Generates a MAC address and adds it to the ARL table of the DUT via stub function
+ * @param channel The channel to which the mac Address should be added
+ */
+export void GenerateMacAddressAndAddItToArlTable(char channel[])
+{
+  char macAddress[20];
+  
+  GenerateMac(macAddress);
+  Stub_AddEntryToArlTable(channel, macAddress);
+  AddSentFrame(channel, macAddress);
+}
+
+/**
+ * Generates a multicast MAC address and adds it to the ARL table of the DUT via stub function
+ * @param channel The channel to which the mac Address should be added
+ */
+export void GenerateMulticastMacAddressAndAddItToArlTable(char channel[])
+{
+  char macAddress[20];
+  
+  GenerateMulticastMac(macAddress);
+  Stub_AddEntryToArlTable(channel, macAddress);
+  AddSentFrame(channel, macAddress);
+}
+
+/**
+ * Gets the type (Host or querier) form a TestPort identified via its channel
+ * @param channel The channel
+ */
+void GetTypeFromChannel(int channel, char type[])
+{
+  int i;
+  
+  type[0] = '\0';
+  for(i = 0; i < elcount(syspar::TestPorts); i++)
+  {
+   if(channel == syspar::TestPorts[i].Channel)
+   {
+     strncpy(type, syspar::TestPorts[i].Type, elcount(type));
+     return;
+   }
+  }
+}
+
+/**
+ * Gets the allowed VLAN IDs form a TestPort identified via its channel
+ * @param channel The channel
+ */
+void GetAllowedVlanIdsFromChannel(int channel, char allowedVlanIds[])
+{
+  int i;
+  
+  allowedVlanIds[0] = '\0';
+  for(i = 0; i < elcount(syspar::TestPorts); i++)
+  {
+   if(channel == syspar::TestPorts[i].Channel)
+   {
+     strncpy(allowedVlanIds, syspar::TestPorts[i].VlanId, elcount(allowedVlanIds));
+     return;
+   }
+  }
+}
+
+/**
+ * Gets the MAC address of the tester side form a TestPort identified via its channel
+ * @param channel The channel
+ */
+void GetMacAddressFromChannel(int channel, char macAddress[])
+{
+  int i;
+  macAddress[0] = '\0';
+  for(i = 0; i < elcount(syspar::TestPorts); i++)
+  {
+    if(channel == syspar::TestPorts[i].Channel)
+    {
+      strncpy(macAddress, syspar::TestPorts[i].MacAddressTesterSide, elcount(macAddress));
+      return;
+    }
+  }
+}
+
+/**
+ * Gets the IP address on the tester side from a TestPort identified via its channel
+ * @param channel The channel
+ */
+void GetIpAddressFromChannel(int channel, char ipAddr[])
+{
+  int i;
+  ipAddr[0] = '\0';
+  for(i = 0; i < elcount(syspar::TestPorts); i++)
+  {
+    if(channel == syspar::TestPorts[i].Channel)
+    {
+      strncpy(ipAddr, syspar::TestPorts[i].IpAddressTesterSide, elcount(ipAddr));
+      return;
+    }
+  }
+}
+
+/**
+ * Converts the comma separated string of allowed VLAN IDs into an int array
+ * @param input the comma separated string of allowed VLAN IDs
+ * @param output The int array of allowed VLAN IDs
+ * @param counter The amount of allowed VLAN IDs
+ */
+void GetAllowedVlanIds(char input[], int output[], int &counter)
+{
+  char buffer[5];
+  int position, offset, i;
+  enum Bool lastNumber;
+  
+  counter = 0;
+  position = -1;
+  lastNumber = kFalse;
+  
+  for(i = 0; i < elcount(output); i++)
+  {
+    offset = position + 1;
+    position = strstr_off(input, offset, ",");
+    if(position == -1)
+    {
+      position = strlen(input);
+      lastNumber = kTrue;
+    }
+    substr_cpy(buffer, input, offset, position - offset, elcount(buffer));
+    output[i] = atol(buffer);
+    counter++;
+    if(lastNumber)
+    {
+      break;
+    }
+  }
+}
+
+/**
+ * Returns the channel number by the name of the corresponding channel on the DUT
+ * @param input The name of the corresponding channel on the DUT
+ */
+int GetChannelFromDutChannel(char input[])
+{
+  int i;
+  for(i = 0; i < elcount(syspar::TestPorts); i++)
+  {
+    if(strncmp(syspar::TestPorts[i].DUTChannel, input, elcount(syspar::TestPorts[i].DUTChannel)) == 0)
+    {
+      return syspar::TestPorts[i].Channel;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Splits a string by commas and puts the substrings into a string array
+ * @param input The string which should be split
+ * @param output The string array
+ * @param counter The amount of strings
+ */
+void SplitString(char input[], char output[][], int &counter)
+{
+  char buffer[20];
+  int position, offset, i;
+  enum Bool lastElement;
+  
+  counter = 0;
+  position = -1;
+  lastElement = kFalse;
+  
+  for(i = 0; i < elcount(output); i++)
+  {
+    offset = position + 1;
+    position = strstr_off(input, offset, ",");
+    if(position == -1)
+    {
+      position = strlen(input);
+      lastElement = kTrue;
+    }
+    substr_cpy(output[i], input, offset, position - offset, elcount(output[i]));
+    counter++;
+    if(lastElement)
+    {
+      break;
+    }
+  }
+}
+
+/**
+ * Checks whether an int array contains a given int value
+ * @param number The number which should be checked
+ * @param numers The int array
+ * @param The size of the int array
+ */
+enum Bool IsInArray(int number, int numbers[], int numbersLength)
+{
+  int i;
+  for(i = 0; i < numbersLength; i++)
+  {
+    if(number == numbers[i])
+      return kTrue;
+  }
+  return kFalse;
+}
+
+int Intersect(int input1[], int input1Count, int input2[], int input2Count, int output[])
+{
+  int i, j, cnt;
+  cnt = 0;
+  for(i = 0; i < input1Count; i++)
+  {
+    for(j = 0; j < input2Count; j++)
+    {
+      if(input1[i] == input2[j])
+      {
+        output[cnt] = input1[i];
+        cnt++;
+      }
+    }
+  }
+  return cnt;
+}
+
+/**
+ * Returns the first element of an int array which is not zero. Returns -1 if all elements of the array are zero
+ * @param numbers The int array
+ * @param numbersLength The size of the int array
+ */
+int GetFirstElementFromArrayNotZero(int numbers[], int numbersLength)
+{
+  int i;
+  for(i = 0; i < numbersLength; i++)
+  {
+    if(numbers[i] != 0)
+    {
+      return numbers[i];
+    }
+  }
+  return -1;
+}
+
+/**
+ * Adds a Channel MAC address pair to the list of sent frames
+ * @param channel The name of the channel
+ * @param macAddress The MAC address of the channel
+ */
+void AddSentFrame(char channel[], char macAddress[])
+{
+  struct ChannelMACPair pair;
+  strncpy(pair.channel, channel, elcount(channel));
+  strncpy(pair.macAddress, macAddress, elcount(macAddress));  
+  memcpy(gSentFrames[gSentFramesIndex], pair);
+  gSentFramesIndex++;
+}
+
+/**
+ * Generates a MAC address. The generated MAC address will be different from the previously generated MAC addresses
+ * @param outMac the generated MAC address
+ */
+void GenerateMAC(char outMac[])
+{
+  gGeneratedMacCounter++;
+  
+  ethGetMacAddressAsString(gGeneratedMacCounter, outMac, 20);  
+}
+/**
+ * Generates a multicast MAC address. The generated MAC address will be different from the previously generated MAC addresses
+ * @param outMac the generated MAC address
+ */
+void GenerateMulticastMac(char outMac[])
+{
+  gGeneratedMulticastMacCounter += (1 << 88);
+  
+  ethGetMacAddressAsString(gGeneratedMulticastMacCounter, outMac, 20);  
+}

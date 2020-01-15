@@ -1,0 +1,1182 @@
+/*@!Encoding:1252*//*@!Encoding:1252*/
+includes
+{
+  #include "RT_basics.cin"
+}
+
+variables
+{
+  // ==============================================================================================================
+  // global test configuration variables
+  
+  enum gFlag_Gen  { gFalse        = 0, gTrue            = 1                         };
+  enum gFlag_Req  { gRequestable  = 0, gNonRequestable  = 1, gReqDontCare       = 2 };
+  enum gFlag_RTS  { gRTSDontCare  = 0, gRTSCTS          = 1, gRTSAbort          = 2 };
+  enum gFlag_Cycl { gNonCyclic    = 0, gCyclic          = 1, gCyclicDontCare    = 2 };
+  enum gFlag_Dlc  { gDLC8         = 0, gDLCx            = 1, gDlcDontCare       = 2 };
+  enum gFlag_Glob { gP2P          = 0, gNonGlobal       = 0, gGlobal            = 1 };
+  enum gFlag_Cast { gUnicast      = 1, gBroadcast       = 2, gAnycast           = 3 };
+  enum gPduType   { gPDU1         = 1, gPDU2            = 2, gPDU_BOTH          = 3 };
+  enum gReqType   { gReqType1     = 1, gReqType2        = 2                         };
+  
+  enum gXferType  { gXferNo       = 0
+                  , gXferYes      = 1
+                  , gXferUndef    = 2
+                  , gXferNA       = 3 
+  };
+  
+  // expected response behavour
+  enum gExpResp
+  {
+    gExpResp_DONTCARE             = -1, // indicate dont care (leave)
+    gExpResp_TIMEOUT              = 0,  // none allowed expect timeout.
+    gExpResp_NONE                 = 0,  // none allowed expect timeout.
+    gExpResp_PG                   = 1,  // PG allowed
+    gExpResp_ACK                  = 2,  // positive ACK allowed
+    gExpResp_NACK                 = 4,  // negative ACK (NACK) allowed
+    gExpResp_DENY                 = 8,  // ACK with Access Denied allowed
+    gExpResp_BUSY                 = 16, // ACK with BUSY allowed
+    gExpResp_ACK_ANY              = 30, // (2+4+8+16)   any ack (e800)
+    gExpResp_ANY_ACK              = 30, // -"-
+    
+    gExpResp_ANY                  = 31, // (1+2+4+8+16) pg, ack, nack, deny, busy (all)
+    
+    gExpResp_PG_ACK               = 3,  // PG or positive ACK allowed.
+    gExpResp_PG_BUSY              = 17, // PG or BUSY allowed
+    gExpResp_PG_ACK_BUSY          = 19, // PG or positive ACK or BUSY allowed.
+    gExpResp_PG_ACK_NACK          = 7,  // PG or positive ACK or negative ACK (NACK) allowed.
+    gExpResp_PG_NACK              = 5,  // PG or NACK allowed
+    gExpResp_PG_NACK_BUSY         = 21, // PG or NACK or BUSY allowed
+    gExpResp_PG_NACK_DENY         = 13, // PG or NACK or DENY allowed
+    gExpResp_ANY_NO_POS_ACK       = 29, // all but no positive ACK allowed.
+    gExpResp_ACK_NACK             = 6   // positive ACK or negative ACK (NACK) allowed.
+  };
+
+  
+  char gsPduType[4][15] = {"?","PDU1","PDU2","PDU1 or PDU2"};
+  char gsDlc[3][4]      = {"<=8", ">8", "?"};
+  
+  // Pgn attributes of the user configuration.
+  struct gPGAttrsCfg
+  {
+    dword           PGN;               // The PGN
+    enum gFlag_Req  NonRequestable;    // 0: Requestable                 1: Not Requestable
+    enum gFlag_RTS  RTS;               // 0: RTSDontCare                 1: RTS->CTS                          2: RTS->Abort
+    dword           CycleTime;         // 0: Non cyclic                 >0: Cyclic with given cycle time.
+    enum gFlag_Dlc  DLCx;              // 0: PGN has DLC8                1: PGN has DLC>8
+    enum gExpResp   ExpResp;           // default 31 (any)
+  };
+  // PGN attributes used as parameter. Seems to be a duplicate of gPGAttrCfg, but
+  // we need type safety to avoid giving the global user-array reference into functions.
+  struct gPGAttrs
+  {
+    dword           PGN;               // The PGN
+    enum gFlag_Req  NonRequestable;    // 0: Requestable                 1: Not Requestable
+    enum gFlag_RTS  RTS;               // 0: RTSDontCare                 1: RTS->CTS                          2: RTS->Abort
+    dword           CycleTime;         // 0: Non cyclic                 >0: Cyclic with given cycle time.
+    enum gFlag_Dlc  DLCx;              // 0: PGN has DLC8                1: PGN has DLC>8
+    enum gExpResp   ExpResp;           // default 31 (any)
+  };
+
+  struct gPGAttrsCfg gPGInfo[long];    // Assoc array that lists PGN with additional attributes. (id# as key)
+                                       // reflects the user-configuration.
+
+  byte  gDUT_Addr;                     // The DUT's address
+  qword gDUT_DevName;                  // The DeviceName bytes of the DUT
+  byte  gTOOL_Addr;                    // The Tool's address (tester node)
+  byte  gBC_Addr;                      // The bc address (0xFF)
+  byte  gDUT_CA;                       // flag indicating DUT supports commanded address (CA)
+  byte  gDUT_NM;                       // flag indicating DUT supports commanded name (CN)
+  byte  gDUT_AddrViolationDM;          // flag indicating DUT supports address violation over DM.
+  byte  gFullMode;                     // flag indicating test works in full mode...
+  
+  dword gDUT_MsgToleranceAbs;          // absolute message tolerance of cyclic messages of the DUT
+  double gDUT_MsgToleranceRel;         // relative message tolerance of cyclic messages of the DUT
+  
+  dword gDUT_FixedPGN;                 // DUT's fixed pgn (0=disabled)
+  byte gDUT_FixedPGNData[long];        // DUT's fixed pgn data as assoc array of bytes.
+  byte gDUT_FixedPGNExampleData[16] = {10,02,30,04,50,06,70,08,05,11,12,13,21,31,41,51};
+}
+
+// ==============================================================================================================
+// build a pg attr struct.
+void CT_BuildPgAttr( struct gPGAttrs result, dword pgn, enum gFlag_Req req, enum gFlag_RTS rts, dword ct, enum gFlag_Dlc dlc, enum gExpResp ExpResp)
+{
+  result.PGN             = pgn            ;
+  if (ExpResp != gExpResp_DONTCARE) result.ExpResp = ExpResp;
+  
+  if (ct  != -1)                  result.CycleTime       = ct   ;
+  if (req != gReqDontCare)        result.NonRequestable  = req  ;
+  if (dlc != gDlcDontCare)        result.DLCx            = dlc  ;
+  if (rts != gRTSDontCare)        result.RTS             = rts  ;
+  
+  // some plausibilities...
+  
+  // non requestable expect NACK
+  if (result.NonRequestable == gNonRequestable)
+  {
+    result.ExpResp  = gExpResp_NACK;
+    result.DlcX = gDLC8;
+  }
+  if ( (result.NonRequestable == gReqDontCare) && (result.RTS != gRTSDontCare) )
+  {
+    result.ExpResp = gExpResp_ANY;
+  }
+}
+
+// ==============================================================================================================
+// add pgn attributes into given target assoc array the given values.
+// returns the PGN 
+// for flags: set it 1 or 0 expclicitely. set a value of >1 means "dont care / leave as is / dont set.";
+// set cycleTime to -1 don't touches the cycle time.
+dword CT_AddPgAttr( struct gPGAttrs target[long], dword pgn, enum gFlag_Req req, enum gFlag_RTS rts, dword ct, enum gFlag_Dlc dlc, enum gExpResp expResp  )
+{
+  long mapKey;
+  mapKey = target.size();
+  for(long k: target)
+  {
+    if (target[k].PGN == pgn)
+    {
+      mapKey = k;
+      break;
+    }
+  }
+  CT_BuildPgAttr( target[mapKey], pgn, req, rts, ct, dlc, expResp );
+  return pgn;
+}
+// ==============================================================================================================
+// add pgn attributes into given target assoc array the given values.
+dword CT_AddPgAttr( struct gPGAttrs target[long], dword pgn, enum gFlag_Req req, dword ct, enum gFlag_Dlc dlc, enum gExpResp expResp  )
+{
+  return CT_AddPgAttr(target, pgn, req, gRTSCTS, ct, dlc, expResp);
+}
+
+// ==============================================================================================================
+// add pgn attributes of given pgn-attrib structure into given target struct array for given pgn 
+// returns the PGN 
+dword CT_AddPgAttr( struct gPGAttrs target[long], dword pgn, struct gPGAttrs attr )
+{
+  return CT_AddPgAttr(target, pgn, attr.NonRequestable, attr.RTS, attr.CycleTime, attr.DLCx, attr.ExpResp);
+}
+// ==============================================================================================================
+// add pgn attributes of given pgn-attrib structure into given target struct array for given pgn 
+// returns the PGN 
+dword CT_AddPgAttr( struct gPGAttrs target[long], struct gPGAttrs attr )
+{
+  return CT_AddPgAttr( target, attr.PGN, attr );
+}
+// ==============================================================================================================
+// add a bunch of pgn attributes of given pgn-attrib structure into given target struct array for given pgn 
+// returns 1;
+dword CT_AddPgAttr( struct gPGAttrs target[long], struct gPGAttrs attrs[long] )
+{
+  for (long k: attrs)
+  {
+    CT_AddPgAttr( target, attrs[k] );
+  }
+  return 1;
+}
+
+// ==============================================================================================================
+// copy from parameter structure to parameter structure
+void CT_CopyPGI( struct gPGAttrs dst, struct gPGAttrs src )
+{
+  memcpy(dst, src);
+}
+// ==============================================================================================================
+// copy from parameter structure to config structure
+void CT_CopyPGI( struct gPGAttrs dst, struct gPGAttrsCfg src )
+{
+  dst.PGN             = src.PGN;
+  dst.NonRequestable  = src.NonRequestable;
+  dst.RTS             = src.RTS;
+  dst.CycleTime       = src.CycleTime;
+  dst.DLCx            = src.DLCx;
+  dst.ExpResp         = src.ExpResp;
+}
+
+// ==============================================================================================================
+// copy from config structure to parameter structure
+void CT_CopyPGI( struct gPGAttrsCfg dst, struct gPGAttrs src )
+{
+  dst.PGN             = src.PGN;
+  dst.NonRequestable  = src.NonRequestable;
+  dst.RTS             = src.RTS;
+  dst.CycleTime       = src.CycleTime;
+  dst.DLCx            = src.DLCx;
+  dst.ExpResp         = src.ExpResp;
+}
+
+// ==============================================================================================================
+// copy pgi-attr structs..
+void CT_CopyPGIs( struct gPGAttrs dst[long], struct gPGAttrs src[long] )
+{
+  dst.clear();
+  for(long sk: src) CT_CopyPGI(dst[sk], src[sk]);
+}
+
+// ==============================================================================================================
+// copy to user config table
+void CT_CopyPGIsToCfg( struct gPGAttrs src[long] )
+{
+  gPGInfo.clear();
+  for(long sk: src) 
+  {
+    CT_CopyPGI(gPGInfo[sk], src[sk]);
+  }
+}
+
+// ==============================================================================================================
+// copy from user config table.
+void CT_CopyPGIsFromCfg( struct gPGAttrs dst[long])
+{
+  dst.clear();
+  for(long sk: gPGInfo) 
+  {
+    CT_CopyPGI(dst[sk], gPGInfo[sk]);
+  }
+}
+
+// ==============================================================================================================
+// retrieve a resulting list with all PGN's of given types. Searches in given source assoc array.
+void CT_GetPGIs( struct gPGAttrs source[long], struct gPGAttrs result[long], enum gFlag_Req req, enum gFlag_RTS rts, enum gFlag_Cycl cyclic, enum gFlag_Dlc dlc, enum gExpResp expResp, enum gPduType pgnType)
+{
+  byte debug = 0;
+  byte ok;
+  //debug = @CT::DEBUG::CONFIG;
+  
+  result.clear();
+  for(long k: source)
+  {
+    ok = 1;
+    if (debug) write("pgn %x", source[k].PGN);
+    if (ok && (pgnType != gPDU_BOTH) )
+    {
+      if (pgnType==gPDU1)
+      {
+        ok &= CT_IsPdu1(source[k].PGN);
+        if (debug) write("ok0=%d",ok);
+      }
+      else
+      {
+        ok &= CT_IsPdu2(source[k].PGN);
+        if (debug) write("ok0=%d",ok);
+      }
+    }
+    
+    if (req != gReqDontCare) ok &= (req == source[k].NonRequestable);
+    if (rts != gRTSDontCare) ok &= (rts == source[k].RTS);
+    
+    if (debug) write("req=%d, rts=%d, source.req=%d, source.rts=%d => ok1=%d",req,rts, source[k].NonRequestable, source[k].RTS, ok);
+    if (ok && (cyclic != gCyclicDontCare))
+    {
+      if (cyclic == gCyclic)
+      {
+        ok &= (source[k].CycleTime > 0);
+        if (debug) write("ok2=%d",ok);
+      }
+      else
+      {
+        if (debug) write("ok3=%d",ok);
+        ok &= (source[k].CycleTime == 0);
+      }
+    }
+    
+    if (ok && (dlc != gDlcDontCare))
+    {
+      if (dlc == gDLCx)
+      {
+        ok &= source[k].DLCx;
+        if (debug) write("ok4=%d",ok);
+      }
+      else
+      {
+        ok &= !source[k].DLCx;
+        if (debug) write("ok5=%d",ok);
+      }
+    }
+    
+    if (ok && (expResp != gExpResp_DONTCARE))
+    {
+      ok &= CT_ExpRespContains(source[k], expResp);
+    }
+    
+    if (debug) write("ok final=%d",ok);
+    if (ok) CT_AddPgAttr(result, source[k].PGN, source[k]);
+    if (debug) write("---------------------------[CT_GetPGIs]");
+  }
+}
+
+// ==============================================================================================================
+// get all configured pgis into result array.
+void CT_GetPGIs(struct gPGAttrs result[long])
+{
+  CT_CopyPGIsFromCfg(result);
+}
+
+// ==============================================================================================================
+// ... get pgis from global config.
+void CT_GetPGIs( struct gPGAttrs result[long], enum gFlag_Req req, enum gFlag_RTS rts, enum gFlag_Cycl cyclic, enum gFlag_Dlc dlc, enum gExpResp expResp, enum gPduType pgnType)
+{
+  struct gPGAttrs src[long];
+  CT_CopyPGIsFromCfg(src);
+  //CT_PrintPgnInfoList(src);
+  CT_GetPGIs(src, result, req, rts, cyclic, dlc, expResp, pgnType);
+  //CT_PrintPgnInfoList(result);
+  src.clear();
+}
+// ==============================================================================================================
+// Get PGIs of type PDU1 and PDU2 from given source
+void CT_GetPGIs( struct gPGAttrs source[long], struct gPGAttrs result[long], enum gFlag_Req req, enum gFlag_RTS rts, enum gFlag_Cycl cyclic, enum gFlag_Dlc dlc, enum gExpResp expResp)
+{
+  CT_GetPGIs(source, result, req, rts, cyclic, dlc, expResp, gPDU_BOTH);
+}
+// ==============================================================================================================
+// Get PGIs of type PDU1 and PDU2 from config as source.
+void CT_GetPGIs( struct gPGAttrs result[long], enum gFlag_Req req, enum gFlag_RTS rts, enum gFlag_Cycl cyclic, enum gFlag_Dlc dlc, enum gExpResp expResp)
+{
+  CT_GetPGIs(result, req, rts, cyclic, dlc, expResp, gPDU_BOTH);
+}
+
+// ==============================================================================================================
+// get pgis with dlc>8 and RTS is answered with CTS.
+void CT_GetRTSCTSPGIs( struct gPGAttrs source[long], struct gPGAttrs result[long])
+{
+  CT_GetPGIs(source, result, gReqDontCare, gRTSCTS, gCyclicDontCare, gDlcDontCare, gExpResp_DONTCARE, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get pgis with dlc>8 and RTS is answered with CTS.
+void CT_GetRTSCTSPGIs(struct gPGAttrs result[long])
+{
+  CT_GetPGIs(result, gReqDontCare, gRTSCTS, gCyclicDontCare, gDlcDontCare, gExpResp_DONTCARE, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get pgis that will answered with abort on RTS.
+void CT_GetRTSAbortPGIs( struct gPGAttrs source[long], struct gPGAttrs result[long])
+{
+  CT_GetPGIs(source, result, gRequestable, gRTSAbort, gCyclicDontCare, gDlcDontCare, gExpResp_DONTCARE, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get pgis that will answered with abort on RTS.
+void CT_GetRTSAbortPGIs(struct gPGAttrs result[long])
+{
+  CT_GetPGIs(result, gReqDontCare, gRTSAbort, gCyclicDontCare, gDlcDontCare, gExpResp_DONTCARE, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get pgis with dlc>8 and RTS is answered with CTS or RTS is answered with RTSAbort.
+void CT_GetRTSPGIs(struct gPGAttrs result[long])
+{
+  struct gPGAttrs pgis2[long];
+  CT_GetRTSCTSPGIs(result);
+  CT_GetRTSAbortPGIs(pgis2);
+  CT_AddPGAttr(result, pgis2);
+}
+
+// ==============================================================================================================
+// get requestable pgis that are answered with given expected response
+void CT_GetReqPGIs( struct gPGAttrs source[long], struct gPGAttrs result[long], enum gFlag_Cycl cyclic, enum gFlag_Dlc dlc, enum gExpResp expResp)
+{
+  CT_GetPGIs(source, result, gRequestable, gRTSDontCare, cyclic, dlc, expResp, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get requestable pgis that are answered with given expected response using global pgInfo as source
+void CT_GetReqPGIs( struct gPGAttrs result[long], enum gFlag_Cycl cyclic, enum gFlag_Dlc dlc, enum gExpResp expResp)
+{
+  CT_GetPGIs(result, gRequestable, gRTSDontCare, cyclic, dlc, expResp, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get requestable pgis that are answered with given expected result.
+void CT_GetReqPGIs( struct gPGAttrs source[long], struct gPGAttrs result[long], enum gExpResp expResp)
+{
+  CT_GetPGIs(source, result, gReqDontCare, gRTSDontCare, gCyclicDontCare, gDlcDontCare, expResp, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get requestable pgis that are answered with given expcted result using global pgInfo as source
+void CT_GetReqPGIs( struct gPGAttrs result[long], enum gExpResp expResp)
+{
+  CT_GetPGIs(result, gReqDontCare, gRTSDontCare, gCyclicDontCare, gDlcDontCare, expResp, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get requestable pgis that are answered with given expected result and pgn type.
+void CT_GetReqPGIs( struct gPGAttrs source[long], struct gPGAttrs result[long], enum gExpResp expResp, enum gPduType pgnType)
+{
+  CT_GetPGIs(source, result, gReqDontCare, gRTSDontCare, gCyclicDontCare, gDlcDontCare, expResp, pgnType);
+}
+// ==============================================================================================================
+// get requestable pgis that are answered with given expcted result and pgn tpye using global pgInfo as source
+void CT_GetReqPGIs( struct gPGAttrs result[long], enum gExpResp expResp, enum gPduType pgnType)
+{
+  CT_GetPGIs(result, gReqDontCare, gRTSDontCare, gCyclicDontCare, gDlcDontCare, expResp, pgnType);
+}
+// ==============================================================================================================
+// get requestable pgis that are answered with PG
+void CT_GetReqPGIs( struct gPGAttrs source[long], struct gPGAttrs result[long], enum gFlag_Cycl cyclic, enum gFlag_Dlc dlc)
+{
+  CT_GetPGIs(source, result, gRequestable, gRTSDontCare, cyclic, dlc, gExpResp_PG, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get requestable pgis that are answered with PG using global pgInfo as source
+void CT_GetReqPGIs( struct gPGAttrs result[long], enum gFlag_Cycl cyclic, enum gFlag_Dlc dlc)
+{
+  CT_GetPGIs(result, gRequestable, gRTSDontCare, cyclic, dlc, gExpResp_PG, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get requestable pgis that are answered with PG where dlc do not care.
+void CT_GetReqPGIs( struct gPGAttrs source[long], struct gPGAttrs result[long], enum gFlag_Cycl cyclic)
+{
+  CT_GetPGIs(source, result, gRequestable, gRTSDontCare, cyclic, gDlcDontCare, gExpResp_PG, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get requestable pgis that are answered with PG where dlc do not care using global pgInfo as source
+void CT_GetReqPGIs( struct gPGAttrs result[long], enum gFlag_Cycl cyclic)
+{
+  CT_GetPGIs(result, gRequestable, gRTSDontCare, cyclic, gDlcDontCare, gExpResp_PG, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get requestable pgis that are answered with PG where neither cyclic nor dlc do not care.
+void CT_GetReqPGIs( struct gPGAttrs source[long], struct gPGAttrs result[long])
+{
+  CT_GetPGIs(source, result, gRequestable, gRTSDontCare, gCyclicDontCare, gDlcDontCare, gExpResp_PG, gPDU_BOTH);
+}
+
+// ==============================================================================================================
+// get requestable pgis that are answered with PG where neither cyclic nor dlc do not care using global pgInfo as source
+void CT_GetReqPGIs( struct gPGAttrs result[long])
+{
+  CT_GetPGIs(result, gRequestable, gRTSDontCare, gCyclicDontCare, gDlcDontCare, gExpResp_PG, gPDU_BOTH);
+}
+
+// ==============================================================================================================
+// get non requestable pgis
+void CT_GetNonReqPGIs( struct gPGAttrs source[long], struct gPGAttrs result[long], enum gFlag_Cycl cyclic)
+{
+  CT_GetPGIs(source, result, gNonRequestable, gRTSDontCare, cyclic, gDlcDontCare, gExpResp_NACK, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get non requestable pgis using global pgInfo as source
+void CT_GetNonReqPGIs( struct gPGAttrs result[long], enum gFlag_Cycl cyclic)
+{
+  CT_GetPGIs(result, gNonRequestable, gRTSDontCare, cyclic, gDlcDontCare, gExpResp_NACK, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get non requestable pgis where cyclic do not care.
+void CT_GetNonReqPGIs( struct gPGAttrs source[long], struct gPGAttrs result[long])
+{
+  CT_GetPGIs(source, result, gNonRequestable, gRTSDontCare, gCyclicDontCare, gDlcDontCare, gExpResp_NACK, gPDU_BOTH);
+}
+// ==============================================================================================================
+// get non requestable pgis where cyclic do not care using global pgInfo as source
+void CT_GetNonReqPGIs( struct gPGAttrs result[long])
+{
+  CT_GetPGIs(result, gNonRequestable, gRTSDontCare, gCyclicDontCare, gDlcDontCare, gExpResp_NACK, gPDU_BOTH);
+}
+
+
+
+// ==============================================================================================================
+// Get given pgn info (pgi) as string...
+void CT_GetPGI_Text(char result[], struct gPGAttrs pgi)
+{
+  char sExpResp[255];
+  CT_GetExpRespHumanReadable(sExpResp, pgi.ExpResp);
+  snprintf(result, elcount(result), "PGN=0x%.05X, Req=%d, CT=%5d, DLCx=%d, ExpResp=%s", pgi.PGN, !pgi.NonRequestable, pgi.CycleTime, pgi.DLCx, sExpResp);
+}
+// ==============================================================================================================
+// Get given pgn info (pgi) as string as table entry ...
+void CT_GetPGI_Text_TableEntry(char result[], byte entryID, struct gPGAttrs pgi)
+{
+  char sExpResp[255];
+  CT_GetExpRespHumanReadable(sExpResp, pgi.ExpResp);
+  snprintf(result, elcount(result), "| %.03d | 0x%.05X | %d  | %d   | %5d | %d  | %s ", entryID, pgi.PGN, !pgi.NonRequestable, pgi.RTS, pgi.CycleTime, pgi.DLCx, sExpResp);
+}
+// ==============================================================================================================
+// Get given pgn info (pgi) as string as table entry ...
+void CT_GetPGI_Text_TableHeader(char result[])
+{
+  char sLine[80];
+  snprintf(sLine, elcount(sLine),       "+-----+---------+----+-----+-------+----+--------");
+  snprintf(result, elcount(result), "%s\n| Nr. | PGN     | Rq | RTS | CyclT | Dx | ExpResp\n%s", sLine, sLine);
+}
+// ==============================================================================================================
+// Get given pgn info (pgi) as string as full table (\n delimited)
+void CT_GetPGI_Text_Table(char result[], struct gPGAttrs pgis[long])
+{
+  char sTableHeader[255];
+  char sEntry[255];
+  snprintf(result, elcount(result), sTableHeader);
+  strncat(result, "\n", elcount(result));
+  for(long k: pgis)
+  {
+    CT_GetPGI_Text_TableEntry(sEntry, k, pgis[k]);
+    strncat(result, sEntry, elcount(result));
+    strncat(result, "\n", elcount(result));
+  }
+}
+
+// ==============================================================================================================
+// get n'th pgn with given flags. n starts at 0 !
+// returns pgn if found, or gc_PGN_INVALID if not found.
+dword CT_GetNthPgn( struct gPGAttrs source[long], byte n, enum gFlag_Req req, enum gFlag_RTS rts, enum gFlag_Cycl cyclic, enum gFlag_Dlc dlc, enum gExpResp expResp )
+{
+  struct gPGAttrs pgis[long];
+  byte i;
+  
+  CT_GetPGIs(source, pgis, req, rts, cyclic, dlc, expResp, gPDU_BOTH);
+  i=0;
+  for (long k: pgis)
+  {
+    if (n==i) 
+    {
+      return (dword)(pgis[k].PGN & 0xFFFFFF);
+    }
+    i++;
+    if (i>n) break;
+  }
+  return gc_PGN_INVALID;
+}
+
+// ==============================================================================================================
+// get n'th pgn with given flags in global pgis. n starts at 0 !
+// returns pgn if found, or gc_PGN_INVALID if not found.
+dword CT_GetNthPgn( byte n, enum gFlag_Req req, enum gFlag_RTS rts, enum gFlag_Cycl cyclic, enum gFlag_Dlc dlc, enum gExpResp expResp)
+{
+  dword result;
+  struct gPGAttrs src[long];
+  CT_CopyPGIsFromCfg(src);
+  result = CT_GetNthPgn(src, n, req, rts, cyclic, dlc, expResp);
+  src.clear();
+  return result;
+}
+
+// ==============================================================================================================
+// get 1st pgn with given flags in given pgi source.
+// returns pgn if found, or gc_PGN_INVALID if not found.
+dword CT_GetFirstPgn( struct gPGAttrs source[long], enum gFlag_Req req, enum gFlag_RTS rts, enum gFlag_Cycl cyclic, enum gFlag_Dlc dlc, enum gExpResp expResp)
+{
+  return CT_GetNthPgn(source, 0, req, rts, cyclic, dlc, expResp);
+}
+// ==============================================================================================================
+// get 1st pgn with given flags in global pgis. 
+// returns pgn if found, or gc_PGN_INVALID if not found.
+dword CT_GetFirstPgn( enum gFlag_Req req, enum gFlag_RTS rts, enum gFlag_Cycl cyclic, enum gFlag_Dlc dlc, enum gExpResp expResp)
+{
+  return CT_GetNthPgn(0, req, rts, cyclic, dlc, expResp);
+}
+
+// ==============================================================================================================
+// init test configuration. setup / initialize the global test configuration variables
+void CT_InitCfg()
+{
+  struct gPGAttrs pgis[long];
+  char text[1024];
+  dword values[long];
+  dword val;
+  byte fixedPgnData[2000];
+  long fixedPgnDataSize;
+  int i;
+  
+  gMsgBufErrorFrameChannel = @CT::CFG::TOOL::Channel;
+  gDUT_DevName = @CT::CFG::DUT::DevName;
+  gDUT_Addr    = @CT::CFG::DUT::Addr;
+  gTOOL_Addr   = @CT::CFG::TOOL::Addr;
+  gDUT_MsgToleranceAbs = @CT::CFG::DUT::MsgToleranceAbs;
+  gDUT_MsgToleranceRel = @CT::CFG::DUT::MsgToleranceRel;
+  gDUT_FixedPGN = @CT::CFG::DUT::PGN::FixedPgn;
+  gBC_Addr = gc_BC_ADDR;
+  gDUT_CA = !@CT::CFG::DUT::NoCA;
+  gDUT_NM = !@CT::CFG::DUT::NoNM;
+  gDUT_AddrViolationDM = @CT::CFG::DUT::AddrViolation_DM;
+  
+  pgis.clear();
+  gDUT_FixedPGNData.clear();
+  
+  sysGetVariableData(sysvar::CT::CFG::DUT::PGN::FixedPgnData, fixedPgnData, fixedPgnDataSize);
+  for (i=0; i<fixedPgnDataSize; i++) gDUT_FixedPGNData[i]=fixedPgnData[i];
+  
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::Req_Msgs_DLC8, text, elcount(text));
+  CSV_SplitHexValues( values, text );
+  for(long k:values) CT_AddPgAttr(pgis, values[k], gRequestable, -1, gDLC8, gExpResp_PG);
+  
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::Req_Msgs_DLCx, text, elcount(text));
+  CSV_SplitHexValues( values, text );
+  for(long k:values) CT_AddPgAttr(pgis, values[k], gRequestable, -1, gDLCx, gExpResp_PG);
+ 
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::NoReq_Msgs, text, elcount(text));
+  CSV_SplitHexValues( values, text );
+  for(long k:values) CT_AddPgAttr(pgis, values[k], gNonRequestable, -1, gDLC8, gExpResp_NACK);
+
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::RTSCTS_Msgs, text, elcount(text));
+  //write("RT_config 605: RTSCTS_Msgs=%s", text);
+  CSV_SplitHexValues( values, text );
+  for(long k:values) CT_AddPgAttr(pgis, values[k], gReqDontCare, gRTSCTS, -1, gDLCx, gExpResp_DONTCARE);
+
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::RTSAbort_Msgs, text, elcount(text));
+  //write("RT_config 611: RTSAbort_Msgs=%s", text);
+  CSV_SplitHexValues( values, text );
+  for(long k:values) CT_AddPgAttr(pgis, values[k], gReqDontCare, gRTSAbort, -1, gDLC8, gExpResp_DONTCARE);
+  
+  // now the cyclic messages are pairs of pgn and cycletime.
+  // so each "second" value was read out hex, but is noted decimal (yes its a mix-up).
+  // read out in a temp variable and write the corrected values to the proper variables.
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::Cycl_Req_Msgs_DLC8, text, elcount(text));
+  CSV_SplitHexValues( values, text );
+  for(long k:values)
+  {
+    dword pgn;
+    if (k%2==0) pgn = values[k];
+    else
+    {
+      snprintf(text, elcount(text), "%x", values[k]);  // cycle time is decimal, so use the hex digits as text and convert with atol.
+      val = (dword)atol(text);
+      CT_AddPgAttr( pgis, pgn, gRequestable, val, gDLC8, gExpResp_PG );
+    }
+  }
+  
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::Cycl_Req_Msgs_DLCx, text, elcount(text));
+  CSV_SplitHexValues( values, text );
+  for(long k:values)
+  {
+    dword pgn;
+    if (k%2==0) pgn = values[k];
+    else
+    {
+      snprintf(text, elcount(text), "%x", values[k]); // cycle time is decimal, so use the hex digits as text and convert with atol.
+      val = (dword)atol(text);
+      CT_AddPgAttr( pgis, pgn, gRequestable, val, gDLCx, gExpResp_PG );
+    }
+  }
+  
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::Cycl_NoReq_Msgs, text, elcount(text));
+  CSV_SplitHexValues( values, text );
+  for(long k:values)
+  {
+    dword pgn;
+    if (k%2==0) pgn = values[k];
+    else
+    {
+      snprintf(text, elcount(text), "%x", values[k]);
+      val = (dword)atol(text);
+      CT_AddPgAttr( pgis, pgn, gNonRequestable, val, gDlcDontCare, gExpResp_NACK);
+    }
+  }
+  
+  // ack producing msgs are non cyclic, and marked as requestable
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::ACK_Producing_Msgs, text, elcount(text));
+  CSV_SplitHexValues( values, text );
+  for(long k:values) CT_AddPgAttr(pgis, values[k], gRequestable, -1, gDLC8, gExpResp_ACK);
+
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::AccessDenied_Producing_Msgs, text, elcount(text));
+  CSV_SplitHexValues( values, text );
+  for(long k:values) CT_AddPgAttr(pgis, values[k], gRequestable, -1, gDLC8, gExpResp_DENY);
+
+  sysGetVariableString(sysvar::CT::CFG::DUT::PGN::Busy_Producing_Msgs, text, elcount(text));
+  CSV_SplitHexValues( values, text );
+  for(long k:values) CT_AddPgAttr(pgis, values[k], gRequestable, -1, gDLC8, gExpResp_BUSY);
+    
+  // transport the built up pgis to the global config.
+  CT_CopyPGIsToCfg(pgis);
+  
+  if (@CT::DEBUG::CONFIG)
+  {
+    CT_PrintPgnInfoList();
+  }
+  
+  // clear the local pgi container again.
+  pgis.clear();
+  
+}
+
+// ==============================================================================================================
+// helper to initialize a word array with given csv-string of word values.
+void CT_InitCfg_FromCSV(dword target[], char csv[])
+{
+  dword vals[long];
+  CSV_SplitHexValues(vals, csv);
+  for(long k:vals) target[k&0xFFFF]=vals[k];
+}
+
+// ==============================================================================================================
+// Print given pgn info array to write.
+void CT_PrintPgnInfoList(struct gPGAttrs pgis[long])
+{
+  char sTableHeader[255];
+  char sEntry[255];
+  
+  CT_GetPGI_Text_TableHeader(sTableHeader);
+  write(sTableHeader);
+  
+  for(long k: pgis)
+  {
+    CT_GetPGI_Text_TableEntry(sEntry, k, pgis[k]);
+    write(sEntry);
+  }
+}
+// ==============================================================================================================
+// Print global pgn info list.
+void CT_PrintPgnInfoList()
+{
+  struct gPGAttrs pgis[long];
+  CT_CopyPGIsFromCfg(pgis);
+  CT_PrintPgnInfoList(pgis);
+  pgis.clear();
+}
+
+// ==============================================================================================================
+// get expResp as human readable string.
+void CT_GetExpRespHumanReadable( char result[], enum gExpResp expResp )
+{
+  snprintf(result, elcount(result), "");
+  
+  if (CT_ExpRespContains( expResp, gExpResp_PG ))    strncat(result, " PG",   elcount(result));
+  if (CT_ExpRespContains( expResp, gExpResp_ACK ))   strncat(result, " ACK",  elcount(result));
+  if (CT_ExpRespContains( expResp, gExpResp_NACK ))  strncat(result, " NACK", elcount(result));
+  if (CT_ExpRespContains( expResp, gExpResp_DENY ))  strncat(result, " DENY", elcount(result));
+  if (CT_ExpRespContains( expResp, gExpResp_BUSY ))  strncat(result, " BUSY", elcount(result));  
+}
+
+// ==============================================================================================================
+// print current testconfiguration to the report. Done automatically when initializing the complete test-module.
+// no need to call this directly.
+void CT_Report_PrintTestConfiguration()
+{
+  char text[1024];
+  char tmp[255];
+  byte byteBuf[1800];
+  long count;
+  struct gPGAttrs pgis[long];
+  dword pgn;
+  int i;
+  
+  testReportAddMiscInfoBlock("Testconfiguration");
+  testReportAddMiscInfo( "Fullmode", "%d", @CT::TEST::CTRL::Fullmode );
+  testReportAddMiscInfo( "Address DUT", "%d (0x%X)", gDUT_Addr, gDUT_Addr);
+  testReportAddMiscInfo( "Device Name DUT", "0x%llX", gDUT_DevName);
+  testReportAddMiscInfo( "DUT abs. message tolerance", "%dms", gDUT_MsgToleranceAbs); 
+  testReportAddMiscInfo( "DUT rel. message tolerance", "%f", gDUT_MsgToleranceRel);
+  testReportAddMiscInfo( "Address Tool", "%d (0x%X)", gTOOL_Addr, gTOOL_Addr);
+  testReportAddMiscInfo( "Cyclic disabled", "%d", @CT::CFG::DUT::CyclicDisabled);
+  testReportAddMiscInfo( "CA support", "%d", 1-@CT::CFG::DUT::NoCA);
+  testReportAddMiscInfo( "NM support", "%d", 1-@CT::CFG::DUT::NoNM);
+  testReportAddMiscInfo( "Address violation over DM", "%d", @CT::CFG::DUT::AddrViolation_DM);
+  testReportAddMiscInfo( "Deny Response disabled", "%d", @CT::CFG::DUT::DenyResponseDisabled);
+
+  switch (@CT::CFG::REPORT::InconclusiveAs)
+  {
+    case 2: snprintf(text, elcount(text), "Failed"); break;
+    case 1: snprintf(text, elcount(text), "Passed"); break;
+    case 0:
+    default: snprintf(text, elcount(text), "Inconclusive"); break;
+  }
+  testReportAddMiscInfo( "Inconclusive as", "%s", text);
+  
+  testReportAddMiscInfo("PGN non cycl. requestable messages DLC=8 (DUT)", "");
+  CT_GetPGIs( pgis, gRequestable, gRTSDontCare, gNonCyclic, gDLC8, gExpResp_PG);
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(text, elcount(text), "- PGN %d / %d (DUT)", k+1, pgis.size() );
+    testReportAddMiscInfo( text, "0x%.05X (%d)", pgn, pgn);
+  }
+  
+  testReportAddMiscInfo("PGN non cycl. requestable messages DLC>8 (DUT)", "");
+  CT_GetPGIs( pgis, gRequestable, gRTSDontCare, gNonCyclic, gDLCx, gExpResp_PG);
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(text, elcount(text), "- PGN %d / %d (DUT)", k+1, pgis.size() );
+    testReportAddMiscInfo( text, "  0x%.05X (%d)", pgn, pgn);
+  }
+
+  testReportAddMiscInfo("PGN RTS->CTS", "");
+  CT_GetRTSCTSPGIs( pgis );
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(text, elcount(text), "- PGN %d / %d (DUT)", k+1, pgis.size() );
+    testReportAddMiscInfo( text, "  0x%.05X (%d)", pgn, pgn);
+  }
+  testReportAddMiscInfo("PGN RTS->Abort", "");
+  CT_GetRTSAbortPGIs( pgis );
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(text, elcount(text), "- PGN %d / %d (DUT)", k+1, pgis.size() );
+    testReportAddMiscInfo( text, "0x%.05X (%d)", pgn, pgn);
+  }
+  
+  testReportAddMiscInfo("PGN non cycl. non requestable messages (DUT)", "");
+  CT_GetNonReqPGIs( pgis, gNonCyclic);
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(text, elcount(text), "- PGN %d / %d (DUT)", k+1, pgis.size() );
+    testReportAddMiscInfo( text, "0x%.05X (%d)", pgn, pgn);
+  }
+
+  testReportAddMiscInfo("PGN cyclic requestable messages DLC=8 (DUT)", "");
+  CT_GetPGIs( pgis, gRequestable, gRTSDontCare, gCyclic, gDLC8, gExpResp_PG);
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(text, elcount(text), "- PGN %d / %d (DUT)", k+1, pgis.size() );
+    testReportAddMiscInfo( text, "0x%.05X (%d) / %dms", pgn, pgn, pgis[k].CycleTime);
+  }
+  
+  testReportAddMiscInfo("PGN cyclic requestable messages DLC>8 (DUT)", "");
+  CT_GetPGIs( pgis, gRequestable, gRTSDontCare, gCyclic, gDLCx, gExpResp_PG);
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(text, elcount(text), "- PGN %d / %d (DUT)", k+1, pgis.size() );
+    testReportAddMiscInfo( text, "0x%.05X (%d) / %dms", pgn, pgn, pgis[k].CycleTime);
+  }
+
+  testReportAddMiscInfo("PGN cyclic non requestable messages (DUT)", "");
+  CT_GetPGIs( pgis, gNonRequestable, gRTSDontCare, gCyclic, gDlcDontCare, gExpResp_NACK);
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(text, elcount(text), "- PGN %d / %d (DUT)", k+1, pgis.size() );
+    testReportAddMiscInfo( text, "0x%.05X (%d) / %dms", pgn, pgn, pgis[k].CycleTime);
+  }
+  
+  testReportAddMiscInfo("PGNs non cyclic, requestable, ACK (DUT)", "");
+  CT_GetReqPGIs(pgis, gExpResp_ACK);
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(text, elcount(text), "- PGN %d / %d (DUT)", k+1, pgis.size() );
+    testReportAddMiscInfo( text, "0x%.05X (%d)", pgn, pgn);
+  }
+
+  testReportAddMiscInfo("PGNs non cyclic, requestable, DENY (DUT)", "");
+  CT_GetReqPGIs(pgis, gExpResp_DENY);
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(text, elcount(text), "- PGN %d / %d (DUT)", k+1, pgis.size() );
+    testReportAddMiscInfo( text, "0x%.05X (%d)", pgn, pgn);
+  }
+  
+  testReportAddMiscInfo("PGNs non cyclic, requestable, BUSY (DUT)", "");
+  CT_GetReqPGIs(pgis, gExpResp_BUSY);
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(text, elcount(text), "- PGN %d / %d (DUT)", k+1, pgis.size() );
+    testReportAddMiscInfo( text, "0x%.05X (%d)", pgn, pgn);
+  }
+  
+  
+  testReportAddMiscInfo( "FIXED PGN", "0x%.05X (%d)", gDUT_FixedPGN, gDUT_FixedPGN);
+
+
+  sysGetVariableData(sysvar::CT::CFG::DUT::PGN::FixedPgnData, byteBuf, count);
+  snprintf(text, elcount(text), "");
+  for(i=0; i<count; i++) 
+  {
+    snprintf(tmp, elcount(tmp), "0x%x", byteBuf[i]);
+    strncat(text, tmp, elcount(text));
+    if (i<count-1) strncat(text, ",", elcount(text));
+  }
+  
+  testReportAddMiscInfo("FIXED PGN DATA (DUT)", text);
+  
+}
+
+
+// ==============================================================================================================
+byte CT_ExpRespMatches_Exact( enum gExpResp haystack, enum gExpResp needle )
+{
+  // write("%d %d %d", haystack, needle, (byte)haystack & (byte)needle);
+  return ( (byte)haystack & (byte)needle ) == needle;
+}
+// ==============================================================================================================
+byte CT_ExpRespMatches_Exact( struct gPGAttrs haystack, enum gExpResp needle )
+{
+  return CT_ExpRespMatches_Exact(haystack.ExpResp, needle);
+}
+// ==============================================================================================================
+byte CT_ExpRespMatches_Exact( enum gExpResp haystack, struct gPGAttrs needle )
+{
+  return CT_ExpRespMatches_Exact(haystack, needle.ExpResp);
+}
+// ==============================================================================================================
+byte CT_ExpRespMatches_Exact( struct gPGAttrs haystack, struct gPGAttrs needle )
+{
+  return CT_ExpRespMatches_Exact(haystack.ExpResp, needle.ExpResp);
+}
+// ==============================================================================================================
+byte CT_ExpRespContains( enum gExpResp a, enum gExpResp b )
+{
+  // write("%d %d %d", a, b, (byte)a & (byte)b);
+  return ( (byte)a & (byte)b ) != 0;
+}
+// ==============================================================================================================
+byte CT_ExpRespContains( struct gPGAttrs a, enum gExpResp b )
+{
+  return CT_ExpRespContains(a.ExpResp, b);
+}
+// ==============================================================================================================
+byte CT_ExpRespContains( enum gExpResp a, struct gPGAttrs b)
+{
+  return CT_ExpRespContains(a, b.ExpResp);
+}
+// ==============================================================================================================
+byte CT_ExpRespContains( struct gPGAttrs a, struct gPGAttrs b)
+{
+  return CT_ExpRespContains(a.ExpResp, b.ExpResp);
+}
+
+
+// ==============================================================================================================
+// check if given pgn is a bc pgn (type2)
+byte CT_IsPdu2(struct gPGAttrs pgi)
+{
+  return CT_IsPdu2(pgi.PGN);
+}
+// ==============================================================================================================
+// check if given pgn is a bc pgn (type1)
+byte CT_IsPdu1(struct gPGAttrs pgi)
+{
+  return CT_IsPdu1(pgi.PGN);
+}
+
+// ==============================================================================================================
+// check if given pgn is a cyclic pgn
+byte CT_IsCyclic(struct gPGAttrs pgi)
+{
+  return (pgi.CycleTime > 0);
+}
+
+// ==============================================================================================================
+// check if given pgn is a cyclic pgn
+byte CT_IsNonCyclic(struct gPGAttrs pgi)
+{
+  return (pgi.CycleTime == 0);
+}
+
+// ==============================================================================================================
+// check if given pgn is configured to have a DLC of 8 (or less for AC)...
+byte CT_IsDLC8(struct gPGAttrs pgi)
+{
+  return (pgi.DLCx == gDLC8);
+}
+
+// ==============================================================================================================
+// check if given pgn is configured to have a DLC of >8... 
+// for dont care this function returns true.
+byte CT_IsDLCx(struct gPGAttrs pgi)
+{
+  return (pgi.DLCx == gDLCx);
+}
+
+// ==============================================================================================================
+// check if given pgn is requestable.
+byte CT_IsReq(struct gPGAttrs pgi)
+{
+  return pgi.NonRequestable == gRequestable;
+}
+// ==============================================================================================================
+// check if given pgn is writeable using RTS and is answered with CTS
+byte CT_IsRTSCTS(struct gPGAttrs pgi)
+{
+  return pgi.RTS == gRTSCTS;
+}
+// ==============================================================================================================
+// check if given pgn is non writeable using RTS where the answer is abort.
+byte CT_IsRTSAbort(struct gPGAttrs pgi)
+{
+  return pgi.RTS == gRTSAbort;
+}
+
+// ==============================================================================================================
+// check if given pgn is non requestable.
+byte CT_IsNonReq(struct gPGAttrs pgi)
+{
+  return (pgi.NonRequestable == gNonRequestable);
+}
+
+// ==============================================================================================================
+// check if given pgn is ACK-access denied producing
+byte CT_IsDeny(struct gPGAttrs pgi)
+{
+  return CT_ExpRespContains( pgi.ExpResp, gExpResp_DENY );
+}
+
+// ==============================================================================================================
+// check if given pgn is ACK-access busy producing
+byte CT_IsBusy(struct gPGAttrs pgi)
+{
+  return CT_ExpRespContains( pgi.ExpResp, gExpResp_BUSY );
+}
+
+// ==============================================================================================================
+// check if given pgn produces positive ACK as answer.
+byte CT_IsAckPos(struct gPGAttrs pgi)
+{
+  return CT_ExpRespContains( pgi.ExpResp, gExpResp_ACK );
+}
+
+// ==============================================================================================================
+// check given pgi to be a NACK
+byte CT_IsNACK(struct gPGAttrs pgi)
+{
+  return CT_ExpRespContains( pgi.ExpResp, gExpResp_NACK );
+}
+
+// ==============================================================================================================
+// check given pgi to be a NACK
+byte CT_IsAckNeg(struct gPGAttrs pgi)
+{
+  return CT_IsNACK(pgi);
+}
+
+// ==============================================================================================================
+// count requestable pgis.
+word CT_CountReq(struct gPGAttrs pgis[long])
+{
+  word result;
+  result = 0;
+  for (long k: pgis) if (CT_IsReq(pgis[k])) result++;
+  return result;
+}
+// ==============================================================================================================
+// count non requestable pgis.
+word CT_CountNonReq(struct gPGAttrs pgis[long])
+{
+  word result;
+  result = 0;
+  for (long k: pgis) if (CT_IsNonReq(pgis[k])) result++;
+  return result;
+}
+// ==============================================================================================================
+// count RTSCTS pgis.
+word CT_CountRTSCTS(struct gPGAttrs pgis[long])
+{
+  word result;
+  result = 0;
+  for (long k: pgis) if (CT_IsRTSCTS(pgis[k])) result++;
+  return result;
+}
+// ==============================================================================================================
+// count RTSAbort pgis.
+word CT_CountRTSAbort(struct gPGAttrs pgis[long])
+{
+  word result;
+  result = 0;
+  for (long k: pgis) if (CT_IsRTSAbort(pgis[k])) result++;
+  return result;
+}
+// ==============================================================================================================
+// Count cyclic pgis.
+word CT_CountCyclic(struct gPGAttrs pgis[long])
+{
+  word result;
+  result = 0;
+  for (long k: pgis) if (CT_IsCyclic(pgis[k])) result++;
+  return result;
+}
+// ==============================================================================================================
+// count non cyclic pgis.
+word CT_CountNonCyclic(struct gPGAttrs pgis[long])
+{
+  word result;
+  result = 0;
+  for (long k: pgis) if (CT_IsNonCyclic(pgis[k])) result++;
+  return result;
+}
+
+// ==============================================================================================================
+// check if there are any requestable pgis
+byte CT_ContainsReq(struct gPGAttrs pgis[long])
+{
+  for (long k: pgis) if (CT_IsReq(pgis[k])) return 1;
+  return 0;
+}
+// ==============================================================================================================
+// check if there are any non requestable pgis
+byte CT_ContainsNonReq(struct gPGAttrs pgis[long])
+{
+  for (long k: pgis) if (CT_IsNonReq(pgis[k])) return 1;
+  return 0;
+}
+
+// ==============================================================================================================
+// check if there are any RTSCTS pgis
+byte CT_ContainsRTSCTS(struct gPGAttrs pgis[long])
+{
+  for (long k: pgis) if (CT_IsRTSCTS(pgis[k])) return 1;
+  return 0;
+}
+// ==============================================================================================================
+// check if there are any RTS->Abort pgis
+byte CT_ContainsRTSAbort(struct gPGAttrs pgis[long])
+{
+  for (long k: pgis) if (CT_IsRTSAbort(pgis[k])) return 1;
+  return 0;
+}
+
+// ==============================================================================================================
+// check if there are any cyclic pgis
+byte CT_ContainsCyclic(struct gPGAttrs pgis[long])
+{
+  for (long k: pgis) if (CT_IsCyclic(pgis[k])) return 1;
+  return 0;
+}
+// ==============================================================================================================
+// check if there are any non cyclic pgis
+byte CT_ContainsNonCyclic(struct gPGAttrs pgis[long])
+{
+  for (long k: pgis) if (CT_IsNonCyclic(pgis[k])) return 1;
+  return 0;
+}
+
+// ==============================================================================================================
+// Get PGI for AC
+void CT_GetPGI_AC(struct gPGAttrs result)
+{
+  // remark: gDLC8 means 8 or less!
+  CT_BuildPgAttr( result, gc_PGN_AC, gRequestable, gRTSAbort, 0, gDLC8, gExpResp_PG ); 
+}
+// ==============================================================================================================
+// Get PGI for AC commanded address
+void CT_GetPGI_AC_COMMANDED(struct gPGAttrs result)
+{
+  // remark: gDLC8 means 8 or less!
+  CT_BuildPgAttr( result, gc_PGN_AC_COMMANDED, gRequestable, gRTSAbort, 0, gDLCx, gExpResp_PG ); 
+}
+// ==============================================================================================================
+// Get PGI for PGN SOFT
+void CT_GetPGI_PGN_SOFT(struct gPGAttrs result)
+{
+  // remark: gDLC8 means 8 or less!
+  CT_BuildPgAttr( result, gc_PGN_SOFT, gRequestable, gRTSAbort, 0, gDLCx, gExpResp_PG ); 
+}
+// ==============================================================================================================
+// Get PGI for Fixed PGN ( a non cyclic requestable pgn with dlc>8 given data in config )
+void CT_GetPGI_PGN_FIXED(struct gPGAttrs result, byte pgnData[long])
+{
+  // remark: gDLC8 means 8 or less!
+  CT_BuildPgAttr( result, gDUT_FixedPGN, gRequestable, gRTSAbort, 0, gDLCx, gExpResp_PG ); 
+  pgnData.clear();
+  for(long k: gDUT_FixedPGNData) pgnData[k]=gDUT_FixedPGNData[k];
+}
+// ==============================================================================================================
+// Get PGI for DM01
+void CT_GetPGI_DM01(struct gPGAttrs result, enum gFlag_Dlc dlc)
+{
+  CT_BuildPgAttr( result, gc_PGN_DM01, gRequestable, gRTSAbort, 0, dlc, gExpResp_PG ); 
+}
+// ==============================================================================================================
+// Get PGI for Transfer PGN
+void CT_GetPGI_XFER(struct gPGAttrs result)
+{
+  CT_BuildPgAttr( result, gc_PGN_XFER, gRequestable, gRTSAbort, 0, gDLCx, gExpResp_ANY_NO_POS_ACK );
+}
+// ==============================================================================================================
+// Get PGI for request2 PGN
+void CT_GetPGI_RQST2(struct gPGAttrs result)
+{
+  CT_BuildPgAttr( result, gc_PGN_RQST2, gRequestable, gRTSAbort, 0, gDLC8, gExpResp_ANY );
+}

@@ -1,0 +1,331 @@
+/*@!Encoding:1252*/
+includes
+{
+#include "TesterLib.cin"
+}
+
+/*----------------------------------------------------------------------------
+|
+| Modulname : Tester.can
+|-----------------------------------------------------------------------------
+|*****************************************************************************
+|-----------------------------------------------------------------------------
+|               A U T H O R   I D E N T I T Y
+|-----------------------------------------------------------------------------
+| Author               Initials         Company
+| ------               --------         -------
+| Alexander Büttner      Br             Vector Informatik GmbH
+|-----------------------------------------------------------------------------
+|               R E V I S I O N   H I S T O R Y
+|-----------------------------------------------------------------------------
+| Date         Ver    Author  Description
+| ---------    ---    ------  ------------------------------------------------
+| 05.03.07     1.0     Br     build
+|----------------------------------------------------------------------------
+*/
+variables
+{
+  // 
+  // see #include "TesterLib.cin"
+  // 
+}
+
+void MainTest()
+{
+  char userName[kSIZE];
+  char buff[kSIZE];
+  
+  // ///////////////////////////////////////////////////////////////////// 
+  // Write some test module information into the report file.
+
+  ChkConfig_Init("user");
+
+  TestModuleTitle ("Seat Tester");
+  TestModuleDescription ("Check the fundamental functions of a seat ECU.");
+  TestModuleDescription ("The different seat adjustment functions are checked in");
+  TestModuleDescription ("separate test cases.");
+
+  // ///////////////////////////////////////////////////////////////////// 
+  // Add information into test engineer information table 
+
+  SysSetVariableString(sysvar::SeatTester::TesterName,buff); 
+  if(!strncmp(buff,"",strlen(buff)))
+  {
+    TestWaitForStringInput("Please, add your Name before start of test!");
+    TestGetStringInput(userName, kSIZE);
+    TestReportAddEngineerInfo("Company", "Vector Informatik GmbH, Stuttgart");
+    TestReportAddEngineerInfo("Tester name",userName);
+    SysSetVariableString(sysvar::SeatTester::TesterName, userName);
+  }
+
+  // ///////////////////////////////////////////////////////////////////// 
+  // The check fires, if a value inside the given range occurs (the expected value)
+  
+  TestWaitForTimeout(2000);  // Wait until initialization phase finished
+    
+  gCheckID_ControlMsg = ChkStart_MsgAbsCycleTimeViolation (ControlMsg,         // Message to supervise
+                                                           gNoCheck,           // min-limit
+                                                           gMaxRelCycleTime);  // max-limit
+  TestAddCondition(gCheckID_ControlMsg);
+
+
+  gCheckID_SeatMsg = ChkStart_MsgAbsCycleTimeViolation (SeatMsg,            // Message to supervise
+                                                        gMinRelCycleTime,   // min-limit
+                                                        gMaxRelCycleTime);  // max-limit
+  TestAddCondition(gCheckID_SeatMsg);
+
+  // ///////////////////////////////////////////////////////////////////////////////////////////////////////// 
+  // First test case: read seat information and choose the tests that should be performed depending on the seat type.
+
+  TestGroupBegin("Seat-Diagnostic", "Read the Seat-Type, Serial-Number and Manufacturer-Date via diagnostic");
+    TC_GlobalSUTInfo();  
+  TestGroupEnd();
+
+  TestGroupBegin("Seat-Functions", "Check the different seat adjustment functions");
+    
+    if(!strncmp(gSeatVarBuff,"Basis",strlen(gSeatVarBuff)) || !strncmp(gSeatVarBuff,"Comfort",strlen(gSeatVarBuff)))
+    {
+      TC_LongitudinalBlock();
+      TC_LongitudinalOperatingError();
+    }
+    if(!strncmp(gSeatVarBuff,"Comfort",strlen(gSeatVarBuff)))
+    {
+      TC_HeightBlock();
+      TC_HeightOperatingError();
+    }
+
+  TestGroupEnd();  
+
+  ChkControl_Destroy(gCheckID_ControlMsg);
+  ChkControl_Destroy(gCheckID_SeatMsg);
+}
+
+//
+// Read the Seat-Type, Serial-Number and Manufacturer-Date via diagnostic requests 
+//
+testcase TC_GlobalSUTInfo()
+{
+  TestCaseTitle("SUT info", "Read global SUT information via Diagnostic");
+
+  // /////////////////////////////////////////////////////////////////// 
+  // Sets the ECU with which the tester should communicate from now on.
+  DiagSetTarget(gTarget);
+
+  // /////////////////////////////////////////////////////////////////// 
+  // Start of the Diagnostic Sassion
+  DiagSendRequest(dr_StartSession);  //  Sends the request object to the SUT.
+  TestWaitForDiagResponse (dr_StartSession, kDIAG_TIMEOUT); 
+
+  // /////////////////////////////////////////////////////////////////// 
+  // Read Manufactor-Datas
+  DiagSendRequest(dr_ReadManufData);  //  Sends the request object to the SUT.
+  TestWaitForDiagResponse(dr_ReadManufData,kDIAG_TIMEOUT);
+  DiagGetRespParameter(dr_ReadManufData,"Date_year",dateYearBuff,elcount(dateYearBuff));
+  DiagGetRespParameter(dr_ReadManufData,"Date_month",dateMonthBuff,elcount(dateMonthBuff));
+  DiagGetRespParameter(dr_ReadManufData,"Date_day",dateDayBuff,elcount(dateDayBuff));
+  DiagGetRespParameter(dr_ReadManufData,"Supplier",supplierBuff,elcount(supplierBuff));
+
+  // /////////////////////////////////////////////////////////////////// 
+  // Read Serial-Number 
+  DiagSendRequest(dr_ReadSerNr);  //  Sends the request object to the SUT.
+  TestWaitForDiagResponse(dr_ReadSerNr,kDIAG_TIMEOUT);
+  DiagGetRespParameter(dr_ReadSerNr,"Serial_Number",serNumBuff,elcount(serNumBuff));
+
+  // /////////////////////////////////////////////////////////////////// 
+  // Read Seat-Variant
+  DiagSendRequest(dr_ReadSeatVari);  //  Sends the request object to the SUT.
+  TestWaitForDiagResponse(dr_ReadSeatVari,kDIAG_TIMEOUT);
+  DiagGetRespParameter(dr_ReadSeatVari,"Seat_Variant",gSeatVarBuff,elcount(gSeatVarBuff));
+
+  // /////////////////////////////////////////////////////////////////// 
+  // Add information to SUT information table
+  TestReportAddSUTInfo ("Supplier",supplierBuff);
+  TestReportAddSUTInfo ("Day",dateDayBuff);
+  TestReportAddSUTInfo ("Month",dateMonthBuff);
+  TestReportAddSUTInfo ("Year",dateYearBuff);
+  TestReportAddSUTInfo ("Serial Number",serNumBuff);
+  TestReportAddSUTInfo ("Seat Variant",gSeatVarBuff);
+
+  // /////////////////////////////////////////////////////////////////// 
+  // Stop of the Diagnostic Sassion
+  DiagSendRequest(dr_StopDiag);  //  Sends the request object to the SUT.
+  TestWaitForDiagResponse (dr_StopDiag, kDIAG_TIMEOUT); 
+}
+
+// //////////////////////////////////////////////////////////
+// This test case checks the block detection of the SUT. 
+// If the block detected, the test will "pass". 
+// If the block not detected, the test case returns "fail". 
+
+testcase TC_HeightBlock()
+{
+  long lWaitResult;
+
+  // ///////////////////////////////////////////////////
+  // Add information to report.
+  TestCaseTitle("Block-Detection check", "Height adjustment");
+  TestCaseDescription("TestCase check the Block-Detection of the SUT");
+  
+  TestStep ("Test Step 1", "Set message signal 'HeightAdjustmentUp' = 1, to test the first block!");
+  $ControlMsg::HeightAdjustmentUp   = 1;
+  $ControlMsg::HeightAdjustmentDown = 0;
+
+  lWaitResult = TestWaitForTextEvent("HeightBlock1",kWAIT_TIMEOUT); 
+  switch(lWaitResult)
+  {
+    case 0:   TestStepFail("Test Step 1", "Timeout: First block was not reached!");  break;
+    case 1:   TestStepPass("Test Step 1", "First block was reached!");  break;
+  }
+
+  TestWaitForTimeout(500);
+  
+  TestStep ("Test Step 2", "Set message signal 'HeightAdjustmentDown' = 1, to test the second block!");
+  $ControlMsg::HeightAdjustmentDown = 1;
+  $ControlMsg::HeightAdjustmentUp   = 0;
+
+  lWaitResult = TestWaitForTextEvent("HeightBlock2",kWAIT_TIMEOUT);
+  switch(lWaitResult)
+  {
+    case 0:   TestStepFail("Test Step 2", "Timeout: Second block was not reached!");  break;
+    case 1:   TestStepPass("Test Step 2", "Second block was reached!");  break;
+  }
+  $ControlMsg::HeightAdjustmentDown = 0;
+  $ControlMsg::HeightAdjustmentUp   = 0;
+}
+
+// //////////////////////////////////////////////////////////
+// This test case checks the block detection of the SUT. 
+// If the block detected, the test will "pass". 
+// If the block not detected, the test case returns "fail". 
+
+testcase TC_LongitudinalBlock ()
+{
+  long lWaitResult;
+
+  // ///////////////////////////////////////////////////
+  // Add information to report.
+  TestCaseTitle("Block-Detection check", "Longitudinal adjustment");
+  TestCaseDescription("TestCase check the Block-Detection of the SUT");
+
+  TestStep ("Test Step 1", "Set message signal 'LongitudinalAdjustmentForward' = 1, to test the first block!");
+  $ControlMsg::LongitudinalAdjustmentForward  = 1;
+  $ControlMsg::LongitudinalAdjustmentBackward = 0;
+
+  lWaitResult = TestWaitForTextEvent("LongitudinalBlock1",kWAIT_TIMEOUT);
+  switch(lWaitResult)
+  {
+    case 0:   TestStepFail("Test Step 1", "Timeout: First block was not reached!");  break;
+    case 1:   TestStepPass("Test Step 1", "First block was reached!");  break;
+  }
+
+  TestWaitForTimeout(500);
+  
+  TestStep ("Test Step 2", "Set message signal 'LongitudinalAdjustmentBackward' = 1, to test the second block!");
+  $ControlMsg::LongitudinalAdjustmentBackward = 1;
+  $ControlMsg::LongitudinalAdjustmentForward  = 0;
+
+  lWaitResult = TestWaitForTextEvent("LongitudinalBlock2",kWAIT_TIMEOUT);  
+  switch(lWaitResult)
+  {
+    case 0:   TestStepFail("Test Step 2", "Timeout: Second block was not reached!");  break;
+    case 1:   TestStepPass("Test Step 2", "Second block was reached!");  break;
+  }
+  $ControlMsg::LongitudinalAdjustmentBackward = 0;
+  $ControlMsg::LongitudinalAdjustmentForward  = 0;
+}
+
+// ////////////////////////////////////////////////////////////////////////////////
+// This test case check the behavior of the SUT in the error case. 
+// For this check, Height-Up and Height-Down are activated simultaneous.
+// If not a movement detected, the test will "pass". 
+// If a movement detected, the test case returns "fail". 
+
+testcase TC_HeightOperatingError ()
+{
+  float lHeight_Pos;
+ 
+  char cBuff[kSIZE];
+  // ///////////////////////////////////////////////////
+  // Add information to report.
+  TestCaseTitle("Operating-Error check", "Height-Up and Height-Down adjustment simultaneous");
+  TestCaseDescription("TestCase check the behavior of SUT in the error case");
+  TestStep ("Test Step", "Set Height adjustment signal Up and Down = 1");
+
+  $ControlMsg::HeightAdjustmentUp   = 1;
+  $ControlMsg::HeightAdjustmentDown = 1;
+
+  TestWaitForTimeout(500);
+
+  lHeight_Pos = $SeatMsg::Height_Pos;
+    
+  TestWaitForTimeout(2000);
+
+  if(lHeight_Pos == $SeatMsg::Height_Pos)
+  {
+    TestStepPass("Test Step", "No seat Height movement realised!"); 
+  }
+  else
+  {
+    TestStepFail("Test Step", "Seat Height movement realised!"); 
+    snprintf(cBuff, elcount(cBuff), "expected = %.2f - actual = %.2f",lHeight_Pos, $SeatMsg::Height_Pos);
+    TestCaseComment ("Height position",cBuff);
+  }
+  $ControlMsg::HeightAdjustmentUp   = 0;
+  $ControlMsg::HeightAdjustmentDown = 0;
+}
+
+on message SeatMsg
+{
+  if(this.Height_Block && this.Height_Pos == kMAX_DIST)  
+    TestSupplyTextEvent("HeightBlock1");
+
+  if(this.Height_Block && this.Height_Pos == kMIN_DIST)  
+    TestSupplyTextEvent("HeightBlock2");
+
+  if(this.Longitudinal_Block && this.Longitudinal_Pos == kMAX_DIST)  
+    TestSupplyTextEvent("LongitudinalBlock1");
+
+  if(this.Longitudinal_Block && this.Longitudinal_Pos == kMIN_DIST)  
+    TestSupplyTextEvent("LongitudinalBlock2");
+}
+
+// ////////////////////////////////////////////////////////////////////////////////
+// This test case check the behavior of the SUT in the error case. 
+// For this check, Longitudinal-Up and Longitudinal-Down are activated simultaneous.
+// If not a movement detected, the test will "pass". 
+// If a movement detected, the test case returns "fail". 
+
+testcase TC_LongitudinalOperatingError ()
+{
+  float lLongitudinal_Pos;
+ 
+  char cBuff[kSIZE];
+  // ///////////////////////////////////////////////////
+  // Add information to report.
+  TestCaseTitle("Operating-Error check", "Longitudinal-Up and Longitudinal-Down adjustment simultaneous");
+  TestCaseDescription("TestCase check the behavior of SUT in the error case");
+  TestStep ("Test Step", "Set longitudinal adjustment signal Up and Down = 1");
+
+  $ControlMsg::LongitudinalAdjustmentForward   = 1;
+  $ControlMsg::LongitudinalAdjustmentBackward  = 1;
+
+  TestWaitForTimeout(500);
+
+  lLongitudinal_Pos = $SeatMsg::Longitudinal_Pos;
+    
+  TestWaitForTimeout(2000);
+
+  if(lLongitudinal_Pos == $SeatMsg::Longitudinal_Pos)
+  {
+    TestStepPass("Test Step", "No seat longitudinal movement realised!"); 
+  }
+  else
+  {
+    TestStepFail("Test Step", "Seat longitudinal movement realised!"); 
+    snprintf(cBuff, elcount(cBuff), "expected = %.2f - actual = %.2f",lLongitudinal_Pos, $SeatMsg::Longitudinal_Pos);
+    TestCaseComment ("Longitudinal position",cBuff);
+  }
+  $ControlMsg::LongitudinalAdjustmentForward   = 0;
+  $ControlMsg::LongitudinalAdjustmentBackward  = 0;
+}
+

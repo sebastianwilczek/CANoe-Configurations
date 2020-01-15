@@ -1,0 +1,159 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+/**
+ * Closes a socket.
+ * @param socketId Socket that should be closed
+ */
+long Internal_Stub_UdpCloseSocket(word socketId)
+{
+  return SP_Udp_CloseSocket(socketId);
+}
+
+/**
+ * Creates a socket and optionally binds this socket to a port and a local IP address.
+ * @param doBind kTrue: bind will be performed, kFalse: no bind will be performed
+ * @param localAddress Local address
+ * @param localPort Local port to bind
+ * @param socketId Output: The resulting socket ID
+ */
+long Internal_Stub_UdpCreateAndBind(enum Bool doBind, char localAddress[], word localPort, word& socketId)
+{
+  long result;
+  byte ipV6Addr[16];
+  
+  if(ConvertIpAddressStringToByteArray(localAddress, ipV6Addr) == 4)
+  {
+    result = SP_Udp_CreateAndBind(doBind, localPort, ipGetAddressAsNumber(localAddress));
+  }
+  else
+  {
+    result = SP_Udp_CreateAndBind(doBind, localPort, ipV6Addr);
+  }
+  
+  socketId = gInternalServicePrimitiveResponseParameters.CreateAndBindResponse.socketId;
+  return result;
+}
+
+/**
+ * Sends data to a target.
+ * @param socketId Local socket used to perform the transmission
+ * @param totalLength Total length: repeat data up to that length
+ * @param destinationPort Destination port
+ * @param destinationAddress Destination address
+ * @param data Data to transmit
+ * @param dataLength The length of the parameter data
+ */
+long Internal_Stub_UdpSendData(word socketId, word totalLength, word destinationPort, char destinationAddress[], char data[])
+{
+  byte ipV6Addr[16];
+  
+  if(ConvertIpAddressStringToByteArray(destinationAddress, ipV6Addr) == 4)
+  {
+    return SP_Udp_SendData(socketId, totalLength, destinationPort, ipGetAddressAsNumber(destinationAddress), data);
+  }
+  else
+  {
+    return SP_Udp_SendData(socketId, totalLength, destinationPort, ipV6Addr, data);
+  }  
+}
+
+/**
+ * Data that will be received after the call of this SP will be forwarded to the test system.
+ * @param socketId The Socket selected for forwarding
+ * @param maxFwd Maximum length of payload to be forwarded per event
+ * @param MaxLen Maximum count of bytes to receive over all
+ * @param dropCnt Output: Count of received and dropped bytes within the inactive phase of this SP
+ */
+long Internal_Stub_UdpReceiveAndForward(word socketId, word maxFwd, word maxLen, word& dropCnt)
+{
+  long result;
+  result = SP_Udp_ReceiveAndForward(socketId, maxFwd, maxLen);
+  dropCnt = gInternalServicePrimitiveResponseParameters.ReceiveAndForwardResponse.dropCnt;
+  return result;
+}
+
+/**
+ * Data that will be received after the call of this SP will be forwarded to the test system.
+ * @param timeoutMilliseconds Listen timeout in milliseconds
+ * @param fullLen The full length of available data in bytes
+ * @param srcPort Source port of the received datagram
+ * @param ip Source address of the received datagram
+ * @param payload The payload that was received
+ * @param payloadLength Output: The length of the payload that was received
+ */
+long Internal_Stub_UdpReceiveAndForwardEvent(long timeoutMilliseconds, word& fullLen, word& srcPort, char ip[], byte payload[], word& payloadLength)
+{
+  long result;
+  int bytesToCopy;
+  write("Entering Internal_Stub_UdpReceiveAndForwardEvent");
+  
+  result = testWaitForTextEvent(kInternalEventReceiveAndForward, timeoutMilliseconds);
+  if(result == 1) // event occured
+  {
+    fullLen = gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.fullLen;
+    srcPort = gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.srcPort;
+    if(gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.ipAddressByteLength == 4)
+    {
+      snprintf(ip,
+        elcount(ip),
+        "%d.%d.%d.%d",
+        gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.srcIpAddress[0],
+        gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.srcIpAddress[1],
+        gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.srcIpAddress[2],
+        gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.srcIpAddress[3]);
+    }
+    else
+    {
+      IpGetAddressAsString(
+        gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.srcIpAddress,
+        ip,
+        elcount(ip));
+    }
+    bytesToCopy = _min(elcount(payload), elcount(gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.payload));
+    memcpy(payload, gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.payload, bytesToCopy);
+    payloadLength = gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.payloadByteLength;
+    return 0;
+  }
+  else if(result == 0) // event did not occur
+  {
+    return -1;
+  }
+  else //error during wait
+  {
+    return -1;
+  }
+}
+
+/**
+ * This SP is used to select and set parameters that can be configured on a socket basis.
+ * @param socketId socket that should be configured
+ * @param paramId Selects the parameter to be configured
+ * @param paramVal The value of the selected parameter that must match the corresponding length.
+ * @param paramLength The length of the Parameter paramVal.
+ */
+long Internal_Stub_UdpConfigureSocket(word socketId, word paramId, byte paramVal[], word paramValLength)
+{
+  return SP_Udp_ConfigureSocket(socketId, paramId, paramVal, paramValLength);
+}

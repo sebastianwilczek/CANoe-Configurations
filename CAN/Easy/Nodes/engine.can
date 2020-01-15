@@ -1,0 +1,56 @@
+/*@!Encoding:1252*/
+variables 
+{
+  message BrakeState msg_BrakeState;
+  
+  //Secure Communication over CAN Bus (2017)
+  int ecuName;
+  int publicKey;
+  int privateKey;
+  message PublicID msg_PublicId;
+  int64 publicKeyStore[int64];
+  ////
+}
+
+on preStart
+{
+  //Secure Communication over CAN Bus (2017)
+  ecuName = 1;
+  publicKey = random(65536);
+  if(publicKey < 0)
+  {
+    publicKey = publicKey * -1;
+  }
+  privateKey = -publicKey;
+  ////
+}
+
+on start
+{
+  //Secure Communication over CAN Bus (2017)
+  write("ENGINE: Public Key %d", publicKey);
+  write("ENGINE: Private Key %d", privateKey);
+  msg_PublicId.ECUName = ecuName;
+  msg_PublicId.PublicKey = publicKey;
+  output(msg_PublicId);
+  ////
+}
+
+//Secure Communication over CAN Bus (2017)
+on message PublicID
+{
+  if(this.ECUName != ecuName)
+  {
+    write("ENGINE: Received public key %d by ID %d", this.PublicKey, this.ECUName);
+    publicKeyStore[this.ECUName] = this.PublicKey;
+  }
+}
+
+on sysvar sysvar::Brakes::BrakePressure
+{
+  write("ENGINE: Brake pressure applied");
+  msg_BrakeState.BrakePressure = @this;
+  msg_BrakeState.PrivateChallenge = privateKey;
+  msg_BrakeState.ECUName = ecuName;
+  output(msg_BrakeState);
+}

@@ -1,0 +1,1164 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "Diagnostics\CCI_FrISOTP.cin"
+  #include "SecurityAccess.cin"
+}
+
+variables
+{
+  char gECU[10] = "ECM";
+  const byte cIsTester = 0;        // set to 1 in diagnostics tester
+
+  // NOTE: The default parameters are set in a function! So change that!!!
+
+  // ------- Session Handling -------
+  // This is the current session the ECU is in:
+  // 0 default
+  // 1 extended
+  // 2 programming
+  byte gCurrentSession;
+  // 0 ECU is locked
+  // 1 ECU is unlocked
+  byte gUnlocked;
+  mstimer tSessionTimer;
+  // Fall into default session if not request was received for this long.
+  const word cSessionTimeout = 4500;
+
+  mstimer tResponseSuppressTimer;
+  // time in which an environment variable is set to indicate a suppressed response
+  const word cResponseSuppressTime = 400;
+
+  mstimer tNegativeResponseTimer;
+  // time in which an environment variable is set to indicate a negative response
+  const word cResponseNegativeTime = 400;
+
+  // ------- Fault Memory -----------
+  // These variables hold the fault memory, which can be manipulated by the user
+  // and also via diagnostic requests (e.g. cleared)
+  const word  cDTCSupportedCount = 6;
+  const DWORD cDTCoffset = 1;
+  const BYTE  cDTCSupportedStatusBits = 0x79; // Support 5 of the bits
+  const word  cDTCMaxNumberOfSnapshots = 10;  // The fault memory is limited
+  DWORD gDTCNumber[ cDTCMaxNumberOfSnapshots];
+  byte  gDTCStatus[ cDTCMaxNumberOfSnapshots];
+  DWORD gDTCEnvData[ cDTCMaxNumberOfSnapshots];
+
+  // ------- Specific data ----------
+  DWORD gSerialNumber;
+
+  // bit flags for the contacts (using byte as smallest CAPL type)
+  int   gDoorContactFrozen = 0; // If set, ECU cannot set the state.
+  byte  gDoorContactFrontLeft = 0;
+  byte  gDoorContactFrontRight= 0;
+  byte  gDoorContactRearLeft  = 0;
+  byte  gDoorContactRearRight = 0;
+
+  word  gEngineSpeed;
+  word  gResistance;
+
+  // ------- Variant Coding ---------
+  byte  gCountryType;
+  byte  gVehicleType;
+  word  gSpecialAdjustment;
+  char text[100];
+
+  // ------- Reset behaviour --------
+  msTimer tResetTimer;
+  const DWORD cResetSoftDuration = 20;
+  const DWORD cResetHardDuration = 300;
+  int   gResetRunning = 0;  // If not 0, the ECU is currently resetting.
+}
+
+on start
+{
+  setWriteDbgLevel( 0);
+  //openPanel("ECU");
+
+  gSerialNumber = 170821;
+
+  gCountryType = 1;
+  gVehicleType = 2;
+  gSpecialAdjustment = 33;
+
+  ClearFaultMemory();
+  HardReset();
+ 
+  // Make sure adding snapshots works immediately.
+  @FM::ConfirmedDTC = 1;
+
+  write( "==============================================");
+  write( "               UDS ECU simulation");
+  write( "");
+  write( "This demo implements a simple ECU based on an");
+  write( "example CDD for UDS.");
+  write( "");
+  write( "Note: For manually changing the VariantCoding,");
+  write( "the ECU has to be unlocked first:");
+  write( "- go into the Extended Session,");
+  write( "- request Seed");
+  write( "- send the Key (hint: look at the ECU panel!)");
+  write( "==============================================");
+  write( "");
+}
+
+on diagRequest "Sessions::DefaultSession::Start"
+{
+  diagResponse this resp;
+
+  cancelTimer( tSessionTimer);
+  gCurrentSession = 0;
+  
+  @ECU::Session =0; // Default Session  
+  
+  gUnlocked = 0;  // New session starts locked
+
+  @ECU::IsLocked = 0; // Lock
+
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    StartResponseSuppressTimer();
+    return; // Do NOT respond to this request.
+  }
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "P3", 500);
+  DiagSetParameter( resp, "P3Ex", 2500);
+  DiagSendResponse( resp);
+}
+
+on diagRequest "Sessions::ProgrammingSession::Start"
+{
+  char line[100];
+  diagResponse this resp;
+
+  if( !gUnlocked)
+  {
+    StartNegativeResponseTimer();
+    // The ECU was not unlocked, so deny access.
+    DiagSendNegativeResponse( this, 0x33);
+    return;
+  }
+
+  gCurrentSession = 2;
+
+  @ECU::Session = 2; // Programming Session
+
+  gUnlocked = 0;  // New session starts locked
+
+  @ECU::IsLocked = 0; // Lock
+
+  cancelTimer( tSessionTimer);
+  setTimer( tSessionTimer, cSessionTimeout);
+
+  //snprintf( line, elcount(line), "CAPL: %s: Handle: 0x%02lX ==> start session timer", gECU, gDiagConnHandle);
+  //writeDbgLevel( 0, line);
+
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    StartResponseSuppressTimer();
+    return; // Do NOT respond to this request.
+  }
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "P3", 500);
+  DiagSetParameter( resp, "P3Ex", 2500);
+  DiagSendResponse( resp);
+}
+
+on diagRequest "Sessions::ExtendedDiagnosticSession::Start"
+{
+  char line[100];
+  diagResponse this resp;
+
+  // It is only possible to go into this session from the default session!
+  if( gCurrentSession > 1)
+  {
+    StartNegativeResponseTimer();
+    DiagSendNegativeResponse( this, 0x7e);
+    return;
+  }
+
+  gCurrentSession = 1;
+
+  @ECU::Session = 1; // Extended Session
+
+  gUnlocked = 0;  // New session starts locked
+
+  @ECU::IsLocked = 0; // Lock
+
+  cancelTimer( tSessionTimer);
+  setTimer( tSessionTimer, cSessionTimeout);
+
+  //snprintf( line, elcount(line), "CAPL: %s: Handle: 0x%02lX ==> start session timer", gECU, gDiagConnHandle);
+  //writeDbgLevel( 0, line);
+
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    StartResponseSuppressTimer();
+    return; // Do NOT respond to this request.
+  }
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "P3", 500);
+  DiagSetParameter( resp, "P3Ex", 2500);
+  DiagSendResponse( resp);
+}
+
+on diagRequest Identification::DevelopmentData::Read
+{
+  diagResponse this resp;
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "OperatingSystemVersion", 1);
+  DiagSetParameter( resp, "CanDriverVersion", 5);
+  DiagSetParameter( resp, "NmVersion", 2);
+  DiagSetParameter( resp, "DiagnosticModuleVersion", 1);
+  DiagSetParameter( resp, "TransportLayerVersion", 4);
+  DiagSendResponse( resp);
+}
+
+on diagRequest Identification::SerialNumber::Read
+{
+  diagResponse this resp;
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "SerialNumber", gSerialNumber);
+  //resp.Resize(2000);
+  DiagSendResponse( resp);
+}
+
+on diagRequest Identification::SerialNumber::Write
+{
+  diagResponse this resp;
+
+  if( gCurrentSession < 2)
+  {
+    StartNegativeResponseTimer();
+    DiagSendNegativeResponse( this, 0x22);
+    return;
+  }
+
+  // Retrieve the parameters from the request.
+  gSerialNumber = DiagGetParameter( this, "SerialNumber");
+  @ECU::SerNumDsp = gSerialNumber;
+
+  DiagSendResponse( resp);
+}
+
+on diagRequest Identification::ProcessorType::Read
+{
+  diagResponse this resp;
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "Processor_Type", 1);
+  DiagSendResponse( resp);
+}
+
+on diagRequest Identification::SpecInformation::Read
+{
+  diagResponse this resp;
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "UDS_Version", 1);
+  DiagSetParameter( resp, "UDS_Patch_Level", 0);
+  DiagSendResponse( resp);
+}
+
+on diagRequest Identification::DiagnosticVersion::Read
+{
+  diagResponse this resp;
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "Diagnostic_Version_dump", 0x0100);
+  DiagSendResponse( resp);
+}
+
+on diagRequest Identification::EcuIdentification::Read
+{
+  diagResponse this resp;
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "Part_Number", "CANoe UDS ECU");
+  DiagSendResponse( resp);
+}
+
+on diagRequest SecurityAccess::SeedLevel1::Request
+{
+  DWORD expKey;
+  diagResponse this resp;
+
+  // Not in default session!
+  if( gCurrentSession < 1)
+  {
+    StartNegativeResponseTimer();
+    DiagSendNegativeResponse( this, 0x7E);
+    return;
+  }
+
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    StartResponseSuppressTimer();
+    return; // Do NOT respond to this request.
+  }
+  
+  // To get a series of seed values, reuse the same algorithm here.
+  gSecurityAccessSeed = ComputeKey( gSecurityAccessSeed);
+  expKey = ComputeKey( gSecurityAccessSeed);
+
+  // To allow users to unlock the ECU manually via the console, display the key.
+  @ECU::ExpectedKey = expKey;
+
+  //write( "%s: calculated seed %x, key %x", gECU, gSecurityAccessSeed, expKey);
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "SecuritySeed", gSecurityAccessSeed);
+  DiagSendResponse( resp);
+}
+
+on diagRequest SecurityAccess::KeyLevel1::Send
+{
+  DWORD SecurityKey;
+  DWORD CorrectKey;
+  diagResponse this resp;
+
+  // Not in default session!
+  if( gCurrentSession < 1)
+  {
+    StartNegativeResponseTimer();
+    DiagSendNegativeResponse( this, 0x7e);
+    return;    
+  }
+  if( gSecurityAccessTries > cSecurityAccessMaxNumberOfTries)
+  {
+    StartNegativeResponseTimer();
+    DiagSendNegativeResponse( this, 0x36);
+    return;    
+  }
+  // Retrieve the parameters from the request.
+  SecurityKey = DiagGetParameter( this, "SecurityKey");
+
+  CorrectKey = ComputeKey( gSecurityAccessSeed);
+  if( CorrectKey != SecurityKey)
+  {
+    write( "%s: ERROR: received key %x instead of %x", gECU, SecurityKey, CorrectKey);
+    ++gSecurityAccessTries;
+    StartNegativeResponseTimer();
+    DiagSendNegativeResponse( this, 0x35);
+    return;
+  }
+  // calculate new seed:
+  gSecurityAccessSeed = (23 * CorrectKey + 57) % 0xFFFF;
+  //gSecurityAccessSeed = CorrectKey;
+  //write( "%s: received good key %x, next seed %x", gECU, SecurityKey, CorrectKey, gSecurityAccessSeed);
+  gUnlocked = 1;
+
+  @ECU::IsLocked = 1; // Unlock
+
+  cancelTimer( tSessionTimer);
+  setTimer( tSessionTimer, cSessionTimeout);
+
+  gSecurityAccessTries = 0;
+
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    StartResponseSuppressTimer();
+    return; // Do NOT respond to this request.
+  }
+
+  DiagSendResponse( resp);
+}
+
+on diagRequest DynamicData::ADValues::Read
+{
+  diagResponse this resp;
+
+  double voltage;
+  voltage = 12.0 + sin( timenow()/100000.0);
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "Voltage", voltage * 10);
+  DiagSetParameter( resp, "Current", (voltage / gResistance) * 10);
+  DiagSetParameter( resp, "Resistance", (gResistance + 5)/ 10);
+  DiagSendResponse( resp);
+}
+
+on diagRequest DynamicData::EngineStatus::Read
+{
+  diagResponse this resp;
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "Engine_Speed", gEngineSpeed);
+  DiagSendResponse( resp);
+
+  gEngineSpeed += 100;
+  if (gEngineSpeed > 1000) gEngineSpeed = 0;
+}
+
+on diagRequest VariantCoding::Coding::Read
+{
+  diagResponse this resp;
+
+  if( !gUnlocked)
+  {
+    StartNegativeResponseTimer();
+    // The ECU was not unlocked, so deny access.
+    DiagSendNegativeResponse( this, 0x33);
+    return;
+  }
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "Codingstring.CountryType", gCountryType);
+  DiagSetParameter( resp, "Codingstring.VehicleType", gVehicleType);
+  DiagSetParameter( resp, "Codingstring.SpecialAdjustment", gSpecialAdjustment);
+  DiagSendResponse( resp);
+}
+
+on diagRequest VariantCoding::Coding::Write
+{
+  diagResponse this resp;
+
+  if( !gUnlocked)
+  {
+    StartNegativeResponseTimer();
+    // The ECU was not unlocked, so deny access.
+    DiagSendNegativeResponse( this, 0x33);
+    return;
+  }
+
+  // Retrieve the parameters from the request.
+  gCountryType = DiagGetParameter( this, "Codingstring.CountryType");
+  gVehicleType = DiagGetParameter( this, "Codingstring.VehicleType");
+  gSpecialAdjustment = DiagGetParameter( this, "Codingstring.SpecialAdjustment");
+
+  //write("#### Country = %d, Variant = %d, Special =0x%X", gCountryType, gVehicleType, gSpecialAdjustment);
+
+  DisplayVariantCoding();
+
+  DiagSendResponse( resp);
+}
+
+on diagRequest IOControl::DoorStatus::Read
+{
+  diagResponse this resp;
+
+  if( !gUnlocked)
+  {
+    StartNegativeResponseTimer();
+    // The ECU was not unlocked, so deny access.
+    DiagSendNegativeResponse( this, 0x33);
+    return;
+  }
+  // read current state
+  gDoorContactFrontLeft     = @Door::ContactFrontLeft;
+  gDoorContactFrontRight    = @Door::ContactFrontRight;
+  gDoorContactRearLeft      = @Door::ContactRearLeft;
+  gDoorContactRearRight     = @Door::ContactRearRight;
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "DoorContact.DoorContactFrontLeft",  gDoorContactFrontLeft);
+  DiagSetParameter( resp, "DoorContact.DoorContactFrontRight", gDoorContactFrontRight);
+  DiagSetParameter( resp, "DoorContact.DoorContactRearLeft",   gDoorContactRearLeft);
+  DiagSetParameter( resp, "DoorContact.DoorContactRearRight",  gDoorContactRearRight);
+  DiagSetParameter( resp, "DoorContact._reserved", 0);
+  DiagSendResponse( resp);
+}
+
+on diagRequest IOControl::DoorStatus::Set
+{
+  diagResponse this resp;
+
+  if( !gUnlocked)
+  {
+    StartNegativeResponseTimer();
+    // The ECU was not unlocked, so deny access.
+    DiagSendNegativeResponse( this, 0x33);
+    return;
+  }
+
+  // Retrieve the parameters from the request.
+  gDoorContactFrontLeft  = DiagGetParameter( this, "DoorContact.DoorContactFrontLeft");
+  gDoorContactFrontRight = DiagGetParameter( this, "DoorContact.DoorContactFrontRight");
+  gDoorContactRearLeft   = DiagGetParameter( this, "DoorContact.DoorContactRearLeft");
+  gDoorContactRearRight  = DiagGetParameter( this, "DoorContact.DoorContactRearRight");
+
+  @Door::ContactFrontLeft = gDoorContactFrontLeft;
+  @Door::ContactFrontRight = gDoorContactFrontRight;
+  @Door::ContactRearLeft = gDoorContactRearLeft;
+  @Door::ContactRearRight = gDoorContactRearRight;
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "DoorContact.DoorContactFrontLeft",  gDoorContactFrontLeft);
+  DiagSetParameter( resp, "DoorContact.DoorContactFrontRight", gDoorContactFrontRight);
+  DiagSetParameter( resp, "DoorContact.DoorContactRearLeft",   gDoorContactRearLeft);
+  DiagSetParameter( resp, "DoorContact.DoorContactRearRight",  gDoorContactRearRight);
+  DiagSetParameter( resp, "DoorContact._reserved", 0);
+  DiagSendResponse( resp);
+}
+
+on diagRequest IOControl::DoorStatus::Reset
+{
+  diagResponse this resp;
+
+  if( !gUnlocked)
+  {
+    StartNegativeResponseTimer();
+    // The ECU was not unlocked, so deny access.
+    DiagSendNegativeResponse( this, 0x33);
+    return;
+  }
+
+  gDoorContactFrontLeft = 0;
+  gDoorContactFrontRight= 0;
+  gDoorContactRearLeft  = 0;
+  gDoorContactRearRight = 0;
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "DoorContact.DoorContactFrontLeft", 0);
+  DiagSetParameter( resp, "DoorContact.DoorContactFrontRight", 0);
+  DiagSetParameter( resp, "DoorContact.DoorContactRearLeft", 0);
+  DiagSetParameter( resp, "DoorContact.DoorContactRearRight", 0);
+  DiagSetParameter( resp, "DoorContact._reserved", 0);
+  DiagSendResponse( resp);
+}
+
+on diagRequest IOControl::DoorStatus::ReturnControl
+{
+  diagResponse this resp;
+
+  if( !gUnlocked)
+  {
+    StartNegativeResponseTimer();
+    // The ECU was not unlocked, so deny access.
+    DiagSendNegativeResponse( this, 0x33);
+    return;
+  }
+
+  gDoorContactFrozen = 0;
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "DoorContact.DoorContactFrontLeft",  gDoorContactFrontLeft);
+  DiagSetParameter( resp, "DoorContact.DoorContactFrontRight", gDoorContactFrontRight);
+  DiagSetParameter( resp, "DoorContact.DoorContactRearLeft",   gDoorContactRearLeft);
+  DiagSetParameter( resp, "DoorContact.DoorContactRearRight",  gDoorContactRearRight);
+  DiagSetParameter( resp, "DoorContact._reserved", 0);
+  DiagSendResponse( resp);
+}
+
+on diagRequest CommunicationControl::EnableRxAndEnableTx::Control
+{
+  diagResponse this resp;
+
+  StartNegativeResponseTimer();
+  // Service not supported in this simulation.
+  DiagSendNegativeResponse( this, 0x11);
+
+/*
+  // Retrieve the parameters from the request.
+  DiagGetParameter( this, "CommType.NormalCommunicationMessages");
+  DiagGetParameter( this, "CommType.NetworkCommunicationCommunicationMessages");
+  DiagGetParameter( this, "CommType.DiagnosticCommunicationMessages");
+  DiagGetParameter( this, "CommType._reserved");
+
+  if( 1 == DiagGetSuppressResp( this))
+    return; // Do NOT respond to this request.
+
+  DiagSendResponse( resp);
+*/
+}
+
+on diagRequest CommunicationControl::EnableRxAndDisableTx::Control
+{
+  diagResponse this resp;
+
+  StartNegativeResponseTimer();
+  // Service not supported in this simulation.
+  DiagSendNegativeResponse( this, 0x11);
+
+/*
+  // Retrieve the parameters from the request.
+  DiagGetParameter( this, "CommType.NormalCommunicationMessages");
+  DiagGetParameter( this, "CommType.NetworkCommunicationCommunicationMessages");
+  DiagGetParameter( this, "CommType.DiagnosticCommunicationMessages");
+  DiagGetParameter( this, "CommType._reserved");
+
+  if( 1 == DiagGetSuppressResp( this))
+    return; // Do NOT respond to this request.
+
+  DiagSendResponse( resp);
+*/
+}
+
+on diagRequest EcuReset::HardReset::Reset
+{
+  diagResponse this resp;
+
+  HardReset();
+  gResetRunning = 2;
+  setTimer( tResetTimer, cResetHardDuration);
+
+  DiagSendResponse( resp);
+}
+
+on diagRequest EcuReset::SoftReset::Reset
+{
+  diagResponse this resp;
+
+  SoftReset();
+  gResetRunning = 1;
+  setTimer( tResetTimer, cResetSoftDuration);
+
+  DiagSendResponse( resp);
+}
+
+on diagRequest FaultMemory::FaultMemory::ReadNumber
+{
+  BYTE DtcStatusbyte;
+  diagResponse this resp;
+
+  // Retrieve the parameters from the request.
+  DtcStatusbyte = DiagGetParameter( this, "DtcStatusbyte");
+/*
+  DiagGetParameter( this, "DtcStatusbyte.TestFailed");
+  DiagGetParameter( this, "DtcStatusbyte.TestFailedThisMonitoringCycle");
+  DiagGetParameter( this, "DtcStatusbyte.PendingDtc");
+  DiagGetParameter( this, "DtcStatusbyte.ConfirmedDtc");
+  DiagGetParameter( this, "DtcStatusbyte.TestNotCompletedSinceLastClear");
+  DiagGetParameter( this, "DtcStatusbyte.TestFailedSinceLastClear");
+  DiagGetParameter( this, "DtcStatusbyte.TestNotCompletedThisMonitoringCycle");
+  DiagGetParameter( this, "DtcStatusbyte.WarningIndicatorRequested");
+*/
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    StartResponseSuppressTimer();
+    return; // Do NOT respond to this request.
+  }
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "DtcStatusbyte", DtcStatusbyte);
+/*
+  DiagSetParameter( resp, "DtcStatusbyte.TestFailed", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestFailedThisMonitoringCycle", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.PendingDtc", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.ConfirmedDtc", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestNotCompletedSinceLastClear", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestFailedSinceLastClear", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestNotCompletedThisMonitoringCycle", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.WarningIndicatorRequested", 0);
+*/
+  DiagSetParameter( resp, "DtcFormatIdentifier", 1);
+  DiagSetParameter( resp, "DtcCount", CountDTC( DtcStatusbyte));
+  DiagSendResponse( resp);
+}
+
+on diagRequest FaultMemory::FaultMemory::ReadAllIdentified
+{
+  BYTE DtcStatusbyte;
+  word i, index;
+  diagResponse this resp;
+
+  // Retrieve the parameters from the request.
+  DtcStatusbyte = DiagGetParameter( this, "DtcStatusbyte");
+/*
+  DiagGetParameter( this, "DtcStatusbyte.TestFailed");
+  DiagGetParameter( this, "DtcStatusbyte.TestFailedThisMonitoringCycle");
+  DiagGetParameter( this, "DtcStatusbyte.PendingDtc");
+  DiagGetParameter( this, "DtcStatusbyte.ConfirmedDtc");
+  DiagGetParameter( this, "DtcStatusbyte.TestNotCompletedSinceLastClear");
+  DiagGetParameter( this, "DtcStatusbyte.TestFailedSinceLastClear");
+  DiagGetParameter( this, "DtcStatusbyte.TestNotCompletedThisMonitoringCycle");
+  DiagGetParameter( this, "DtcStatusbyte.WarningIndicatorRequested");
+*/
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    StartResponseSuppressTimer();
+    return; // Do NOT respond to this request.
+  }
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "DtcStatusbyte", DtcStatusbyte);
+/*
+  DiagSetParameter( resp, "DtcStatusbyte.TestFailed", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestFailedThisMonitoringCycle", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.PendingDtc", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.ConfirmedDtc", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestNotCompletedSinceLastClear", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestFailedSinceLastClear", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestNotCompletedThisMonitoringCycle", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.WarningIndicatorRequested", 0);
+*/
+  DiagResize( resp, 3 + 4 * CountDTC( DtcStatusbyte));
+  index = 0;
+
+  for( i = 0; i < cDTCMaxNumberOfSnapshots; ++i)
+  {
+    if( !MatchStatusBits( DtcStatusbyte, gDTCStatus[i]))
+      continue;
+
+    DiagSetComplexParameter( resp, "ListOfDTC", index, "DTC", gDTCNumber[i]);
+    DiagSetComplexParameter( resp, "ListOfDTC", index, "DtcStatusbyte", gDTCStatus[i]);
+    ++index;
+  }
+  DiagSendResponse( resp);
+}
+
+on diagRequest FaultMemory::FaultMemory::ReadEnvironmentData
+{
+  DWORD DTC;
+  WORD index;
+  WORD i;
+  BYTE DtcSnapshotRecordNumber;
+  BYTE DtcCombinedStatus;
+
+  diagResponse this resp;
+
+  // Retrieve the parameters from the request.
+  DTC = DiagGetParameter( this, "DTC");
+  DtcSnapshotRecordNumber = DiagGetParameter( this, "DtcSnapshotRecordNumber");
+
+  if( DTC - cDTCoffset > cDTCSupportedCount
+   || DtcSnapshotRecordNumber != 0)
+  {
+    StartNegativeResponseTimer();
+    DiagSendNegativeResponse( this, 0x31);
+    return;
+  }
+
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    StartResponseSuppressTimer();
+    return; // Do NOT respond to this request.
+  }
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "DTC", DTC);
+  DtcCombinedStatus = 0;
+  DiagSetParameter( resp, "DtcStatusbyte", DtcCombinedStatus);  // Must be set to resize successfully
+
+  // Make room for potentially _all_ snapshots
+  DiagResize( resp, 6 + 6 * cDTCMaxNumberOfSnapshots);
+/*
+  DiagSetParameter( resp, "DtcStatusbyte.TestFailed", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestFailedThisMonitoringCycle", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.PendingDtc", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.ConfirmedDtc", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestNotCompletedSinceLastClear", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestFailedSinceLastClear", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestNotCompletedThisMonitoringCycle", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.WarningIndicatorRequested", 0);
+*/
+  index = 0;
+  for( i = 0; i < cDTCMaxNumberOfSnapshots; ++i)
+  {
+    if( gDTCNumber[i] != DTC)
+      continue;
+
+    DtcCombinedStatus |= gDTCStatus[i];
+    DiagSetComplexParameter( resp, "ListOfDTC", index, "DtcSnapshotRecordNumber", 1);
+    DiagSetComplexParameter( resp, "ListOfDTC", index, "DtcSnapshotRecordNumberOfIdentifiers", 3);
+//  DiagSetComplexParameter( resp, "ListOfDTC", index, "SnapshotRecord", 0);
+    DiagSetComplexParameter( resp, "ListOfDTC", index, "Operation_Cycle_Counter", gDTCEnvData[i] >> 24);
+    DiagSetComplexParameter( resp, "ListOfDTC", index, "Frequency_Counter", (gDTCEnvData[i] >> 16) & 0xFF);
+    DiagSetComplexParameter( resp, "ListOfDTC", index, "Odometer_Value", GetOdoMeter( gDTCEnvData[i]));
+    ++index;
+  }
+  DiagSetParameter( resp, "DtcStatusbyte", DtcCombinedStatus);  // Must be set to resize successfully
+
+  // Cut response to actual length depending on the number of DTCs found.
+  DiagResize( resp, 6 + 6 * index);
+
+  DiagSendResponse( resp);
+}
+
+on diagRequest FaultMemory::FaultMemory::ReadAllSupported
+{
+  word index;
+  diagResponse this resp;
+
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    StartResponseSuppressTimer();
+    return; // Do NOT respond to this request.
+  }
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "DtcStatusbyte", cDTCSupportedStatusBits);
+/*
+  DiagSetParameter( resp, "DtcStatusbyte.TestFailed", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestFailedThisMonitoringCycle", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.PendingDtc", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.ConfirmedDtc", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestNotCompletedSinceLastClear", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestFailedSinceLastClear", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.TestNotCompletedThisMonitoringCycle", 0);
+  DiagSetParameter( resp, "DtcStatusbyte.WarningIndicatorRequested", 0);
+*/
+  DiagResize( resp, 3 + 4 * cDTCSupportedCount);
+
+  for( index = 0; index < cDTCSupportedCount; ++index)
+  {
+    DiagSetComplexParameter( resp, "ListOfDTCAndStatus", index, "DTC", cDTCoffset + index);
+    DiagSetComplexParameter( resp, "ListOfDTCAndStatus", index, "DtcStatusbyte", cDTCSupportedStatusBits);
+  }
+/*
+  DiagSetComplexParameter( resp, "ListOfDTCAndStatus", 0, "DTC", 0);
+  DiagSetComplexParameter( resp, "ListOfDTCAndStatus", 0, "DtcStatusbyte", 0);
+  DiagSetComplexParameter( resp, "ListOfDTCAndStatus", 0, "DtcStatusbyte.TestFailed", 0);
+  DiagSetComplexParameter( resp, "ListOfDTCAndStatus", 0, "DtcStatusbyte.TestFailedThisMonitoringCycle", 0);
+  DiagSetComplexParameter( resp, "ListOfDTCAndStatus", 0, "DtcStatusbyte.PendingDtc", 0);
+  DiagSetComplexParameter( resp, "ListOfDTCAndStatus", 0, "DtcStatusbyte.ConfirmedDtc", 0);
+  DiagSetComplexParameter( resp, "ListOfDTCAndStatus", 0, "DtcStatusbyte.TestNotCompletedSinceLastClear", 0);
+  DiagSetComplexParameter( resp, "ListOfDTCAndStatus", 0, "DtcStatusbyte.TestFailedSinceLastClear", 0);
+  DiagSetComplexParameter( resp, "ListOfDTCAndStatus", 0, "DtcStatusbyte.TestNotCompletedThisMonitoringCycle", 0);
+  DiagSetComplexParameter( resp, "ListOfDTCAndStatus", 0, "DtcStatusbyte.WarningIndicatorRequested", 0);
+*/
+  DiagSendResponse( resp);
+}
+
+on diagRequest FaultMemory::FaultMemory::Clear
+{
+  int i;
+  DWORD GroupOfDtc;
+  diagResponse this resp;
+
+  // Retrieve the parameters from the request.
+  GroupOfDtc = DiagGetParameter( this, "GroupOfDtc");
+
+  for( i = 0; i < cDTCMaxNumberOfSnapshots; ++i)
+  {
+    ClearSnapshot( i);
+  }
+
+  @ECU::NumberOfSnapshots = 0;
+  DiagSendResponse( resp);
+}
+
+on diagRequest TesterPresent::TesterPresent::Send
+{
+  diagResponse this resp;
+
+  // Note: the session timeout is handled in the TP layer callback!
+
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    StartResponseSuppressTimer();
+    return; // Do NOT respond to this request.
+  }
+
+  DiagSendResponse( resp);
+}
+
+on timer tSessionTimer
+{
+  writeDbgLevel(0, "%s: Session timed out, falling back to default.", gECU);
+
+  gCurrentSession = 0;
+
+  @ECU::Session = 0; // Default session
+
+  gUnlocked = 0;
+
+  @ECU::IsLocked = 0; // Lock
+}
+
+word CountDTC( BYTE DtcStatusbyte)
+{
+  int i;
+  word count;
+  count = 0;
+
+  for( i = 0; i < cDTCMaxNumberOfSnapshots; ++i)
+  {
+    // If any of the requested bits is set, the DTC is active.
+    if( MatchStatusBits( DtcStatusbyte, gDTCStatus[i]))
+      ++count;
+  }
+  return count;
+}
+
+ClearSnapshot( word index)
+{
+  gDTCNumber[ index] = 0;
+  gDTCStatus[ index] = 0;
+  gDTCEnvData[index] = 0;
+}
+
+// Return !0 if the mask selects the given dtcStatus, 0 otherwise.
+// mask == 0 means that no DTC is selected (does not make sense!) EVAL00031324/first
+// otherwise ANY bit set in the mask must be set in the status too.
+
+int MatchStatusBits( BYTE mask, BYTE dtcStatus)
+{
+  return (mask & dtcStatus);
+}
+
+on timer tResetTimer
+{
+  gResetRunning = 0;
+}
+
+HardReset()
+{
+  int i;
+
+  // Called for a hard reset, like reading this from ROM.
+  gCurrentSession = 0;  // default
+  @ECU::Session = 0; // Default session
+  cancelTimer( tSessionTimer);
+
+  gUnlocked = 0;        // locked
+  @ECU::IsLocked = 0; // Lock
+
+  //gSerialNumber = 170821;
+  @ECU::SerNumDsp = gSerialNumber;
+
+  gSecurityAccessTries = 0;
+  gSecurityAccessSeed = 47093;
+
+  gDoorContactFrozen = 0;
+  gDoorContactFrontLeft = 0;
+  gDoorContactFrontRight= 0;
+  gDoorContactRearLeft  = 0;
+  gDoorContactRearRight = 0;
+
+  gEngineSpeed = 0x100;
+  gResistance = 20;  // Ohm
+
+  //gCountryType = 1;
+  //gVehicleType = 2;
+  //gSpecialAdjustment = 33;
+  DisplayVariantCoding();
+
+  // Toggle value to force call to event handler
+  @FM::SelectDTC = 2;
+  @FM::SelectDTC = 1;
+
+  //@ECU::NumberOfSnapshots = 1;
+
+}
+
+AddSnapshot( DWORD dtc, byte status)
+{
+  int oldestEntry;
+  word i;
+  oldestEntry = -1;
+
+  if( !status)
+  {
+    sysSetVariableString(sysVar::FM::SelectedDTCDsp, "Invalid DTC Status!\r\nPlease set some flags.");
+    return;
+  }
+
+  for( i=0; i < cDTCMaxNumberOfSnapshots; ++i)
+  {
+    if( 0 == gDTCNumber[i])
+    {
+      break;
+    } else
+    {
+      if( oldestEntry < 0
+      || GetOdoMeter( gDTCEnvData[i]) < GetOdoMeter( gDTCEnvData[ oldestEntry]))
+      {
+        oldestEntry = i;
+      }
+    }
+  }
+  if( i >= cDTCMaxNumberOfSnapshots)
+  {
+    writeDbgLevel( 1, "%s: Overwriting Snapshot #%d with %06x", gECU, oldestEntry, dtc);
+    i = oldestEntry;
+  } else
+  {
+    writeDbgLevel( 2, "%s: Adding Snapshot #%d (%06x)", gECU, i, dtc);
+  }
+  gDTCNumber[i] = dtc;
+  gDTCStatus[i] = status;
+  gDTCEnvData[i]= CreateEnvData();
+
+  if(@ECU::NumberOfSnapshots < cDTCMaxNumberOfSnapshots)
+  {
+    @ECU::NumberOfSnapshots += 1;
+  }
+}
+
+DWORD GetOdoMeter( DWORD envData)
+{
+  return envData & 0xFFFF;
+}
+
+DWORD CreateEnvData()
+{
+  byte sOperationCycleCounter = 0;
+  byte frequency;
+  WORD odometer;
+
+  ++sOperationCycleCounter;
+  frequency = 1;  // Every snapshot appears only once.
+
+  // In order to get some interesting values here,
+  // assume car is driving along at a speed of 3600 km/h
+  // Parameter factor is 16
+  // => every 16s the odometer value will increase
+  odometer = (timeNowFloat() / 100000.0) / 16; // from 10µs to 1 km/s, /16
+  odometer += 1320; // start value
+
+  return (sOperationCycleCounter << 24) | (frequency << 16) | odometer;
+}
+
+on key *
+{
+  DWORD dtc;
+  byte status;
+
+  if( this >= 'a' && this <= 'f')
+  {
+    dtc = cDTCoffset + this - 'a';
+    status = 0x11;
+  } else if( this >= '1' && this <= '6')
+  {
+    dtc = cDTCoffset + this - '1';
+    status = 0x09;
+  } else
+  {
+    return; // ignore
+  }
+
+  AddSnapshot( dtc, status);
+}
+
+on timer tResponseSuppressTimer
+{
+  // reset indication
+  @ECU::ResponseSuppressed = 0; 
+}
+
+StartResponseSuppressTimer ()
+{
+  @ECU::ResponseSuppressed = 1;
+  cancelTimer( tResponseSuppressTimer);
+  setTimer( tResponseSuppressTimer, cResponseSuppressTime);
+}
+
+on timer tNegativeResponseTimer
+{
+  // reset indication
+  @ECU::NegativeResponse = 0; 
+}
+
+StartNegativeResponseTimer ()
+{
+  @ECU::NegativeResponse = 1;
+  cancelTimer( tNegativeResponseTimer);
+  setTimer( tNegativeResponseTimer, cResponseNegativeTime);
+}
+
+DisplayVariantCoding()
+{
+  // convert raw data to text via a response object
+  diagResponse VariantCoding::Coding::Read converterResp;
+  char text[20];
+
+  // Set the parameters in the response.
+  DiagSetParameter( converterResp, "Codingstring.CountryType", gCountryType);
+  DiagSetParameter( converterResp, "Codingstring.VehicleType", gVehicleType);
+  DiagSetParameter( converterResp, "Codingstring.SpecialAdjustment", gSpecialAdjustment);
+
+  DiagGetParameter( converterResp, "Codingstring.CountryType", text, elcount(text));
+  sysSetVariableString(sysVar::ECU::CountryType,text);
+
+  DiagGetParameter( converterResp, "Codingstring.VehicleType", text, elcount(text));
+  sysSetVariableString(sysVar::ECU::VehicleType,text);
+
+  DiagGetParameter( converterResp, "Codingstring.SpecialAdjustment", text, elcount(text));
+  sysSetVariableString(sysVar::ECU::SpecialAdjustment,text);
+}
+
+on sysVar FM::SelectDTC
+{
+  char dtcText[100];
+  DWORD dtcSelected;
+  diagResponse FaultMemory::FaultMemory::ReadEnvironmentData converter;
+
+  // Use a response object to convert the code into its text
+  dtcSelected = @this;
+  DiagSetParameter( converter, "DTC", dtcSelected);
+  DiagGetParameter( converter, "DTC", dtcText, elcount( dtcText));
+
+  sysSetVariableString(sysVar::FM::SelectedDTCDsp, dtcText);
+  @FM::SelectedDTChex = dtcSelected;
+}
+
+on sysVar FM::AddSnapshot
+{
+  diagResponse FaultMemory::FaultMemory::ReadAllIdentified converter;
+
+  if( @this != 1)
+    return;
+
+  DiagSetParameter( converter, "DtcStatusbyte.TestFailed", @FM::TestFailed);
+  DiagSetParameter( converter, "DtcStatusbyte.ConfirmedDtc", @FM::ConfirmedDTC);
+  DiagSetParameter( converter, "DtcStatusbyte.TestNotCompletedSinceLastClear", @FM::TestNotCompletedSinceClear);
+  DiagSetParameter( converter, "DtcStatusbyte.TestFailedSinceLastClear", @FM::TestFailedSinceLastClear);
+  DiagSetParameter( converter, "DtcStatusbyte.TestNotCompletedThisMonitoringCycle", @FM::TestNotCompletedThisCycle);
+
+  AddSnapshot( @FM::SelectDTC, DiagGetParameter( converter, "DtcStatusbyte"));
+}
+
+on preStart
+{
+  setWriteDbgLevel( 2);
+  CCI_CallinOnPreStart();
+}
+
+SoftReset ()
+{
+  // Reset some basic parameters.
+  gCurrentSession = 0;
+  @ECU::Session = 0; // Default session
+  cancelTimer( tSessionTimer);
+
+  gUnlocked = 0;
+  @ECU::IsLocked = 0; // Lock
+
+  gSecurityAccessSeed = 47093;
+  gSecurityAccessTries = 0;
+}
+
+ClearFaultMemory ()
+{
+  int i;
+
+  // Clear fault memory:
+  for( i = 0; i < cDTCMaxNumberOfSnapshots; ++i)
+  {
+    ClearSnapshot( i);
+  }
+}
+
+void CCI_ReceptionInd (long connectionHdl, BYTE data[])
+{
+  char line[100];
+
+  if( (isPhysicalConnHandle(connectionHdl) > 0) || (isFunctionalConnHandle(connectionHdl) > 0))
+  {
+    if( (gCurrentSession >= 1) && (gUnlocked >= 1))
+    {
+      // reset the session timeout timer:
+      //snprintf( line, elcount(line), "CAPL: %s: Handle: 0x%02lX ==> cancel session timer, Session = %d", gECU, gDiagConnHandle, gCurrentSession);
+      //writeDbgLevel( 0, line);
+      cancelTimer( tSessionTimer);
+      setTimer( tSessionTimer, cSessionTimeout);
+    }
+  }
+}
+
+void CCI_TxConfirmationInd(long connectionHdl)
+{
+}
+
+void CCI_P2IsExpired (int wasP2ExtActive)
+{
+}
+
+void CCI_FrameRxInd (long handle, long frType, byte data[])
+{
+}
+

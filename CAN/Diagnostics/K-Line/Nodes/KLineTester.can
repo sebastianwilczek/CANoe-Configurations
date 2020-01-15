@@ -1,0 +1,126 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "KLine_Utilities.cin"
+  #include "KLine_ErrorInd.cin"
+	#include "DiagResponses.cin"
+	#include "TesterECUSettings.cin"
+}
+
+variables
+{
+  const byte gkSinkSystem           = 0;  // System tab is the target of a notification to Write window
+  const byte gkSinkCAPL             = 1;  // CAPL tab is the target of a notification to Write window
+  const byte gkSinkTest             = 4;  // Test tab is the target of a notification to Write window
+  const byte gkSevError             = 3;  // Error severity of a notification to Write window
+  const byte gkSevWarn              = 2;  // Warning severity of a notification to Write window
+  
+  char gPrefix[20];
+  long gCurrentChannelState = CS_Closed;
+  long gLastChannelState   = CS_Closed;
+  const int gDefaultHeader = 5;
+}
+
+
+SetPrefix()
+{
+  snprintf( gPrefix, elcount( gPrefix), "[%.3f] EcuSim", timenow()/100000.0);
+}
+
+on start
+{
+  if (IsSimulated()) // don't activate demo when running in simulated mode
+  {
+    WriteLineEx(gkSinkCAPL, gkSevError
+      , "KLine features can not be used in simulated mode!");     
+    stop();
+    return;
+  }
+  
+	DiagSetTarget("KLineTester");
+}
+
+
+_KLine_FrameReceptionInd(BYTE data[], int64 timestamps[])
+{
+  if (gCurrentChannelState == CS_Connected)
+  {
+    SetSimulationBehavior(data[3]);
+    KLineSetHeaderFormat(@sysvar::KLineECUSimulation::HeaderFormat);
+  }
+  else
+  {
+    switch (@sysvar::KLineECUSimulation::HeaderFormat)
+    {
+      case DefaultHeader:
+      case FourByteHeader:
+       SetSimulationBehavior(data[4]);
+      break;
+      case ThreeByteHeader:
+        SetSimulationBehavior(data[3]);
+      break;
+      case TwoByteHeader:
+        SetSimulationBehavior(data[2]);
+      break;
+      case OneByteHeader:
+      SetSimulationBehavior(data[1]);
+      break;
+    }
+  }
+}
+
+
+void SetSimulationBehavior(byte sid)
+{   
+  if (sid == cRSidStartCom)
+  {
+    @sysvar::KLineECUSimulation::SetBaudrate = 1;
+  }
+  else if (sid == cRSidStopCom)
+  {
+    @sysvar::KLineECUSimulation::Baudrate = 10400;
+    @sysvar::KLineECUSimulation::SetBaudrate = 1;
+    KLineSetHeaderFormat(gDefaultHeader);
+  }
+}
+
+_Diag_ChannelStateChanged(long newState)
+{
+  char channelStateName[16];
+  
+  gCurrentChannelState = newState;
+  KLine_Util_GetChannelStateByName(channelStateName);
+  writeLineEx(4, INFORMATION, "[%.3f] Called _Diag_ChannelStateChanged: New State: %s", timenow()/100000.0, channelStateName);
+}
+
+void KLine_Util_GetChannelStateByName(char channelState[])
+{
+  switch (gCurrentChannelState)
+  {
+    case CS_Closed:
+       snprintf(channelState, elcount(channelState),"CLOSED");
+    break;
+    case CS_Opened :
+       snprintf(channelState, elcount(channelState),"OPENED");   
+    break;
+    case CS_Connected :
+       snprintf(channelState, elcount(channelState),"CONNECTED");    
+    break;
+    case CS_Online :
+       snprintf(channelState, elcount(channelState),"ONLINE");  
+    break;
+    case CS_ClosePending :  
+       snprintf(channelState, elcount(channelState),"CLOSE_PENDING");   
+    break;
+    case CS_ConnectPending :
+       snprintf(channelState, elcount(channelState),"CONNECT_PENDING"); 
+    break;
+    case CS_EndDiagChannelConnectionState :
+       snprintf(channelState, elcount(channelState),"END_DIAG");   
+    break;
+    default :
+       snprintf(channelState, elcount(channelState),"ERROR_UNDEFINED"); 
+    break;
+  }
+}
+

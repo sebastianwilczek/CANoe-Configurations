@@ -1,0 +1,408 @@
+/*@!Encoding:1252*/
+/**************************************************************************************************
+ Description: This file is part of an example configuration for CANoe option CANaero.
+              The example implements a simple Message Builder for ARINC 825-2.
+ -------------------------------------------------------------------------------------------------
+      C O P Y R I G H T 
+ ------------------------------------------------------------------------------------------------- 
+  Copyright (c) 2014 by Vector Informatik GmbH. All rights reserved. 
+  
+  This software is copyright protected and proprietary to Vector Informatik GmbH. 
+  Vector Informatik GmbH grants to you only those rights as set out in the license conditions. 
+  All other rights remain with Vector Informatik GmbH. 
+  
+  REMOVAL OF THESE COMMENTS IS A VIOLATION OF THE COPYRIGHT AGREEMENT. 
+ *************************************************************************************************/
+
+includes
+{
+  #include "CANaero/A825_3.cin"
+}
+
+variables
+{
+  // buffer to get last message into the panel
+  message * a825;
+  
+  // identifier structure buffer
+  struct tA825idP2P outA825_P2P_id;
+  struct tA825idDirectMessage outA825_DM_id;
+  struct tA825idO2M outA825_O2M_id;
+}
+
+
+
+// distribute parts of CAN id to panel items
+on envVar evA825ID
+{
+  switch (A825DisassembleLCC(@this))
+  {
+    case 0x0:
+    case 0x2:
+    {
+      A825disassembleO2MId (outA825_O2M_id, @this);
+      @evLCC         = outA825_O2M_id.mLCC;
+      @evSourceFID   = outA825_O2M_id.mSrcFID;
+      @evFSB         = (outA825_O2M_id.mFlags >> 2) & 0x1;
+      @evLCL         = (outA825_O2M_id.mFlags >> 1) & 0x1;
+      @evPVT         = (outA825_O2M_id.mFlags     ) & 0x1;
+      
+      @evDOC         = outA825_O2M_id.mDOC;
+      @evRCI         = outA825_O2M_id.mRCI;
+      
+      // update value on panel
+      @evA825ID      = valOfId (A825assembleO2MId (outA825_O2M_id));
+      
+      break;
+    }
+    case 0x3:
+    {
+      A825disassembleDMId (outA825_DM_id, @this);
+      @evLCC        = outA825_DM_id.mLCC;
+      @evSourceFID  = outA825_DM_id.mSrcAddr;
+      
+      // update value on panel
+      @evA825ID      = valOfId (A825assembleDMId (outA825_DM_id));
+      
+      break;
+    }
+    case 0x4:
+    case 0x6:
+    {      
+      A825disassembleP2PId (outA825_P2P_id, @this);
+      @evLCC         = outA825_P2P_id.mLCC;
+      @evSourceFID   = outA825_P2P_id.mClntFID;
+      @evSMT         = (outA825_P2P_id.mFlags >> 2) & 0x1;
+      @evLCL         = (outA825_P2P_id.mFlags >> 1) & 0x1;
+      @evPVT         = (outA825_P2P_id.mFlags     ) & 0x1;
+      @evPeerDestFID = outA825_P2P_id.mSrvFID;
+      @evPeerSID     = outA825_P2P_id.mSID;
+      
+      // update value on panel
+      @evA825ID      = valOfId (A825assembleP2PId (outA825_P2P_id));
+      
+      break;
+    }
+  }  
+}
+
+
+
+// Bit 26 - 28 - belongs to field mLCC
+on envVar evLCC
+{
+  switch (@evLCC)
+  {
+    case 0x0:
+    case 0x2:
+    {
+      outA825_O2M_id.mLCC = (enum _BitLCC)(@this & 0x7);
+      // update value on panel
+      @evA825ID      = valOfId (A825assembleO2MId (outA825_O2M_id));
+      break;
+    }
+    case 0x3:
+    {
+      outA825_DM_id.mLCC = (enum _BitLCC)(@this & 0x7);
+      // update value on panel
+      @evA825ID      = valOfId (A825assembleDMId (outA825_DM_id));
+      break;
+    }
+    case 0x4:
+    case 0x6:
+    {
+      outA825_P2P_id.mLCC = (enum _BitLCC)(@this & 0x7);
+      // update value on panel
+      @evA825ID      = valOfId (A825assembleP2PId (outA825_P2P_id));
+      break;
+    }
+  }  
+}
+
+
+
+// Bit 19 - 25 - belongs to field mSrcClntFID
+on envVar evSourceFID
+{
+  switch (@evLCC)
+  {
+    case 0x0:
+    case 0x2:
+    {
+      outA825_O2M_id.mSrcFID = (@this & 0x7F);
+      // update value on panel
+      @evA825ID      = valOfId (A825assembleO2MId (outA825_O2M_id));
+      break;
+    }
+    case 0x4:
+    case 0x6:
+    {
+      outA825_P2P_id.mClntFID = (@this & 0x7F);
+      // update value on panel
+      @evA825ID      = valOfId (A825assembleP2PID (outA825_P2P_id));
+      break;
+    }
+  }
+}
+
+// Bit 19 - 25 - belongs to Source Address
+on envVar evSrcAddr
+{
+  outA825_DM_id.mSrcAddr = (@this & 0x7F);
+  // update value on panel
+  @evA825ID = valOfId (A825assembleDMId (outA825_DM_id));
+}
+
+// Bit 12 - 18 - belongs to Destination Address
+on envVar evDestAddr
+{
+  outA825_DM_id.mDstAddr = (@this & 0x7F);
+  // update value on panel
+  @evA825ID = valOfId (A825assembleDMId (outA825_DM_id));
+}
+
+// Bit 6 - 11 - belongs to Source Port ID
+on envVar evSourcePort
+{
+  outA825_DM_id.mSrcPrtID = (@this & 0x3F);
+  // update value on panel
+  @evA825ID = valOfId (A825assembleDMId (outA825_DM_id));
+}
+
+// Bit 0 - 5 - belongs to Destination Port ID
+on envVar evDestPort
+{
+  outA825_DM_id.mDstPrtID = (@this & 0x3F);
+  // update value on panel
+  @evA825ID = valOfId (A825assembleDMId (outA825_DM_id));
+}
+
+// Bit 18 - belongs to field mFlags
+on envVar evFSB
+{
+  // assign to file       : reset old flag              : set actual value
+  outA825_O2M_id.mFlags = (outA825_O2M_id.mFlags & 0x3) | ((@this << 2) & 0x4);
+  // update value on panel
+  @evA825ID      = valOfId (A825assembleO2MId (outA825_O2M_id));
+}
+
+on envVar evSMT
+{
+  // assign to file       : reset old flag              : set actual value
+  outA825_P2P_id.mFlags = (outA825_O2M_id.mFlags & 0x3) | ((@this << 2) & 0x4);
+  // update value on panel
+  @evA825ID      = valOfId (A825assembleP2PId (outA825_P2P_id));
+}
+
+// Bit 17 - belongs to field mFlags
+on envVar evLCL
+{
+  switch (@evLCC)
+  {
+    case 0x0:
+    case 0x2:
+    {
+      // assign to file       : reset old flag              : set actual value
+      outA825_O2M_id.mFlags = (outA825_O2M_id.mFlags & 0x1) | ((@this << 1) & 0x2);
+      // update value on panel
+      @evA825ID      = valOfId (A825assembleO2MId (outA825_O2M_id));
+      break;
+    }
+    case 0x3:
+    {
+      break;
+    }
+    case 0x4:
+    case 0x6:
+    {
+      // assign to file       : reset old flag              : set actual value
+      outA825_P2P_id.mFlags = (outA825_O2M_id.mFlags & 0x1) | ((@this << 1) & 0x2);
+      // update value on panel
+      @evA825ID      = valOfId (A825assembleP2PID (outA825_P2P_id));
+      break;
+    }
+  } 
+ }
+
+
+
+// Bit 16 - belongs to field mFlags
+on envVar evPVT
+{
+  switch (@evLCC)
+  {
+    case 0x0:
+    case 0x2:
+    {
+      // assign to file       : reset old flag              : set actual value
+      outA825_O2M_id.mFlags = (outA825_O2M_id.mFlags & 0x6) | ((@this << 0) & 0x1);
+      // update value on panel
+      @evA825ID      = valOfId (A825assembleO2MId (outA825_O2M_id));
+      break;
+    }
+    case 0x3:
+    {
+      break;
+    }
+    case 0x4:
+    case 0x6:
+    {
+      // assign to file       : reset old flag              : set actual value
+      outA825_P2P_id.mFlags = (outA825_O2M_id.mFlags & 0x6) | ((@this << 0) & 0x1);
+      // update value on panel
+      @evA825ID      = valOfId (A825assembleP2PID (outA825_P2P_id));
+      break;
+    }
+  }
+}
+
+
+
+// Bit 2 - 15 - belongs to fields mSrvFID and mSID
+on envVar evDOC
+{
+  outA825_O2M_id.mDOC = @this;
+  // update value on panel
+  @evA825ID      = valOfId (A825assembleO2MId (outA825_O2M_id));
+}
+
+
+
+// Bit 9 - 15 - belongs to field mSrvFID
+on envVar evPeerDestFID
+{
+  outA825_P2P_id.mSrvFID = (@this & 0x7F);
+  // update value on panel
+  @evA825ID      = valOfId (A825assembleP2PID (outA825_P2P_id));
+}
+
+
+
+// Bit 2 - 8 - belongs to field mSID
+on envVar evPeerSID
+{
+  outA825_P2P_id.mSID = (@this & 0x7F);
+  // update value on panel
+  @evA825ID      = valOfId (A825assembleP2PID (outA825_P2P_id));
+}
+
+
+
+// Bit 0 - 1 - belongs to field mRCI
+on envVar evRCI
+{
+  switch (@evLCC)
+  {
+    case 0x0:
+    case 0x2:
+    {
+      outA825_O2M_id.mRCI = (enum _BitRCI)(@this & 0x3);
+      // update value on panel
+      @evA825ID      = valOfId (A825assembleO2MID (outA825_O2M_id));
+      break;
+    }
+    case 0x3:
+    {
+      break;
+    }
+    case 0x4:
+    case 0x6:
+    {
+      outA825_P2P_id.mRCI = (enum _BitRCI)(@this & 0x3);
+      // update value on panel
+      @evA825ID      = valOfId (A825assembleP2PId (outA825_P2P_id));
+      break;
+    }
+  } 
+}
+
+
+
+// check payload size and truncate when necessary
+on envVar evPayload
+{
+  if( getValueSize( this ) > 8 )
+  {
+    byte nBuffer[8];
+
+    getValue( evPayload, nBuffer );    // hopefully getValue honors the max. buffer size
+    putValue( evPayload, nBuffer, 8 ); // truncate everything to 8 bytes
+  }
+}
+
+
+
+// transmit message on request
+on envVar evA825IDSend
+{
+  byte nBuffer[8];
+  int  nBufferLen;
+  int  nBufferIndex;
+  nBufferLen = getValue( evPayload, nBuffer );
+  if( @this == 1 )
+  {
+    message * myA825tx;
+    switch (@evLCC)
+    {
+      case 0x0:
+      case 0x2:
+      {
+        myA825tx.id = A825assembleO2MId (outA825_O2M_id);
+        break;
+      }
+      case 0x3:
+      {
+        myA825tx.id = A825assembleDMId (outA825_DM_id);
+        break;
+      }
+      case 0x4:
+      case 0x6:
+      {
+        myA825tx.id = A825assembleP2PId (outA825_P2P_id);
+        break;
+      }
+    } 
+    
+    for( nBufferIndex = 0; nBufferIndex < nBufferLen; nBufferIndex ++ )
+    {
+      myA825tx.byte(nBufferIndex) = nBuffer[nBufferIndex];
+    }
+    myA825tx.dlc = nBufferLen;
+    output(myA825tx);
+  }
+}
+
+
+
+// put captured message to panel
+on envVar evA825ShowLastRx
+{
+  byte nBuffer[8];
+  int  nBufferIndex;
+  // force update by a toggle
+  @evA825ID = a825.id;
+  for( nBufferIndex = 0; nBufferIndex < a825.dlc; nBufferIndex++ ) {
+     nBuffer[nBufferIndex] = a825.byte( nBufferIndex );
+  }
+  putvalue( evPayload, nBuffer, a825.dlc );
+  @evA825CapturedMsg = 0;
+}
+
+
+
+// accept a message from the valid identifier ranges only
+on message
+  EEC_IdLowLimit - EEC_IdHighLimit,
+  NOC_IdLowLimit - NOC_IdHighLimit,
+  DMC_IdLowLimit - DMC_IdHighLimit,
+  NSC_IdLowLimit - NSC_IdHighLimit,
+  UDC_IdLowLimit - UDC_IdHighLimit,
+  TMC_IdLowLimit - TMC_IdHighLimit,
+  FMC_IdLowLimit - FMC_IdHighLimit
+{
+  if (@evA825CapturedMsg == 0) {
+    a825 = this;
+    @evA825CapturedMsg = 1;
+  }
+}
+

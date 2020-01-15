@@ -1,0 +1,466 @@
+/*@!Encoding:1252*/
+variables
+{
+  long gConnPhys;
+  long gConnFunc;
+  word gTxBufferCount = 0;
+
+  const int  txSize= 4096;
+  byte gTxBuffer[txSize];
+
+  word gTravelDistanceWhileMILActive = 0x0080;
+  word gTravelDistanceSinceDTCsCleared = 567;
+  word gMinutesRun     = 0x00B4;
+  word gTimeSinceEngineStart = 0;
+
+  msTimer tDelayResponse;
+  WORD gDelayResponse = 5;
+
+  char gbOBDFMcleared = 0;
+  msTimer tResetOBDFM;
+}
+
+UnsupportedOBDService(byte data[])
+{
+  // For OBD-II NO negative responses may be sent!
+  writeDbgLevel( 2, "Received unsupported request SID=%02x", data[0]);
+}
+
+RequestCurrentPowertrainDiagnosticData(byte data[])
+{
+  switch (data[1])
+  {
+    case 0x00: 
+    case 0x20:
+    case 0x40:
+    case 0x60:
+    case 0x80:
+    case 0xA0:
+    case 0xC0:
+    case 0xE0: // Supported
+               gTxBuffer[0]= data[0] + 0x40;
+               gTxBuffer[1]= data[1];
+               gTxBuffer[2]= 0x00;
+               gTxBuffer[3]= 0x3A;
+               gTxBuffer[4]= 0x00;
+               gTxBuffer[5]= 0x12;
+               SendResponse(6);
+               break;
+    case 0x0B: // Intake Manifold Absolute Pressure
+               gTxBuffer[0]= data[0] + 0x40;
+               gTxBuffer[1]= data[1];
+               gTxBuffer[2]= 98;
+               SendResponse(3);
+               break;
+    case 0x0C: // Engine RPM
+               gTxBuffer[0]= data[0] + 0x40;
+               gTxBuffer[1]= data[1];
+               gTxBuffer[2]= ((word)($PowerTrain::EngineData::EngSpeed.phys*4)>>8)&0xFF;
+               gTxBuffer[3]= (byte)($PowerTrain::EngineData::EngSpeed.phys*4)&0xFF;      
+               
+               SendResponse(4);
+               break;
+
+    case 0x0D: // Vehicle Speed Sensor
+               gTxBuffer[0]= data[0] + 0x40;
+               gTxBuffer[1]= data[1];
+               gTxBuffer[2]= @sysvar::ComfortBus::CarSpeedEuropean;
+               SendResponse(3);
+               break;
+
+    case 0x0F: // Intake Air Temperature
+               gTxBuffer[0]= data[0] + 0x40;
+               gTxBuffer[1]= data[1];
+               gTxBuffer[2]= 61;
+               SendResponse(3);
+               break;
+
+    case 0x1C: // Vehicle design respective OBD requirements
+               gTxBuffer[0]= data[0] + 0x40;
+               gTxBuffer[1]= data[1];
+               gTxBuffer[2]= 0x07;
+               SendResponse(3);
+               break;
+
+    case 0x1F: // Time Since Engine Start
+               gTxBuffer[0]= data[0] + 0x40;
+               gTxBuffer[1]= data[1];
+               gTxBuffer[2]= (gTimeSinceEngineStart>>8)&0xFF;
+               gTxBuffer[3]= gTimeSinceEngineStart&0xFF;
+               SendResponse(4);
+               break;
+
+    case 0x01: //Monitor Status since DTCs cleared
+               gTxBuffer[0]= data[0] + 0x40;
+               gTxBuffer[1]= data[1];
+               gTxBuffer[2]= 0x80 /* MIL on */ + 2 /* 3 DTCs */;      //Monitor status
+               gTxBuffer[3]= 0x02;      //Supported Continuous Tests and Status
+               gTxBuffer[4]= 0x20;      //Supported Tests
+               gTxBuffer[5]= 0x20;      //Supported Test Status
+
+               SendResponse(6);
+               break;
+
+    case 0x21: //Travel Distance While MIL Activated
+               gTxBuffer[0]= data[0] + 0x40;
+               gTxBuffer[1]= data[1];
+               gTxBuffer[2]= (gTravelDistanceWhileMILActive>>8)&0xFF;     //Travel Distance While MIL Activated
+               gTxBuffer[3]= gTravelDistanceWhileMILActive&0xFF;          //Travel Distance While MIL Activated
+
+               SendResponse(4);
+               break;
+
+    case 0x31: //Travel Distance Since DTCs Cleared
+               gTxBuffer[0]= data[0] + 0x40;
+               gTxBuffer[1]= data[1];
+               gTxBuffer[2]= (gTravelDistanceSinceDTCsCleared>>8)&0xFF;
+               gTxBuffer[3]= gTravelDistanceSinceDTCsCleared&0xFF;
+
+               SendResponse(4);
+               break;
+
+    case 0x4D: //Minutes Run By Engine While MIL Active
+               gTxBuffer[0]= data[0] + 0x40;
+               gTxBuffer[1]= data[1];
+               gTxBuffer[2]= (gMinutesRun>>8)&0xFF; //Minutes Run By Engine While MIL Active
+               gTxBuffer[3]= gMinutesRun&0xFF;      //Minutes Run By Engine While MIL Active
+
+               SendResponse(4);
+               break;
+
+    default:   UnsupportedOBDService(data);
+  }
+}
+
+RequestVehicleInformation(byte data[])
+{
+  switch (data[1])
+  {
+    case 0x00: 
+               gTxBuffer[0]= data[0] + 0x40;
+               gTxBuffer[1]= data[1];
+               gTxBuffer[2]= 0x50;
+               gTxBuffer[3]= 0x40;
+               gTxBuffer[4]= 0x00;
+               gTxBuffer[5]= 0x00;
+               CanTpSendData(gConnPhys, gTxBuffer, 6);
+               break;
+    case 0x20:
+    case 0x40:
+    case 0x60:
+    case 0x80:
+    case 0xA0:
+    case 0xC0:
+    case 0xE0: // Supported
+               gTxBuffer[0]= data[0] + 0x40;
+               gTxBuffer[1]= data[1];
+               gTxBuffer[2]= 0x00;
+               gTxBuffer[3]= 0x00;
+               gTxBuffer[4]= 0x00;
+               gTxBuffer[5]= 0x00;
+               CanTpSendData(gConnPhys, gTxBuffer, 6);
+               break;
+    case 0x02: // Vehicle Information
+               gTxBuffer[ 0]= data[0] + 0x40;
+               gTxBuffer[ 1]= data[1];
+               gTxBuffer[ 2]= 1;
+               gTxBuffer[ 3]= 'V';
+               gTxBuffer[ 4]= 'X';
+               gTxBuffer[ 5]= 'Y';
+               gTxBuffer[ 6]= '2';
+               gTxBuffer[ 7]= '8';
+               gTxBuffer[ 8]= '0';
+               gTxBuffer[ 9]= '3';
+               gTxBuffer[10]= '1';
+               gTxBuffer[11]= '9';
+               gTxBuffer[12]= '7';
+               gTxBuffer[13]= '4';
+               gTxBuffer[14]= '1';
+               gTxBuffer[15]= '8';
+               gTxBuffer[16]= '0';
+               gTxBuffer[17]= '4';
+               gTxBuffer[18]= ' ';
+               gTxBuffer[19]= ' ';
+               CanTpSendData(gConnPhys, gTxBuffer, 20);
+               break;
+    case 0x04: // Calibration Identification
+               gTxBuffer[ 0]= data[0] + 0x40;
+               gTxBuffer[ 1]= data[1];
+               gTxBuffer[ 2]= 2;
+               gTxBuffer[ 3]= '1';
+               gTxBuffer[ 4]= '8';
+               gTxBuffer[ 5]= '0';
+               gTxBuffer[ 6]= '4';
+               gTxBuffer[ 7]= '1';
+               gTxBuffer[ 8]= '9';
+               gTxBuffer[ 9]= '7';
+               gTxBuffer[10]= '5';
+               gTxBuffer[11]= ' ';
+               gTxBuffer[12]= ' ';
+               gTxBuffer[13]= ' ';
+               gTxBuffer[14]= ' ';
+               gTxBuffer[15]= ' ';
+               gTxBuffer[16]= ' ';
+               gTxBuffer[17]= ' ';
+               gTxBuffer[18]= ' ';
+               gTxBuffer[19]= '2';
+               gTxBuffer[20]= '8';
+               gTxBuffer[21]= '0';
+               gTxBuffer[22]= '3';
+               gTxBuffer[23]= '1';
+               gTxBuffer[24]= '9';
+               gTxBuffer[25]= '7';
+               gTxBuffer[26]= '6';
+               gTxBuffer[27]= ' ';
+               gTxBuffer[28]= ' ';
+               gTxBuffer[29]= ' ';
+               gTxBuffer[30]= ' ';
+               gTxBuffer[31]= ' ';
+               gTxBuffer[32]= ' ';
+               gTxBuffer[33]= ' ';
+               gTxBuffer[34]= ' ';
+
+               CanTpSendData(gConnPhys, gTxBuffer, 35);
+
+               break;
+    case 0x0A: // ECU name
+               gTxBuffer[ 0]= data[0] + 0x40;
+               gTxBuffer[ 1]= data[1];
+               gTxBuffer[ 2]= 1;
+               gTxBuffer[ 3]= 'E';
+               gTxBuffer[ 4]= 'C';
+               gTxBuffer[ 5]= 'U';
+               gTxBuffer[ 6]= ' ';
+               gTxBuffer[ 7]= '-';
+               gTxBuffer[ 8]= ' ';
+               gTxBuffer[ 9]= 'E';
+               gTxBuffer[10]= 'N';
+               gTxBuffer[11]= 'G';
+               gTxBuffer[12]= 'I';
+               gTxBuffer[13]= 'N';
+               gTxBuffer[14]= 'E';
+               gTxBuffer[15]= ' ';
+               gTxBuffer[16]= 'C';
+               gTxBuffer[17]= 'O';
+               gTxBuffer[18]= 'N';
+               gTxBuffer[19]= 'T';
+               gTxBuffer[20]= 'R';
+               gTxBuffer[21]= 'O';
+               gTxBuffer[22]= 'L';
+               CanTpSendData(gConnPhys, gTxBuffer, 23);
+               break;
+
+    default:   UnsupportedOBDService(data);
+  }
+}
+
+RequestOnBoardMonitoringTestResults(byte data[])
+{
+  switch (data[1]) 
+  {
+    case 0x00:
+    {
+        gTxBuffer[0]= data[0] + 0x40;
+        gTxBuffer[1]= data[1];
+        gTxBuffer[2]= 0x88;
+        gTxBuffer[3]= 0x00;
+        gTxBuffer[4]= 0x00;
+        gTxBuffer[5]= 0x00;
+        CanTpSendData(gConnPhys, gTxBuffer, 6);
+    }
+    break;
+
+    case 0x01:
+    {
+        gTxBuffer[0] = data[0] + 0x40;  // SIDPRQ
+
+        gTxBuffer[1] = data[1];         // OBDMID
+        gTxBuffer[2] = 0x03;            // STID
+        gTxBuffer[3] = 0x0B;            // UASID
+        gTxBuffer[4] = 0x01;            // TESTVAL
+        gTxBuffer[5] = 0x5F;            // TESTVAL
+        gTxBuffer[6] = 0x01;            // MINLIMIT
+        gTxBuffer[7] = 0x5F;            // MINLIMIT
+        gTxBuffer[8] = 0x01;            // MAXLIMIT
+        gTxBuffer[9] = 0x5F;            // MAXLIMIT
+
+        gTxBuffer[10] = data[1];        // OBDMID
+        gTxBuffer[11] =  0x04;          // STID
+        gTxBuffer[12] = 0x0B;           // UASID
+        gTxBuffer[13] = 0x01;           // TESTVAL
+        gTxBuffer[14] = 0xC1;           // TESTVAL
+        gTxBuffer[15] = 0x01;           // MINLIMIT
+        gTxBuffer[16] = 0xC1;           // MINLIMIT
+        gTxBuffer[17] = 0x01;           // MAXLIMIT
+        gTxBuffer[18] = 0xC1;           // MAXLIMIT
+
+        gTxBuffer[19] = data[1];        // OBDMID
+        gTxBuffer[20] = 0x05;           // STID
+        gTxBuffer[21] = 0x10;           // UASID
+        gTxBuffer[22] = 0x00;           // TESTVAL
+        gTxBuffer[23] = 0x28;           // TESTVAL
+        gTxBuffer[24] = 0x00;           // MINLIMIT
+        gTxBuffer[25] = 0x00;           // MINLIMIT
+        gTxBuffer[26] = 0x03;           // MAXLIMIT
+        gTxBuffer[27] = 0xD6;           // MAXLIMIT
+
+        gTxBuffer[28] = data[1];        // OBDMID
+        gTxBuffer[29] = 0x81;           // STID
+        gTxBuffer[30] = 0x10;           // UASID
+        gTxBuffer[31] = 0x0E;           // TESTVAL
+        gTxBuffer[32] = 0x97;           // TESTVAL
+        gTxBuffer[33] = 0x00;           // MINLIMIT
+        gTxBuffer[34] = 0x00;           // MINLIMIT
+        gTxBuffer[35] = 0x59;           // MAXLIMIT
+        gTxBuffer[36] = 0xDA;           // MAXLIMIT
+
+        CanTpSendData(gConnPhys, gTxBuffer, 37);
+    }
+    break;
+
+    case 0x05:
+    {
+        gTxBuffer[0] = data[0] + 0x40;  // SIDPRQ
+        gTxBuffer[1] = data[1];         // OBDMID
+        gTxBuffer[2] = 0x85;            // STID
+        gTxBuffer[3] = 0x24;            // UASID
+        gTxBuffer[4] = 0x00;            // TESTVAL
+        gTxBuffer[5] = 0x96;            // TESTVAL
+        gTxBuffer[6] = 0x00;            // MINLIMIT
+        gTxBuffer[7] = 0x4B;            // MINLIMIT
+        gTxBuffer[8] = 0xFF;            // MAXLIMIT
+        gTxBuffer[9] = 0xFF;            // MAXLIMIT
+
+
+        CanTpSendData(gConnPhys, gTxBuffer, 10);
+    }
+    break;
+
+    default:   UnsupportedOBDService(data);
+  }
+}
+
+RequestEmissionRelatedTroubleCodes()
+{
+  BYTE dtcList[ 1 + 1 + 2 * 2] =
+  { 0x43 /* SIDPR */, 0x02 /* number of DTCs */
+  , 0x04, 0x43 // Evaporative Emission System Purge Control Valve Circuit
+  , 0x04, 0x44 // Evaporative Emission System Purge Control Valve Circuit Open
+  };
+  
+  if( !gbOBDFMcleared)
+    CanTpSendData(gConnPhys, dtcList, elcount(dtcList));
+}
+
+RequestFreezeFrameData( BYTE data[])
+{
+  gTxBuffer[0] = data[0] + 0x40;  // SIDPRQ
+  gTxBuffer[1] = data[1];         // OBDMID
+  gTxBuffer[2] = data[2];         // Frame number
+  
+  switch( data[1])
+  {
+  case 0x00:
+    gTxBuffer[3] = 0x40;
+    gTxBuffer[4] = 0x00;
+    gTxBuffer[5] = 0x20;
+    gTxBuffer[6] = 0x00;
+    SendResponse(7);
+    break;
+
+  case 0x02:
+    if( data[2] < 2) // frame 0 or 1?
+    {
+      // report the DTCs as in RequestEmissionRelatedTroubleCodes
+      gTxBuffer[3] = 0x04;
+      gTxBuffer[4] = 0x43 + data[2];
+      SendResponse(5);
+    }
+    break;
+
+  case 0x13:
+    gTxBuffer[3] = 0x10;    // Frame Number
+    SendResponse(4);
+    break;
+  }
+}
+
+RequestEmissionRelatedTroubleCodesClear()
+{
+  gbOBDFMcleared = 1;
+  tResetOBDFM.set( 3000);
+}
+
+on timer tResetOBDFM
+{
+  gbOBDFMcleared = 0;
+}
+
+InitTPLayer( BYTE NF_ecuAddr, BYTE Normal_ecuNumber)
+{
+  // Normal
+  gConnPhys = CanTpCreateConnection(0);
+
+  CanTpSetRxIdentifier( gConnPhys, 0x7e0 + Normal_ecuNumber);
+  CanTpSetTxIdentifier( gConnPhys, 0x7e8 + Normal_ecuNumber);
+
+  gConnFunc = CanTpCreateConnection( 0);
+  CanTpSetRxIdentifier( gConnFunc, 0x7df);
+  CanTpSetAddressType( gConnFunc, 1);
+
+  writeDbgLevel(2,"%s - Normal", gECU);
+  writeDbgLevel(2,"%s: TxId=0x%x", gECU, CanTpGetTxIdentifier( gConnPhys));
+  writeDbgLevel(2,"%s: RxId=0x%x", gECU, CanTpGetRxIdentifier( gConnPhys));
+}
+
+on timer tDelayResponse
+{
+  long result;
+  if( gTxBufferCount == 0)
+    return;
+
+  result = CanTpSendData( gConnPhys, gTxBuffer, gTxBufferCount);
+  writeDbgLevel( 2, "[%.3f] %s: Sending response %02x %02x %02x ... (%d byte) on conn %d returns %d"
+  , timenow()/100000.0, gECU, gTxBuffer[0], gTxBuffer[1], gTxBuffer[2], gTxBufferCount, gConnPhys, result);
+  gTxBufferCount = 0;
+}
+
+SendResponse( WORD responseLength)
+{
+  gTxBufferCount = responseLength;
+  setTimer( tDelayResponse, gDelayResponse);
+}
+
+ProcessOBDIIRequest( diagRequest * request)
+{
+  long count;
+  BYTE data[7];
+  
+  count = request.GetPrimitiveData( data, elcount(data));
+
+  if( canOnline(3) != 3)
+  {
+    write( "[%.3f] (OBDII) %s: Going online to allow sending OBD responses.", timenow()/100000.0, gECU);
+  }
+  
+  writeDbgLevel(2, "(OBDII) %s: DataIndication %d bytes: %02X %02X", gECU, count, data[0], data[1]);
+
+  switch (data[0]) 
+  {
+    case 0x01: RequestCurrentPowertrainDiagnosticData(data);
+      break;
+    case 0x02: RequestFreezeFrameData(data);
+      break;
+    case 0x03: RequestEmissionRelatedTroubleCodes();
+      break;
+    case 0x04: RequestEmissionRelatedTroubleCodesClear();
+      break;
+    case 0x06: RequestOnBoardMonitoringTestResults(data);
+      break;
+    case 0x09: RequestVehicleInformation(data);
+      break;
+   
+    default:   UnsupportedOBDService(data);
+  }
+  gSentResponse = 1;
+}

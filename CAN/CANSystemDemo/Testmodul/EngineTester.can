@@ -1,0 +1,321 @@
+/*@@var:*/
+variables
+{
+  dword gCycCheckId;
+
+  int gCycCheckRes;
+  int gUndifnedMsgCheckResult;
+
+  const long kMIN_CYCLE_TIME = 40;
+  const long kMAX_CYCLE_TIME = 60;
+  const long kTIMEOUT        = 4000;
+  const long kDIAG_TIMEOUT   = 500;
+
+  // Variables for Transport-Layer
+  char gECU[15] = "%NODE_NAME%";
+}
+/*@@end*/
+
+/*@@mainTest:MainTest():*/
+void MainTest()
+{
+  TestModuleTitle ("Engine Tester");
+  TestModuleDescription ("Checks cycle time of the engine messages.");
+
+  TestGroupBegin("Message Cycle Time", "Check the differ message cycle time");
+    DiagTestCase();
+    CheckMsgABSData();
+    CheckMsgGearBoxInfo();
+    CheckMsgEngineData();
+    CheckMsgEngineDataIEEE();
+    CheckUndefinedMessage();
+  TestGroupEnd();  
+
+}
+/*@@end*/
+
+/*@@testcase:CheckMsgABSData():*/
+testcase CheckMsgABSData()
+{
+  float lCycMinCycleTime;  // Minimum relative distance 
+  float lCycMaxCycleTime;  // Maximum relative distance
+ 
+  lCycMinCycleTime = kMIN_CYCLE_TIME;
+  lCycMaxCycleTime = kMAX_CYCLE_TIME; 
+  gCycCheckRes = 0;
+
+  // Information for test report.
+  TestCaseTitle("TC 2", "Check cycle time of message ABSData");
+
+  gCycCheckId = ChkStart_MsgAbsCycleTimeViolation (ABSdata,   // Message to supervise
+                                    lCycMinCycleTime,         // min-limit
+                                    lCycMaxCycleTime);        // max-limit
+                                               
+  CheckMsg(lCycMinCycleTime, lCycMaxCycleTime);
+}
+/*@@end*/
+
+/*@@testcase:CheckMsgGearBoxInfo():*/
+testcase CheckMsgGearBoxInfo()
+{
+  float lCycMinCycleTime;  // Minimum relative distance 
+  float lCycMaxCycleTime;  // Maximum relative distance
+
+  lCycMinCycleTime = kMIN_CYCLE_TIME;
+  lCycMaxCycleTime = kMAX_CYCLE_TIME;
+  gCycCheckRes = 0;
+
+  // Information for test report.
+  TestCaseTitle("TC 3", "Check cycle time of message GearBoxInfo");
+
+  gCycCheckId = ChkStart_MsgAbsCycleTimeViolation (EngineData,   // Message to supervise
+                                    lCycMinCycleTime,         // min-limit
+                                    lCycMaxCycleTime);        // max-limit
+
+  CheckMsg(lCycMinCycleTime, lCycMaxCycleTime);
+}
+/*@@end*/
+
+/*@@testcase:CheckMsgEngineData():*/
+testcase CheckMsgEngineData()
+{
+  float lCycMinCycleTime;  // Minimum relative distance 
+  float lCycMaxCycleTime;  // Maximum relative distance
+
+  lCycMinCycleTime = kMIN_CYCLE_TIME;
+  lCycMaxCycleTime = kMAX_CYCLE_TIME;
+  gCycCheckRes = 0;
+
+  // Information for test report.
+  TestCaseTitle("TC 4", "Check cycle time of message EngineData");
+
+  gCycCheckId = ChkStart_MsgAbsCycleTimeViolation (EngineData,   // Message to supervise
+                                    lCycMinCycleTime,         // min-limit
+                                    lCycMaxCycleTime);        // max-limit
+
+  CheckMsg(lCycMinCycleTime, lCycMaxCycleTime);
+}
+/*@@end*/
+
+/*@@testcase:CheckMsgEngineDataIEEE():*/
+testcase CheckMsgEngineDataIEEE()
+{
+  float lCycMinCycleTime;  // Minimum relative distance 
+  float lCycMaxCycleTime;  // Maximum relative distance
+
+  lCycMinCycleTime = kMIN_CYCLE_TIME;
+  lCycMaxCycleTime = kMAX_CYCLE_TIME;
+  gCycCheckRes = 0;
+
+  // Information for test report.
+  TestCaseTitle("TC 5", "Check cycle time of message EngineDataIEEE");
+
+  gCycCheckId = ChkStart_MsgAbsCycleTimeViolation (EngineData,   // Message to supervise
+                                    lCycMinCycleTime,         // min-limit
+                                    lCycMaxCycleTime);        // max-limit
+
+  CheckMsg(lCycMinCycleTime, lCycMaxCycleTime);
+}
+/*@@end*/
+
+/*@@testcase:DiagTestCase():*/
+testcase DiagTestCase()
+{
+  int error = 0; 
+  
+  diagRequest ECU_Identification_Read reqId;
+  diagRequest Serial_Number_Read reqSerNr;
+  diagRequest Coding_Read reqVarCode;
+  diagRequest STOP_SESSION_Stop reqStop;
+
+  // Information for test report.
+  TestCaseTitle("TC 1", "Get ECU Information");
+
+  if( 0 != DiagSetTarget("Engine")) write( "Error setting target!");
+  
+  StartDefaultSession();
+
+  // Wait 500ms for a response from the ECU
+  TestWaitForDiagResponse(kDIAG_TIMEOUT);
+
+  if(DiagGetLastResponseCode() == -1)  // A positive response was received 
+  {
+    TestStepPass("Start Default Session", "Positiv response received!");
+  } 
+  else if(DiagGetLastResponseCode() == 0)  // Timeout
+  {
+    TestStepFail("Start Default Session", "Timeout during start of default session!");
+         write("Timeout during start of default session!");
+    error = 1;
+  } 
+  else if(DiagGetLastResponseCode() > 0) // A negative response was received 
+  {
+    TestStepFail("Start Default Session", "Negative response received!");
+    write("Negative response received!");
+    error = 1;
+  }
+
+  DiagSendRequest(reqId);
+
+  if(1 != TestWaitForDiagResponse(reqId,200))  /* There was an error or timeout */
+  {
+    write("No answer from ECU!");
+    TestStepFail("Read ECU Identification", "No answer from ECU!");
+    error = 1;
+  } 
+  else if(DiagGetLastResponseCode(reqId) == -1) /* A positive response was received */
+  {
+    TestReportWriteDiagResponse(reqId);
+    TestStepPass("Read ECU Identification", "Positiv response received!");
+  }
+  else if(DiagGetLastResponseCode(reqId) > 0) /* A negative response was received */
+  {
+    write( "ECU Diagnostics Identification failed: 0x%x", DiagGetLastResponseCode(reqId));
+    TestReportWriteDiagResponse(reqId);
+    TestStepFail("Read ECU Identification", "Negative response received");
+    error = 1;
+  }
+
+  DiagSendRequest(reqSerNr);
+
+  if(1 != TestWaitForDiagResponse(reqSerNr,200))  // There was an error or timeout
+  {
+    write("No answer from ECU!");
+    TestStepFail("Read Serial Number", "No answer from ECU!");
+    error = 1;
+  } 
+  else if(DiagGetLastResponseCode(reqSerNr) == -1) // A positive response was received 
+  {
+    TestReportWriteDiagResponse(reqSerNr);
+    TestStepPass("Read Serial Number", "Positiv response received!");
+  }
+  else if(DiagGetLastResponseCode(reqSerNr) > 0) // A negative response was received 
+  {
+    TestReportWriteDiagResponse(reqSerNr);
+    TestStepFail("Read Serial Number", "Negative response received");
+    error = 1;
+  }
+
+  DiagSendRequest(reqVarCode);
+
+  if(1 != TestWaitForDiagResponse(reqVarCode,200))  // There was an error or timeout
+  {
+    write("No answer from ECU!");
+    TestStepFail("Read Coding", "No answer from ECU!");
+    error = 1;
+  } 
+  else if(DiagGetLastResponseCode(reqVarCode) == -1) // A positive response was received 
+  {
+    TestReportWriteDiagResponse(reqVarCode);
+    TestStepPass("Read Coding", "Positiv response received!");
+  }
+  else if(DiagGetLastResponseCode(reqVarCode) > 0) // A negative response was received 
+  {
+    TestReportWriteDiagResponse(reqVarCode);
+    TestStepFail("Read Coding", "Negative response received");
+    error = 1;
+  }
+
+  /* Sends the request object to the ECU. */
+  DiagSendRequest(reqStop);  
+}
+/*@@end*/
+
+/*@@caplFunc:StartDefaultSession():*///function
+StartDefaultSession ()
+{
+  // This service is used by the client to enable the default 
+  // session (OBDII) in the server(s). A diagnostic session 
+  // enables a specific set of diagnostic services in the server(s).
+
+  diagRequest "DEFAULT_SESSION_Start" req;
+
+  DiagSendRequest(req); /* Sends the request object to the ECU. */
+}
+/*@@end*/
+
+/*@@testcase:CheckUndefinedMessage():*/
+testcase CheckUndefinedMessage()
+{            
+  long   lEventUndefineMessageId;             
+  char lbuffer[100];
+
+  gUndifnedMsgCheckResult = 0;
+
+  // Information for test report.
+  TestCaseTitle("TC 6", "Check Power Train channel for undefined messages");
+
+  gCycCheckId = ChkStart_UndefinedMessageReceived("UndefinedMsgCallback");
+
+  testWaitForTimeout(kTIMEOUT);
+
+  switch(gUndifnedMsgCheckResult)
+  {
+    case 1:  
+      // Event message ID
+      lEventUndefineMessageId = ChkQuery_EventMessageId(gCycCheckId);
+      snprintf(lbuffer,elcount(lbuffer),"Undefined message detacted: Id 0x%x", lEventUndefineMessageId);      
+      TestStepFail("", lbuffer);
+      break; 
+    default:
+      TestStepPass("","No undefined message detacted");       
+      break; 
+  }
+
+  ChkControl_Destroy(gCycCheckId);
+}
+/*@@end*/
+
+/*@@caplFunc:UndefinedMsgCallback(dword):*///callback
+UndefinedMsgCallback(dword aCheckId)
+{
+  ChkQuery_EventStatusToWrite(aCheckId);
+  gUndifnedMsgCheckResult = 1;
+}
+/*@@end*/
+
+/*@@caplFunc:CheckMsg(float,float):*///function
+CheckMsg(float aCycMinCycleTime, float aCycMaxCycleTime)
+{
+  long lQueryResultNumProbes;
+  long lQueryResultProbeAvg;
+  long lQueryResultProbeMin;
+  long lQueryResultProbeMax;
+  char lbuffer[100];
+
+  TestAddCondition(gCycCheckId);
+
+  testWaitForTimeout(kTIMEOUT);
+   
+  lQueryResultNumProbes = ChkQuery_StatNumProbes(gCycCheckId);  
+  lQueryResultProbeAvg = ChkQuery_StatProbeIntervalAvg(gCycCheckId);  
+  lQueryResultProbeMin = ChkQuery_StatProbeIntervalMin(gCycCheckId); 
+  lQueryResultProbeMax = ChkQuery_StatProbeIntervalMax(gCycCheckId);   
+
+  if(ChkQuery_NumEvents(gCycCheckId) > 0)
+  {
+      snprintf(lbuffer,elcount(lbuffer),"Valid values %.0fms - %.0fms", aCycMinCycleTime, aCycMaxCycleTime);      
+      TestStepFail("", lbuffer);
+      snprintf(lbuffer,elcount(lbuffer),"Average cycle time:  %dms", lQueryResultProbeAvg);
+      TestStepFail("", lbuffer);
+      snprintf(lbuffer,elcount(lbuffer),"Min cycle time:      %dms", lQueryResultProbeMin);
+      TestStepFail("", lbuffer);
+      snprintf(lbuffer,elcount(lbuffer),"Max cycle time:      %dms", lQueryResultProbeMax);
+      TestStepFail("", lbuffer);
+   }
+   else
+   {
+      snprintf(lbuffer,elcount(lbuffer),"Valid values %.0fms - %.0fms", aCycMinCycleTime, aCycMaxCycleTime);      
+      TestStepPass("", lbuffer);
+      snprintf(lbuffer,elcount(lbuffer),"Average cycle time:  %dms", lQueryResultProbeAvg);
+      TestStepPass("", lbuffer);
+      snprintf(lbuffer,elcount(lbuffer),"Min cycle time:      %dms", lQueryResultProbeMin);
+      TestStepPass("", lbuffer);
+      snprintf(lbuffer,elcount(lbuffer),"Max cycle time:      %dms", lQueryResultProbeMax);
+      TestStepPass("", lbuffer);
+  }
+
+  ChkControl_Destroy(gCycCheckId); // Destroy the check
+}
+/*@@end*/
+

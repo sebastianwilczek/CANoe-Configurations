@@ -1,0 +1,139 @@
+/*@!Encoding:1252*/
+/**************************************************************************************************
+ Description: This file is part of the examples in the option CANaero.
+              It feeds a small aircraft model with environment date.
+ -------------------------------------------------------------------------------------------------
+      C O P Y R I G H T 
+ ------------------------------------------------------------------------------------------------- 
+  Copyright (c) 2014 by Vector Informatik GmbH. All rights reserved. 
+  
+  This software is copyright protected and proprietary to Vector Informatik GmbH. 
+  Vector Informatik GmbH grants to you only those rights as set out in the license conditions. 
+  All other rights remain with Vector Informatik GmbH. 
+  
+  REMOVAL OF THESE COMMENTS IS A VIOLATION OF THE COPYRIGHT AGREEMENT. 
+ *************************************************************************************************/
+
+variables
+{
+  mstimer oFlightStateCycleTimer;
+  int     nFlightStateCycleTime = 200;//ms
+
+  // temporary storage
+  float    varBodyRollAngle  = 0;
+  float    varBodyPitchAngle = 0;
+  float    varBodyRollRate   = 0;
+  float    varBodyPitchRate  = 0;
+}
+
+
+
+// calculation of flight status
+// The status is calculated cyclically.
+// Based on the calculation some signals are updated and the aircraft image is recalculated.
+on timer oFlightStateCycleTimer
+{
+
+  varBodyRollAngle   = varBodyRollAngle  + (varBodyRollRate  * ((float)nFlightStateCycleTime/1000));
+  varBodyPitchAngle  = varBodyPitchAngle + (varBodyPitchRate * ((float)nFlightStateCycleTime/1000));
+  if( varBodyRollAngle > (pi/2) )
+  {
+    varBodyRollAngle -= pi;
+  }
+  if( varBodyRollAngle < -(pi/2) )
+  {
+    varBodyRollAngle += pi;
+  }
+  if( varBodyPitchAngle > (pi/2) )
+  {
+    varBodyPitchAngle -= pi;
+  }
+  if( varBodyPitchAngle < -(pi/2) )
+  {
+    varBodyPitchAngle += pi;
+  }
+
+  // update signals -> this will cause the transmisson of CAN frames
+  $BodyRollRate   = varBodyRollRate;
+  $BodyPitchRate  = varBodyPitchRate;
+  $BodyRollAngle  = varBodyRollAngle;
+  $BodyPitchAngle = varBodyPitchAngle;
+
+  // update panel
+  UpdateAirplaneImage( varBodyPitchRate, varBodyRollRate );
+
+  SetTimer( oFlightStateCycleTimer, nFlightStateCycleTime );
+}
+
+on start
+{
+
+  SetTimer( oFlightStateCycleTimer, nFlightStateCycleTime );
+}
+
+
+
+on envVar (evAileronRightAngle | evAileronLeftAngle)
+{
+  varBodyRollRate = @this * 2; // Roll rate is set to double aileron right angle i.e. 5° = 10°/s
+}
+
+
+
+on envVar evElevatorAngle
+{
+  varBodyPitchRate = @this * 2; //Pitch rate is set to double elevator pitch angle i.e. 5° = 10°/s
+}
+
+
+
+on message LeftAileronPosition
+{
+  @evAileronLeftAngle = this.LeftAileronPosition;
+}
+
+on message RightAileronPosition
+{
+  @evAileronRightAngle = this.RightAileronPosition;
+}
+
+on message ElevatorPosition
+{
+  @evElevatorAngle = this.ElevatorPosition;
+}
+
+on message RudderPosition
+{
+  @evRudderAngle = this.RudderPosition;
+}
+
+void UpdateAirplaneImage( float nPitchRate, float nRollRate )
+{
+  // nPitchRate = -0.872665 .. 0.872665
+  // nRollRate  = -0.698132 .. 0.698132
+  @evImageIndex = CalculateImageIndex( nPitchRate, nRollRate );
+}
+
+int CalculateImageIndex( float nPitchRate, float nRollRate )
+{
+  int iIndex;
+  nPitchRate = nPitchRate * 5.72957;
+  nRollRate  = nRollRate  * 7.16095;
+  // degined index result area
+  // 71 - (75) - 79: roll = 4
+  // 62 - (66) - 70: roll = 3
+  // 53 - (57) - 61: roll = 2
+  // 44 - (48) - 52: roll = 1
+  // 35 - (39) - 43: roll = 0
+  // 26 - (30) - 34: roll = -1
+  // 17 - (21) - 25: roll = -2
+  //  8 - (12) - 16: roll = -3
+  //  0 -  (4) -  7: roll = -4
+  iIndex = (((int)nRollRate) + 4) * 9 + ((int)nPitchRate + 4) - 1;
+  if (iIndex >= 0) {
+    return iIndex;
+  }
+  else {
+    return 0;
+  }
+}

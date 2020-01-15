@@ -1,0 +1,274 @@
+/*@!Encoding:1252*/
+
+includes
+{
+  #include "..\CAPL Includes\NM_Observer_Include.cin"
+  #include "TPExchange.cin"
+}
+variables
+{
+  char gECU[10] = "%NODE_NAME%";
+
+  int gWarningOn;
+  int gTurnIndicatorLastStatus = %NODE_NAME%_2.Active::None;
+
+  msTimer tPhase;
+  const cPhaseTime = 500;
+  int  gPhaseOn;
+
+  msTimer tResetRadio;
+  int     tResetRadioTime = 1;
+}
+
+on start
+{
+  ILSetOperationMode(2,0);
+  // net-management
+  // set to 2 to get more information into write-window 
+  setWriteDbgLevel(1);
+  writeDbgLevel(2,gECU);
+ 
+}
+
+on timer tPhase
+{
+  gPhaseOn = !gPhaseOn;
+
+  $%NODE_NAME%_2::Phase = gPhaseOn;
+
+  setTimer(this,cPhaseTime);
+}
+
+SetRadioChannel(int channel)
+{
+  // Set the radio station text for the TP transmition  
+
+  int i, StringLength;
+  int MaxLength = 16;
+
+  byte Buffer[16];
+  char Text[16];
+
+  switch(channel)
+  {
+    case 1: 
+            strncpy (Text,"PND 6",MaxLength);
+            SysSetVariableString(sysvar::ComfortBus::RadioInfoDisplay, "AF     EON     RDS");
+            SysSetVariableString(sysvar::ComfortBus::SetRadioChannelDisplay, "FM1:         PND 6                 87.5");break;
+    case 2: 
+            strncpy (Text,"RBL 3",MaxLength);
+            SysSetVariableString(sysvar::ComfortBus::RadioInfoDisplay, "AF     EON     RDS");         
+            SysSetVariableString(sysvar::ComfortBus::SetRadioChannelDisplay, "FM1:         RBL 3                 92.2");break;
+    case 3: 
+            strncpy (Text,"Radio CANoe",MaxLength);
+            SysSetVariableString(sysvar::ComfortBus::RadioInfoDisplay, "AF     EON     RDS");     
+            SysSetVariableString(sysvar::ComfortBus::SetRadioChannelDisplay, "FM1:         Radio CANoe       90.0");break;
+    case 4: 
+            strncpy (Text,"FM Stuttgart",MaxLength);
+            SysSetVariableString(sysvar::ComfortBus::RadioInfoDisplay, "AF     EON     RDS");        
+            SysSetVariableString(sysvar::ComfortBus::SetRadioChannelDisplay, "FM1:         FM Stuttgart       100.9");break;
+    case 5: 
+            strncpy (Text,"Radio Vector",MaxLength);
+            SysSetVariableString(sysvar::ComfortBus::RadioInfoDisplay, "AF     EON     RDS"); 
+            SysSetVariableString(sysvar::ComfortBus::SetRadioChannelDisplay, "FM1:         Radio Vector       87.1");break;
+    case 6: 
+            strncpy (Text,"Channel",MaxLength);
+            SysSetVariableString(sysvar::ComfortBus::RadioInfoDisplay, "AF     EON     RDS");   
+            SysSetVariableString(sysvar::ComfortBus::SetRadioChannelDisplay, "FM1:         Channel              80.0");break;
+    case 7: 
+            strncpy (Text,"",MaxLength);   
+            SysSetVariableString(sysvar::ComfortBus::SetRadioChannelDisplay, "");break;
+
+  }
+  StringLength = strlen(Text);
+  
+  for(i =0; i<= StringLength; i++)
+  {
+    Buffer[i] = Text[i];
+  }
+
+  SysSetVariableData(sysvar::ComfortBus::TPConsoleMessage, Buffer, StringLength);
+}
+
+on timer tResetRadio
+{
+  @sysvar::ComfortBus::SetRadioChannel_1 = 0;
+  @sysvar::ComfortBus::SetRadioChannel_2 = 0;    
+  @sysvar::ComfortBus::SetRadioChannel_3 = 0;
+  @sysvar::ComfortBus::SetRadioChannel_4 = 0;
+  SysSetVariableString(sysvar::ComfortBus::SetRadioChannelDisplay, "");
+  SysSetVariableString(sysvar::ComfortBus::RadioInfoDisplay, "");
+}
+
+on preStart
+{
+  @sysvar::ComfortBus::SetRadioChannel_1 = 0;
+  @sysvar::ComfortBus::SetRadioChannel_2 = 0;    
+  @sysvar::ComfortBus::SetRadioChannel_3 = 0;
+  @sysvar::ComfortBus::SetRadioChannel_4 = 0;
+  SysSetVariableString(sysvar::ComfortBus::SetRadioChannelDisplay, "");
+  SysSetVariableString(sysvar::ComfortBus::RadioInfoDisplay, "");
+}
+
+on sysvar_update sysvar::LightSystem::TurnIndicationLeft
+{
+  if(@this == 1)
+  {
+    gTurnIndicatorLastStatus = %NODE_NAME%_2.Active::Turn_left;
+    @sysvar::LightSystem::TurnIndicationRight=0;
+    if(!gWarningOn) {
+      $%NODE_NAME%_2::Active = %NODE_NAME%_2.Active::Turn_left;
+      setTimer(tPhase, cPhaseTime);
+    }
+  }
+  else if (gTurnIndicatorLastStatus == %NODE_NAME%_2.Active::Turn_left)
+  {
+    gTurnIndicatorLastStatus = %NODE_NAME%_2.Active::None;
+    if(!gWarningOn) {
+      $%NODE_NAME%_2::Active = %NODE_NAME%_2.Active::None;
+      cancelTimer(tPhase);
+    }
+  }
+}
+
+on sysvar_update sysvar::LightSystem::TurnIndicationRight
+{
+  if(@this == 1)
+  {
+    gTurnIndicatorLastStatus = %NODE_NAME%_2.Active::Turn_right;
+    @sysvar::LightSystem::TurnIndicationLeft=0;
+    if(!gWarningOn) {
+      $%NODE_NAME%_2::Active = %NODE_NAME%_2.Active::Turn_right;
+      setTimer(tPhase, cPhaseTime);
+    }
+  }
+  else if (gTurnIndicatorLastStatus == %NODE_NAME%_2.Active::Turn_right)
+  {
+    gTurnIndicatorLastStatus = %NODE_NAME%_2.Active::None;
+    if(!gWarningOn) {
+      $%NODE_NAME%_2::Active = %NODE_NAME%_2.Active::None;
+      cancelTimer(tPhase);
+    }
+  }
+}
+
+on sysvar_update sysvar::LightSystem::SwitchHazard
+{
+  gWarningOn = !gWarningOn;
+ 
+  if(gWarningOn)
+  {
+    cancelTimer(tPhase);
+    setTimer(tPhase, cPhaseTime);
+    $%NODE_NAME%_2::Active = %NODE_NAME%_2.Active::Warning;
+  }
+  else 
+  {
+    $%NODE_NAME%_2::Active = gTurnIndicatorLastStatus;
+    if(gTurnIndicatorLastStatus == %NODE_NAME%_2.Active::None)
+    {
+      cancelTimer(tPhase);
+    }
+  }
+}
+
+on sysvar_update sysvar::ComfortBus::RadioOnOff
+{
+  if(@this == 1) @sysvar::ComfortBus::SetRadioChannel_1 = 1;
+  else 
+  {
+    @sysvar::ComfortBus::SetRadioChannel_1 = 0;
+    @sysvar::ComfortBus::SetRadioChannel_2 = 0;    
+    @sysvar::ComfortBus::SetRadioChannel_3 = 0;
+    @sysvar::ComfortBus::SetRadioChannel_4 = 0;
+    SysSetVariableString(sysvar::ComfortBus::SetRadioChannelDisplay, "");
+    SysSetVariableString(sysvar::ComfortBus::RadioInfoDisplay, "");
+  }
+}
+
+on sysvar_update sysvar::ComfortBus::SetRadioChannel_1
+{
+  if(@this == 1 && @sysvar::ComfortBus::RadioOnOff == 1)
+  {
+    @sysvar::ComfortBus::SetRadioChannel_2 = 0;
+    @sysvar::ComfortBus::SetRadioChannel_3 = 0;
+    @sysvar::ComfortBus::SetRadioChannel_4 = 0;
+
+    SetRadioChannel(1);
+  }
+  if(@this == 1 && @sysvar::ComfortBus::RadioOnOff == 0)  
+  {
+    SetTimer(tResetRadio,tResetRadioTime);
+    SetRadioChannel(7);
+  }
+}
+
+on sysvar_update sysvar::ComfortBus::SetRadioChannel_2
+{
+  if(@this == 1 && @sysvar::ComfortBus::RadioOnOff == 1)
+  {
+    @sysvar::ComfortBus::SetRadioChannel_1 = 0;
+    @sysvar::ComfortBus::SetRadioChannel_3 = 0;
+    @sysvar::ComfortBus::SetRadioChannel_4 = 0;
+
+    SetRadioChannel(2);
+  }
+  if(@this == 1 && @sysvar::ComfortBus::RadioOnOff == 0)  
+  {
+    SetTimer(tResetRadio,tResetRadioTime);
+    SetRadioChannel(7);
+  }
+}
+
+on sysvar_update sysvar::ComfortBus::SetRadioChannel_3
+{
+  if(@this == 1 && @sysvar::ComfortBus::RadioOnOff == 1)
+  {
+    @sysvar::ComfortBus::SetRadioChannel_1 = 0;
+    @sysvar::ComfortBus::SetRadioChannel_2 = 0;
+    @sysvar::ComfortBus::SetRadioChannel_4 = 0;
+
+    SetRadioChannel(3);
+  }
+  if(@this == 1 && @sysvar::ComfortBus::RadioOnOff == 0)  
+  {
+    SetTimer(tResetRadio,tResetRadioTime);
+    SetRadioChannel(7);
+  }
+}
+
+on sysvar_update sysvar::ComfortBus::SetRadioChannel_4
+{
+  if(@this == 1 && @sysvar::ComfortBus::RadioOnOff == 1)
+  {
+    @sysvar::ComfortBus::SetRadioChannel_1 = 0;
+    @sysvar::ComfortBus::SetRadioChannel_3 = 0;
+    @sysvar::ComfortBus::SetRadioChannel_2 = 0;
+
+    SetRadioChannel(4);
+  }
+  if(@this == 1 && @sysvar::ComfortBus::RadioOnOff == 0)  
+  {
+    SetTimer(tResetRadio,tResetRadioTime);
+    SetRadioChannel(7);
+  }
+}
+
+on sysvar_update sysvar::ComfortBus::TPConsoleMessage
+{
+  SendTPMessage();
+}
+
+on sysvar_update sysvar::NMTester::NMOnOff26
+{
+  if(@this) 
+  {
+    canOffline(3); 
+    TraceNMState(getBusContext(),8);
+  }
+  else 
+  {
+    canOnline(3);
+    TraceNMState(getBusContext(), Nm_GetState());
+  } 
+}

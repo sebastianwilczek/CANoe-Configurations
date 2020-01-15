@@ -1,0 +1,501 @@
+/*@@var:*/
+variables
+{
+  char gECU[10]       = "Node_B";
+  char gPanelName[10] = "Node_B";
+
+  msTimer tBusSynchronization;
+  msTimer tApplMsg;
+  msTimer tRepeatMessageReq;
+  msTimer tCarWakeUp;
+  msTimer tCarWakeUpAnimation;
+
+  int carWakeupAnimation = 0;
+  int carWakeupAnimationSpeed = 400;  //ms
+  int carWakeupAnimationDuration = 2800;
+
+  const cBusSleepState = 1;
+  const cRepeatMessageState = 5;
+  const cNormalOperationState = 4;
+  
+  DWORD sControlBits = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:Trace(char[],char[]):*///function
+void Trace( char functionName[], char info[])
+{
+  Trace( functionName, info, "");
+}
+/*@@end*/
+
+/*@@caplFunc:TraceCall(char[],long):*///function
+void TraceCall( char functionName[], long callResult)
+{
+  char line[100];
+  if( callResult == 1)
+    snprintf( line, elcount(line), "calling %s", functionName);
+  else
+    snprintf( line, elcount(line), "call to %s failed - wrong state?", functionName);
+  Trace( "", "", line);
+}
+/*@@end*/
+
+/*@@caplFunc:Trace(char[],char[],char[],long):*///function
+void Trace( char functionName[], char info[], char verbose[], long argument)
+{
+  char line[100];
+  snprintf( line, elcount(line), verbose, argument);
+  Trace( functionName, info, line);
+}
+/*@@end*/
+
+/*@@caplFunc:Trace(char[],char[],char[]):*///function
+void Trace( char functionName[], char info[], char verbose[])
+{
+  char sep[2] = "/";
+  sep[0] = functionName[0] ? '/' : 0;
+  if( verbose[0])
+  {
+    write( "[%.3f]%s%s%s: %s", timeNow()/100000.0, gECU
+           , sep
+           , functionName
+           , verbose
+           );
+  } else
+  {
+    write( "[%.3f]%s%s%s: %s", timeNow()/100000.0, gECU
+           , sep
+           , functionName
+           , info
+           );
+  }
+  if( info[0])
+	{
+  	char buffer[30];
+  	buffer[0] = ' ';
+  	buffer[1] = '\0';
+  	strncat(buffer, info, 29);
+  	sysSetVariableString(sysvar::NetworkManagement::NetworkStateB, buffer);
+	}   
+}
+/*@@end*/
+
+/*@@caplFunc:FrNm_SynchronizeModeInd():*///callback
+void FrNm_SynchronizeModeInd()
+{
+  Trace( "FrNm_SynchronizeModeInd", "Sychronize Mode active");
+  SetStateDisplayColor(255, 255, 0);
+  setDispDetectedNodesOff();
+}
+/*@@end*/
+
+/*@@caplFunc:FrNm_NetworkModeInd():*///callback
+void FrNm_NetworkModeInd()
+{
+  Trace( "FrNm_NetworkModeInd", "Network Mode active");
+  SetStateDisplayColor(0, 255, 0);
+  setTimer(tApplMsg, 1000);
+}
+/*@@end*/
+
+/*@@caplFunc:FrNm_BusSleepModeInd():*///callback
+void FrNm_BusSleepModeInd()
+{
+  Trace( "FrNm_BusSleepModeInd", "Sleep Mode active");
+  SetStateDisplayColor(255, 255, 255);
+  cancelTimer(tApplMsg);
+}
+/*@@end*/
+
+/*@@caplFunc:FrNm_PreSendInd(word[],byte[]):*///callback
+void FrNm_PreSendInd( WORD dlcIn[], BYTE data[])
+{
+  // Trace( "FrNm_PreSendInd", "", "dlc=%d", dlcIn[0]);
+}
+/*@@end*/
+
+/*@@caplFunc:FrNm_PduRxInd(dword,dword,long,byte[]):*///callback
+void FrNm_PduRxInd( DWORD canId, DWORD ident, long bRepeatMessageBit, BYTE data[])
+{
+  DWORD sCount = 0;
+  if( (sCount++ % 25) == 0)
+    write( "[%.3f]%s: FrNm_PduRxInd(%d), canid=0x%x, id=%d, RM=%d, %d byte", timeNow()/100000.0, gECU, sCount,
+           canId, ident, bRepeatMessageBit, elcount(data) );
+}
+/*@@end*/
+
+/*@@caplFunc:FrNm_RemoteSleepInd(long):*///callback
+void FrNm_RemoteSleepInd( long flag)
+{
+  Trace( "FrNm_RemoteSleepInd", "", "%d", flag);
+}
+/*@@end*/
+
+/*@@timer:tBusSynchronization:*/
+on timer tBusSynchronization
+{
+  @sysvar::NetworkManagement::BusSynchNodesB = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:DisplayDetectedNodes():*///function
+void DisplayDetectedNodes()
+{
+  long nodeId;
+  long active_state;
+   
+  switch( FrNm_GetNodeState( FrNm_GetLocalNodeIdentifier()))
+  {
+  case 1:
+    Trace( "", "", "ERROR: am detected as present (#%d)", FrNm_GetLocalNodeIdentifier());
+    break;
+  case 0:
+    // The node does not detect itself!
+    break;
+  default:
+    // Node identifier list invalid, e.g. because RepeatMessage is left from startup
+    return;
+  }
+  setDispDetectedNodesOff();
+
+  for( nodeId = FrNm_GetDLLInfo( 0x12); nodeId >= 0; --nodeId)
+  {
+    active_state = FrNm_GetNodeState(nodeId);
+    if(active_state == 1)
+    {
+      Trace( "", "", "detected active node %d", nodeId);
+    }
+    if( isNodeA(nodeId) ) {
+      @sysvar::NetworkManagement::ActiveNodesBA = active_state;
+    }
+    else if( isNodeB(nodeId) ) {
+      @sysvar::NetworkManagement::ActiveNodesBB = active_state;
+    }
+    else if( isNodeC(nodeId) ) {
+      @sysvar::NetworkManagement::ActiveNodesBC = active_state;
+    }
+    else {
+      ;   // not one of our nodes
+    }
+  }
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  write( "%s: CANoe AUTOSAR FlexRay NM 3.2.0 demo 2.0", gECU);
+  FrNm_SetVerbosity(3);
+}
+/*@@end*/
+
+/*@@caplFunc:FrNm_ControlBitVectorInd(dword,dword):*///callback
+void FrNm_ControlBitVectorInd( DWORD sourceId, DWORD controlBits)
+{
+  if( sControlBits == controlBits)
+    return;
+
+  write( "[%.3f]%s: FrNm_ControlBitVectorInd(0x%x, 0x%x)", timeNow()/100000.0, gECU,
+         sourceId, controlBits);
+  sControlBits = controlBits;
+}
+/*@@end*/
+
+/*@@caplFunc:isNodeC(int):*///function
+int isNodeC(int nodeId)
+{
+  return nodeId==0x33 ? 1 : 0;
+}
+/*@@end*/
+
+/*@@caplFunc:isNodeA(int):*///function
+int isNodeA(int nodeId)
+{
+  return nodeId==0x11 ? 1 : 0;
+}
+/*@@end*/
+
+/*@@caplFunc:isNodeB(int):*///function
+int isNodeB(int nodeId)
+{
+  return nodeId==0x22 ? 1 : 0;
+}
+/*@@end*/
+
+/*@@timer:tApplMsg:*/
+on timer tApplMsg
+{
+  FrFrame ApplFrame_B msgAppl;
+  msgAppl.fr_flags = 0x10;
+  setTimer(tApplMsg, 1000);
+  frOutputDynFrame(msgAppl);
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  // Bus starts in sleep mode
+  FrNm_BusSleepModeInd();
+
+  if( @sysvar::NetworkManagement::ActivePassiveB == 0 )
+  {
+    // Define the startup behaviour of the node, can be changed during bus sleep
+    ActivatePassiveMode( 1);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:setDispDetectedNodesOff():*///function
+void setDispDetectedNodesOff()
+{
+  @sysvar::NetworkManagement::ActiveNodesBA = 0;
+  @sysvar::NetworkManagement::ActiveNodesBB = 0;
+  @sysvar::NetworkManagement::ActiveNodesBC = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:FrNm_NetworkStartInd():*///callback
+void FrNm_NetworkStartInd()
+{
+  Trace( "FrNm_NetworkStartInd", "", "Network started");
+  FrNm_PassiveStartUp();
+}
+/*@@end*/
+
+/*@@caplFunc:FrNm_StateChangeNotification(long,long):*///callback
+void FrNm_StateChangeNotification( long previousState, long currentState)
+{
+  char line[50];
+  snprintf( line, elcount(line), "Transition from %d to %d"
+    , previousState, currentState);
+  Trace( "FrNm_StateChangeNotification", "", line);
+
+  @sysvar::NetworkManagement::RepeatMessageIndB = ( currentState == cRepeatMessageState ? 1 : 0 );
+
+  // You can only change between active and passive during BusSleep!
+  EnableControl( gPanelName, "sysvar:ActivePassiveB"
+  , currentState == cBusSleepState ? 1 : 0);
+
+  // If we just left the RepeatMessage state, display the detected nodes
+  if( previousState == cRepeatMessageState)
+  {
+    @sysvar::NetworkManagement::RepeatMessageB = 0;
+    DisplayDetectedNodes();
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ActivatePassiveMode(long):*///function
+ActivatePassiveMode( long enterPassive)
+{
+  if( enterPassive)
+  {
+    if( 1 != FrNm_EnablePassiveMode())
+    {
+      Trace( "", "", "Cannot enter passive mode! Is BusSleep mode active?");
+      return;
+    }
+  } else
+  {
+    if( 1 != FrNm_DisablePassiveMode())
+    {
+      Trace( "", "", "Cannot leave passive mode! Is BusSleep mode active?");
+      return;
+    }
+  }
+
+  // Set controls to reflect state
+  {
+    enterPassive = 1 - enterPassive;
+    enableControl( gPanelName, "sysvar:RepeatMessageB", enterPassive);
+    enableControl( gPanelName, "sysvar:SetNodeActiveB", enterPassive);
+    enableControl( gPanelName, "sysvar:ControBitVectorB", enterPassive);
+    enableControl( gPanelName, "sysvar:UserDataB", enterPassive);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:FrNm_CarWakeUpInd(dword,dword,long,byte[]):*///callback
+void FrNm_CarWakeUpInd ( DWORD canId, DWORD ident, long bRepeatMessageBit, BYTE data[])
+{
+  // Trace("", "Car WakeUp received");
+
+  if( carWakeupAnimation > 0)
+    return;
+
+  SetTimer(tCarWakeUp, carWakeupAnimationDuration);
+  SetTimer(tCarWakeUpAnimation, carWakeupAnimationSpeed);
+  carWakeupAnimation = 1;
+  
+  if( FrNm_GetState() != cNormalOperationState)
+  {
+    FrNm_NetworkRequest();        // wake up
+    @sysvar::NetworkManagement::SetNodeActiveB = ( @sysvar::NetworkManagement::ActivePassiveB != 0 );
+  }
+}
+/*@@end*/
+
+/*@@timer:tCarWakeUp:*/
+on timer tCarWakeUp
+{
+  @sysvar::NetworkManagement::CarWakeupB = 0;
+  carWakeupAnimation = 0;
+}
+/*@@end*/
+
+/*@@timer:tCarWakeUpAnimation:*/
+on timer tCarWakeUpAnimation
+{
+  if (carWakeupAnimation == 1)
+  {
+    @sysvar::NetworkManagement::CarWakeupB = 1;
+    carWakeupAnimation = 2;
+    SetTimer(tCarWakeUpAnimation, carWakeupAnimationSpeed);
+  }
+  else if (carWakeupAnimation == 2)
+  {
+    @sysvar::NetworkManagement::CarWakeupB = 0;
+    carWakeupAnimation = 1;
+    SetTimer(tCarWakeUpAnimation, carWakeupAnimationSpeed);
+  }
+}
+/*@@end*/
+
+/*@@timer:tRepeatMessageReq:*/
+on timer tRepeatMessageReq
+{    
+  @sysvar::NetworkManagement::RepeatMessageB = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:SetStateDisplayColor(int,int,int):*///function
+void SetStateDisplayColor (int red, int green, int blue)
+{
+  SetControlForeColor(gPanelName, "IOStateNodeB", MakeRGB(red, green, blue));
+}
+/*@@end*/
+
+/*@@caplFunc:FrNm_PnInactiveInd():*///callback
+void FrNm_PnInactiveInd()
+{
+  Trace( "FrNm_PnInactiveInd", "", "PN1");
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NetworkManagement::ActivePassiveB:*/
+on sysvar_update NetworkManagement::ActivePassiveB
+{
+  // EV: 1 means "active", 0 "passive"
+  if( @this == 0 )
+  {
+    ActivatePassiveMode(1); // activate passive mode -> 1
+  } else
+  {
+    ActivatePassiveMode(0); // deactivate passive mode -> 0
+  }
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NetworkManagement::BusSynchNodesB:*/
+on sysvar_update NetworkManagement::BusSynchNodesB
+{
+  // NOTE: this always returns true for FlexRay; remove later
+
+  long status;
+  if( 0 == @this )
+    return;
+  status = FrNm_RequestBusSynch();
+  if( 1 == status)
+    Trace( "", "", "Request bus synchronization.");
+  else
+    Trace( "", "", "Request bus synchronization failed!");
+  
+  // Make sure the button is deactivated again!
+  setTimer( tBusSynchronization, 250);
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NetworkManagement::ControBitVectorB:*/
+on sysvar_update NetworkManagement::ControBitVectorB
+{
+  long sControlBits;
+  sControlBits = @this;
+  Trace( "", "", "calling FrNm_SetControlBitVector( 0x%x)", sControlBits);
+  FrNm_SetControlBitVector( sControlBits);
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NetworkManagement::EnablePnB:*/
+on sysvar_update NetworkManagement::EnablePnB
+{
+  if ( @this == 1 )
+  {
+    if( 1 != FrNm_EnablePartialNetworking())
+      Trace("", "", "Cannot enable Partial Networking: please review your INI file");
+  }
+  else
+  {
+    if( 1 != FrNm_DisablePartialNetworking())
+      Trace("", "", "Cannot disable Partial Networking: please review your INI file");
+  }
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NetworkManagement::RepeatMessageB:*/
+on sysvar_update NetworkManagement::RepeatMessageB
+{
+  long status;
+  if( @this == 0 || FrNm_GetState() == cRepeatMessageState)
+  {
+    return; // nothing to do
+  }
+  status = FrNm_RepeatMessageRequest();
+  if( 1 == status)
+  {
+    Trace( "", "", "Goto RepeatMessage state");
+    setDispDetectedNodesOff();
+  } else
+  {
+    Trace( "", "", "Cannot go to RepeatMessage state (%d)", status);
+    setTimer(tRepeatMessageReq, 1);     // sets sysvar to 0 again
+  }
+
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NetworkManagement::SetNodeActiveB:*/
+on sysvar_update NetworkManagement::SetNodeActiveB
+{
+  if( @this == 1 )
+  {
+    TraceCall( "FrNm_NetworkRequest", FrNm_NetworkRequest());
+  } 
+  else {
+    TraceCall( "FrNm_NetworkRelease", FrNm_NetworkRelease());
+  }
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NetworkManagement::UpdateLastRecUserDataB:*/
+on sysvar_update NetworkManagement::UpdateLastRecUserDataB
+{
+  BYTE userData[8];
+  long count;
+  count = FrNm_GetUserData( userData, 8);
+  // write("  dbg node B user data = %d ", ud);
+  sysSetVariableData(sysvar::NetworkManagement::LastRecUserDataB, userData, count);
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NetworkManagement::UserDataB:*/
+on sysvar_update NetworkManagement::UserDataB
+{
+  BYTE sUserData[8];
+  long count;
+  sysGetVariableData(this, sUserData, count);
+  FrNm_SetUserData(sUserData, count);
+}
+/*@@end*/
+

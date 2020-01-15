@@ -1,0 +1,744 @@
+/*@!Encoding:1252*/
+includes
+{
+  // include DLL with file streaming extensions
+  // path relative to this CAPL file
+  #pragma library ("MostSyncStrmToFile.dll")
+}
+
+variables
+{
+  //
+  // This CAPL program applies the CAPL DLL MostSyncStrmToFile.dll
+  // to record data of synchronous MOST channels.
+  // 
+
+  // channel of MOST interface
+  long  gChannel        = 1;
+  // name of extension DLL for streaming (path relative to cfg file)
+  char  gDllName[200]   = "MostSyncStrmToFile.dll";
+  // streaming direction
+  char  gDirection      = RX;
+  // latency: 0 (short reaction time, high CPU load)...
+  //          4 (slow reaction time, low CPU load)
+  char  gLatency        = 4;
+  // digits of file name counter
+  long  gFileCntDigits  = 2;
+
+  // default file to stream data to
+  char  gDefaultFile[200] = "data.bin";
+  char  gDefaultTSFile[200] = "data.ts";
+
+  // MOST frame rate
+  float gFrequency      = 48000.0;
+
+
+  // streaming states (see OnMostSyncStrmState)
+  const int kClosed  = 1;
+  const int kOpened  = 2;
+  const int kStarted = 3;
+  const int kStopped = 4;
+
+  // streaming errors (see OnMostSyncStrmError)
+  const int kOK                          =   0;
+  const int kOpenFailed                  =   1;
+  const int kCloseFailed                 =   2;
+  const int kStartFailed                 =   3;
+  const int kStopFailed                  =   4;
+  const int kDriverCallFailed            =  10; // call of the bus interface driver failed
+  const int kDirectionNotSupported       =  11; // the streaming direction is not supported by the client
+  const int kNumSyncChannelsNotSupported =  12; // the number of streaming channels is not supported by the client
+  const int kOptionsNotSupported         =  13; // the streaming options are not supported by the client
+  const int kLatencyNotSupported         =  14; // the suggested latency is not supported by the client
+  const int kInvalidInterface            =  15;
+  const int kBufferUnderrunHW            =  40; // 0-data was streamed (TX only)
+  const int kBufferUnderrunClient        =  41; // client didn't provide buffer in time (TX only)
+  const int kBufferOverflowHW            =  42; // synchr data got lost (RX only)
+  const int kBufferOverflowClient        =  43; // client didn't provide buffer in time (RX only)
+  const int kBufferErrorClient           =  44; // streaming client was unable to prepare/process a buffer
+  const int kBufferErrorStart            =  45; // no buffers provided at start of streaming (TX: 0-data was streamed; RX: data got lost)
+  const int kBufferErrorStop             =  46; // buffer underrun or overflow reported after the stream has been stopped
+  const int kNotEnoughBW                 =  51; // The desired bandwidth for a Tx stream cannot be allocated.
+  const int kNetOff                      =  52; // NetInterface is in state NetOff. No streaming is possible. In case streaming was activated it is automatically stopped. Additionally a Tx stream is closed. 
+  const int kConfigNotOK                 =  53; // The Network Configuration state switched to ‘NotOk’. Any active streaming is stopped. Additionally a Tx stream is closed. 
+  const int kCLDisappeared               =  54; // Any connection label from the Rx stream disappeared, thus streaming is automatically stopped.
+  const int kINICSocketError             =  55; // INIC reported a socket connection error for the Tx stream. Streaming is automatically stopped and stream is closed.
+  const int kDeviceModeBypass            =  56; // INIC’s bypass was closed by application request. With closed bypass no streaming is possible, so streaming will be stopped automatically. Additionally a Tx stream is closed.
+  const int kNIStateNotNetOn             =  57; // NetInterface is not in NetOn, thus no streaming is possible. This error might be reported when opening the Tx stream. 
+  const int kINICBusy                    =  58; // INIC is currently busy processing other requests. The application may perform a retry.
+  const int kCLMissing                   =  59; // One or more connection labels are missing when trying to start the Rx stream.
+  const int kNumBytesMismatch            =  60; // The number of bytes per MOST frame given by the application does not match the number of bytes actually given by the connection labels for the Rx stream.
+  const int kINICCommunicationError      =  61; // A communication error with INIC occurred. 
+  const int kUnlock                      =  70; // Rx streaming stopped due to an unlock event. As soon as lock is re-gained streaming will be continued.
+  const int kUnknownError                = 255; 
+
+  
+  // specific file states reported from MostSyncStrmToFile.dll
+  // see OnMostSyncStrmTFState
+  const int kFileState_Closed       = 0;
+  const int kFileState_Opened       = 1;
+
+  // specific errors reported from MostSyncStrmToFile.dll
+  // see OnMostSyncStrmTFError
+  const int kFileError_NoFile       = 1;
+  const int kFileError_OpenFailed   = 2;
+  const int kFileError_ReadError    = 4;
+  const int kFileError_EndOfFile    = 5;
+  const int kFileError_FeatureNotAvailable = 7;
+ 
+  // valid label numbers for MOST150
+  const long kLabelMin = 0x000C;
+  const long kLabelMax = 0x017F;
+
+  dword gHandle;              // handle for synchronous channel streaming
+
+  char  gNodeName[40]     = "StreamToFile_150";  // name this node
+  char  gPanelName[40]    = "Stream To File";
+
+  long  gAllocTableReported;
+  
+  char gPIDTableHeader[50] = "PID      Lost frames====================";
+  char gPIDTableFooter[50] = "====================  All";
+  dword gNoOfAllPIDs = 0;
+  
+  const dword kPIDStatistic = 1;
+  const dword kTSStatistic = 2;
+}
+
+
+
+void OnMostSyncStrmTSPIDStatistics(word bufPIDs[], long bufLostFrames[])
+{
+  UpdatePIDTable(bufPIDs, bufLostFrames);
+}
+
+on sysvar StreamTF::TS::ResetStatistic
+{
+  if(@this == 1)
+  {
+    MostSyncStrmTSResetStatistics(kPIDStatistic | kTSStatistic);
+    sysSetVariableString(sysvar::StreamTF::TS::PIDs, gPIDTableHeader);
+  }
+}
+
+void UpdatePIDTable(word bufPIDs[], long bufLostFrames[])
+{
+  dword bufSize;
+  char pidTable[3000];
+  dword i;
+  dword noOfAllLostFrames;
+  char pidLine[50];
+  
+  noOfAllLostFrames = 0;
+  
+  pidTable[0] = 0;
+  
+  bufSize = elcount(bufPIDs);
+  strncpy(pidTable, gPIDTableHeader, elcount(pidTable));
+  
+  for(i = 0; i < bufSize; ++i)
+  { 
+    if(bufLostFrames[i] >= 0)
+    {
+      snprintf(pidLine, elCount(pidLine), "$%04x    %11d", bufPIDs[i], bufLostFrames[i]);
+      noOfAllLostFrames += bufLostFrames[i];
+    }
+    else
+    {
+      snprintf(pidLine, elCount(pidLine), "$%04x            n/a", bufPIDs[i]);
+    }
+    
+    strncat(pidTable, pidLine, elcount(pidTable));
+  }
+  
+  snprintf(pidLine, elCount(pidLine), "%s%15d", gPIDTableFooter, noOfAllLostFrames);
+  strncat(pidTable, pidLine, elcount(pidTable));
+  
+  if(pidTable[0] != 0)
+  {
+    sysSetVariableString(sysvar::StreamTF::TS::PIDs, pidTable);
+  }
+}
+
+
+void OnMostSyncStrmTSStatistics(dword noOfTSBytes, dword noOfAllBytes, dword tsc, dword tErrorCounter, dword tsType)
+{  
+  if(noOfAllBytes == 0)
+    @StreamTF::TS::Bandwidth = 0.0;
+  else
+    @StreamTF::TS::Bandwidth = ((double)noOfTSBytes/(double)noOfAllBytes) * 100.0;
+  
+  @StreamTF::TS::BytesReceived += noOfTSBytes;
+  @StreamTF::TS::BytesReceivedTotal += noOfAllBytes;
+  
+  @StreamTF::TS::TSC = tsc;
+  @StreamTF::TS::TErrorCounter = tErrorCounter;
+  @StreamTF::TS::Type = tsType;
+}
+
+void ResetStatistic()
+{
+  @StreamTF::TS::Bandwidth = 0.0;
+  @StreamTF::TS::BytesReceived = 0;
+  @StreamTF::TS::BytesReceivedTotal = 0;
+  @StreamTF::TS::TSC = @StreamTF::TS::TSC::Unknown;
+  @StreamTF::TS::TErrorCounter = 0;
+  @StreamTF::TS::Type = @StreamTF::TS::Type::Unknown;
+}
+
+on preStart
+{ 
+  // initialize extension DLL for file streaming
+  // binds the CAPL node exclusively to the DLL
+  gHandle = mostSyncStrmInit(gChannel, gDirection, gDllName);
+
+  if(0 == gHandle)
+    write("%s: Initialization of streaming client failed (%s)", gNodeName, gDllName);
+}
+
+void OnMostSyncStrmError(dword handle, long errorcode)
+{
+  // this callback reports a general streaming error
+  switch(errorcode)
+  {
+  case kNotEnoughBW:
+    write("%s: Error: The desired bandwidth for a Tx stream cannot be allocated.", gNodeName);
+    break;
+  case kNetOff:
+    write("%s: Error: NetInterface is in state NetOff. No streaming is possible. In case streaming was activated it is automatically stopped. Additionally a Tx stream is closed.", gNodeName);
+    break;
+  case kConfigNotOK: 
+    write("%s: Error: The Network Configuration state switched to ‘NotOk’. Any active streaming is stopped. Additionally a Tx stream is closed.", gNodeName);
+    break;
+  case kCLDisappeared:
+    write("%s: Error: Any connection label from the Rx stream disappeared, thus streaming is automatically stopped.", gNodeName);
+    break;
+  case kINICSocketError:
+    write("%s: Error: INIC reported a socket connection error for the Tx stream. Streaming is automatically stopped and stream is closed.", gNodeName);
+    break;
+  case kDeviceModeBypass:
+    write("%s: Error: INIC’s bypass was closed by application request. With closed bypass no streaming is possible, so streaming will be stopped automatically. Additionally a Tx stream is closed.", gNodeName);
+    break;
+  case kNIStateNotNetOn:
+    write("%s: Error: NetInterface is not in NetOn, thus no streaming is possible. This error might be reported when opening the Tx stream.", gNodeName);
+    break;
+  case kINICBusy:
+    write("%s: Error: INIC is currently busy processing other requests. The application may perform a retry.", gNodeName);
+    break;
+  case kCLMissing:
+    write("%s: Error: One ore more connection labels are missing when trying to start the Rx stream.", gNodeName);
+    break;
+  case kNumBytesMismatch:
+    write("%s: Error: The number of bytes per MOST frame given by the application does not match the number of bytes actually given by the connection labels for the Rx stream.", gNodeName);
+    break;
+  case kINICCommunicationError: 
+    write("%s: Error: A communication error with INIC occurred.", gNodeName);
+    break;
+  case kUnknownError:
+    write("%s: Error: Unknown error occurred.", gNodeName);
+    break;
+  default: 
+    //write("%s: Error %d occured while streaming", gNodeName, errorcode);
+    break;
+  }
+}
+
+void OnMostSyncStrmState(dword handle, long state)
+{
+  // state of a stream is reported
+  //write("OnMostSyncStrmState hdl: %04X  state: %d", handle, state);
+  if(handle != gHandle)
+    return;
+
+  @StreamTF::State = state;
+}
+
+OnMostAllocTable()
+{
+  gAllocTableReported = 1;
+  if(@StreamTF::State == kClosed)
+  {
+    if(!IsLabelInRange(@StreamTF::Label))
+    {
+      // find first valid label, if an invalid label is displayed
+      long i, noOfLabels; 
+      long label;
+
+      noOfLabels = MostAllocTableGetSize(gChannel);
+  
+      for(i = 0; i < noOfLabels; ++i)
+      {
+        label = MostAllocTableGetCL(gChannel, i);
+        if(IsLabelInRange(label))
+        {
+          @StreamTF::Label = label;
+        }
+      }
+    }
+  }
+  UpdateControls();
+}
+
+on sysvar StreamTF::Open
+{
+  long ret, label, labelWidth;
+  char fileName[260];
+
+  if(@this)
+    return;
+
+  // Up to 8 labels can be recorded. This demo records one label only.
+  label = @StreamTF::Label;
+  labelWidth = LabelWidth(label);
+
+  if(labelWidth == 0)
+  {
+    write("%s: Cannot open streaming. Label 0x%03X does not exist.", gNodeName, label);
+    return;
+  }
+
+  ret = mostSyncStrmOpen(gHandle, labelWidth, 0, gLatency);
+
+  if(ret != 0)
+    write("%s: Failed to open stream (%d)", gNodeName, ret);
+}
+
+on sysvar StreamTF::FileName
+{
+  UpdateControls();
+}
+
+on sysvar StreamTF::Start
+{
+  long ret;
+  word labels[8];
+  word labelWidths[8];
+  if(@this)
+    return;
+
+  // Up to 8 labels can be recorded. This demo records one label only.
+  labels[0] = @StreamTF::Label;
+  labelWidths[0] = LabelWidth(labels[0]);
+
+  if(labelWidths[0] == 0)
+  {
+    write("%s: Cannot start streaming. Label 0x%03X does not exist.", gNodeName, labels[0]);
+    return;
+  }
+  
+  ResetStatistic();
+
+  SetSocket();
+  // set file parameters
+  SetFile();
+
+  // start streaming
+  ret = mostSyncStrmStart(gHandle, labels, labelWidths, 1);
+
+  if(ret != 0)
+    write("%s: Failed to start stream (%d)", gNodeName, ret);
+  
+  sysSetVariableString(sysvar::StreamTF::TS::PIDs, gPIDTableHeader);
+}
+
+on sysvar StreamTF::Stop
+{
+  if(@this)
+    return;
+
+  mostSyncStrmStop(gHandle);
+  @StreamTF::TS::Bandwidth = 0.0;
+}
+
+on sysvar StreamTF::Close
+{
+  if(@this)
+    return;
+
+  mostSyncStrmClose(gHandle);
+}
+
+on sysvar StreamTF::State
+{
+  UpdateControls();
+}
+
+on sysvar StreamTF::Mode
+{
+  UpdateControls();
+}
+
+void UpdateControls()
+{
+  // switch user controls on/off
+
+  int state, labelexists;
+  
+  char file[260];
+  
+  
+  
+  sysGetVariableString(sysvar::StreamTF::FileName, file, elcount(file));
+  
+  state = @StreamTF::State;
+
+  enableControl(gPanelName, "Label", state == kClosed);
+  enableControl(gPanelName, "LabelUp", state == kClosed);
+  enableControl(gPanelName, "LabelDown", state == kClosed);
+
+  @StreamTF::LabelWidth = LabelWidth(@StreamTF::Label);
+  labelexists = @StreamTF::LabelWidth > 0;
+  
+  if(state == kClosed)
+    enableControl(gPanelName, "Open", labelexists);
+  else
+    enableControl(gPanelName, "Open", 0);
+
+  SetControlForeColor(gPanelName, "LabelWarning", labelexists ? MakeRGB(221,221,221) : MakeRGB(200,21,21));
+
+  enableControl(gPanelName, "Start", state == kOpened || state == kStopped);
+  enableControl(gPanelName, "Stop",  state == kStarted);
+  enableControl(gPanelName, "Close", state == kOpened || state == kStopped);
+  
+  enableControl(gPanelName, "GroupBoxControl23", FileStreamingEnabled() && (state != kStarted));
+  enableControl(gPanelName, "NSGroupBox", NetworkStreamingEnabled() && (state != kStarted));
+  
+  if(mostGetSpeedGrade(mostGetChannel()) != 3)
+  {
+    @StreamTF::Mode = @StreamTF::Mode::StreamSyncDataToFile;
+    enableControl(gPanelName, "Combo Box", 0);
+  }
+  else
+  {
+    enableControl(gPanelName, "Combo Box", (state != kStarted));
+  }
+
+  if(@StreamTF::Mode == @StreamTF::Mode::StreamSyncDataToFile)
+  {
+    SetControlVisibility(gPanelName, "PathControlIsoStrm", 0);
+    SetControlVisibility(gPanelName, "PathControlSyncStrm", 1);
+        
+    if((!strEndsWith(file, ".wav") && !strEndsWith(file, ".bin")) || strEndsWith(file, gDefaultTSFile))
+    {
+      ReplaceExtension(file, ".bin");
+      sysSetVariableString(sysvar::StreamTF::FileName, file);
+    }
+  }
+  else if(@StreamTF::Mode == @StreamTF::Mode::StreamIsoDataToFile
+        || @StreamTF::Mode == @StreamTF::Mode::StreamIsoDataToFileAndNetwork)
+  {
+    SetControlVisibility(gPanelName, "PathControlIsoStrm", 1);
+    SetControlVisibility(gPanelName, "PathControlSyncStrm", 0);    
+    if((strEndsWith(file, gDefaultFile)) || (!strEndsWith(file, ".ts") && !strEndsWith(file, ".bin")))
+    {
+      ReplaceExtension(file, ".ts");
+      sysSetVariableString(sysvar::StreamTF::FileName, file);
+    }
+  }
+}
+
+long NetworkStreamingEnabled()
+{
+  return @StreamTF::Mode == @StreamTF::Mode::StreamIsoDataToNetwork
+      || @StreamTF::Mode == @StreamTF::Mode::StreamIsoDataToFileAndNetwork;
+}
+
+long FileStreamingEnabled()
+{
+  return @StreamTF::Mode == @StreamTF::Mode::StreamSyncDataToFile
+      || @StreamTF::Mode == @StreamTF::Mode::StreamIsoDataToFile
+      || @StreamTF::Mode == @StreamTF::Mode::StreamIsoDataToFileAndNetwork;
+}
+
+on start
+{
+  char strFileAbs[400];
+  
+  if(gHandle == 0)
+  {
+    writeLineEx(0,3,"Streaming not possible!");
+    writeLineEx(0,3,"Please check you have a VN2610 interface box connected!");
+    stop();
+  }
+
+  @StreamTF::State = kClosed;
+  UpdateControls();
+
+  if(@StreamTF::Mode == @StreamTF::Mode::StreamSyncDataToFile)
+  {
+    // get absolute file path from relative file (relative to configuration file)
+    if(-1 == getAbsFilePath(gDefaultFile, strFileAbs, elcount(strFileAbs)))
+      return;
+  }
+  else if(@StreamTF::Mode == @StreamTF::Mode::StreamIsoDataToFile 
+          || @StreamTF::Mode == @StreamTF::Mode::StreamIsoDataToFileAndNetwork)
+  {
+    // get absolute file path from relative file (relative to configuration file)
+    if(-1 == getAbsFilePath(gDefaultTSFile, strFileAbs, elcount(strFileAbs)))
+      return;
+  }
+
+  sysSetVariableString(sysvar::StreamTF::FileName, strFileAbs);
+
+  @StreamTF::Label = 0;
+
+}
+
+void OnMostSyncStrmTFError(long fileerror, char file[])
+{
+  // this callback of the streaming dll
+  // reports a specific streaming error
+
+  switch(fileerror)
+  {
+  case kFileError_NoFile:
+    write("%s: No file specified", gNodeName);
+    break;
+  case kFileError_OpenFailed:
+    write("%s: Failed to open file %s", gNodeName, file);
+    break;
+  case kFileError_ReadError:
+    write("%s: Failed to read data from file", gNodeName);
+    break;
+  case kFileError_EndOfFile:
+    write("%s: End of file reached", gNodeName);
+    mostSyncStrmStop(gHandle);
+    break;
+  case kFileError_FeatureNotAvailable:
+    write("%s: Feature not available: %s", gNodeName, file);
+    mostSyncStrmStop(gHandle);
+    break;
+  }
+}
+
+void OnMostSyncStrmTFState(long filestate, char file[])
+{
+  // this callback of the streaming dll
+  // reports a specific streaming state
+  
+  if(filestate == kFileState_Closed)
+  {
+    write("%s: File closed: %s", gNodeName, file);
+  }
+  else if(filestate == kFileState_Opened)
+  {
+    write("%s: File opened: %s", gNodeName, file);
+  }
+
+
+}
+
+SetFile()
+{
+  // set file to stream to
+  char absPath[260];
+  char file[260];
+
+  if(FileStreamingEnabled())
+  {
+    sysGetVariableString(sysvar::StreamTF::FileName, file, elcount(file));
+    getAbsFilePath(file, absPath, elcount(absPath));
+  }
+  else
+  {
+    absPath[0] = 0;
+  }
+
+  // maximum file size
+  MostSyncStrmTFSetMaxFrames(GetFileSizeInFrames());
+
+  // file name counter
+  MostSyncStrmTFSetFileInc(@StreamTF::FileInc == 1 ? gFileCntDigits : 0);
+
+  MostSyncStrmTFSetFile(absPath, 0);
+}
+
+
+
+void SetSocket()
+{
+  if(NetworkStreamingEnabled())
+  {
+    char strAddr[30];
+    dword address;
+    sysGetVariableString(sysvar::StreamTF::Network::Address, strAddr, elcount(strAddr));
+    address = IpGetAddressAsNumber(strAddr);
+    if(address != 0xFFFFFFF)
+      MostSyncStrmTFSetSocket(address, @StreamTF::Network::Port);
+  }
+}
+
+on stopMeasurement
+{
+  gAllocTableReported = 0;
+  @StreamTF::State = 0;
+  UpdateControls();
+}
+
+on sysvar StreamTF::LabelUp
+{
+  long nextlabel, currentlabel;
+  long i, noOfLabels; 
+  int label;
+
+  if(@this)
+    return;
+
+  if(@StreamTF::State != kClosed)
+    return; // no modification if stream is open
+
+  noOfLabels = MostAllocTableGetSize(gChannel);
+  
+  // search nearest label
+  currentlabel = @StreamTF::Label;
+  nextlabel = -1;
+  for(i = 0; i < noOfLabels; ++i)
+  {
+    label = MostAllocTableGetCL(gChannel, i);
+    
+    if((label <= kLabelMax) && (label > currentlabel) 
+       && (label > nextlabel))
+    {
+      nextlabel = label;
+    }
+  }
+  if(nextlabel >= kLabelMin)
+    @StreamTF::Label = nextlabel;
+}
+
+on sysvar StreamTF::LabelDown
+{
+  long nextlabel, currentlabel;
+  long i, noOfLabels; 
+  long label;
+
+  if(@this)
+    return;
+
+  if(@StreamTF::State != kClosed)
+    return; // no modification if stream is open
+
+  noOfLabels = MostAllocTableGetSize(gChannel);
+  
+  // search nearest label
+  currentlabel = @StreamTF::Label;
+  nextlabel = -1;
+  for(i = 0; i < noOfLabels; ++i)
+  {
+    label = MostAllocTableGetCL(gChannel, i);
+    
+    if((label <= kLabelMax) && (label < currentlabel) 
+       && (label > nextlabel))
+    {
+      nextlabel = label;
+    }
+  }
+  if(nextlabel >= kLabelMin)
+    @StreamTF::Label = nextlabel;
+}
+
+long GetFileSizeInFrames()
+{
+  long frames;
+
+  switch(@StreamTF::FileSizeUnit)
+  {
+  case 0: // 1000 frames
+  default:
+    frames = 1000 * @StreamTF::FileSize;
+    break;
+  case 1: // seconds
+    frames = @StreamTF::FileSize * gFrequency;
+    break;
+  case 2: // minutes
+    frames = @StreamTF::FileSize * gFrequency * 60;
+    break;
+  }
+  return frames;
+}
+
+void OnMostSyncStrmTFProgress(dword bytesWritten, dword maxSize)
+{
+  // the streaming client reports the total number of bytes written
+  @StreamTF::BytesWritten = bytesWritten;
+  @StreamTF::BytesMax = maxSize;
+}
+
+on sysvar StreamTF::Label
+{
+  UpdateControls();
+}
+
+long IsLabelInRange(long label)
+{
+  if((label < kLabelMin) || (label > kLabelMax))
+    return 0;
+  return 1;
+}
+
+long LabelWidth(long label)
+{
+  // Get width of a label.
+  // Retruns 0 if label does not exists in the allocation table.
+
+  long i, noOfLabels,locallabel;
+
+  if(!gAllocTableReported)
+    return 0;
+
+  if(!IsLabelInRange(label))
+    return 0; // invalid label number
+
+  noOfLabels = MostAllocTableGetSize(gChannel);
+  for(i = 0; i < noOfLabels; ++i)
+  {
+    locallabel = MostAllocTableGetCL(gChannel, i);
+    if(IsLabelInRange(locallabel))
+    {
+      if(locallabel == label)
+        return MostAllocTableGetWidth(gChannel, i);
+    }
+  }
+  return 0;
+}
+
+long strEndsWith(char s1[], char s2[])
+{
+  int s1Len;
+  int s2Len;
+  char s1Low[260];
+  char s2Low[260];
+
+  toLower(s1Low, s1, elcount(s1Low));
+  toLower(s2Low, s2, elcount(s2Low));
+  
+  s1Len = strlen(s1Low);
+  s2Len = strlen(s2Low);
+  
+  if(s1Len >= s2Len)
+  {
+    int off;
+    off = strstr_off(s1Low, s1Len - s2Len - 1, s2Low);
+    
+    if(off == (s1Len - s2Len))
+      return 1;
+  }
+  
+  return 0;
+}
+
+void ReplaceExtension(char fileName[], char newExt[])
+{
+  long i;
+  for(i = strlen(fileName); i >= 0; --i)
+  {
+    if(fileName[i] == '.')
+      break;
+  }
+  
+  if(i == -1)
+    strncat(fileName, newExt, elcount(fileName));
+  else    
+    strncpy_off(fileName, i, newExt, elcount(fileName));
+}
+

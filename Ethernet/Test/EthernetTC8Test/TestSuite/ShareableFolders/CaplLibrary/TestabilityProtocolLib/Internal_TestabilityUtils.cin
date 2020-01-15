@@ -1,0 +1,858 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "Internal_TestabilityMessageDefinition.cin"
+}
+
+variables
+{
+  // Test parameters (e.g. IP address and port used for the Testability Service)
+  dword gTestabilityServicesResponseTimeoutMs;
+  
+  // Buffers for sending and receiving messages
+  struct TestabilityMessage gInternalTestabilityMessageRx;
+  struct TestabilityMessage gInternalTestabilityMessageTx;
+  BYTE   gInternalTxBuffer[kTestabilityMessageMaxPayloadByteLength + kTestabilityMessageHeaderByteLength]; // Max. UDP payload without fragmentation
+  BYTE   gInternalRxBuffer[kTestabilityMessageMaxPayloadByteLength + kTestabilityMessageHeaderByteLength]; // Max. UDP payload without fragmentation
+  
+  // Additional parameters of Service Primitive Response Messages
+  struct TestabilityMessageResponseParameters
+  {
+    struct TestabilityMessage_SP_Get_Version_Response              GetVersionResponse;
+    struct TestabilityMessage_SP_Create_and_Bind_Response          CreateAndBindResponse;
+    struct TestabilityMessage_SP_Receive_and_Forward_Response      ReceiveAndForwardResponse;
+    struct TestabilityMessage_SP_Tcp_Get_State_Response            TcpGetStateResponse;
+    struct TestabilityMessage_SP_Phy_Read_Signal_Quality           ReadSignalQualityResponse;
+    struct TestabilityMessage_SP_Phy_Read_Cable_Diagnostics_Result ReadCableDiagnosticsResult;
+  } gInternalServicePrimitiveResponseParameters;
+  
+  // Additional parameters of Service Primitive Events
+  struct TestabilityMessageEventParameters
+  {
+    struct TestabilityMessage_SP_Receive_and_Forward_ICMP_Event ReceiveAndForwardICMPEvent;
+    struct TestabilityMessage_SP_Receive_and_Forward_UDP_Event  ReceiveAndForwardUdpEvent;
+    struct TestabilityMessage_SP_Receive_and_Forward_TCP_Event  ReceiveAndForwardTcpEvent;
+    struct TestabilityMessage_SP_Listen_and_Accept_TCP_Event    ListenAndAcceptTcpEvent;
+  } gInternalServicePrimitiveEventParameters;
+  
+  // Variables for parsing the parameters of Testability messages
+  dword  gInternalTestabilityCurrentTxParamOffset;
+  dword  gInternalTestabilityCurrentRxParamOffset;
+  
+  // Variables for the UDP socket that is used to communicate with the DUT's Upper Tester interface
+  UdpSocket gInternalUdpSocket;
+  char      kInternalEventExpectedServicePrimitiveResponse[33] = "ExpectedServicePrimitiveResponse";
+  char      kInternalEventReceiveAndForward[50]                = "Service Primitive Event: Receive and Forward";
+  char      kInternalEventListenAndAccept[50]                  = "Service Primitive Event: Listen and Accept";
+  
+  // Temporary variable to check whether a Service Primitive Response is pending, especially for Service Primitives
+  // that currently don't wait for the SP response.
+  // TODO: The variable may be removed when vTESTstudio allows a parallel function execution.
+  byte      gTmpServicePrimitiveResponsePending;
+  
+  // Temporary variables to check whether a Service Primitive Event has already occured.
+  // TODO: The variable may be removed when vTESTstudio allows a parallel function execution.
+  qword     gTmpServicePrimitiveTotalEventCounter = 0;
+  qword     gTmpServicePrimitiveSavedEventCounter = 0;
+}
+
+// Temporary function to wait for a Service Primitive Event or to continue if event has already occured.
+// TODO: The variable may be removed when vTESTstudio allows a parallel function execution.
+long TmpWaitForServicePrimitiveEvent(char evtName[], dword timeoutMilliseconds)
+{
+  long result;
+  
+  if(gTmpServicePrimitiveTotalEventCounter != gTmpServicePrimitiveSavedEventCounter)
+  {
+    gTmpServicePrimitiveSavedEventCounter = gTmpServicePrimitiveTotalEventCounter;
+    return 1;
+  }
+  
+  result = testWaitForTextEvent(evtName, timeoutMilliseconds);
+  if(result == 1)
+  {
+    gTmpServicePrimitiveSavedEventCounter = gTmpServicePrimitiveTotalEventCounter;
+  }
+  
+  return result;
+}
+
+byte IsIpv6Address(char inputAddress[], byte outAddress[])
+{
+  dword res;  
+  res = IpGetAddressAsArray(inputAddress, outAddress);  
+  return res == 0;
+}
+
+byte IsUpperTesterIpv6()
+{
+  byte  addr[16];
+  return IsUpperTesterIpv6(addr);
+}
+
+byte IsUpperTesterIpv6(byte address[])
+{
+  return IsIpv6Address(syspar::TestabilityServicesIpAddress, address);
+}
+
+/**
+ * Function for checking the Testability Protocol UDP socket for errors
+ * and for reporting those.
+ */
+long InternalCheckSocketError(char socketAction[])
+{
+  char strBuf[200];
+  
+  // Error reporting
+  if(gInternalUdpSocket.GetLastSocketError() != 0 && gInternalUdpSocket.GetLastSocketError() != 997)
+  {
+    gInternalUdpSocket.GetLastSocketErrorAsString(strBuf, elcount(strBuf));
+    write("<%BASE_FILE_NAME%> %s failed, %s (Result %d)", socketAction, strBuf, gInternalUdpSocket.GetLastSocketError());
+  }
+  
+  // return the socket's error code
+  return gInternalUdpSocket.GetLastSocketError();
+}
+
+/**
+ * Function to initialize the Testability Service Client (Tester) e.g. by opening the
+ * Testability UDP client socket.
+ */
+void InternalInitTestabilityServiceClient(dword responseTimeoutMs)
+{
+  byte ipv6AddrArray[16];
+  IpGetAddressAsArray("::", ipv6AddrArray);
+  
+  // set the Testability Service parameters
+  gTestabilityServicesResponseTimeoutMs = responseTimeoutMs;
+
+  // Open UDP socket
+  if(IsUpperTesterIpv6())
+    gInternalUdpSocket = UdpSocket::Open(ipv6AddrArray,0);
+  else
+    gInternalUdpSocket = UdpSocket::Open(0,0);
+
+  InternalCheckSocketError("Opening UDP socket");
+  
+  // prepare socket to receive packets
+  gInternalUdpSocket.ReceiveFrom(gInternalRxBuffer, elcount(gInternalRxBuffer));
+  InternalCheckSocketError("ReceiveFrom");
+}
+
+/**
+ * Function to clean up the Testability Service Client (Tester) e.g. by closing the
+ * Testability UDP client socket.
+ */
+void InternalCleanupTestabilityServiceClient()
+{
+  // Close Testability UDP socket
+  gInternalUdpSocket.Close();
+}
+
+/**
+ * Callback function for reception of UDP data. This callback may be used to evaluate the
+ * return code of Service Primitives or Service Primitve Events
+ */
+void OnUdpReceiveFrom(dword socketHandle, long result, dword remoteIp, dword remotePort, byte data[], dword dataSize)
+{
+  OnUdpReceiveFromAnySource(socketHandle, result, data, dataSize);
+}
+
+/**
+ * Callback function for reception of UDP data. This callback may be used to evaluate the
+ * return code of Service Primitives or Service Primitve Events
+ */
+void OnUdpReceiveFrom(dword socketHandle, long result, byte remoteIpv6[], dword remotePort, byte data[], dword dataSize)
+{
+  OnUdpReceiveFromAnySource(socketHandle, result, data, dataSize);
+}
+
+/**
+ * Callback function for reception of UDP data. This callback may be used to evaluate the
+ * return code of Service Primitives or Service Primitve Events
+ */
+void OnUdpReceiveFromAnySource(dword socketHandle, long result, byte data[], dword dataSize)
+{
+  int   i;
+  dword localIpv4Address;
+  byte  localIpv6Address[16];
+  dword localPort;
+  char  localIpAddressStr[40];
+  dword varDataLen;
+
+  // handle Service Primitives
+  if (result == 0 && dataSize >= kTestabilityMessageHeaderByteLength && ((data[0] << 8) | data[1]) == kTestabilityMessageServiceId )
+  {
+    // new Testability Service Response / Event received -> clear the RX parameter offset counter
+    gInternalTestabilityCurrentRxParamOffset = 0;
+    
+    // copy data to appropriate struct
+    memcpy_n2h(gInternalTestabilityMessageRx , gInternalRxBuffer);
+        
+    // check whether the expected Service Primitive Response to a pending request was received
+    if(  gInternalTestabilityMessageRx.header.groupId            == gInternalTestabilityMessageTx.header.groupId
+      && gInternalTestabilityMessageRx.header.servicePrimitiveId == gInternalTestabilityMessageTx.header.servicePrimitiveId
+      && gInternalTestabilityMessageRx.header.typeId             == kTestabilityTypeResponse)
+    {
+      // fetch response parameters depending on:
+      // Group ID
+      switch(gInternalTestabilityMessageRx.header.groupId)
+      {
+        case kTestabilityGroupGeneral:
+        {
+          // Service Primitive ID
+          switch(gInternalTestabilityMessageRx.header.servicePrimitiveId)
+          {
+            case kTestabilityGroupGeneralGetVersion:
+            {
+              // in case of the Service Primitive Response to 'Get Version (General)', remember
+              // the response parameters major and minor versions
+              gInternalServicePrimitiveResponseParameters.GetVersionResponse.majorVersion = InternalGetParamWord();
+              gInternalServicePrimitiveResponseParameters.GetVersionResponse.minorVersion = InternalGetParamWord();
+              
+              if(syspar::Debug) Write("Received Testability Service Response 'Get Version' with major version %d, minor version %d", gInternalServicePrimitiveResponseParameters.GetVersionResponse.majorVersion, gInternalServicePrimitiveResponseParameters.GetVersionResponse.minorVersion);
+              break;
+            }
+            default: break;
+          }
+          break;
+        }
+        
+        case kTestabilityGroupUDP:
+        {
+          // Service Primitive ID
+          switch(gInternalTestabilityMessageRx.header.servicePrimitiveId)
+          {
+            case kTestabilityGroupUDPCreateAndBind:
+            {
+              // in case of a Service Primitive Response to 'Create and bind (UDP)', remember
+              // the UDP socket handle on DUT side for further usage
+              gInternalServicePrimitiveResponseParameters.CreateAndBindResponse.socketId = InternalGetParamWord();
+              if(syspar::Debug) Write("Received Testability Service Response 'Create and Bind' with socket handle %d", gInternalServicePrimitiveResponseParameters.CreateAndBindResponse.socketId);
+              break;
+            }
+            
+            case kTestabilityGroupUDPReceiveAndFwd:
+            {
+              // in case of the Service Primitive Response to 'Receive and Forward (UDP)', remember
+              // the response parameter dropCnt
+              gInternalServicePrimitiveResponseParameters.ReceiveAndForwardResponse.dropCnt = InternalGetParamWord();
+              break;
+            }
+            default: break;
+          }          
+          break;
+        }
+        
+        case kTestabilityGroupTCP:
+        {
+          // Service Primitive ID
+          switch(gInternalTestabilityMessageRx.header.servicePrimitiveId)
+          {
+            case kTestabilityGroupTCPCreateAndBind:
+            {
+              // in case of a Service Primitive Response to 'Create and bind (TCP)', remember
+              // the TCP socket handle on DUT side for further usage
+              gInternalServicePrimitiveResponseParameters.CreateAndBindResponse.socketId = InternalGetParamWord();
+              if(syspar::Debug) Write("Received Testability Service Response 'Create and Bind' with socket handle %d", gInternalServicePrimitiveResponseParameters.CreateAndBindResponse.socketId);
+              break;
+            }
+            
+            case kTestabilityGroupTCPReceiveAndFwd:
+            {
+              // in case of the Service Primitive Response to 'Receive and Forward (TCP)', remember
+              // the response parameter dropCnt
+              gInternalServicePrimitiveResponseParameters.ReceiveAndForwardResponse.dropCnt = InternalGetParamWord();
+              break;
+            }
+            
+            case kTestabilityGroupTCPGetState:
+            {
+              // in case of the Service Primitive Response to 'Receive and Forward (TCP)', remember
+              // the response parameter dropCnt
+              gInternalServicePrimitiveResponseParameters.TcpGetStateResponse.tcpState = InternalGetParamByte();
+              break;
+            }
+            
+            default: break;
+          }          
+          break;
+        }
+
+        
+        case kTestabilityGroupDHCP:
+        {
+          // Service Primitive ID
+          switch(gInternalTestabilityMessageRx.header.servicePrimitiveId)
+          {
+            case kTestabilityGroupDhcpInitialiazeClient:
+            {
+              if(syspar::Debug) Write("Received Testability Service Response 'DHCP Init Client' with socket handle %d", gInternalServicePrimitiveResponseParameters.CreateAndBindResponse.socketId);
+              break;
+            }
+
+            case kTestabilityGroupDhcpStopClient:
+            {
+              if(syspar::Debug) Write("Received Testability Service Response 'DHCP Stop Client' with socket handle %d", gInternalServicePrimitiveResponseParameters.CreateAndBindResponse.socketId);
+              break;
+            }
+
+            case kTestabilityGroupDhcpSetOption:
+            {
+              if(syspar::Debug) Write("Received Testability Service Response 'DHCP Set Option' with socket handle %d", gInternalServicePrimitiveResponseParameters.CreateAndBindResponse.socketId);
+              break;
+            }
+
+            default: break;
+          }          
+          break;
+        }
+        
+        case kTestabilityGroupPHY:
+        {
+          switch(gInternalTestabilityMessageRx.header.servicePrimitiveId)
+          {
+            case kTestabilityGroupPhyReadSignalQuality:
+            {
+              gInternalServicePrimitiveResponseParameters.ReadSignalQualityResponse.sigQuality = InternalGetParamByte();
+              break;
+            }
+            case kTestabilityGroupPhyReadDiagResult:
+            {
+              gInternalServicePrimitiveResponseParameters.ReadCableDiagnosticsResult.diagResult = InternalGetParamByte();
+              break;
+            }
+            default: break;
+          }
+          break;
+        }
+        
+        default: break;
+      }
+      
+      // supply the text event for receiving the expected
+      gTmpServicePrimitiveResponsePending = 0;
+      testSupplyTextEvent(kInternalEventExpectedServicePrimitiveResponse);
+    }
+    
+    // Handle received Service Primitive Events
+    if(gInternalTestabilityMessageRx.header.typeId == kTestabilityTypeEvent)
+    {
+      // depending on the group ID (ignoring the most significant (Event) bit)
+      switch(gInternalTestabilityMessageRx.header.groupId & 0x7F)
+      {
+        // handle UDP Events
+        case kTestabilityGroupUDP:
+        {
+          switch(gInternalTestabilityMessageRx.header.servicePrimitiveId)
+          {
+            case kTestabilityGroupUDPReceiveAndFwd:
+            {
+              // check whether the payload is greater or equal to the minimal parameter size
+              if(dataSize - kTestabilityMessageHeaderByteLength >= kTestabilityMessageUdpMinFwdAndRcvParamLength)
+              {
+                // convenient access to Result ID of header
+                gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.resultId = gInternalTestabilityMessageRx.header.resultId;
+                
+                // get the event's parameters
+                gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.fullLen = InternalGetParamWord();
+                gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.srcPort = InternalGetParamWord();
+                
+                varDataLen = InternalGetParamVarLength(gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.srcIpAddress);
+                gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.ipAddressByteLength = varDataLen;
+                
+                varDataLen = InternalGetParamVarLength(gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.payload);
+                gInternalServicePrimitiveEventParameters.ReceiveAndForwardUdpEvent.payloadByteLength = varDataLen;
+                
+                // supply the text event for receiving the expected
+                gTmpServicePrimitiveTotalEventCounter++;
+                testSupplyTextEvent(kInternalEventReceiveAndForward);
+              }
+              
+              break;
+            }
+            
+            default: break;
+          }
+          
+          break;
+        }
+        
+        // handle TCP Receive and Forward Events
+        case kTestabilityGroupTCP:
+        {
+          switch(gInternalTestabilityMessageRx.header.servicePrimitiveId)
+          {
+            case kTestabilityGroupTCPReceiveAndFwd:
+            {
+              // check whether the payload is greater or equal to the minimal parameter size
+              if(dataSize - kTestabilityMessageHeaderByteLength >= kTestabilityMessageTcpMinFwdAndRcvParamLength)
+              {
+                // convenient access to Result ID of header
+                gInternalServicePrimitiveEventParameters.ReceiveAndForwardTcpEvent.resultId = gInternalTestabilityMessageRx.header.resultId;
+                
+                // get the event's parameters
+                gInternalServicePrimitiveEventParameters.ReceiveAndForwardTcpEvent.fullLen = InternalGetParamWord();
+                
+                varDataLen = InternalGetParamVarLength(gInternalServicePrimitiveEventParameters.ReceiveAndForwardTcpEvent.payload);
+                gInternalServicePrimitiveEventParameters.ReceiveAndForwardTcpEvent.payloadByteLength = varDataLen;
+                
+                // supply the text event for receiving the expected
+                gTmpServicePrimitiveTotalEventCounter++;
+                testSupplyTextEvent(kInternalEventReceiveAndForward);
+              }
+              
+              break;
+            }
+             
+            case kTestabilityGroupTCPListenAndAccept:
+            {
+              // check whether the payload is greater or equal to the minimal parameter size
+              if(dataSize - kTestabilityMessageHeaderByteLength >= kTestabilityMessageTcpMinListenAndAcceptParamLength)
+              {
+                // convenient access to Result ID of header
+                gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.resultId = gInternalTestabilityMessageRx.header.resultId;
+                
+                // get the event's parameters
+                gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.listenSocketId = InternalGetParamWord();
+                gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.newSocketId    = InternalGetParamWord();
+                gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.port           = InternalGetParamWord();
+                
+                varDataLen = InternalGetParamVarLength(gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.address);
+                gInternalServicePrimitiveEventParameters.ListenAndAcceptTcpEvent.ipAddressByteLength = varDataLen;
+                
+                // supply the text event for receiving the expected
+                gTmpServicePrimitiveTotalEventCounter++;
+                testSupplyTextEvent(kInternalEventListenAndAccept);
+              }
+              break;
+            }
+            
+            default: break;
+          }
+          
+          break;
+        }
+        case kTestabilityGroupICMP:
+        {
+          switch(gInternalTestabilityMessageRx.header.servicePrimitiveId)
+          {
+            //ICMP
+            case kTestabilityGroupICMPv4ReceiveAndFwd:
+            {
+              // check whether the payload is greater or equal to the minimal parameter size
+              if(dataSize - kTestabilityMessageHeaderByteLength >= kTestabilityMessageUdpMinFwdAndRcvICMPParamLength)
+              {
+                // convenient access to Result ID of header
+                gInternalServicePrimitiveEventParameters.ReceiveAndForwardICMPEvent.resultId = gInternalTestabilityMessageRx.header.resultId;
+                
+                // get the event's parameters
+                varDataLen = InternalGetParamVarLength(gInternalServicePrimitiveEventParameters.ReceiveAndForwardICMPEvent.bSrcIpAddress);
+                gInternalServicePrimitiveEventParameters.ReceiveAndForwardICMPEvent.ipAddressByteLength = varDataLen;
+                varDataLen = InternalGetParamVarLength(gInternalServicePrimitiveEventParameters.ReceiveAndForwardICMPEvent.bDstIpAddress);
+                gInternalServicePrimitiveEventParameters.ReceiveAndForwardICMPEvent.bType     = InternalGetParamByte();
+                gInternalServicePrimitiveEventParameters.ReceiveAndForwardICMPEvent.bCode     = InternalGetParamByte();
+                gInternalServicePrimitiveEventParameters.ReceiveAndForwardICMPEvent.wChecksum = InternalGetParamWord();
+                varDataLen = InternalGetParamVarLength(gInternalServicePrimitiveEventParameters.ReceiveAndForwardICMPEvent.payload);
+                gInternalServicePrimitiveEventParameters.ReceiveAndForwardICMPEvent.payloadByteLength = varDataLen;
+                
+                // supply the text event for receiving the expected
+                gTmpServicePrimitiveTotalEventCounter++;
+                testSupplyTextEvent(kInternalEventReceiveAndForward);
+              }
+              break;
+            }
+            default:
+              break;
+          }
+        }
+        break;
+              
+        
+        default: break;
+      }
+    }
+  }
+  
+  // prepare socket to receive more data
+  gInternalUdpSocket.ReceiveFrom(gInternalRxBuffer, elcount(gInternalRxBuffer));
+  InternalCheckSocketError("UdpReceiveFrom");
+}
+
+/**
+ * Function to reset the header fields and parameters of the Testability message buffer
+ */
+void InternalResetTestabilityMessage()
+{
+  // TODO: may be removed when vTESTstudio allows a parallel function execution.
+  if(gTmpServicePrimitiveResponsePending)
+  {
+    testWaitForTextEvent(kInternalEventExpectedServicePrimitiveResponse, gTestabilityServicesResponseTimeoutMs);
+    gTmpServicePrimitiveResponsePending = 0;
+  }
+  
+  gInternalTestabilityMessageTx.header.serviceId          = kTestabilityMessageServiceId;
+  gInternalTestabilityMessageTx.header.groupId            = 0;
+  gInternalTestabilityMessageTx.header.servicePrimitiveId = 0;
+  gInternalTestabilityMessageTx.header.length             = 8;
+  gInternalTestabilityMessageTx.header.reserved           = 0;
+  gInternalTestabilityMessageTx.header.protocolVersion    = kTestabilityMessageProtocolVersion;
+  gInternalTestabilityMessageTx.header.interfaceVersion   = kTestabilityMessageInterfaceVersion;
+  gInternalTestabilityMessageTx.header.typeId             = kTestabilityTypeRequest;
+  gInternalTestabilityMessageTx.header.resultId           = E_OK;
+  gInternalTestabilityCurrentTxParamOffset                = 0;
+}
+
+/**
+ * Function to send a Testability Request Service Primitive to the DUT
+ */
+enum TestabilityMessageResultIds InternalSendTestabilityRequest_WaitForResponse(word groupId, word servicePrimitiveId)
+{
+  return InternalSendTestabilityRequest(groupId, servicePrimitiveId, /* wait for response */ 1);
+}
+
+/**
+ * Function to send a Testability Request Service Primitive to the DUT.
+ * TODO: The function may be removed when vTESTstudio allows a parallel function execution.
+ */
+enum TestabilityMessageResultIds InternalSendTestabilityRequest_DontWaitForResponse(word groupId, word servicePrimitiveId)
+{
+  return InternalSendTestabilityRequest(groupId, servicePrimitiveId, /* don't wait for response */ 0);
+}
+
+/**
+ * Function to send a Testability Request Service Primitive to the DUT
+ */
+enum TestabilityMessageResultIds InternalSendTestabilityRequest(word groupId, word servicePrimitiveId, byte waitForResponse)
+{  
+  long result;
+  byte ipv6Addr[16];
+  
+  write("groupId=%d servicePrimitiveId=%d", groupId, servicePrimitiveId);
+  
+  switch(groupId)
+  {
+    case kTestabilityGroupUDP:  if(servicePrimitiveId != kTestabilityGroupUDPReceiveAndFwd)    break;
+    case kTestabilityGroupICMP: if(servicePrimitiveId != kTestabilityGroupICMPv4ReceiveAndFwd) break;
+    case kTestabilityGroupTCP:  if(servicePrimitiveId != kTestabilityGroupTCPReceiveAndFwd && servicePrimitiveId != kTestabilityGroupTCPListenAndAccept) break;
+        gTmpServicePrimitiveSavedEventCounter = gTmpServicePrimitiveTotalEventCounter;
+
+    default:
+        break;
+  }
+  
+  // set the header fields of the Testability message
+  gInternalTestabilityMessageTx.header.groupId            = groupId;
+  gInternalTestabilityMessageTx.header.servicePrimitiveId = servicePrimitiveId;
+  gInternalTestabilityMessageTx.header.length             += gInternalTestabilityCurrentTxParamOffset;
+  
+  // copy the Testability message to the TX buffer (in network byte order)
+  memcpy_h2n(gInternalTxBuffer, gInternalTestabilityMessageTx);
+
+  // Send UDP data
+  if(IsUpperTesterIpv6(ipv6Addr))
+    gInternalUdpSocket.SendTo(ipv6Addr, syspar::TestabilityServicesUdpPort, gInternalTxBuffer, gInternalTestabilityMessageTx.header.length + 8);
+  else
+    gInternalUdpSocket.SendTo(ipGetAddressAsNumber(syspar::TestabilityServicesIpAddress), syspar::TestabilityServicesUdpPort, gInternalTxBuffer, gInternalTestabilityMessageTx.header.length + 8);
+  
+  if(InternalCheckSocketError("SendTo") == 0)
+  {
+    gTmpServicePrimitiveResponsePending = 1;
+    
+    // In case of the following Service Primitives 'Send data' we don't wait for the Service Primitive Response:
+    // - TCPSendData
+    // - UDPSendData
+    // - ICMPv4 Echo Request
+    // - TCPConnect
+    // The tester will wait for the expected data instead by using the dynmic text event mechanism.
+    // TODO: may be removed when vTESTstudio allows a parallel function execution.
+    if(waitForResponse == 0)
+    {
+      return E_OK;
+    }
+    else
+    {
+      // Wait for the Service Primitive Response message from the DUT
+      result = testWaitForTextEvent(kInternalEventExpectedServicePrimitiveResponse, gTestabilityServicesResponseTimeoutMs);
+      gTmpServicePrimitiveResponsePending = 0;
+    }
+    
+    if(result == 1)
+    {
+      // Return the return code of the received response message
+      return (enum TestabilityMessageResultIds) gInternalTestabilityMessageRx.header.resultId;
+    }
+  }
+  return E_NOK;
+}
+
+/**
+ * Function to add a boolean parameter to the Testability Request message
+ */
+void InternalAddParamBool(byte boolValue)
+{
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset]   = boolValue;
+  gInternalTestabilityCurrentTxParamOffset++;
+}
+
+/**
+ * Function to add an unsigned 8 byte integer parameter to the Testability Request message
+ */
+void InternalAddParamInt(byte value)
+{
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset]   = value & 0xFF;    
+  gInternalTestabilityCurrentTxParamOffset += 1;  
+}
+
+/**
+ * Function to add an unsigned 16 byte integer parameter to the Testability Request message
+ */
+void InternalAddParamInt(word value)
+{
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset]   = (value >> 8) & 0xFF;    
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+1] = value        & 0xFF;    
+  gInternalTestabilityCurrentTxParamOffset += 2;  
+}
+
+/**
+ * Function to add an unsigned 32 byte integer parameter to the Testability Request message
+ */
+void InternalAddParamInt(dword value)
+{
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset]   = (value >> 24) & 0xFF;  
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+1] = (value >> 16) & 0xFF;  
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+2] = (value >> 8)  & 0xFF;  
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+3] =  value        & 0xFF;    
+  gInternalTestabilityCurrentTxParamOffset += 4;  
+}
+
+/**
+ * Function to add an unsigned 64 byte integer parameter to the Testability Request message
+ */
+void InternalAddParamInt(qword value)
+{
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset]   = (value >> 56) & 0xFF;  
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+1] = (value >> 48) & 0xFF;
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+2] = (value >> 40) & 0xFF;
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+3] = (value >> 32) & 0xFF;
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+4] = (value >> 24) & 0xFF;
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+5] = (value >> 16) & 0xFF;
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+6] = (value >> 8)  & 0xFF;  
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+7] =  value        & 0xFF;    
+  gInternalTestabilityCurrentTxParamOffset += 8;  
+}
+
+/**
+ * Function to add a signed 8 byte integer parameter to the Testability Request message
+ */
+void InternalAddParamInt(char value)
+{
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset]   = value & 0xFF;    
+  gInternalTestabilityCurrentTxParamOffset += 1;  
+}
+
+/**
+ * Function to add a signed 16 byte integer parameter to the Testability Request message
+ */
+void InternalAddParamInt(int value)
+{
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset]   = (value >> 8) & 0xFF;    
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+1] =  value       & 0xFF;    
+  gInternalTestabilityCurrentTxParamOffset += 2;  
+}
+
+/**
+ * Function to add a signed 32 byte integer parameter to the Testability Request message
+ */
+void InternalAddParamInt(long value)
+{
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset]   = (value >> 24) & 0xFF;  
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+1] = (value >> 16) & 0xFF;  
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+2] = (value >> 8)  & 0xFF;  
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+3] =  value        & 0xFF;    
+  gInternalTestabilityCurrentTxParamOffset += 4;  
+}
+
+/**
+ * Function to add a signed 64 byte integer parameter to the Testability Request message
+ */
+void InternalAddParamInt(int64 value)
+{
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset]   = (value >> 56) & 0xFF;  
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+1] = (value >> 48) & 0xFF;
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+2] = (value >> 40) & 0xFF;
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+3] = (value >> 32) & 0xFF;
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+4] = (value >> 24) & 0xFF;
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+5] = (value >> 16) & 0xFF;
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+6] = (value >> 8)  & 0xFF;  
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+7] =  value        & 0xFF;    
+  gInternalTestabilityCurrentTxParamOffset += 8;  
+}
+
+/**
+ * Function to add parameter of variable length to the Testability Request message
+ */
+void InternalAddParamVarLength(word length, byte data[])
+{
+  InternalAddParamInt(length);
+  
+  memcpy_off(gInternalTestabilityMessageTx.params, gInternalTestabilityCurrentTxParamOffset, data, 0, length);
+  gInternalTestabilityCurrentTxParamOffset += length;  
+}
+
+/**
+ * Function to add parameter of variable length to the Testability Request message
+ */
+void InternalAddParamVarLength(byte data[])
+{
+  InternalAddParamInt((word)elcount(data));
+  
+  memcpy_off(gInternalTestabilityMessageTx.params, gInternalTestabilityCurrentTxParamOffset, data, 0, elcount(data));
+  gInternalTestabilityCurrentTxParamOffset += elcount(data);  
+}
+
+/**
+ * Function to add parameter of variable length to the Testability Request message (without UTF-8 BOM and without termination)
+ */
+void InternalAddParamVarLength(char data[])
+{  
+  InternalAddParamInt((word)strlen(data));
+  
+  memcpy_off(gInternalTestabilityMessageTx.params, gInternalTestabilityCurrentTxParamOffset, data, 0, strlen(data));
+  gInternalTestabilityCurrentTxParamOffset += strlen(data); 
+}
+
+/**
+ * Function to add parameter of variable length to the Testability Request message
+ */
+void InternalAddParamVarLength(dword data)
+{  
+  InternalAddParamInt((word)4);
+  InternalAddParamInt(data);
+}
+
+/**
+ * Function to add string parameter to the Testability Request message (with UTF-8 BOM and termination)
+ */
+void InternalAddParamText(char str[])
+{
+  word len            = 0;
+  byte termination    = 0;
+ 
+  // calculate the length of the variable data
+  len = 3 /* UTF-8 BOM */ + strlen(str) + 1 /* termination */;
+  InternalAddParamInt(len);
+  
+  // add BOM to data
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset]   = 0xEF;
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+1] = 0xBB;
+  gInternalTestabilityMessageTx.params[gInternalTestabilityCurrentTxParamOffset+2] = 0xBF;
+  gInternalTestabilityCurrentTxParamOffset += 3; 
+  
+  // add actual string to data
+  memcpy_off(gInternalTestabilityMessageTx.params, gInternalTestabilityCurrentTxParamOffset, str, 0, strlen(str));
+  gInternalTestabilityCurrentTxParamOffset += strlen(str);
+  
+  // add termination to data
+  InternalAddParamInt(termination);
+}
+
+/**
+ * Function to get an unsigned 8 bit integer parameter from Testability Response message
+ */
+word InternalGetParamByte()
+{
+  byte retValue;
+  retValue = 0;
+  
+  // check whether the received testability response message is long enough to contain the parameter
+  if(gInternalTestabilityCurrentRxParamOffset + 1 <= gInternalTestabilityMessageRx.header.length - 8)
+  {
+    retValue = gInternalTestabilityMessageRx.params[gInternalTestabilityCurrentRxParamOffset];
+    gInternalTestabilityCurrentRxParamOffset += 1;
+  }
+  
+  return retValue;
+}
+
+/**
+ * Function to get an unsigned 16 bit integer parameter from Testability Response message
+ */
+word InternalGetParamWord()
+{
+  word retValue;
+  retValue = 0;
+  
+  // check whether the received testability response message is long enough to contain the parameter
+  if(gInternalTestabilityCurrentRxParamOffset + 2 <= gInternalTestabilityMessageRx.header.length - 8)
+  {
+    retValue = (gInternalTestabilityMessageRx.params[gInternalTestabilityCurrentRxParamOffset] << 8) | gInternalTestabilityMessageRx.params[gInternalTestabilityCurrentRxParamOffset+1];
+    gInternalTestabilityCurrentRxParamOffset += 2;
+  }
+  
+  return retValue;
+}
+
+/**
+ * Function to get data of variable length from a Testability Message.
+ * The function returns the length of the fetched data.
+ */
+dword InternalGetParamVarLength(byte buffer[])
+{
+  dword variableParameterLength;
+  dword extracedDataLength;
+  dword minLen;
+  
+  variableParameterLength = 0;
+  extracedDataLength      = 0;
+  minLen                  = 0;
+  
+  // check whether the received testability message is long enough to contain a variable length parameter
+  if(gInternalTestabilityCurrentRxParamOffset + 2 <= gInternalTestabilityMessageRx.header.length - 8)
+  {
+    // get the actual length of the variable data
+    variableParameterLength = InternalGetParamWord();
+    
+    // check whether the received testability message is long enough to contain the data of the variable length parameter
+    if(gInternalTestabilityCurrentRxParamOffset + variableParameterLength <= gInternalTestabilityMessageRx.header.length - 8)
+    {
+      // determine the minimal length of data to be copied to the buffer (considering the buffer size)
+      minLen = (elcount(buffer) < variableParameterLength) ? elcount(buffer) : variableParameterLength;
+      
+      if(minLen > 0)
+      {
+        // copy the actual data to the buffer
+        memcpy_off(buffer, 0, gInternalTestabilityMessageRx.params, gInternalTestabilityCurrentRxParamOffset, minLen);
+      }
+    }
+    
+    // increment the internal offset in order to fetch further parameters (if any)
+    gInternalTestabilityCurrentRxParamOffset += variableParameterLength;
+  }
+  
+  // return the length of data that was written to the buffer
+  return minLen;
+}

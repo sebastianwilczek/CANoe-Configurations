@@ -1,0 +1,371 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+variables
+{
+  // Ethernet header size
+  const int kETH_MAX_HEADER_LENGTH = 18;
+  const int kETH_MAX_DATA_LENGTH = 1500;
+  
+  // Ethernet Type
+  enum Ethernet_Type
+  {
+    Eth_Type_IPv4 = 0x0800,  // IPv4
+    Eth_Type_ARP = 0x0806,   // ARP
+    Eth_Type_VLAN = 0x8100,  // VLAN tag
+    Eth_Type_IPv6 = 0x86DD,  // IPv6
+    
+    Eth_Type_Invalid = 0xFFFF
+  }; 
+      
+  struct _Token_Eth_Packet
+  {
+    qword qwSource;
+    qword qwDestination;
+    enum Ethernet_Type type;
+    
+    struct _Token_Testabilty testability;
+
+    struct _Token_ARP arp;
+    struct _Token_IPv4 ipv4;
+    
+    byte bPayload[kETH_MAX_DATA_LENGTH];
+    int  iPayloadlength;
+  };
+  
+  // Eth Received Raw Packet
+  byte bEthRecvRawHeader[kETH_MAX_HEADER_LENGTH];
+  int  iEthRecvRawHeaderLength;
+  byte bEthRecvRawData[kETH_MAX_DATA_LENGTH];
+  int  iEthRecvRawDataLength;
+}
+
+/// <initialize>
+// Inititalization of Ethernet token data
+void initEthTokenData(struct _Token_Eth_Packet data)
+{
+  int i;
+  data.type = Eth_Type_Invalid;
+  
+  initArpTokenData(data.arp);
+  initIpv4TokenData(data.ipv4);
+  
+  for(i=0; i<elCount(data.bPayload); i++)
+  {
+    data.bPayload[i] = 0;
+  }
+  data.iPayloadlength = 0;
+  initTestabilityTokenData(data.testability);
+}
+
+// Ethernet receive callback function
+void onEthPacket(long channel, long dir, long handle)
+{  
+  int iRet;
+  struct _Token_Eth_Packet recvData; // receive data object
+  struct _Token_Eth_Packet sendData; // response data object
+     
+  // send-receive direction check
+  if(dir == 1)
+  {
+    // direction = DUT -> Tester
+    return;
+  }
+  
+  iRet = 0;
+  
+  // init packet object data
+  initEthTokenData(recvData);
+  initEthTokenData(sendData);
+  
+  // get received ethernet packet data
+  iRet = getEthPacket(recvData, handle);
+  if(iRet == 0)
+  {
+    return;
+  }
+  
+  // Process received ethernet packet data
+  iRet = procEth(recvData, sendData);
+  if(iRet == 0)
+  {
+    return;
+  }
+
+  // make response packet data
+  iRet = makeEthPacket(recvData, sendData);
+  if(iRet == 0)
+  {
+    return;
+  }
+  
+  // send response packet
+  sendPacket(sendData);
+}
+
+/// <getPacketData>
+// get ethernet packet data
+// ret 1:succeed 0:failed
+int getEthPacket(struct _Token_Eth_Packet data, long handle)
+{  
+  int iRet = 0;
+   
+  // set received data to packet object
+  getEthPacketHeaderData(data, handle);
+  
+  switch(data.type)
+  {
+    // IPv4
+    case Eth_Type_IPv4:
+      iRet = getIpv4Packet(data.ipv4, handle);
+      if(IsTestAbilityProtocol(handle) == 1)
+      {
+        // TestAbility protocol
+        const word offset = 0;
+        if(gTestAbilityState != TestAbility_State_Run && (IsPidStartTest(handle) == 0))
+        {
+          // When test isn't started, TestAbility protocol are not accept.
+          return 0;
+        }
+        iRet = getTestAbilityPacket(data.testability, offset);
+        if(iRet == 0)
+        {
+          return 0;
+        }
+        
+        // reading testability protocol detail
+        iRet = getTestAbilityDetailPacket(data.testability, offset);        
+      }
+      break;
+    // ARP
+    case Eth_Type_ARP:
+      iRet = getArpPacket(data.arp, handle);
+      break;
+      
+    default:
+      break;
+  }
+  
+  return iRet;
+}
+
+/// <getPacketData>
+// set received data to packet object
+void getEthPacketHeaderData(struct _Token_Eth_Packet data, long handle)
+{
+  int i;
+  data.qwDestination = EthGetTokenInt64(handle, "eth", "destination", kBYTE_OFFSET, kBYTE_LENGTH_HWADDRESS, kBYTE_ORDER_INTEL);
+  data.qwSource = EthGetTokenInt64(handle, "eth", "source", kBYTE_OFFSET, kBYTE_LENGTH_HWADDRESS, kBYTE_ORDER_INTEL);
+  data.type = (enum Ethernet_Type)EthGetTokenInt(handle, "eth", "type");  
+  
+  data.iPayloadlength = EthGetTokenData(handle, "eth", "data", elCount(data.bPayload), data.bPayload);
+  
+  // Get Eth Received Raw Packet
+  for(i=0; i<elCount(bEthRecvRawHeader); i++) bEthRecvRawHeader[i] = 0;
+  iEthRecvRawHeaderLength = 0;
+  for(i=0; i<elCount(bEthRecvRawData); i++) bEthRecvRawData[i] = 0;
+  iEthRecvRawDataLength = 0;
+  iEthRecvRawHeaderLength = EthGetTokenData(handle, "eth", "header", elCount(bEthRecvRawHeader), bEthRecvRawHeader);
+  iEthRecvRawDataLength = EthGetTokenData(handle, "eth", "data", elCount(bEthRecvRawData), bEthRecvRawData);
+}
+
+/// <sendPacket/constructHeader>
+// construct Ethernet header packet handle
+void constructEthHeader(qword srcMacAddr, qword dstMacAddr, long lPacketHandle)
+{  
+  // construct Ethernet header
+  EthSetTokenInt64(lPacketHandle, "eth", "source", kBYTE_OFFSET, kBYTE_LENGTH_HWADDRESS, kBYTE_ORDER_INTEL, srcMacAddr);
+  EthSetTokenInt64(lPacketHandle, "eth", "destination", kBYTE_OFFSET, kBYTE_LENGTH_HWADDRESS, kBYTE_ORDER_INTEL, dstMacAddr);
+}
+
+/// <processPacketData>
+// process when Ethernet protocol received
+// return code 1:respond 0:don't respond
+int procEth(struct _Token_Eth_Packet recvData, struct _Token_Eth_Packet sendData)
+{
+  int iRet;
+  
+  iRet = 0;
+      
+  switch(recvData.type)
+  {
+    // IPv4
+    case Eth_Type_IPv4:
+      if(IsTestAbilityProtocol(recvData) == 1)
+      {
+        // testability protocol
+        iRet = procTestAbility(recvData.testability, sendData.testability);
+      }
+      else
+      {
+        // other
+        iRet = procIpv4(recvData.ipv4);
+        iRet = 1; // set return code(TODO:validity check of return code)
+      }
+      break;
+
+    // ARP
+    case Eth_Type_ARP:
+      iRet = procArp(recvData.arp);
+      iRet = 1; // set return code(TODO:validity check of return code)
+      break;
+      
+    default:
+      break;
+  }
+  
+  return iRet;
+}
+
+/// <makePacketData>
+// make receive object of Ethernet
+// return 1:receive is nessasary  0:receive is unnecessary
+int makeEthPacket(struct _Token_Eth_Packet recvData, struct _Token_Eth_Packet sendData)
+{
+  int iRet;
+  
+  iRet = 0;
+  
+  // set header data
+  sendData.qwSource = recvData.qwDestination;
+  sendData.qwDestination = recvData.qwSource;
+  
+  switch(recvData.type)
+  {
+    // IPv4
+    case Eth_Type_IPv4:
+      sendData.type = Eth_Type_IPv4;
+      iRet = makeIpv4Packet(recvData, sendData.ipv4);
+      if(IsTestAbilityProtocol(recvData) == 1)
+      {
+        // testability protocol
+        // this function always return 1
+        iRet = makeTestAbilityPacket(recvData.testability, sendData.testability);
+      }
+      break;
+      
+    // ARP
+    case Eth_Type_ARP:
+      // check if CAPL ARP is activate.
+      // to avoid the conflict of ARP response of TCP/IP stack
+      if(@sysvar::TC8_DUT_Config::TestGroup == kArp)
+      {
+        sendData.type = Eth_Type_ARP;
+        iRet = makeArpPacket(recvData.arp, sendData.arp);
+      }
+      break;
+      
+    // Other
+    default:
+      break;
+  }
+  
+  return iRet;
+}  
+
+/// <sendPacket>
+// send packet
+// ret 1:succeed 0:failed
+int sendPacket(struct _Token_Eth_Packet sendData)
+{
+  long lPacketHandle;
+  int iRet; 
+  char error[100];
+    
+  iRet = 0;
+  
+  // create packet
+  lPacketHandle = EthInitPacket("eth");  
+  if(lPacketHandle == 0)
+  {
+    EthGetLastErrorText(elCount(error), error);
+    write("<DUT> Error: %s", error);
+    return 0;
+  }
+  
+  // construct header
+  constructEthHeader(sendData.qwSource, sendData.qwDestination, lPacketHandle);
+  
+  switch(sendData.type)
+  {
+    // IPv4
+    case Eth_Type_IPv4:
+      constructIpv4Packet(sendData.ipv4, lPacketHandle);
+      if(IsTestAbilityProtocol(sendData) == 1)
+      {
+        // testability protocol
+        constructTestAbilityResPacket(sendData.testability, lPacketHandle);
+      }
+      break;
+      
+    // ARP
+    case Eth_Type_ARP:
+      constructArpPacket(sendData.arp, lPacketHandle);
+      break;  
+      
+    default:
+      break;
+  }
+  
+  // complete packet
+  EthCompletePacket(lPacketHandle);
+  
+  // send packet
+  if(EthOutputPacket(lPacketHandle) == 0)
+  {
+    iRet = 1;
+  }
+  else
+  {
+    iRet = 0;
+    EthGetLastErrorText(elCount(error), error);
+    write("<DUT> Error: %s", error);
+  }
+  
+  // release packet
+  EthReleasePacket(lPacketHandle);    
+  
+  return iRet;
+}
+
+int SendPacketOrCacheForArp(struct _Token_Eth_Packet sendData, dword dstIpAddr)
+{
+  int sendTblNo;
+  qword dstMacAddr;
+  
+  // Search mac adress from ARP table
+  sendTblNo = getArpTableNo(dstIpAddr, sendData);
+  
+  if(sendTblNo < 0)
+  {
+    // no IP adress in ARP table
+    // send arp
+    configToSendArp(kBROADCAST_MAC_ADDRESS, kBROADCAST_MAC_ADDRESS, dstIpAddr, Arp_Operation_Request);
+    return 0;
+  }
+  
+  dstMacAddr = gArpTable[sendTblNo].qwMacAdress;
+  sendData.qwDestination = dstMacAddr;
+  return sendPacket(sendData);
+}

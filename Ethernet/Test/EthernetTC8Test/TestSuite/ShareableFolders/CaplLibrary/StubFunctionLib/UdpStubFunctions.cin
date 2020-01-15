@@ -1,0 +1,520 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "../StubFunctionLib/StubFunctions.cin"
+}
+
+/**
+ * Closes a socket.
+ */
+export testfunction Stub_UdpCloseSockets()
+{
+  byte i;
+  for (i = 0; i < 10; i++)
+  {
+    if (gSocketId[i] != -1)
+    {
+      Stub_UdpCloseSocket(i);
+    }
+  }
+}
+
+void Stub_UdpCloseSocket(long socketNumber)
+{
+  long stubResult;
+
+  stubResult = Internal_Stub_UdpCloseSocket(gSocketId[socketNumber]);
+  gSocketId[socketNumber] = -1;
+
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_UdpCloseSocket", "Closing socket on DUT succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_UdpCloseSocket", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_UdpCloseSocket", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_UdpCloseSocket", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_UdpCloseSocket", "Unknown error.");
+    break;
+  }
+}
+
+/**
+ * Creates a socket and optionally binds this socket to a port and a local IP address.
+ * @param localPort Local port to bind
+ */
+export Stub_UdpCreateAndBind(char localPort[])
+{
+  Stub_UdpCreateAndBind(localPort, syspar::DIface0Ip, 0, kTrue);
+}
+
+/**
+ * Creates a socket and optionally binds this socket to a port and a local IP address.
+ * @param localPort Local port to bind
+ * @param ipAddr the IP Address of the socket
+ * @param the number of the socket if several sockets are opened. Starts counting with zero
+ */
+export testfunction Stub_UdpCreateAndBind(char localPort[], char ipAddr[], int socketNumber, enum Bool doBind)
+{
+  long stubResult;
+  word port;
+  word socketId;
+  
+  // Convert local port
+  port = atol(localPort);
+  
+  stubResult = Internal_Stub_UdpCreateAndBind(doBind, ipAddr, port, socketId);
+  gSocketId[socketNumber] = socketId;
+
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_UdpCreateAndBind", "Creating and binding a UDP socket on DUT succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_UdpCreateAndBind", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_UdpCreateAndBind", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_UdpCreateAndBind", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_UdpCreateAndBind", "Unknown error.");
+    break;
+  }
+}
+
+/**
+ * Creates 10 unbound sockets.
+ */
+export testfunction Stub_CreateTenSockets()
+{
+  
+  long stubResult;
+  int i, j;
+  word socketId;
+  word dropCnt;
+  
+  //Create the sockets
+  for(i=0;i<10;i++)
+  {
+    stubResult = Internal_Stub_UdpCreateAndBind(kFalse, syspar::DIface0Ip, i + 10, socketId); //port and addr parameters do not matter since they will not be bound
+    gSocketId[i] = socketId;
+    
+    switch (stubResult) {
+    case 0:
+      // Check sockets
+      for(j=0;j<i;j++)
+      {
+        if (gSocketId[i] == gSocketId[j])
+        {
+          testStepFail("Stub_CreateTenSockets", "Created Socket already exists. Socket ID: %d (0x%04X)", gSocketId[i], gSocketId[i]);
+          return;
+        }
+      }
+      break;
+    case -1:
+      testStepFail("Stub_CreateTenSockets", "Internal stub function handling error.");
+      return;
+    case -2:
+      testStepFail("Stub_CreateTenSockets", "Stub function parse error.");
+      return;
+    default:
+      if (kStubErrorMessages.containsKey(stubResult))
+        testStepFail("Stub_CreateTenSockets", kStubErrorMessages[stubResult]);
+      else
+        testStepFail("Stub_CreateTenSockets", "Unknown error.");
+      return;
+      
+      
+    }
+        stubResult = Internal_Stub_UdpReceiveAndForward(gSocketId[i], 0xFFFF, 0xFFFF, dropCnt); //0xFFFF: limitless length
+
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_UdpReceiveAndForward", "Receive and check UDP data on DUT succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_UdpReceiveAndForward", "Internal stub function handling error.");
+    return;
+  case -2:
+    testStepFail("Stub_UdpReceiveAndForward", "Stub function parse error.");
+    return;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_UdpReceiveAndForward", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_UdpReceiveAndForward", "Unknown error.");
+    return;
+  } 
+  }
+  testStepPass("Stub_CreateTenSockets", "Creating ten UDP sockets on DUT succeeded.");
+}
+  
+
+  
+/**
+ * Sends data to a target.
+ * @param totalLength Total length: repeat data up to that length
+ * @param destinationPort Destination port
+ * @param destinationAddress Destination address
+ * @param data Data to transmit
+ */
+export Stub_UdpSendData(char totalLength[], char destinationPort[], char destinationAddress[], char data[])
+{
+  Stub_UdpSendData(0, totalLength, destinationPort, destinationAddress, data);
+}
+  
+/**
+ * Sends data to a target.
+ * @param socketNumber the number of the socket which shall send the data (if several sockets are opened via stub function. starts counting at zero).
+ * @param totalLength Total length: repeat data up to that length
+ * @param destinationPort Destination port
+ * @param destinationAddress Destination address
+ * @param data Data to transmit
+ */
+export testfunction Stub_UdpSendData(int socketNumber, char totalLength[], char destinationPort[], char destinationAddress[], char data[])
+{
+  long stubResult;
+  byte i;
+  word length, destPort;
+  
+  // Convert total length and destinationPort
+  length = atol(totalLength);
+  destPort = atol(destinationPort);
+  
+  stubResult = Internal_Stub_UdpSendData(gSocketId[socketNumber], length, destPort, destinationAddress, data);
+
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_UdpSendData", "Send UDP data from DUT succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_UdpSendData", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_UdpSendData", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_UdpSendData", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_UdpSendData", "Unknown error.");
+    break;
+  }
+}
+
+/**
+ * Data that will be received after the call of this SP will be forwarded to the test system.
+ */
+export Stub_UdpReceiveAndForward()
+{
+  Stub_UdpReceiveAndForward(0,0xFFFF);
+}
+
+/**
+ * Data that will be received after the call of this SP will be forwarded to the test system.
+ * @param socketNumber: The number of the socket that shall be used
+ */
+export testfunction Stub_UdpReceiveAndForward(int socketNumber, word maxFwd )
+{
+  long stubResult;
+  word dropCnt; //unused output
+
+  stubResult = Internal_Stub_UdpReceiveAndForward(gSocketId[socketNumber], maxFwd, 0xFFFF, dropCnt); //0xFFFF: limitless length
+
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_UdpReceiveAndForward", "Receive and check UDP data on DUT succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_UdpReceiveAndForward", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_UdpReceiveAndForward", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_UdpReceiveAndForward", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_UdpReceiveAndForward", "Unknown error.");
+    break;
+  }
+}
+  
+/**
+ * This is not just a wrapper.
+ * Checks the data that returns after Stub_UdpReceiveAndForward according to various parameters.
+ * @param timeoutMilliseconds Listen timeout in milliseconds.
+ * @param fullLen Compares with the full length of available data in bytes.
+ * @param srcPort Compares with the UDP source port of the received datagram.
+ * @param srcIpAddress Compares with the IP source address of the received datagram.
+ * @param payload Compares with the payload that was received.
+ */
+export testfunction Stub_UdpReceiveAndForwardEvent(
+  long timeoutMilliseconds, 
+  char fullLen[],
+  char srcPort[],
+  char srcIpAddress[],
+  char payload[]
+  )
+{
+  Internal_UdpReceiveAndForwardEvent(
+    timeoutMilliseconds, 
+    fullLen,
+    srcPort,
+    srcIpAddress,
+    payload,
+    strlen(payload),
+    kTrue);
+}
+  
+/**
+ * This is not just a wrapper.
+ * Checks the data that returns after Stub_UdpReceiveAndForward according to various parameters.
+ * @param timeoutMilliseconds Listen timeout in milliseconds.
+ * @param fullLen Compares with the full length of available data in bytes.
+ * @param srcPort Compares with the UDP source port of the received datagram.
+ * @param srcIpAddress Compares with the IP source address of the received datagram.
+ * @param payload Compares with the payload that was received.
+ */
+export testfunction Stub_UnexpectedUdpReceiveAndForwardEvent(
+  long timeoutMilliseconds, 
+  char fullLen[],
+  char srcPort[],
+  char srcIpAddress[],
+  char payload[]
+  )
+{
+  Internal_UdpReceiveAndForwardEvent(
+    timeoutMilliseconds, 
+    fullLen,
+    srcPort,
+    srcIpAddress,
+    payload,
+    strlen(payload),
+    kFalse);
+}
+
+void Internal_UdpReceiveAndForwardEvent(
+  long timeoutMilliseconds, 
+  char fullLen[],
+  char srcPort[],
+  char srcIpAddress[],
+  char payload[],
+  word payloadLength,
+  enum Bool expectedMessage
+  )
+{
+  long stubResult;
+  word outFullLen, outScrPort;
+  char outIp[50];
+  byte outPayload[0xFFFF];
+  word outPayloadLength;
+
+  stubResult = Internal_Stub_UdpReceiveAndForwardEvent(timeoutMilliseconds, outFullLen, outScrPort, outIp, outPayload, outPayloadLength);
+
+  switch (stubResult) {
+  case 0:
+      CheckUdpReceiveAndForwardEventParameters(
+        fullLen,
+        outFullLen,
+        srcPort,
+        outScrPort,
+        srcIpAddress,
+        outIp,
+        payload,
+        payloadLength,
+        outPayload,
+        outPayloadLength,
+        expectedMessage);
+    break;
+  case -1:
+    //timeout
+    if(expectedMessage == kTrue)
+    {
+      testStepFail("Stub_UdpReceiveAndForwardEvent", "Internal stub function handling error.");
+    }
+    else
+    {
+      testStepPass("Stub_UdpReceiveAndForwardEvent", "Did not receive unexpected UDP data.");
+    }
+    break;
+  case -2:
+    testStepFail("Stub_UdpReceiveAndForwardEvent", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_UdpReceiveAndForwardEvent", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_UdpReceiveAndForwardEvent", "Unknown error.");
+    break;
+  }
+}
+
+void CheckUdpReceiveAndForwardEventParameters(
+  char fullLen[],
+  word outFullLen,
+  char srcPort[],
+  word outScrPort,
+  char srcIpAddress[],
+  char outIp[],
+  char payload[],
+  word payloadLength,
+  byte outPayload[],
+  word outPayloadLength,
+  enum Bool expectedMessage)
+{
+  char parameterTemp[5], outPayloadString[0x1FFFF];
+  byte payloadBytes[0xFFFF], i;
+  
+  if(expectedMessage == kTrue)
+  {
+    //Check if received data matches expected values.
+    if(!isWildcard(fullLen) && atol(fullLen) != outFullLen)
+    {
+      testStepFail("Stub_UdpReceiveAndForwardEvent", "Receive and check UDP data on DUT failed. Full length mismatch.");
+      return;
+    }
+    if(!isWildcard(srcPort) && atol(srcPort) != outScrPort)
+    {
+      testStepFail("Stub_UdpReceiveAndForwardEvent", "Receive and check UDP data on DUT failed. Source port mismatch.");
+      return;
+    }
+    if(!isWildcard(srcIpAddress) && CompareIpAddresses(srcIpAddress, outIp) == kFalse)
+    {
+      testStepFail("Stub_UdpReceiveAndForwardEvent", "Receive and check UDP data on DUT failed. Source IP mismatch.");
+      return;
+    }
+    if(!isWildcard(fullLen) && atol(fullLen) != outFullLen)
+    {
+      testStepFail("Stub_UdpReceiveAndForwardEvent", "Receive and check UDP data on DUT failed. FullLength mismatch.");
+      return;
+    }
+    if(!isWildcard(payload))
+    {
+      if(ComparePayload(payload, payloadLength, outPayload, outPayloadLength) != kTrue)
+      {
+        testStepFail("Stub_UdpReceiveAndForwardEvent", "Receive and check UDP data on DUT failed. Payload mismatch.");
+        return;
+      }
+    }
+    testStepPass("Stub_UdpReceiveAndForwardEvent", "UDP data have been received by DUT.");
+  }
+  else
+  {
+    testStepFail("Stub_UdpReceiveAndForwardEvent", "Received unexpected UDP data.");
+  }
+}
+
+/**
+ * This SP is used to select and set parameters that can be configured on a socket basis.
+ * @param paramId Selects the parameter to be configured
+ * @param paramVal The value of the selected parameter that must match the corresponding length.
+ */
+export testfunction Stub_UdpConfigureSocket(word paramId, word paramVal)
+{
+  char paramStr[5];
+  
+  switch(paramId)
+  {
+    case 0:
+    case 1:
+    case 2:
+    case 4:
+    case 6:
+    case 7:
+      snprintf(paramStr, 3, "%02X", paramVal);
+      Internal_UdpConfigureSocket(paramId, paramStr, (word) 2);
+      break;
+    case 5:
+      snprintf(paramStr, 5, "%04X", paramVal);
+      Internal_UdpConfigureSocket(paramId, paramStr, (word) 4);
+      break;
+    default:
+      testStepFail("Stub_UdpConfigureSocket", "Unexpected paramId.");
+      break;
+  }
+}
+  
+/**
+ * This SP is used to select and set parameters that can be configured on a socket basis.
+ * @param paramId Selects the parameter to be configured
+ * @param paramVal The value of the selected parameter that must match the corresponding length.
+ */
+export testfunction Stub_UdpConfigureSocket(word paramId, char paramVal[])
+{
+  Internal_UdpConfigureSocket(paramId, paramVal, strlen(paramVal));
+}
+
+void Internal_UdpConfigureSocket(word paramId, char paramVal[], word paramLength)
+{
+  long stubResult;
+  char parameterTemp[5];
+  byte parameterValue[0xFFFF], i;
+  
+  // Convert paramVal
+  strncpy(parameterTemp, "0x", 3);
+  
+  for (i = 0; (i * 2) < paramLength; i++)
+  {
+    substr_cpy_off(parameterTemp, 2, paramVal, i * 2, 2, 5);
+    parameterValue[i] = atol(parameterTemp);
+  }
+  
+   if( gSocketId[0] < 0)
+  {
+    testStepFail("Stub_UdpConfigureSocket", "Invailid socket ID, please create socket first.");
+    return;
+  }
+  
+  stubResult = Internal_Stub_UdpConfigureSocket(gSocketId[0], paramId, parameterValue, paramLength / 2);
+
+  switch (stubResult) {
+  case 0:
+    testStepPass("Stub_UdpConfigureSocket", "Receive and check UDP data on DUT succeeded.");
+    break;
+  case -1:
+    testStepFail("Stub_UdpConfigureSocket", "Internal stub function handling error.");
+    break;
+  case -2:
+    testStepFail("Stub_UdpConfigureSocket", "Stub function parse error.");
+    break;
+  default:
+    if (kStubErrorMessages.containsKey(stubResult))
+      testStepFail("Stub_UdpConfigureSocket", kStubErrorMessages[stubResult]);
+    else
+      testStepFail("Stub_UdpConfigureSocket", "Unknown error.");
+    break;
+  }
+}

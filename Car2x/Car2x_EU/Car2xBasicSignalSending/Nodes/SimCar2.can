@@ -1,0 +1,65 @@
+/*@!Encoding:1252*/
+variables
+{
+  long gHeading = 1800;  // 360°, divide through 0.0125 to get the heading val
+  long gLatitude = 488251930;
+  long gLongitude = 90941940;
+
+  int gLatCounter = 0;
+
+  msTimer transmitCAM;
+  long    gPacketHandle = 0;
+}
+
+/****************************************************************/
+// Called on simulation start
+/****************************************************************/
+on start
+{
+  // register the pre transmit callback
+  C2xRegisterCallback(1, "OnTxCAM", "CAM") ;
+  setTimerCyclic(transmitCAM, 100, 100);
+}
+
+/****************************************************************/
+// Timer to set CAM position
+/****************************************************************/
+on timer transmitCAM
+{
+  if(gPacketHandle != 0)
+  {
+    C2xSetTokenInt(gPacketHandle, "geo_eh", "lpvHeading", gHeading);
+    C2xSetTokenInt(gPacketHandle, "geo_eh", "lpvLatitude", gLatitude);
+    C2xSetTokenInt(gPacketHandle, "geo_eh", "lpvLongitude", gLongitude);
+  }
+
+  C2xSetSignal("CAM::cam::camParameters::highFrequencyContainer::basicVehicleContainerHighFrequency::heading::headingValue", gHeading) ;
+  C2xSetSignal("CAM::cam::camParameters::basicContainer::referencePosition::latitude", gLatitude);
+  C2xSetSignal("CAM::cam::camParameters::basicContainer::referencePosition::longitude", gLongitude);
+
+  gLatitude -= 100;
+  gLatCounter++;
+  
+  if(gLatCounter % 10 == 0)
+  {
+    gLongitude += 80;
+    gHeading -= 3;
+  }
+  
+  // Set values back, so that vehicles drive in a loop
+  if(gLatitude <= 488234070)
+  {
+    gHeading = 1800;
+    gLatitude = 488251930;
+    gLongitude = 90941940;
+    gLatCounter = 0;
+  }
+}
+
+/****************************************************************/
+// Callback before sending CAM
+/****************************************************************/
+void OnTxCAM(LONG packet)
+{
+  gPacketHandle = packet;
+}

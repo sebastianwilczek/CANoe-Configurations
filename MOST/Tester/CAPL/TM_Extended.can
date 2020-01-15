@@ -1,0 +1,209 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  // MOST node address of AudioDiskPlayer
+  word  gDefaultGroup = 0x300;
+
+  // typical timeout in ms to wait for a 'Processing' message
+  const dword t_WaitForProcessing = 200; 
+
+  // used in test case GatherNotifications 
+  const dword t_WaitingForNotifications = 2000;  
+
+  // InstanceId of SUT
+  int gADPInstance;
+
+}
+/*@@end*/
+
+/*@@testcase:TC_MethodResponse():*/
+// This test case demonstrates an application of joined wait conditions with
+// logical OR semantics using testWaitForAnyJoinedEvent(). In this case, it 
+// is used to process alternative responses by evaluating the result returned
+// by the composite condition. 
+//--------------------------------------------------------------------------
+testcase TC_MethodResponse ()
+{
+  mostAMSMessage * statusMsg;              // container for received status message
+  int result = 1;
+  int step;
+  char strStep[10];
+  char buffer[256];
+  int countProcessing = 0;
+
+  TestCaseTitle ("MethodResponse", "Demonstration of function testWaitForAnyJoinedEvent().");
+
+  TestSendMostAMSMessage(0x101, "AudioDiskPlayer.DeAllocate.StartResult(1)", gADPInstance);
+
+  TestWaitForTimeout(100);  
+
+  TestStep("1", "Send 'AudioDiskPlayer.Allocate.StartResult(1)'.");
+
+  TestSendMostAMSMessage(0x101, "AudioDiskPlayer.Allocate.StartResult(1)", gADPInstance);
+
+  step = 2;          // for proper test step numeration in report
+  while(result == 1) // process repeating "Processing" messages
+  {
+    // result is 1, when the following condition gets resolved
+    TestJoinMostAMSMessageEvent("AudioDiskPlayer.Allocate.Processing", gADPInstance);  
+    // result is 2, when the following condition gets resolved
+    TestJoinMostAMSMessageEvent("AudioDiskPlayer.Allocate.Result", gADPInstance); 
+    result = testWaitForAnyJoinedEvent(t_WaitForProcessing);
+    snprintf(strStep, elcount(strStep), "%d", step);
+    if(result == 1)  
+    {
+      // delayed processing of "Allocate" request active
+      TestStepPass(strStep, "Ok. Received 'Allocate.Processing' message.");
+      countProcessing++;
+      step++;
+    }
+  }
+  if(result == 2)
+  {
+    snprintf(buffer, elCount(buffer), "Ok. Received 'Result' message after  %d 'Processing' messages.", countProcessing);
+    TestStepPass(strStep, buffer);
+  }
+  else
+  {
+    snprintf(buffer, elCount(buffer), "Timeout. Expected 'Result' message didn't occur. %d 'Processing' messages received meanwhile.", countProcessing);
+    TestStepFail(strStep, buffer);
+  }  
+}
+/*@@end*/
+
+/*@@caplFunc:GetADPInstance():*///function
+// returns a instance number of the AudioDiskPlayer (0x31)
+int GetADPInstance ()
+{
+  int i; 
+  gADPInstance = 1 ; // default value
+  for(i = 0; i < MostAsRgGetSize(kBusRegistry); i++)
+  {
+    if(MostAsRgGetFBlockID(kBusRegistry, i) == 0x31) 
+    {
+      return MostAsrgGetInstID(kBusRegistry, i) ;
+    }
+  }
+  return 0;
+}
+/*@@end*/
+
+/*@@mainTest:MainTest():*/
+void MainTest()
+{
+  // Set test module title and detailed infos for test report.
+  TestModuleTitle ("TM_Extended - More function tests of AudioDiskPlayer functions.");
+  SetReportInfos();
+
+  gADPInstance = GetADPInstance();
+
+  TC_MethodResponse();
+  TestWaitForTimeout(100);
+  TC_GatherNotifications();
+}
+/*@@end*/
+
+/*@@testcase:TC_GatherNotifications():*/
+// This test case shows how to set up a condition to wait for messages from 
+// all functions of a FBlock. In this application, the test case collects all 
+// incoming status messages that occur within a specified amount of time 
+// (t_WaitingForNotifications), after notification for all functions in the 
+// AudioDiskPlayer has been activated. The generated report lists the IDs of 
+// the functions that have sent a notification.
+// -------------------------------------------------------------------------- 
+testcase TC_GatherNotifications ()
+{
+  char strSymMsg[100];
+  char strReportLine[100];
+  mostAMSMessage * msg;
+  dword functionIds[256]; 
+  
+  dword timeRemaining; 
+  dword timeStartCond;
+
+  int nOfFunctions = 0;
+  int i = 0;
+
+  TestCaseTitle ("GatherNotifications", "Demonstration of testWaitForMostAMSReport() function.");
+
+  TestStep ("1", "Send message for notification on all functions of the AudioDiskPlayer.");
+
+  snprintf(strSymMsg, 100, "AudioDiskPlayer.Notification.Set(SetAll, %d)", gDefaultGroup);
+  TestSendMostAMSMessage(strSymMsg, gADPInstance);
+
+  TestStep ("2", "Wait for any incoming notification messages from the AudioDiskPlayer.");
+ 
+  timeRemaining = t_WaitingForNotifications;
+  while(timeRemaining > 0)
+  {
+    // save current time, ...
+    timeStartCond = timeNow() / 100;  // 10us -> ms
+    if(TestWaitForMostAMSReport("AudioDiskPlayer", gADPInstance, timeRemaining) > 0)
+    { 
+      // .. calculate time passed after condition is resolved and recalculate remaining time
+      timeRemaining = timeRemaining - ((timeNow() / 100) - timeStartCond); 
+      testGetWaitEventMostAMSMsgData(msg);
+      if(MostGetOpType(msg) == kOpTStatus)
+      {
+        // collect the IDs of the functions
+        functionIds[nOfFunctions] = MostGetFunctionID(msg);
+        nOfFunctions++;
+      }
+    }
+    else
+    {
+      break;
+    }
+  }
+
+  if(nOfFunctions > 0)
+  {
+     TestStepPass("3", "Ok. Notifications from functions with the following IDs have been received:");
+     for(i = 0; i < nOfFunctions; i++)
+     {
+        snprintf(strReportLine, elcount(strReportLine), "%d. 0x%X", i+1, functionIds[i]);
+        TestStep("", strReportLine);
+     }
+  }
+  else
+  {
+    TestStepFail("3", "Error. No notifications have been received.");
+  }
+  
+  
+  TestStep("4", "Deactivate notifications.");
+  
+  // delete notifications
+  snprintf(strSymMsg, 100, "AudioDiskPlayer.Notification.Set(ClearAll, %d)", gDefaultGroup);
+  TestSendMostAMSMessage(strSymMsg, gADPInstance);
+}
+/*@@end*/
+
+/*@@caplFunc:SetReportInfos():*///function
+// Determine info about test engineer, test setup etc.
+// and write info into report. A text that describes the
+// test module is written into the report, too.
+
+void SetReportInfos ()
+{
+  TestModuleDescription ("This test module demonstrates the usage of the TFS functions ");
+  TestModuleDescription ("testWaitForMostAMSReport() and testWaitForAnyJoinedEvent().");
+
+  TestReportAddEngineerInfo ("Name", "not available");
+  TestReportAddEngineerInfo ("Company", "not available");
+
+  TestReportAddSetupInfo ("CANoe Configuration", "MOSTTester");
+  TestReportAddSetupInfo ("Creator", "Vector Informatik GmbH, Stuttgart");
+  TestReportAddSetupInfo ("Version and Date", "3.0 from 2006-10-10");
+
+  TestReportAddSUTInfo ("Device Name", "MOST AudioDiskPlayer");
+}
+/*@@end*/
+

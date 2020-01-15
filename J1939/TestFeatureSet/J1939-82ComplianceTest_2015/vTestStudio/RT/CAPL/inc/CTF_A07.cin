@@ -1,0 +1,5029 @@
+/*@!Encoding:1252*/
+/*@!Encoding:1252*/
+includes
+{
+  #include "RT_checks.cin"
+}
+
+variables
+{
+}
+
+// ==============================================================================================================
+// functionality of the test A7 01 TP Init
+// ==============================================================================================================
+// FuncPath's:
+// 1: No disturbance detected. (PASS)
+// 2: Requesting error. (timeout) (FAIL)
+// 3: Message buffer searching error. (FAIL)
+// 4: TP.CM_RTS not prior to TP.DT (FAIL)
+// 5: PGI inconsistency (FAIL)
+void CTF_A07_01_TP_Init(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  char errTextRequest[1024];
+  dword timeout;
+  int64 stepTime;
+  double trts; // previous time as double
+  double tdt;  // current time as double.
+  byte prio;
+  dword pgn;
+  byte ok;
+  byte tdSeq;   // a td's sequence number
+  byte requestAnswered;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/2 request
+    // ====================
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) over TP...", testerAddr, testerAddr, pgn, pgn, dutAddr, dutAddr);
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+
+    CT_WAIT_FOR_BAM_GAP();
+
+    MsgBuf_StartRecording();
+    requestAnswered = 1;
+
+    // do the request...
+    if ( CT_Request_And_Await_Response(pgR, pgis[k], errTextRequest, testerAddr, dutAddr, timeout, prio) != 0)
+    {
+      // requesting error (timeout).
+      // there are other errors to check for within buffer. e.g. if it was sent to specific address...
+      // so do not leave until some further tests were done.
+      requestAnswered = 0; // tp not detected... continue checking...
+    }
+
+    // check against dlc within the response really has a dlc>8
+    if (pgR.dlc <= 8)
+    {
+      CT_STEP_END_ERROR_DLC_NOT_GREATER_8_NO_TP_POSSIBLE(5, pgR.dlc);
+      return; // leave on fail.
+    }
+    CT_WAIT(gc_TIMEOUT_T3); // wait T3... seconds to check if the transport really is done.
+
+    // stop message buffering...
+    MsgBuf_StopRecording();
+
+    // request done...
+    CT_STEP_END_PASS(0);
+
+    
+    // ====================
+    // step 2/2 Check data...
+    // ====================
+    CT_STEP_BEGIN("Checking data...");
+   
+    // Get all TP.CM_RTS for current pgn from DUT (dutAddr)
+    trts = 0;
+    if ( !CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dutAddr, gc_TPCM_CTRL_WORD_RTS, pgn))
+    {
+      // there are no RTS found...
+      if (requestAnswered)
+      {
+        CT_STEP_END_FAIL(3, "Searching in message buffer failure.");
+        return; // leave on fail.
+      }
+    }
+    else
+    {
+      // there are RTS found...
+      trts = CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns);
+      //write("TP_INIT-TIME: %f", trts);
+
+      // get all TP.DT indices of the message buffer between test-start and response time...
+      if (!CT_Get_TPDTs_In_MsgBuf_Between(bufIndices, stepTime, requestAnswered ? pgR.time_ns : timeNowInt64(), dutAddr))
+      {
+        if (requestAnswered)
+        {
+          CT_STEP_END_FAIL(3, "TP.DT not found in message buffer.");
+          return; // leave on fail.
+        }
+      }
+      
+      // check that td's with seq number 1 (first ones) time is not < tp-init-time if the td's sequence number is 1...
+      for (long bi: bufIndices)
+      {
+        // only the td with seq 1 is investigated in this testcase...
+        tdSeq = CT_GetDataByte(0, gMsgBuf[bufIndices[bi]]);
+
+        // only for the first td's with sequence number 1...
+        if (tdSeq == 1)
+        {
+          tdt  = CT_Ns2Sec(gMsgBuf[bufIndices[bi]].time_ns);
+          
+          // is DT before the TP.CM_RTS...?
+          if (tdt < trts) 
+          {
+            snprintf(errText, elcount(errText), "TP.CM_RTS at t=%.6f not prior to first TP.DT at t=%.6f.", trts, tdt);
+            CT_STEP_END_FAIL(4, errText);
+            return; // in this case leave the test now.
+          }
+        
+          // skip further buffer entries.
+          break;
+        }
+      }
+      
+    }
+    
+    
+    // if request was not ok (timeout)...
+    if (!requestAnswered) 
+    {
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errTextRequest, timeout);
+      return;
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+    
+  }
+}
+
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A7 02 TP RTS
+// ==============================================================================================================
+// FuncPath's:
+// 1: No disturbance detected. (PASS)
+// 2: Requesting error. (timeout) (FAIL)
+// 3: Message buffer searching error. (FAIL)
+// 4: TP.CM_RTS sent to global address (FAIL)
+// 5: TP.CM_RTS total message size does not fit number of TP.DT packets (FAIL)
+// 6: TP.DT messages after wide event detected (FAIL)
+// 7: TP.CM_RTS max package count <1 not allowed. (FAIL)
+// 8: PGI inconsistency (FAIL)
+void CTF_A07_02_TP_RTS(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  word bufIndicesTPCM[long];
+  word bufIndicesTPDT[long];
+  long bufIdxRTS;
+  long bufIdxTPDT;
+  char reportText[1024];
+  char errText[1024];
+  char errTextRequest[1024];
+  dword timeout;
+  int64 stepTime;
+  int64 tpStartTime;
+  int64 tpEndTime;
+  word totalBytes;
+  byte totalPackages;
+  byte maxPackages;
+  word neededPackages;
+  word detectedPackages;
+  double tpcmMs;
+  byte prio;
+  dword pgn;
+  byte requestAnswered;
+  byte ok;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(8, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(8, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/2 request
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) over TP...", testerAddr, testerAddr, pgn, pgn, dutAddr, dutAddr);
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+
+    MsgBuf_StartRecording();
+    requestAnswered = 1;
+    
+    // request from tool (testerAddr) to DUT (dutAddr)
+    tpStartTime = timeNowInt64();
+    if ( CT_Request_And_Await_Response(pgR, pgis[k], errTextRequest, testerAddr, dutAddr, timeout, prio) != 0)
+    {
+      // requesting error (timeout).
+      // there are other errors to check for within buffer. e.g. if it was sent to specific address...
+      // so do not leave until some further tests were done.
+      requestAnswered = 0; // tp not detected... continue checking...
+    }
+    tpEndTime = timeNowInt64();
+    
+    // check against dlc within the response really has a dlc>8
+    if (pgR.dlc <= 8)
+    {
+      CT_STEP_END_ERROR_DLC_NOT_GREATER_8_NO_TP_POSSIBLE(8, pgR.dlc);
+      return; // leave on fail.
+    }
+    CT_WAIT(gc_TIMEOUT_T3); // wait T3... seconds to check if the transport really is done.
+    
+    // stop message buffering
+    MsgBuf_StopRecording();
+    
+    // request done...
+    CT_STEP_END_PASS(0);
+    
+    
+    // ====================
+    // step 2/2 Check data...
+    // ====================
+    CT_STEP_BEGIN("Checking data...");
+    
+    // Get all TP.CM_RTS for current pgn from DUT (dutAddr) // do not filter messages to TOOL (dutAddr) due then the TP.CM_RTS sent to global address is not contained within this set.
+    if ( !CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndicesTPCM, stepTime, dutAddr, gc_TPCM_CTRL_WORD_RTS, pgn))
+    {
+      // there are no RTS found...
+      // msg buf error only if the request was detected, but nothing found within message buffer.
+      if (requestAnswered)
+      {
+        // TP.CM_RTS not found.
+        CT_STEP_END_FAIL(3, "TP.CM_RTS not found within message buffer.");
+        return; // leave on fail.
+      }
+    }
+    else
+    {
+      // there are RTS found...
+      bufIdxRTS   = bufIndicesTPCM[0]; // the first TP.CM_RTS entry index...
+      tpcmMs      = CT_Ns2Sec(gMsgBuf[bufIdxRTS].time_ns);
+      
+      // check TP.CM_RTS sent to global address...
+      if (CT_GetDst(gMsgBuf[bufIdxRTS]) == gc_BC_ADDR)
+      {
+        CT_STEP_END_FAIL(4, "TP.CM_RTS sent to global address.");
+        return; // leave on fail.
+      }
+      
+      // RTS total messages: byte 2 and 3 in payload.
+      // RTS number of packages: byte 4
+      totalBytes = CT_GetDataWord(1, gMsgBuf[bufIdxRTS]);
+      totalPackages = CT_GetTPCMRTSPkgCount(gMsgBuf[bufIdxRTS]);
+      maxPackages = CT_GetTPCMRTSMaxPkgs(gMsgBuf[bufIdxRTS]);
+      neededPackages = (word)_ceil(totalBytes/7.0);
+    
+      // debug...
+      // write("tpcmMs=%.6f, totalBytes=%d, packages=%d, maxPackages=%d, neededPackages=%d, tpStartTime=%d, tpEndTime=%d", tpcmMs, totalBytes, totalPackages, maxPackages, neededPackages, tpStartTime, tpEndTime);
+      if (maxPackages <1)
+      {
+        CT_STEP_END_FAIL(7, "TP.CM_RTS max package count <1 not allowed.");
+        return; // leave on fail.
+      }
+      
+      // now get the TP.DT messages after tpcm from DUT (dutAddr) to TOOL (testerAddr)
+      if (!CT_Get_TPDTs_In_MsgBuf_Between(bufIndicesTPDT, tpStartTime, tpEndTime, dutAddr, testerAddr))
+      {
+        // TP.DTs not found.
+        CT_STEP_END_FAIL(3, "TP.DTs for transport not found within message buffer.");
+        return; // leave on fail.
+      }
+      
+      detectedPackages = bufIndicesTPDT.size();
+      
+      if (detectedPackages>0)
+      {
+        if ( neededPackages != detectedPackages )
+        {
+          snprintf(errText, elcount(errText), "TP.CM_RTS at t=%.6f: Total message size %d does not fit detected TP.DT count of %d. (%d packages needed)", tpcmMs, totalBytes, detectedPackages, neededPackages);
+          CT_STEP_END_FAIL(5, errText);
+          return; // leave on fail.
+        }
+        
+        // check that there are no tp.dt's between the wide event and the buffer end, or the next TPCM.
+        bufIdxTPDT = MsgBuf_FindByTimestamp(0, tpEndTime+1);
+        if ( bufIdxTPDT != IDX_NOT_FOUND )
+        {
+          word i;
+          for (i=bufIdxTPDT; i<MSGBUF_SIZE; i++)
+          {
+            if (CT_GetPGN( gMsgBuf[i] ) == gc_PGN_TPCM ) break; // there is a TPCM. leave...
+            if (MsgBuf_IsEmptyMsg(gMsgBuf[i])) break; // leave after end of message buffer.
+            
+            // if there is TP.DT, this indicates TP.DT's after the wide event...
+            if (
+                    ( CT_GetPGN(gMsgBuf[i]) == gc_PGN_TPDT ) 
+                &&  ( CT_GetSrc(gMsgBuf[i]) == dutAddr)
+                &&  ( CT_GetDst(gMsgBuf[i]) == testerAddr)
+              )
+            {
+              CT_STEP_END_FAIL(6, "TP.DT messages after wide event detected.");
+              return; // leave on fail.
+            }
+          }
+        };
+      }
+      
+    }
+    
+    if (!requestAnswered)
+    {
+      // if request was not ok (timeout), and no other error with higher prio left, leave now with timeout message.
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errTextRequest, timeout);
+      return;
+    }
+    
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+    
+  }
+  
+}
+
+// ==============================================================================================================
+// functionality of the test A7 03 TP CTS
+// ==============================================================================================================
+// FuncPath's:
+// 1: No disturbance detected. (PASS)
+// 2: Requesting error. (timeout) (FAIL)
+// 3: Message buffer searching error. (FAIL)
+// 4: TP.CM_CTS not prior to TP.DT (FAIL)
+// 5: DUT does not transmit an abort if first TP.CM_CTS' next packet number is not 1. (FAIL)
+// 6: DUT sends abort for first missing TP.CM_CTS (FAIL)
+// 7: DUT does not transmit an abort for CTS' number of packets greater than RTS limitation. (FAIL)
+// 8: PGI inconsistency (FAIL)
+void CTF_A07_03_TP_CTS(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  word bufIndicesRTS[long];
+  word bufIndicesCTS[long];
+  word bufIndicesDT[long];
+  char reportText[1024];
+  char errText[1024];
+  char errTextRequest[1024];
+  dword timeout;
+  int64 stepTime;
+  double trts; // time in s of rts
+  int64 tsrts; // timestamp of rts
+  double tcts; // time in s of cts
+  int64 tscts; // timestamp of cts
+  double tdt;
+  int64 treq; // timestamp request.
+  byte prio;
+  dword pgn;
+  byte rtsTotalPackets;
+  byte rtsMaxPackets;
+  byte ctsNrOfPackets;
+  byte ctsNextPacket;
+  byte requestAnswered;
+  byte ok;
+  byte tdSeq;   // a td's sequence number
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(8, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(8, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/6 request
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) over TP...", testerAddr, testerAddr, pgn, pgn, dutAddr, dutAddr);
+    stepTime = CT_STEP_BEGIN(-6, reportText);
+
+    MsgBuf_StartRecording(); // also clears current buffers
+    requestAnswered=1;
+
+    // do the request...
+    if ( CT_Request_And_Await_Response(pgR, pgis[k], errTextRequest, testerAddr, dutAddr, timeout, prio) != 0)
+    {
+      // requesting error (timeout).
+      requestAnswered=0;
+      // do not leave, due some things without wide-event cant be detected...
+    }
+
+    // check against dlc within the response really has a dlc>8
+    if (pgR.dlc <= 8)
+    {
+      CT_STEP_END_ERROR_DLC_NOT_GREATER_8_NO_TP_POSSIBLE(8, pgR.dlc);
+      return; // leave on fail.
+    }
+    CT_WAIT(gc_TIMEOUT_T3); // wait T3... seconds to check if the transport really is done.
+    
+    // request done...
+    CT_STEP_END_PASS(0);
+
+    
+    // ====================
+    // step 2/6 Check Init TP...
+    // ====================
+    CT_STEP_BEGIN("Checking init TP...");
+
+    // Get all TP.CM_RTS for current pgn from DUT (dutAddr) to TOOL (testerAddr)
+    trts = 0;
+    rtsTotalPackets = 0;
+    rtsMaxPackets = 0;
+    if ( !CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndicesRTS, stepTime, dutAddr, testerAddr, gc_TPCM_CTRL_WORD_RTS, pgn))
+    {
+      if (requestAnswered)
+      {
+        // there are no RTS found.
+        CT_STEP_END_FAIL(3, "Searching TP.CM_RTS in message buffer failure.");
+        return; // leave on fail.
+      }
+    }
+    else
+    {
+      // there are RTS found...
+      tsrts = gMsgBuf[bufIndicesRTS[0]].time_ns;
+      trts = CT_Ns2Sec(tsrts);
+      rtsTotalPackets = CT_GetDataByte(3, gMsgBuf[bufIndicesRTS[0]]);
+      rtsMaxPackets = CT_GetDataByte(4, gMsgBuf[bufIndicesRTS[0]]);
+    }
+    
+    // Get all TP.CM_CTS for current pgn from TOOL (testerAddr) to DUT (dutAddr)
+    tcts = 0;
+    ctsNrOfPackets = 0;
+    ctsNextPacket = 0;
+    if ( !CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndicesCTS, stepTime, testerAddr, dutAddr, gc_TPCM_CTRL_WORD_CTS, pgn))
+    {
+      // there are no CTS in buffer found...
+      if (requestAnswered)
+      {
+        CT_STEP_END_FAIL(3, "Searching TP.CM_CTS in message buffer failure.");
+        return; // leave on fail.
+      }
+    }
+    else
+    {
+      tscts = gMsgBuf[bufIndicesCTS[0]].time_ns;
+      tcts = CT_Ns2Sec(tscts);
+      ctsNrOfPackets = CT_GetDataByte(1, gMsgBuf[bufIndicesCTS[0]]);
+      ctsNextPacket = CT_GetDataByte(2, gMsgBuf[bufIndicesCTS[0]]);
+    }
+    CT_STEP_END_PASS(0);
+    
+    
+    // ====================
+    // step 3/6 Check TP.CM_CTS is prior to TP.DT
+    // ====================
+    CT_STEP_BEGIN("Check TP.CM_CTS is prior to TP.DT...");
+    
+    // get all TP.DT indices of the message buffer between request and CTS DUT (dutAddr)
+    if (CT_Get_TPDTs_In_MsgBuf_Between(bufIndicesDT, stepTime, tscts, dutAddr))
+    {
+      // check that td's with seq number 1 (first ones) time is not prior to CTS...
+      for (long bi: bufIndicesDT)
+      {
+        // only the td with seq 1 is investigated in this testcase...
+        tdSeq = CT_GetDataByte(0, gMsgBuf[bufIndicesDT[bi]]);
+
+        // only for the first td's with sequence number 1...
+        if (tdSeq == 1)
+        {
+          tdt  = CT_Ns2Sec(gMsgBuf[bufIndicesDT[bi]].time_ns);
+          //write("tdt=%.6f, tcts=%.6f", tdt, tcts);
+          // is DT before the TP.CM_CTS...?
+          if (tdt < tcts) 
+          {
+            snprintf(errText, elcount(errText), "TP.CM_CTS at t=%.6f not prior to first TP.DT at t=%.6f.", tcts, tdt);
+            CT_STEP_END_FAIL(4, errText);
+            return; // in this case leave the test now.
+          }
+        
+          // skip further buffer entries.
+          break;
+        }
+      }
+    }
+    CT_STEP_END_PASS(0);
+
+    // if request was not answered, then return timeout error, if no other investigation broke up to here...
+    if (!requestAnswered)
+    {
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errTextRequest, timeout);
+      return;
+    }
+    
+    if (requestAnswered)
+    {
+      pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+      // 
+      // FIRST REQUEST ANSWERED...
+      //
+      // ==================================================================
+      // CHECK WRONG CTS REQUESTS... ( only if the previous request was answered. )
+      // ==================================================================
+      // ====================
+      // step 4/6 Check DUT abort on packet number is not 1 in first CTS...
+      // ====================
+      stepTime = CT_STEP_BEGIN("Check DUT abort on packet number is not 1 in first CTS...");
+      
+      // ---------------------
+      // REQUEST...
+      // ---------------------
+      treq = CT_SendRequest(pgn, testerAddr, dutAddr);
+      
+      // wait for RTS...
+      if (testWaitForJ1939PG( gc_PGN_TPCM, dutAddr, testerAddr, timeout ) == 0)
+      {
+        // ---------------------
+        // NO RTS...
+        // ---------------------
+        requestAnswered = 0;
+      }
+      else
+      {
+        testGetWaitJ1939PGData(pgRTS);
+        if (CT_GetTPCMCtrlByte(pgRTS) == gc_TPCM_CTRL_WORD_RTS)
+        {
+          // ---------------------
+          // GOT RTS...
+          // ---------------------
+          pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+          trts = CT_Ns2Sec(pgRTS.time_ns);
+          CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 2, 3 ); // next pkg 2 inconsitent. first pkg nr has to be 1.
+          // wait up to a timeout before checking abort...
+          CT_Wait(timeout);
+          
+          // check for aborts...
+          if (!CT_CHECK_ANY_ABORTS(dutAddr, testerAddr, gc_BC_ADDR, stepTime))
+          {
+            CT_STEP_END_FAIL(5, "DUT does not send an abort if first TP.CM_CTS' next packet number is not 1.");
+            return; // leave on fail.
+          }
+          else
+          {
+            // DUT sent abort for invalid CTS (success so far)...
+            CT_Wait(gc_TIMEOUT_T3);
+          }
+          
+        }
+        else
+        {
+          requestAnswered = 0;
+        }
+      }
+      CT_STEP_END_PASS(0);
+    }
+    
+    if (requestAnswered)
+    {
+      // ====================
+      // step 5/6 Check abort when CTS exceeds RTS package limitation...
+      // ====================
+      pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+      stepTime = CT_STEP_BEGIN("Check abort when CTS exceeds RTS package limitation.");
+      // ---------------------
+      // REQUEST...
+      // ---------------------
+      treq = CT_SendRequest(pgn, testerAddr, dutAddr);
+      
+      // wait for RTS...
+      if (testWaitForJ1939PG( gc_PGN_TPCM, dutAddr, testerAddr, timeout ) == 0)
+      {
+        // ---------------------
+        // NO RTS...
+        // ---------------------
+        requestAnswered = 0;
+      }
+      else
+      {
+        testGetWaitJ1939PGData(pgRTS);
+        if (CT_GetTPCMCtrlByte(pgRTS) == gc_TPCM_CTRL_WORD_RTS)
+        {
+          // ---------------------
+          // GOT RTS...
+          // ---------------------
+          pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+         
+          trts = CT_Ns2Sec(pgRTS.time_ns);
+          
+          CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets + 1); // > too big value
+
+          // wait up to a timeout before checking abort...
+          CT_Wait(timeout);
+          
+          // check for aborts...
+          if (!CT_CHECK_ANY_ABORTS(dutAddr, testerAddr , gc_BC_ADDR, stepTime))
+          {
+            CT_STEP_END_FAIL(7, "DUT does not transmit an abort for CTS' number of packets greater than RTS limitation.");
+            return; // leave on fail.
+          }
+          else
+          {
+            // DUT sent abort for invalid CTS (success so far)...
+            CT_Wait(gc_TIMEOUT_T3);
+          }
+          
+        }
+        else
+        {
+          requestAnswered = 0;
+        }
+      }
+    }
+    
+    if (requestAnswered)
+    {
+      // ====================
+      // step 6/6 Check CTS timeout
+      // ====================
+      pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+      stepTime=CT_STEP_BEGIN("Check CTS timeout...");
+      // ---------------------
+      // REQUEST...
+      // ---------------------
+      treq = CT_SendRequest(pgn, testerAddr, dutAddr);
+      
+      // wait for RTS...
+      if (testWaitForJ1939PG( gc_PGN_TPCM, dutAddr, testerAddr, timeout ) == 0)
+      {
+        // ---------------------
+        // NO RTS...
+        // ---------------------
+        requestAnswered = 0;
+      }
+      else
+      {
+        testGetWaitJ1939PGData(pgRTS);
+        if (CT_GetTPCMCtrlByte(pgRTS) == gc_TPCM_CTRL_WORD_RTS)
+        {
+          // ---------------------
+          // GOT RTS...
+          // ---------------------
+          pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+          trts = CT_Ns2Sec(pgRTS.time_ns);
+          
+          // JUST WAIT at least T3 and do CTS too late...
+          CT_WAIT(gc_TIMEOUT_T3 + 1);
+          
+          CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets );
+          
+          // wait up to a timeout before checking abort...
+          CT_Wait(timeout);
+          
+          // check for DUT abort...
+          if (CT_CHECK_ANY_ABORTS(dutAddr, testerAddr , gc_BC_ADDR, stepTime))
+          {
+            if (requestAnswered)
+            {
+              snprintf(reportText, elcount(reportText), "DUT sends abort for first missing TP.CM_CTS. (RTS at t=%.6f)", trts);
+              CT_STEP_END_FAIL(6, reportText);
+              return; // leave on fail.
+            }
+          }
+          else
+          {
+            // DUT sends no abort for first CTS timed out
+            CT_Wait(gc_TIMEOUT_T3);
+          }
+          
+        }
+        else
+        {
+          requestAnswered = 0;
+        }
+      }
+    }
+    
+    if (!requestAnswered)
+    {
+      snprintf(errTextRequest, elcount(errTextRequest), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errTextRequest, timeout);
+      return;
+    }
+    
+    CT_STEP_END_PASS(1);
+    
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+  }
+}
+
+
+// ==============================================================================================================
+// functionality of the test A7 04 TP RTS Abort
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts on abort correctly (PASS)
+// 2: Requesting error. (timeout) (FAIL)
+// 3: DUT does not react on abort (FAIL)
+// 4: PGI inconsistency (FAIL)
+void CTF_A07_04_TP_RTS_Abort(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndicesTPDT[long];
+  char reportText[1024];
+  dword timeout;
+  int64 stepTime;
+  int64 tpStartTime;
+  int64 treq;
+  byte prio;
+  dword pgn;
+  byte ok;
+  
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(4, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(4, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/2 request
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) over TP...", testerAddr, testerAddr, pgn, pgn, dutAddr, dutAddr);
+    MsgBuf_StartRecording();
+     
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+    // ---------------------
+    // REQUEST...
+    // ---------------------
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr);
+      
+    // wait for RTS...
+    if (testWaitForJ1939PG( gc_PGN_TPCM, dutAddr, testerAddr, timeout ) == 0)
+    {
+      // NO RTS...
+      snprintf(reportText, elcount(reportText), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, reportText, timeout);
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/2 abort RTS...
+    // ====================
+    stepTime = CT_STEP_BEGIN("Aborting RTS...");
+    testGetWaitJ1939PGData(pgRTS);
+    if (CT_GetTPCMCtrlByte(pgRTS) == gc_TPCM_CTRL_WORD_RTS)
+    {
+      // GOT RTS...
+      pg J1939::J1939_CT_RT::TPCMxx pgAbort;
+      
+      initJ1939PGData(pgAbort);
+      pgAbort.sa = testerAddr;
+      pgAbort.da = dutAddr;
+      pgAbort.PGNumber = pgn;
+      pgAbort.ConnectionAbortReason = 1;
+      pgAbort.ControlByte = gc_TPCM_CTRL_WORD_ABORT;
+      
+      output(pgAbort);    // abort RTS
+      CT_WAIT(timeout);   // wait a timeout time...
+      
+      // check if DUT aborted and didnt sent any data packages after timeout.
+      if (CT_Get_TPDTs_In_MsgBuf(bufIndicesTPDT, stepTime, dutAddr, testerAddr))
+      {
+        // there are DT's found
+        CT_STEP_END_FAIL(3, "DUT does not react on abort and continues sending data packages.");
+        return; // leave on fail.
+      }
+    }
+
+    // stop message buffering
+    MsgBuf_StopRecording();
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+    
+  }
+}
+
+
+// ==============================================================================================================
+// functionality of the test A7 05 TP Multiple CTS
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT timeout. (FAIL)
+// 3: DUT sent no abort for a missing subsequent CTS (FAIL)
+// 4: DUT does not inspect DP within CTS' pgNumber (FAIL)
+// 5: DUT does not inspect EDP within CTS' pgNumber (FAIL)
+// 6: DUT does transmit an abort for CTS' number of packets greater than RTS limitation. (FAIL)
+// 7: PGI inconsistency (FAIL)
+void CTF_A07_05_TP_Multiple_CTS(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndicesTPDT[long];
+  char reportText[1024];
+  int64 stepTime;
+  int64 tpStartTime;
+  int64 treq;
+  byte prio;
+  dword pgn;
+  byte ok;
+  
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(7, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(7, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+    pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/5 request
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    snprintf(reportText, elcount(reportText), "Testnode %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) over TP...", testerAddr, testerAddr, pgn, pgn, dutAddr, dutAddr);
+    MsgBuf_StartRecording();
+    
+    stepTime = CT_STEP_BEGIN(-5, reportText);
+    // ---------------------
+    // REQUEST...
+    // ---------------------
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr);
+      
+    // wait for RTS...
+    if (testWaitForJ1939PG( gc_PGN_TPCM, dutAddr, testerAddr, gc_RESP_TIMEOUT ) == 0)
+    {
+      // NO RTS...
+      snprintf(reportText, elcount(reportText), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, reportText, gc_RESP_TIMEOUT);
+      return; // leave on fail.
+    }
+    testGetWaitJ1939PGData(pgRTS);
+    CT_STEP_END_PASS(0);
+    
+    CT_WAIT(gc_TIMEOUT_T3-5);
+    
+    // ====================
+    // step 2/5 Check DUT abort on subsequent CTS timeout
+    // ====================
+    stepTime = CT_STEP_BEGIN("Check DUT aborts on subsequent CTS timeout...");
+    
+    CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 1, 1 );
+    
+    // wait for response DT of the dut...
+    if (testWaitForJ1939PG(gc_PGN_TPDT, dutAddr, testerAddr, gc_RESP_TIMEOUT) == 0)
+    {
+      // DUT timeout.
+      CT_STEP_END_FAIL(2, "Timeout. DUT didn't sent expected data package after CTS.");
+      return; // leave on fail.
+    }
+    
+    // send next CTS, but too late...
+    CT_WAIT(gc_TIMEOUT_T3+1);
+    CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 2, 1 );
+    
+    // wait for DUT abort within TR after it detects a CTS timeout.
+    CT_WAIT(gc_TIMEOUT_TR);
+    
+    // check for aborts...
+    if (!CT_CHECK_ANY_ABORTS(dutAddr, testerAddr, gc_BC_ADDR, stepTime))
+    {
+      CT_STEP_END_FAIL(3, "DUT sent no abort for a missing subsequent CTS.");
+      return; // leave on fail.
+    }
+    
+    // before continue, wait a timeout...
+    CT_WAIT(gc_TIMEOUT_T3);
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 3/5 Check DUT inspects DP in CTS' PGN.
+    // ====================
+    stepTime = CT_STEP_BEGIN("Check DUT inspects DP in CTS' PGN");
+    // ---------------------
+    // REQUEST...
+    // ---------------------
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr);
+      
+    // wait for RTS...
+    if (testWaitForJ1939PG( gc_PGN_TPCM, dutAddr, testerAddr, gc_RESP_TIMEOUT ) == 0)
+    {
+      // NO RTS...
+      snprintf(reportText, elcount(reportText), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, reportText, gc_RESP_TIMEOUT);
+      return; // leave on fail.
+    }
+    testGetWaitJ1939PGData(pgRTS);
+    
+    // send CTS for one package but with DP bit in CTS' PGN
+    CT_SendCTS( pgCTS, pgn | 0x100000, testerAddr, dutAddr, 1, 1 );
+    
+    // wait for response DT of the dut...
+    if (!testWaitForJ1939PG(gc_PGN_TPDT, dutAddr, testerAddr, gc_RESP_TIMEOUT) == 0)
+    {
+      // DUT reacts on CTS with DP bit set (failure)
+      CT_STEP_END_FAIL(4, "DUT does not inspect DP within CTS' PGN");
+      return; // leave on fail.
+    }
+    // before continue, wait a timeout...
+    CT_WAIT(gc_TIMEOUT_T3);
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 4/5 Check DUT inspects EDP in CTS' PGN.
+    // ====================
+    stepTime = CT_STEP_BEGIN("Check DUT inspects EDP in CTS' PGN");
+    // ---------------------
+    // REQUEST...
+    // ---------------------
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr);
+      
+    // wait for RTS...
+    if (testWaitForJ1939PG( gc_PGN_TPCM, dutAddr, testerAddr, gc_RESP_TIMEOUT ) == 0)
+    {
+      // NO RTS...
+      snprintf(reportText, elcount(reportText), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, reportText, gc_RESP_TIMEOUT);
+      return; // leave on fail.
+    }
+    testGetWaitJ1939PGData(pgRTS);
+    
+    // send CTS for one package but with EDP bit in CTS' PGN
+    CT_SendCTS( pgCTS, pgn | 0x200000, testerAddr, dutAddr, 1, 1 );
+    
+    // wait for response DT of the dut...
+    if (!testWaitForJ1939PG(gc_PGN_TPDT, dutAddr, testerAddr, gc_RESP_TIMEOUT) == 0)
+    {
+      // DUT reacts on CTS with DP bit set (failure)
+      CT_STEP_END_FAIL(5, "DUT does not inspect EDP within CTS' PGN");
+      return; // leave on fail.
+    }
+    // before continue, wait a timeout...
+    CT_WAIT(gc_TIMEOUT_T3);
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 5/5 Check abort when CTS exceeds RTS package limitation...
+    // ====================
+    stepTime = CT_STEP_BEGIN("Check abort when CTS exceeds RTS package limitation.");
+    // ---------------------
+    // REQUEST...
+    // ---------------------
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr);
+      
+    // wait for RTS...
+    if (testWaitForJ1939PG( gc_PGN_TPCM, dutAddr, testerAddr, gc_RESP_TIMEOUT ) == 0)
+    {
+      // NO RTS...
+      snprintf(reportText, elcount(reportText), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, reportText, gc_RESP_TIMEOUT);
+      return; // leave on fail.
+    }
+    testGetWaitJ1939PGData(pgRTS);
+    
+    CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets+1 ); // to big value in NumberOfPacketsThatCanBeSent
+    
+    CT_WAIT(gc_TIMEOUT_T3);
+    // check for aborts...
+    if (!CT_CHECK_ANY_ABORTS(dutAddr, testerAddr , gc_BC_ADDR, stepTime))
+    {
+      CT_STEP_END_FAIL(6, "DUT does not transmit an abort for CTS' number of packets greater than RTS limitation.");
+      return; // leave on fail.
+    }
+    // before continue, wait a timeout...
+    CT_WAIT(gc_TIMEOUT_T3);
+    
+    // stop message buffering
+    MsgBuf_StopRecording();
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+    
+  }
+}
+
+
+
+// ==============================================================================================================
+// functionality of the test A7 06 TP CTS Retransmission
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT timeout. (FAIL)
+// 3: DUT answers with wrong / unexpected data sequence number. (FAIL)
+// 4: DUT does not sent an abort for invalid CTS'. (FAIL)
+// 5: PGI inconsistency
+void CTF_A07_06_TP_CTS_Retransmission(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  char reportText[1024];
+  int64 stepTime;
+  int64 tpStartTime;
+  int64 treq;
+  byte i,v;
+  byte prio;
+  dword pgn;
+  byte ok;
+  
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+    pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+    pg J1939::J1939_CT_RT::TPDT pgDT;
+    
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/7 request
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    snprintf(reportText, elcount(reportText), "Testnode %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) over TP...", testerAddr, testerAddr, pgn, pgn, dutAddr, dutAddr);
+    MsgBuf_StartRecording();
+    
+    stepTime = CT_STEP_BEGIN(-7, reportText);
+    // ---------------------
+    // REQUEST...
+    // ---------------------
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr);
+      
+    // wait for RTS...
+    if (testWaitForJ1939PG( gc_PGN_TPCM, dutAddr, testerAddr, gc_RESP_TIMEOUT ) == 0)
+    {
+      // NO RTS...
+      snprintf(reportText, elcount(reportText), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, reportText, gc_RESP_TIMEOUT);
+      return; // leave on fail.
+    }
+    testGetWaitJ1939PGData(pgRTS);
+    CT_STEP_END_PASS(0);
+
+    // ====================
+    // step 2/7 Check DUT answering with 2 data packages.
+    // ====================
+    stepTime = CT_STEP_BEGIN("Check DUT answering with 2 data packages.");
+
+    CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 1, 2 );
+    
+    // wait for two response DT of the dut...
+    for (i=1; i<=2; i++)
+    {
+      if (testWaitForJ1939PG(gc_PGN_TPDT, dutAddr, testerAddr, gc_RESP_TIMEOUT) == 0)
+      {
+        // DUT timeout.
+        CT_STEP_END_FAIL(2, "Timeout. DUT didn't sent expected data package after CTS.");
+        return; // leave on fail.
+      }
+      // check the sequence number of the DT package to be the i'th one.
+      testGetWaitJ1939PGData(pgDT);
+      if (pgDT.SequenceNumber != i)
+      {
+        snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, i);
+        CT_STEP_END_FAIL(3, reportText);
+        return; // leave on fail.
+      }
+    }
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 3/7 Check DUT partial retransmission...
+    // ====================
+    stepTime = CT_STEP_BEGIN("Check DUT partial package retransmission of the last two packages #1 and #2...");
+    
+    // send next CTS with retransmission of both packages.
+    CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 1, 2 );
+    
+    // wait for two response DTs of the dut...
+    for (i=1; i<=2; i++)
+    {
+      if (testWaitForJ1939PG(gc_PGN_TPDT, dutAddr, testerAddr, gc_RESP_TIMEOUT) == 0)
+      {
+        // DUT timeout.
+        CT_STEP_END_FAIL(2, "Timeout. DUT didn't sent expected data package after CTS.");
+        return; // leave on fail.
+      }
+      // check the sequence number of the DT package to be the i'th one.
+      testGetWaitJ1939PGData(pgDT);
+      if (pgDT.SequenceNumber != i)
+      {
+        snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, i);
+        CT_STEP_END_FAIL(3, reportText);
+        return; // leave on fail.
+      }
+    }
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 4/7 Check DUT partial retransmission...
+    // ====================
+    stepTime = CT_STEP_BEGIN("Check DUT retransmission of the last package #2...");
+    CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 2, 1 );
+    
+    // check data package
+    if (testWaitForJ1939PG(gc_PGN_TPDT, dutAddr, testerAddr, gc_RESP_TIMEOUT) == 0)
+    {
+        // DUT timeout.
+        CT_STEP_END_FAIL(2, "Timeout. DUT didn't sent expected data package after CTS.");
+        return; // leave on fail.
+    }
+    
+    // check the sequence number of the DT package to be the 2nd one.
+    testGetWaitJ1939PGData(pgDT);
+    if (pgDT.SequenceNumber != 2)
+    {
+      snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, 2);
+      CT_STEP_END_FAIL(3, reportText);
+      return; // leave on fail.
+    }
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 5/7 Finalize transmission
+    // ====================
+    stepTime = CT_STEP_BEGIN("Finalize transmission...");
+    // finalize the transport.
+    if ( (pgRTS.TotalNumberOfPackets-2) > 0 )
+    {
+      pg J1939::J1939_CT_RT::TPCMxx pgEOM;
+      
+      CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 3,  pgRTS.TotalNumberOfPackets-2 );
+      
+      // wait for the last tds and send a EOM.
+      for (i=3; i<=pgRTS.TotalNumberOfPackets; i++)
+      {
+        if (testWaitForJ1939PG(gc_PGN_TPDT, dutAddr, testerAddr, gc_RESP_TIMEOUT) == 0)
+        {
+            // DUT timeout.
+            CT_STEP_END_FAIL(2, "Timeout. DUT didn't sent expected data package after CTS.");
+            return; // leave on fail.
+        }
+        testGetWaitJ1939PGData(pgDT);
+        if (pgDT.SequenceNumber != i)
+        {
+          snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, i);
+          CT_STEP_END_FAIL(3, reportText);
+          return; // leave on fail.
+        }
+      }
+      initJ1939PGData(pgEOM);
+      pgEOM.sa = pgCTS.sa;
+      pgEOM.da = pgCTS.da;
+      pgEOM.PGNumber = pgn;
+      pgEOM.TotalMessageSize = pgRTS.TotalMessageSize;
+      pgEOM.TotalNumberOfPackets = pgRTS.TotalNumberOfPackets;
+      pgEOM.ControlByte = gc_TPCM_CTRL_WORD_EOM;
+      output(pgEOM);
+      testWaitForJ1939PG(gc_PGN_TPCM, pgEOM.sa, pgEOM.da, gc_TIMEOUT_T3); // wait until EOM was seen...
+      CT_WAIT(350); // don't continue too fast.
+    }
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+
+    // ====================
+    // step 6+7/7 Check DUT aborts on invalid CTS'
+    // ====================
+    
+    // 2 invalid CTS variants.
+    // v=1: order retransmission of td below the sequence range of last CTS (retransmit only possible for last block range)
+    // v=2: order retransmission of td above the sequence range of last CTS (may produce a td-skip (gap))
+    for (v=1; v<=2; v++)
+    {
+      char kind[255];
+      snprintf(kind, elcount(kind), "smaller");
+      if (v==2) snprintf(kind, elcount(kind), "greater");
+      
+      CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+      
+      snprintf(reportText, elcount(reportText), "Check DUT aborts on sequence out of last CTS sequences (%s). Testnode %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) over TP...", kind, testerAddr, testerAddr, pgn, pgn, dutAddr, dutAddr);
+      MsgBuf_StartRecording();
+      
+      stepTime = CT_STEP_BEGIN(reportText);
+      treq = CT_SendRequest(pgn, testerAddr, dutAddr);
+        
+      // wait for RTS...
+      if (testWaitForJ1939PG( gc_PGN_TPCM, dutAddr, testerAddr, gc_RESP_TIMEOUT ) == 0)
+      {
+        // NO RTS...
+        snprintf(reportText, elcount(reportText), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+        CT_STEP_END_Failed_To_Detect_Requested_PGN(2, reportText, gc_RESP_TIMEOUT);
+        return; // leave on fail.
+      }
+      testGetWaitJ1939PGData(pgRTS);
+      
+      // order single packets...
+      // v1: order #1 and #2
+      // v2: order #1
+      for (i=1; i<=((v==1) ? 2 : 1); i++)
+      {
+        CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, i, 1 );
+        
+        // check data package
+        if (testWaitForJ1939PG(gc_PGN_TPDT, dutAddr, testerAddr, gc_RESP_TIMEOUT) == 0)
+        {
+            // DUT timeout.
+            CT_STEP_END_FAIL(2, "Timeout. DUT didn't sent expected data package after CTS.");
+            return; // leave on fail.
+        }
+        
+        // check the sequence number of the DT package to be the 1st one.
+        testGetWaitJ1939PGData(pgDT);
+        if (pgDT.SequenceNumber != i)
+        {
+          snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, i);
+          CT_STEP_END_FAIL(3, reportText);
+          return; // leave on fail.
+        }
+      }
+      
+      if (v==1)
+      {
+        //write("case v1. resend 1...");
+        // last cts block contained packet #2, reorder #1 is below the sequence number in last block.
+        CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 1, 1 );
+        // wait for a sure timeout situation and ... check for aborts...
+        CT_WAIT(gc_TIMEOUT_T3);
+        if (!CT_CHECK_ANY_ABORTS(dutAddr, testerAddr , gc_BC_ADDR, stepTime))
+        {
+          CT_STEP_END_FAIL(4, "DUT does not transmit an abort for CTS with next package number smaller than previous CTS limitation. Retransmission only possible for the sequence numbers within last CTS.");
+          return; // leave on fail.
+        }
+      }
+      else if(v==2)
+      {
+        // last cts block contained packet #1, order #3 (this is a gap).
+        CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 3, 1 );
+        // wait for a sure timeout situation and ... check for aborts...
+        CT_WAIT(gc_TIMEOUT_T3);
+        if (!CT_CHECK_ANY_ABORTS(dutAddr, testerAddr , gc_BC_ADDR, stepTime))
+        {
+          CT_STEP_END_FAIL(4, "DUT does not transmit an abort for invalid CTS with next package number greater than prevous CTS' transported sequence numbers. This may not be a retransmission, but a skip / gap within the DT-Sequence.");
+          return; // leave on fail.
+        }
+      }
+      
+    }
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+    
+  } // next pgn loop...
+}
+
+// ==============================================================================================================
+// COMBINATION of CTS hold tests...
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT timeout. (FAIL)
+// 3: DUT answers with wrong / unexpected data sequence number. (FAIL)
+// 4: DUT seems not to inspects DP bit within PGN of the CTS payload. (FAIL)
+// 5: DUT seems not to inspects EDP bit within PGN of the CTS payload. (FAIL)
+// 6: DUT does not hold the connection but continues sending data packages. (FAIL)
+// 7: DUT does not send connection abort on CTS-timeout. (FAIL)
+// 8: PGI inconsistency (FAIL)
+void CTF_A07_COMBI_07_TO_08(byte testerAddr, byte dutAddr, byte holdTimes, struct gPGAttrs pgis[long])
+{
+  word bufIndicesDT[long];
+  char reportText[1024];
+  int64 stepTime;
+  int64 tpStartTime;
+  int64 treq;
+  byte i,n,l,s;
+  byte prio;
+  dword pgn;
+  byte ok;
+  
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(8, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(8, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+    pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+    pg J1939::J1939_CT_RT::TPDT pgDT;
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    for (l=1; l<=2; l++)
+    {
+      // ====================
+      // step 1/9 + 5/9 request
+      // ====================
+      CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+      
+      snprintf(reportText, elcount(reportText), "Testnode %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) over TP...", testerAddr, testerAddr, pgn, pgn, dutAddr, dutAddr);
+      
+      if (l==1)
+      {
+        stepTime = CT_STEP_BEGIN(-10, reportText);
+      }
+      else
+      {
+        stepTime = CT_STEP_BEGIN(reportText);
+      }
+      // ---------------------
+      // REQUEST...
+      // ---------------------
+      treq = CT_SendRequest(pgn, testerAddr, dutAddr);
+        
+      // wait for RTS...
+      if (testWaitForJ1939PG( gc_PGN_TPCM, dutAddr, testerAddr, gc_RESP_TIMEOUT ) == 0)
+      {
+        // NO RTS...
+        snprintf(reportText, elcount(reportText), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+        CT_STEP_END_Failed_To_Detect_Requested_PGN(2, reportText, gc_RESP_TIMEOUT);
+        return; // leave on fail.
+      }
+      testGetWaitJ1939PGData(pgRTS);
+      CT_WAIT(1);
+      CT_STEP_END_PASS(0);
+
+      // ====================
+      // step 2/9 + 6/9 Check DUT answering with 1 data packages.
+      // ====================
+      stepTime = CT_STEP_BEGIN("Check DUT answering with data package #1.");
+
+      CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 1, 1 );
+      
+      // wait for one response DT of the dut...
+      if (testWaitForJ1939PG(gc_PGN_TPDT, dutAddr, testerAddr, gc_RESP_TIMEOUT) == 0)
+      {
+        // DUT timeout.
+        CT_STEP_END_FAIL(2, "Timeout. DUT didn't sent expected data package after CTS.");
+        return; // leave on fail.
+      }
+      
+      // check the sequence number of the DT package to be the 1st one.
+      testGetWaitJ1939PGData(pgDT);
+      if (pgDT.SequenceNumber != 1)
+      {
+        snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, 1);
+        CT_STEP_END_FAIL(3, reportText);
+        return; // leave on fail.
+      }
+      
+      CT_WAIT(1);
+      CT_STEP_END_PASS(0);    
+      
+      // ====================
+      // step 3/9 + 7/9 Check DUT pauses on CTS holds.
+      // ====================
+      MsgBuf_StartRecording();
+      stepTime = CT_STEP_BEGIN("Check DUT pauses on CTS holds.");
+      for (n=1; n<=holdTimes; n++)
+      {
+        CT_SendCTSHold( pgCTS, pgn, testerAddr, dutAddr ); // hold
+        CT_WAIT(gc_MAX_CTS_HOLD); // wait nearly max timeout...
+        
+        // still no data packages..?
+        if (CT_Get_TPDTs_In_MsgBuf(bufIndicesDT, stepTime, pgRTS.sa, pgRTS.da))
+        {
+          CT_STEP_END_FAIL(6, "DUT does not hold the connection but continues sending data packages.");
+          return; // leave on fail.
+        }
+      }
+      CT_WAIT(1);
+      CT_STEP_END_PASS(0);
+      
+      if (l>1) 
+      {
+        // ====================
+        // step 8/9 Check for abort on hold-timeout.
+        // ====================
+        stepTime = CT_STEP_BEGIN("Check for abort on hold-timeout.");
+        CT_INFO(1, "", "Produce a timeout by waiting T4 ms...");
+        CT_WAIT(gc_TIMEOUT_T4);
+        // check for aborts...
+        if (!CT_CHECK_ANY_ABORTS(dutAddr, testerAddr, gc_BC_ADDR, stepTime))
+        {
+          CT_STEP_END_FAIL(7, "DUT does not send connection abort on CTS-timeout.");
+          return; // leave on fail.
+        }
+        else
+        {
+          // DUT sent abort for invalid CTS (success so far)...
+        }      
+      }
+      else
+      {
+      
+        // ====================
+        // step 4/9 Finalize transport...
+        // ====================
+        pg J1939::J1939_CT_RT::TPCMxx pgEOM;
+        stepTime = CT_STEP_BEGIN("Finalize transport...");
+        
+        CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 2, pgRTS.TotalNumberOfPackets-1 );
+        
+        // wait for the last dts and send a EOM.
+        for (i=2; i<=pgRTS.TotalNumberOfPackets; i++)
+        {
+          if (testWaitForJ1939PG(gc_PGN_TPDT, dutAddr, testerAddr, gc_RESP_TIMEOUT) == 0)
+          {
+              // DUT timeout.
+              CT_STEP_END_FAIL(2, "Timeout. DUT didn't sent expected data package after CTS.");
+              return; // leave on fail.
+          }
+          testGetWaitJ1939PGData(pgDT);
+          if (pgDT.SequenceNumber != i)
+          {
+            snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, i);
+            CT_STEP_END_FAIL(3, reportText);
+            return; // leave on fail.
+          }
+        }
+
+        CT_SendEOM(pgEOM, pgn, pgCTS.sa, pgCTS.da, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+
+      }
+      CT_STEP_END_PASS(0);
+      
+      CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+      
+    } // end repetition run. (for l)
+    
+    // ====================
+    // step 9 + 10/10 Check DUT inspects DP/EDP bit in CTS
+    // ====================
+    for (s=1; s<=2; s++)
+    {
+      byte EDPTest;
+      EDPTest = 0;
+      if (s==2) EDPTest = 1;
+      
+      if (holdTimes == 1)
+      {
+        if (EDPTest)
+          stepTime = CT_STEP_BEGIN("Check DUT inspects EDP bit in first CTS hold");
+        else
+          stepTime = CT_STEP_BEGIN("Check DUT inspects DP bit in first CTS hold");
+      }
+      else
+      {
+        if (EDPTest)
+          stepTime = CT_STEP_BEGIN("Check DUT inspects EDP bit in consecutive CTS hold");
+        else
+          stepTime = CT_STEP_BEGIN("Check DUT inspects DP bit in consecutive CTS hold");
+      }
+      CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+      treq = CT_SendRequest(pgn, testerAddr, dutAddr);
+        
+      // wait for RTS...
+      if (testWaitForJ1939PG( gc_PGN_TPCM, dutAddr, testerAddr, gc_RESP_TIMEOUT ) == 0)
+      {
+        // NO RTS...
+        snprintf(reportText, elcount(reportText), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+        CT_STEP_END_Failed_To_Detect_Requested_PGN(2, reportText, gc_RESP_TIMEOUT);
+        return; // leave on fail.
+      }
+      testGetWaitJ1939PGData(pgRTS);
+      CT_WAIT(1);
+      
+      // request first packet...
+      CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 1, 1 );
+        
+      // wait for one response DT of the dut...
+      if (testWaitForJ1939PG(gc_PGN_TPDT, dutAddr, testerAddr, gc_RESP_TIMEOUT) == 0)
+      {
+        // DUT timeout.
+        CT_STEP_END_FAIL(2, "Timeout. DUT didn't sent expected data package after CTS.");
+        return; // leave on fail.
+      }
+        
+      // check the sequence number of the DT package to be the 1st one.
+      testGetWaitJ1939PGData(pgDT);
+      if (pgDT.SequenceNumber != 1)
+      {
+        snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, 1);
+        CT_STEP_END_FAIL(3, reportText);
+        return; // leave on fail.
+      }
+      
+      
+      if (holdTimes == 1)
+      {
+        CT_WAIT(gc_MAX_CTS_HOLD);
+      }
+      else
+      {
+        // the first holdTimes-1 holds are sent with DP = 0. Only the last one is sent with DP = 1
+        for (n=1; n<holdTimes; n++)
+        {
+          CT_SendCTSHold( pgCTS, pgn, testerAddr, dutAddr );
+          CT_WAIT(gc_MAX_CTS_HOLD);
+          // still no data packages..?
+          if (CT_Get_TPDTs_In_MsgBuf(bufIndicesDT, pgCTS.time_ns, pgRTS.sa, pgRTS.da))
+          {
+            CT_STEP_END_FAIL(6, "DUT does not hold the connection but continues sending data packages.");
+            return; // leave on fail.
+          }
+        }
+      }
+      
+      // Send wrong CTS hold... with DP/EDP bit set.
+      CT_SendCTS( pgCTS, pgn | (EDPTest ? 0x20000 : 0x10000), testerAddr, dutAddr, 2, 0 );
+      
+      if (holdTimes == 1)
+      {
+        // wait for abort within T3-T4+Tr after the last CTS - means it's T3+Tr after last valid DT. T3-T4=Tr => 2*Tr effective waiting time after CTS.
+        if (CT_AWAIT_ABORT(pgn, dutAddr, testerAddr, 2 * gc_TIMEOUT_TR ))
+        {
+          // abort timeout
+          if (EDPTest)
+            CT_STEP_END_FAIL(5, "DUT seems not to inspect EDP bit within PGN of the CTS hold payload.");
+          else
+            CT_STEP_END_FAIL(4, "DUT seems not to inspect DP bit within PGN of the CTS hold payload.");
+          CT_WAIT(gc_TIMEOUT_T3 + gc_RESP_TIMEOUT); // wait long enough for TP to be timeouted.
+          return; // leave on missing abort.
+        }
+      }
+      else
+      {
+        // consecutive cts holds -> timeout is T4.
+        if (CT_AWAIT_ABORT(pgn, dutAddr, testerAddr, gc_TIMEOUT_T4 ))
+        {
+          // abort timeout.
+          if (EDPTest)
+            CT_STEP_END_FAIL(5, "DUT seems not to inspect EDP bit within PGN of the consecutive CTS hold payload.");
+          else
+            CT_STEP_END_FAIL(4, "DUT seems not to inspect DP bit within PGN of the consecutive CTS hold payload.");
+          CT_WAIT(gc_TIMEOUT_T3 + gc_RESP_TIMEOUT); // wait long enough for TP to be timeouted.
+          return; // leave on missing abort.
+        }
+      }
+      
+      CT_WAIT(gc_TIMEOUT_T4);
+      CT_STEP_END_PASS( EDPTest ? 1 : 0);
+    } // end d=1 (DP), d=2 (EDP)
+    
+  } // end pgn loop (CT_LOOP)
+}
+
+// ==============================================================================================================
+// functionality of the test A7 07 TP CTS Single Hold
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT timeout. (FAIL)
+// 3: DUT answers with wrong / unexpected data sequence number. (FAIL)
+// 4: DUT seems not to inspects DP bit within CTS. (FAIL)
+// 5: DUT seems not to inspects EDP bit within CTS. (FAIL)
+// 6: DUT does not hold the connection but continues sending data packages. (FAIL)
+// 7: DUT does not send connection abort on hold-timeout. (FAIL) // NOT done in this step, due produce timeout is set to 0.
+// 8: PGI inconsistency (FAIL)
+void CTF_A07_07_TP_CTS_Single_Hold(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  CTF_A07_COMBI_07_TO_08(testerAddr, dutAddr, 1, pgis);
+}
+
+
+
+// ==============================================================================================================
+// functionality of the test A7 08 TP CTS Consequtive Hold
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT timeout. (FAIL)
+// 3: DUT answers with wrong / unexpected data sequence number. (FAIL)
+// 4: DUT seems not to inspects DP bit within CTS. (FAIL)
+// 5: DUT seems not to inspects EDP bit within CTS. (FAIL)
+// 6: DUT does not hold the connection but continues sending data packages. (FAIL)
+// 7: DUT does not send connection abort on hold-timeout. (FAIL)
+// 8: PGI inconsistency (FAIL)
+void CTF_A07_08_TP_CTS_Consecutive_Hold(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  CTF_A07_COMBI_07_TO_08(testerAddr, dutAddr, 3, pgis);
+}
+
+// ==============================================================================================================
+// functionality of the test A7 09 TP CTS Data After Hold
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT timeout. (FAIL)
+// 3: DUT answers with wrong / unexpected data sequence number. (FAIL)
+// 4: DUT does not hold the connection but continues sending data packages. (FAIL)
+// 5: DUT does not send connection abort CTS with packet number out of range. (FAIL)
+// 6: PGI inconsistency (FAIL)
+void CTF_A07_09_TP_CTS_Data_After_Hold(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndicesDT[long];
+  char reportText[1024];
+  int64 stepTime;
+  int64 tpStartTime;
+  int64 treq;
+  byte rtsTimeout, dtTimeout;
+  byte dtWrongSeqNr, dtExpectedSeqNr;
+  byte noHold;
+  byte isAbortTimeout;
+  dword pgn;
+  int dtres;
+  byte ok;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(6, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(6, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  rtsTimeout = 0;
+  dtTimeout = 0;
+  dtWrongSeqNr = 0;
+  dtExpectedSeqNr = 0;
+  isAbortTimeout = 0;
+  noHold = 0;
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/4 Check continue transmit after CTS hold
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    stepTime = CT_STEP_BEGIN(-4, "Check continue transmit after CTS hold");
+    
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if ((rtsTimeout = CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr)) != 0) break;
+
+    // send CTS for first packet only.
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, 1);
+    
+    // check dts...
+    if ((dtres = CT_WaitForDTs( pgDT, pgCTS )) == 1)
+    {
+      dtTimeout = 1;
+      break; // leave on dt-timeout.
+    }
+    if ( (dtExpectedSeqNr = abs(dtres)) != 0 ) break; // leave on unexpected seqNr.
+    
+    // CTS HOLD
+    CT_SendCTS( pgn, testerAddr, dutAddr, 2, 0 );
+
+    // check if node did hold...
+    if ((noHold = CT_WaitForNextDT(pgDT, dutAddr, testerAddr, gc_MAX_CTS_HOLD)) != 0) break; // leave on no hold.
+    
+    // continue with CTS for "rest" of packages
+    CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 2, pgRTS.TotalNumberOfPackets-1 );
+    
+    // check dts...
+    if ((dtres = CT_WaitForDTs( pgDT, pgCTS )) >= 1)
+    {
+      dtTimeout = 1;
+      break; // leave on dt-timeout.
+    }
+    if ((dtExpectedSeqNr = abs(dtres)) != 0 ) break; // leave on unexpected seqNr.
+    
+    // send EOM...
+    CT_SendEOM(pgEOM, pgn, pgCTS.sa, pgCTS.da, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+    
+    
+    // ====================
+    // step 2/4 Check Retransmit of last package after CTS hold
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    stepTime = CT_STEP_BEGIN("Check Retransmit of last package after CTS hold");
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if ((rtsTimeout = CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr)) != 0) break;
+
+    // send CTS for packets #1
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, 1);
+    
+    // check dts...
+    if ((dtres = CT_WaitForDTs( pgDT, pgCTS )) >= 1)
+    {
+      dtTimeout = 1;
+      break; // leave on dt-timeout.
+    }
+    if ( (dtExpectedSeqNr = abs(dtres)) != 0 ) break; // leave on unexpected seqNr.
+    
+    // CTS HOLD
+    CT_SendCTS( pgn, testerAddr, dutAddr, 2, 0 );
+
+    // check if node did hold...
+    if ((noHold = CT_WaitForNextDT(pgDT, dutAddr, testerAddr, gc_MAX_CTS_HOLD)) != 0) break; // leave on no hold.
+    
+    // retransmit with CTS for last package #1 (and rest)
+    CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets );
+    
+    // check dts...
+    if ((dtres = CT_WaitForDTs( pgDT, pgCTS )) >= 1)
+    {
+      dtTimeout = 1;
+      break; // leave on dt-timeout.
+    }
+    if ( (dtExpectedSeqNr = abs(dtres)) != 0) break; // leave on unexpected seqNr.
+    
+    // send EOM...
+    CT_SendEOM(pgEOM, pgn, pgCTS.sa, pgCTS.da, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 3/4 Check Retransmit of a package below last CTS block
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    stepTime = CT_STEP_BEGIN("Check Retransmit of a package below last CTS block after CTS hold");
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr); // request
+
+    // await rts
+    if ((rtsTimeout = CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr)) != 0) break;
+
+    // send CTS for packets #1
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, 1);
+    
+    // check dts...
+    if ((dtres = CT_WaitForDTs( pgDT, pgCTS )) >= 1)
+    {
+      dtTimeout = 1;
+      break; // leave on dt-timeout.
+    }
+    if ( (dtExpectedSeqNr = abs(dtres)) != 0 ) break; // leave on unexpected seqNr.
+
+    // send CTS for packets #2
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 2, 1);
+    
+    // check dts...
+    if ((dtres = CT_WaitForDTs( pgDT, pgCTS )) >= 1)
+    {
+      dtTimeout = 1;
+      break; // leave on dt-timeout.
+    }
+    if ( (dtExpectedSeqNr = abs(dtres)) != 0 ) break; // leave on unexpected seqNr.
+
+    
+    // CTS HOLD
+    CT_SendCTS( pgn, testerAddr, dutAddr, 3, 0 );
+
+    // check if node did hold...
+    if ((noHold = CT_WaitForNextDT(pgDT, dutAddr, testerAddr, gc_MAX_CTS_HOLD)) != 0) break; // leave on no hold.
+    
+    // continue with CTS for package #1 (bellow allowed sequence number) (and rest)
+    CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets );
+    
+    // wait for abort...
+    if (CT_AWAIT_ABORT(pgn, dutAddr, testerAddr, gc_TIMEOUT_T3 + gc_RESP_TIMEOUT))
+    {
+      isAbortTimeout = 1;
+      CT_WAIT(gc_TIMEOUT_T3 + gc_RESP_TIMEOUT); // wait long enough for TP to be timeouted.
+      break; // leave on missing abort.
+    }
+    
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+
+    
+    // ====================
+    // step 4/4 Check Retransmit of a package above last CTS block
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, testerAddr); // else there may be a DT with sequence #1 before the TP init and the step-time.
+    stepTime = CT_STEP_BEGIN("Check Retransmit of a package above last CTS block");
+        // request pgn from testerAddr to dutAddr and check following up tp.
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if ((rtsTimeout = CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr)) != 0) break;
+
+    // send CTS for packet #1
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, 1);
+    
+    // check dts...
+    if ((dtres = CT_WaitForDTs( pgDT, pgCTS )) >= 1)
+    {
+      dtTimeout = 1;
+      break; // leave on dt-timeout.
+    }
+    if ( (dtExpectedSeqNr = abs(dtres)) != 0 ) break; // leave on unexpected seqNr.
+    
+    // CTS HOLD
+    CT_SendCTS( pgn, testerAddr, dutAddr, 2, 0 );
+
+    // check if node did hold...
+    if ((noHold = CT_WaitForNextDT(pgDT, dutAddr, testerAddr, gc_MAX_CTS_HOLD)) != 0) break; // leave on no hold.
+    
+    // continue with CTS packet above allowed one #3
+    CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 3, pgRTS.TotalNumberOfPackets-1 );
+    
+    // wait for abort...
+    if (CT_AWAIT_ABORT(pgn, dutAddr, testerAddr, gc_TIMEOUT_T3 + gc_RESP_TIMEOUT))
+    {
+      isAbortTimeout = 1;
+      CT_WAIT(gc_TIMEOUT_T3 + gc_RESP_TIMEOUT); // wait long enough for TP to be timeouted.
+      break; // leave on missing abort.
+    }
+    
+    CT_WAIT(1);
+    CT_STEP_END_PASS(1);
+  } // end pgn loop (CT_LOOP)
+
+  
+  // check for errors after leaving loop...
+  if (rtsTimeout)
+  {
+    snprintf(reportText, elcount(reportText), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+    CT_STEP_END_Failed_To_Detect_Requested_PGN(2, reportText, gc_RESP_TIMEOUT);
+    return;
+  }
+  if (dtTimeout)
+  {
+    CT_STEP_END_FAIL(2, "Timeout. DUT didn't sent expected data package after CTS.");
+    return;
+  }
+  if ( dtExpectedSeqNr && (pgDT.SequenceNumber != dtExpectedSeqNr) )
+  {
+    snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, dtExpectedSeqNr);
+    CT_STEP_END_FAIL(3, reportText);
+    return;
+  }
+  if (noHold)
+  {
+    CT_STEP_END_FAIL(4,"DUT does not hold the connection but continues sending data packages.");
+    return;
+  }
+  if (isAbortTimeout)
+  {
+    CT_STEP_END_FAIL(5, "DUT does not send connection abort on CTS with packet number out of range.");
+    return;
+  }
+}
+
+
+// ==============================================================================================================
+// functionality of the test A7 10 TP Multiple CTS
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT timeout. (FAIL)
+// 3: DUT does not send connection abort for wrong / unexpected followup CTS.(FAIL)
+// 4: DUT answers with wrong / unexpected data sequence number. (FAIL)
+// 5: PGI inconsistency (FAIL)
+void CTF_A07_10_TP_Multiple_CTS(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  int64 stepTime;
+  dword treq;
+  byte rtsTimeout, dtTimeout;
+  byte dtWrongSeqNr, dtExpectedSeqNr;
+  byte isAbortTimeout;
+  dword pgn;
+  int dtres;
+  byte ok;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  rtsTimeout = 0;
+  dtTimeout = 0;
+  dtWrongSeqNr = 0;
+  dtExpectedSeqNr = 0;
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/2 Check multiple CTS within T3
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    stepTime = CT_STEP_BEGIN(-2, "Check multiple CTS within T3");
+      
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if ((rtsTimeout = CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr)) != 0) break;
+
+    // send CTS for first packet only.
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, 1);
+    
+    // check dts...
+    if ((dtres = CT_WaitForDTs( pgDT, pgCTS )) >= 1)
+    {
+      dtTimeout = 1;
+      break; // leave on dt-timeout.
+    }
+    if ( (dtExpectedSeqNr = abs(dtres)) != 0 ) break; // leave on unexpected seqNr.
+    
+    // continue with CTS for "rest" of packages
+    CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 2, pgRTS.TotalNumberOfPackets-1 );
+    
+    // await one dt
+    if ((dtres = CT_WaitForDTs( pgDT, pgCTS, 1 )) >= 1)
+    {
+      dtTimeout = 1;
+      break; // leave on dt-timeout.
+    }
+    if ((dtExpectedSeqNr = abs(dtres)) != 0 ) break; // leave on unexpected seqNr.
+
+    // "disturb" with another CTS with wrong pgn for this connection within specific time...
+    CT_SendCTS( pgCTS, pgn+1, testerAddr, dutAddr, 2, pgRTS.TotalNumberOfPackets-1);
+      
+    // wait for abort...
+    if (CT_AWAIT_ABORT(pgn, dutAddr, testerAddr, gc_TIMEOUT_T3 + gc_RESP_TIMEOUT))
+    {
+      isAbortTimeout = 1;
+      CT_WAIT(gc_TIMEOUT_T3 + gc_RESP_TIMEOUT); // wait long enough for TP to be timeouted.
+      break;
+    }
+
+    CT_WAIT(1);
+    CT_STEP_END_PASS(1);
+      
+  } // end pgn loop (CT_LOOP)
+
+  CT_WAIT(gc_TIMEOUT_T3);
+  
+  // check for errors after leaving loop...
+  if (rtsTimeout)
+  {
+    snprintf(reportText, elcount(reportText), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+    CT_STEP_END_Failed_To_Detect_Requested_PGN(2, reportText, gc_RESP_TIMEOUT);
+    return;
+  }
+  if (dtTimeout)
+  {
+    CT_STEP_END_FAIL(2, "Timeout. DUT didn't sent expected data package after CTS.");
+    return;
+  }
+  if ( dtExpectedSeqNr && (pgDT.SequenceNumber != dtExpectedSeqNr) )
+  {
+    snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, dtExpectedSeqNr);
+    CT_STEP_END_FAIL(4, reportText);
+    return;
+  }
+  if (isAbortTimeout)
+  {
+    CT_STEP_END_FAIL(3, "DUT does not send connection abort for wrong / unexpected followup CTS.");
+    return;
+  }
+}
+
+// ==============================================================================================================
+// functionality of the test A7 11 TP CTS outside
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT ignores CTS(PASS)
+// 2: TP not working. (FAIL)
+// 3: DUT reacts on CTS (FAIL)
+// 4: PGI inconsistency (FAIL)
+void CTF_A07_11_TP_CTS_Outside(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  int64 stepTime;
+  dword pgn;
+  byte ok;
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(4, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(4, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/3 Check TP works.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    CT_STEP_BEGIN(-3, "Check TP works.");
+
+    if (CT_Request_And_Await_Response(pgR, pgis[k], reportText, testerAddr, dutAddr, gc_TIMEOUT_T3, gc_PRIO_DEFAULT) != 0)
+    {
+      CT_STEP_END_FAIL(2, reportText);
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/3 Send CTS outside TP and check for any reaction
+    // ====================
+    stepTime = CT_STEP_BEGIN("Send CTS outside TP and check for any reaction");
+    
+    CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 1, 3 ); // Send CTS outside of an TP...
+    CT_WAIT( gc_TIMEOUT_T3 );
+    CT_SendCTS( pgCTS, pgn, testerAddr, dutAddr, 2, 5 ); // Send CTS outside of an TP...
+    CT_WAIT( gc_TIMEOUT_T3 );
+    
+    // check reaction from DUT
+    CT_Find_All_In_MsgBuf_From_To(bufIndices, stepTime, dutAddr, testerAddr);
+    if (bufIndices.size() > 0)
+    {
+      CT_STEP_END_FAIL(3, "DUT reacts on outstanding CTS.");
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 1/3 Check TP still works.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    CT_STEP_BEGIN("Check TP still works.");
+
+    if (CT_Request_And_Await_Response(pgR, pgis[k], reportText, testerAddr, dutAddr, gc_TIMEOUT_T3, gc_PRIO_DEFAULT) != 0)
+    {
+      CT_STEP_END_FAIL(2, reportText);
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(1);
+    
+  }
+}
+
+// ==============================================================================================================
+// functionality of the test A7 12 TP first DT
+// ==============================================================================================================
+// FuncPath's:
+// 1: First DT after CTS is within 200ms (PASS)
+// 2: First DT after CTS is not within 200ms (FAIL)
+// 3: Timeout. (FAIL)
+// 4: PGI inconsistency (FAIL)
+// 5: TP.DT sequence error (FAIL)
+void CTF_A07_12_TP_First_DT(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  char reportText[1024];
+  dword pgn;
+  byte ok;
+  int tpdtRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(4, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(4, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/1 Check first DT after CTS is within 200ms.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    CT_STEP_BEGIN(-1, "Check first DT after CTS is within 200ms.");
+      
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr) != 0)
+    {
+      CT_STEP_END_FAIL(3, "RTS timeout.");
+      return; // leave on fail.
+    }
+
+    // send CTS for all packets.
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    
+    // check dts...
+    if ((tpdtRes=CT_WaitForDTs( pgDT, pgCTS )) == 1)
+    {
+      CT_STEP_END_FAIL(2, "First DT timeout after CTS (>200ms)");
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    else if (tpdtRes>0)
+    {
+      CT_STEP_END_FAIL(3, "DT timeout.");
+      return; // leave on fail.
+    }
+    else if (tpdtRes<0)
+    {
+      snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, abs(tpdtRes));
+      CT_STEP_END_FAIL(5, reportText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return;
+    }
+    
+    // send EOM...
+    CT_SendEOM(pgEOM, pgn, pgCTS.sa, pgCTS.da, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    
+    CT_WAIT(1);
+    CT_STEP_END_PASS(1);
+
+      
+  } // end pgn loop (CT_LOOP)
+
+}
+
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A7 13 TP Requested DTs
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: RTS timeout (FAIL)
+// 3: DT timeout (FAIL)
+// 4: DT sequence number failure. (FAIL)
+// 5: Number of requested DTs mismatch (FAIL)
+// 6: PGI inconsistency (FAIL)
+void CTF_A07_13_TP_Requested_DTs(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  dword pgn;
+  //int64 ctsTime;
+  byte ok;
+  int tpdtRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(6, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(6, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/3 Check next packet number to be sent for a first CTS
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    CT_STEP_BEGIN(-3, "Check next packet number to be sent for a first CTS.");
+      
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr) != 0)
+    {
+      CT_STEP_END_FAIL(2, "RTS timeout.");
+      return; // leave on fail.
+    }
+
+    // send CTS for first packet.
+    //ctsTime = timeNowInt64();
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, 1);
+
+    // check dts...
+    if ((tpdtRes=CT_WaitForDTs( pgDT, pgCTS )) >0)
+    {
+      CT_STEP_END_FAIL(3, "DT timeout.");
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(reportText, elcount(reportText), "DT sequence number failure. Got seq nr %d, expected %d.", pgDT.SequenceNumber, abs(tpdtRes));
+      CT_STEP_END_FAIL(4, reportText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    
+    // check if there is only one DT.
+    CT_WAIT(1);
+    CT_Get_TPDTs_In_MsgBuf(bufIndices, pgCTS.time_ns, dutAddr, testerAddr);
+    if (bufIndices.size() != 1)
+    {
+      snprintf(reportText, elcount(reportText), "Number of requested DTs mismatch. Got %d, expected %d.", 1, bufIndices.size());
+      CT_STEP_END_FAIL(5, reportText );
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/3 Check rest DTs
+    // ====================
+    CT_STEP_BEGIN("Check next packet number to be sent for all the other DTs...");
+    // send CTS for rest of packets.
+    //ctsTime = timeNowInt64();
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 2, pgRTS.TotalNumberOfPackets-1);
+
+    // check dts...
+    if ((tpdtRes=CT_WaitForDTs( pgDT, pgCTS )) > 0)
+    {
+      CT_STEP_END_FAIL(3, "DT timeout.");
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(reportText, elcount(reportText), "DT sequence number failure. Got seq nr %d, expected %d.", pgDT.SequenceNumber, abs(tpdtRes));
+      CT_STEP_END_FAIL(4, reportText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+
+    CT_WAIT(gc_TIMEOUT_TR / 2); // wait a bit, to be able to send extra sequences before checking DT's and sending EOM...
+    
+    // check if there are the ordered number of DTs.
+    CT_Get_TPDTs_In_MsgBuf(bufIndices, pgCTS.time_ns, dutAddr, testerAddr);
+    if (bufIndices.size() != pgRTS.TotalNumberOfPackets-1)
+    {
+      snprintf(reportText, elcount(reportText), "Number of requested DTs mismatch. Got %d, expected %d.", 1, bufIndices.size());
+      CT_STEP_END_FAIL(5, reportText );
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 3/3 Finalize TP
+    // ====================
+    CT_STEP_BEGIN("Finalize TP...");
+    
+    // send EOM...
+    CT_SendEOM(pgEOM, pgn, pgCTS.sa, pgCTS.da, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    CT_WAIT(gc_TIMEOUT_T3);
+    
+    CT_STEP_END_PASS(1);
+
+      
+  } // end pgn loop (CT_LOOP)
+
+}
+
+
+
+// ==============================================================================================================
+// functionality of the test A7 14 TP Data Content
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: timeout (INCONCLUSIVE)
+// 3: DT sequence number failure. (FAIL)
+// 4: Data content mismatch (FAIL)
+// 5: FIXED PGN not >0 or dlc not >8 (INCONCLUSIVE)
+void CTF_A07_14_TP_Data_Content(byte testerAddr, byte dutAddr)
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  char reportText[1024];
+  char errText[1024];
+  int64 requestTime;
+  byte fixedPgnData[long];
+  struct gPGAttrs fixedPgi;
+  dword pgn;
+  word i;
+  int tpdtRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  
+  // PRECONDITIONS...
+  // get configured fixed pgn...
+  CT_GetPGI_PGN_FIXED(fixedPgi, fixedPgnData);
+  pgn = fixedPgi.PGN;
+  
+  // check dlc to be >8 to ensure tp will be used on request...
+  if ( (pgn==0) || (fixedPgnData.size() <= 8) )
+  {
+    CT_STEP_PRECOND_INCONCLUSIVE(5, "FIXED PGN not >0 or dlc not >8");
+    return; // leave on fail.
+  }
+    
+  // wait until no TP running from dutAddr to testerAddr.
+  CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+  
+  // ====================
+  // step 1/2 Request Fixed PGN
+  // ====================
+  requestTime = CT_STEP_BEGIN(-2, "Request Fixed PGN...");
+  // request pgn from testerAddr to dutAddr and check following up tp.
+  CT_SendRequest(pgn, testerAddr, dutAddr); // request
+  
+  // await rts
+  if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr) != 0)
+  {
+    CT_STEP_END_INCONCLUSIVE(2, "RTS timeout.");
+    return; // leave on fail.
+  }
+
+  // send cts
+  CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+
+  // await dts
+  if ((tpdtRes=CT_WaitForDTs( pgDT, pgCTS )) >0)
+  {
+    CT_STEP_END_INCONCLUSIVE(2, "DT timeout.");
+    CT_WAIT(gc_TIMEOUT_T3);
+    return; // leave on fail.
+  }
+  else if (tpdtRes < 0)
+  {
+    snprintf(reportText, elcount(reportText), "DT sequence number failure. Got seq nr %d, expected %d.", pgDT.SequenceNumber, abs(tpdtRes));
+    CT_STEP_END_FAIL(3, reportText);
+    CT_WAIT(gc_TIMEOUT_T3);
+    return; // leave on fail.
+  }
+  
+  // send EOM...
+  CT_SendEOM(pgEOM, pgn, pgCTS.sa, pgCTS.da, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+  
+  // get the wide event into pgR (pg response).
+  if (testWaitForJ1939PG(pgn, dutAddr, testerAddr, gc_TIMEOUT_T3)==0)
+  {
+    CT_STEP_END_INCONCLUSIVE(2, "Timeout retrieving fixed pgn response.");
+    return; // leave on fail.
+  };
+  testGetWaitJ1939PGData(pgR);
+  CT_STEP_END_PASS(0);
+  
+  // ====================
+  // step 2/2 Check data content...
+  // ====================
+  CT_STEP_BEGIN("Check data content...");
+  // check the content...
+  for (i=0; i<_max(pgR.dlc, fixedPgnData.size()); i++)
+  {
+    //write("pgR byte (i=%d) = %x, byteBuf=%x", i, pgR.byte(i), fixedPgnData[i]);
+    if (pgR.byte(i) != fixedPgnData[i])
+    {
+      snprintf(reportText, elcount(reportText), "Incorrect content in byte %d detected. (Got: 0x%.02X, Expected: 0x%.02X)", i+1, pgR.byte(i), fixedPgnData[i]);
+      CT_STEP_END_FAIL(4, reportText);
+      return; // leave on fail.
+    }
+  }
+  CT_STEP_END_PASS(1);
+}
+
+
+// ==============================================================================================================
+// functionality of the test A7 15 TP DT Sequence
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: timeout (FAIL)
+// 3: DT sequence number failure. (FAIL)
+// 4: PGI inconsistency (FAIL)
+void CTF_A07_15_TP_DT_Sequence(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 requestTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpdtRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(4, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(4, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // wait until no TP running from dutAddr to testerAddr.
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    // ====================
+    // step 1/1 Request and check DT sequence
+    // ====================
+    requestTime = CT_STEP_BEGIN(-1, "Request and check DT sequence.");
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr) != 0)
+    {
+      CT_STEP_END_FAIL(2, "RTS timeout.");
+      return; // leave on fail.
+    }
+    
+    // send cts
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    
+    // await dts
+    if ((tpdtRes=CT_WaitForDTs( pgDT, pgCTS )) >0)
+    {
+      CT_STEP_END_FAIL(2, "DT timeout.");
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(reportText, elcount(reportText), "DT sequence number failure. Got seq nr %d, expected %d.", pgDT.SequenceNumber, abs(tpdtRes));
+      CT_STEP_END_FAIL(3, reportText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    
+    // send EOM...
+    CT_SendEOM(pgEOM, pgn, pgCTS.sa, pgCTS.da, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    
+    // await the wide event for the pg...
+    if (testWaitForJ1939PG(pgn, dutAddr, testerAddr, gc_TIMEOUT_T3)==0)
+    {
+      CT_STEP_END_FAIL(2, "Response timeout");
+      return; // leave on fail.
+    };
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+// ==============================================================================================================
+// functionality of the test A7 16 TP DT Timeout
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DT timeout (FAIL)
+// 3: RTS or response timeout (FAIL)
+// 4: DT sequence number error (FAIL)
+// 5: PGI inconsistency (FAIL)
+void CTF_A07_16_TP_DT_Timeout(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  char errText[1024];
+  char reportText[1024];
+  int64 requestTime;
+  dword pgn;
+  int res;
+  byte ok;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPCMxx pgBAM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  pg * pgR;
+  
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // wait until no TP running from dutAddr to testerAddr.
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    // ====================
+    // step 1/1 Request and check for DT timeouts.
+    // ====================
+    CT_STEP_BEGIN(-1, "Request and check for DT timeouts.");
+
+    // 0: OK
+    // 1: DT Timeout
+    // 2: RTS timeout
+    // 3: DT seq nr failure
+    // 4: BAM timeout ( not here, due asBAM is set to 0 )
+    // 5: RTS error (inconsistent size and total number of packages)
+    // 6: BAM error (inconsistent size and total number of packages) ( not here, due asBAM is set t0 0 )
+    res = CT_Check_TP_AsResponder(  testerAddr, dutAddr         //   byte reqSrcAddr, byte reqDstAddr
+                                  , pgn                         // , dword pgn
+                                  , requestTime                 // , int64& reqTime
+                                  , pgR                         // , pg* pgOutResponse
+                                  , pgRTS                       // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                  , pgBAM                       // , pg J1939::J1939_CT_RT::TPCMxx pgOutBAM
+                                  , pgCTS                       // , pg J1939::J1939_CT_RT::TPCMxx pgOutCTS
+                                  , pgDT                        // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                  , pgEOM                       // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                  , 0                           // , word eomDelay
+                                  , 0                           // , byte asBAM
+                                  , errText);                   // , char errText[])
+    switch(res)
+    {
+      case 1: CT_STEP_END_FAIL(2, errText); return;
+      case 2: CT_STEP_END_FAIL(3, errText); return;
+      case 3: CT_STEP_END_FAIL(4, errText); return;
+      // rest not checked up to now.
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+
+// ==============================================================================================================
+// functionality of the test A7 17 TP DT DLC
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: Timeout (FAIL)
+// 3: DT sequence number error (FAIL)
+// 4: DLC of DT <> 8 (FAIL)
+// 5: PGI inconsistency (FAIL)
+void CTF_A07_17_TP_DT_DLC(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  struct MsgBufEntry tpdtMsgs[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 requestTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpdtRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // wait until no TP running from dutAddr to testerAddr.
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    // ====================
+    // step 1/1 Request and check DT DLCs to be 8
+    // ====================
+    requestTime = CT_STEP_BEGIN(-1, "Request and check DT DLCs to be 8.");
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr) != 0)
+    {
+      CT_STEP_END_FAIL(2, "RTS timeout.");
+      return; // leave on fail.
+    }
+    
+    // send cts
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    
+    // await dts
+    if ((tpdtRes=CT_WaitForDTs( pgDT, tpdtMsgs, pgCTS )) >0)
+    {
+      CT_STEP_END_FAIL(2, "DT timeout.");
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(reportText, elcount(reportText), "DT sequence number failure. Got seq nr %d, expected %d.", pgDT.SequenceNumber, abs(tpdtRes));
+      CT_STEP_END_FAIL(3, reportText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    
+    // send EOM...
+    CT_SendEOM(pgEOM, pgn, pgCTS.sa, pgCTS.da, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    
+    // await the wide event for the pg...
+    if (testWaitForJ1939PG(pgn, dutAddr, testerAddr, gc_TIMEOUT_T3)==0)
+    {
+      // check the DLC's... ( if there is a dlc <> 8 then there is no wide event.
+      for (long bi: tpdtMsgs)
+      {
+        if (tpdtMsgs[bi].dlc != 8)
+        {
+          snprintf(errText, elcount(errText), "TP.DT's DLC at t=%.6f has a DLC not equal to 8", CT_Ns2Sec(tpdtMsgs[bi].time_ns));
+          CT_STEP_END_FAIL(4, errText);
+          return; // leave on fail.
+        }
+      }
+      
+      CT_STEP_END_FAIL(2, "Response timeout.");
+      return; // leave on fail.
+    };
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+
+
+// ==============================================================================================================
+// functionality of the test A7 18 TP DT Padding
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: Timeout (FAIL)
+// 3: DT sequence number error (FAIL)
+// 4: Padding byte error. (FAIL)
+// 5: PGI inconsistency (FAIL)
+void CTF_A07_18_TP_DT_Padding(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 requestTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpdtRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  byte ps,pe;
+  
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // wait until no TP running from dutAddr to testerAddr.
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    // ====================
+    // step 1/1 Request and check last DTs padding bytes.
+    // ====================
+    requestTime = CT_STEP_BEGIN(-1, "Request and check last DTs padding bytes.");
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr) != 0)
+    {
+      CT_STEP_END_FAIL(2, "RTS timeout.");
+      return; // leave on fail.
+    }
+    
+    // send cts
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    
+    // await dts
+    if ((tpdtRes=CT_WaitForDTs( pgDT, pgCTS )) >0)
+    {
+      CT_STEP_END_FAIL(2, "DT timeout.");
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(reportText, elcount(reportText), "DT sequence number failure. Got seq nr %d, expected %d.", pgDT.SequenceNumber, abs(tpdtRes));
+      CT_STEP_END_FAIL(3, reportText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    
+    // send EOM...
+    CT_SendEOM(pgEOM, pgn, pgCTS.sa, pgCTS.da, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    
+    // await the wide event for the pg...
+    if (testWaitForJ1939PG(pgn, dutAddr, testerAddr, gc_TIMEOUT_T3)==0)
+    {
+      CT_STEP_END_FAIL(2, "Response timeout.");
+      return; // leave on fail.
+    };
+    
+    // check the padding bytes of the last pgDT.
+    CT_Calc_TP_PaddingByteIndices(pgRTS.TotalMessageSize, ps, pe);
+    //write("ps=%d, pe=%d", ps, pe);
+    for (i=ps; i<=pe; i++)
+    {
+      //write("checking byte %d = %x", i, pgDT.byte(i));
+      if (pgDT.byte(i) != 0xFF)
+      {
+        snprintf(errText, elcount(errText), "Padding byte error in byte %d of TP.DT at t=%.6f.", i+1, CT_Ns2Sec(pgDT.time_ns));
+        CT_STEP_END_FAIL(4, errText);
+        return; // leave on fail.
+      }
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+
+// ==============================================================================================================
+// functionality of the test A7 19 TP DT Prio
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: Timeout (FAIL)
+// 3: DT sequence number error (FAIL)
+// 4: Prio DT <> 7 (FAIL)
+// 5: PGI inconsistency (FAIL)
+void CTF_A07_19_TP_DT_Prio(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  struct MsgBufEntry tpdtMsgs[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 requestTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpdtRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // wait until no TP running from dutAddr to testerAddr.
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    // ====================
+    // step 1/1 Request and check DT prio to be 7
+    // ====================
+    requestTime = CT_STEP_BEGIN(-1, "Request and check DT prio to be 7.");
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr) != 0)
+    {
+      CT_STEP_END_FAIL(2, "RTS timeout.");
+      return; // leave on fail.
+    }
+    
+    // send cts
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    
+    // await dts
+    if ((tpdtRes=CT_WaitForDTs( pgDT, tpdtMsgs, pgCTS )) >0)
+    {
+      CT_STEP_END_FAIL(2, "DT timeout.");
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(reportText, elcount(reportText), "DT sequence number failure. (got seq nr %d, expected %d)", pgDT.SequenceNumber, abs(tpdtRes));
+      CT_STEP_END_FAIL(3, reportText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    
+    // send EOM...
+    CT_SendEOM(pgEOM, pgn, pgCTS.sa, pgCTS.da, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    
+    // await the wide event for the pg...
+    if (testWaitForJ1939PG(pgn, dutAddr, testerAddr, gc_TIMEOUT_T3)==0)
+    {
+      CT_STEP_END_FAIL(2, "Response timeout.");
+      return; // leave on fail.
+    };
+    
+    // check the prio's...
+    for (long bi: tpdtMsgs)
+    {
+      byte prio;
+      prio = CT_GetPrio(tpdtMsgs[bi]);
+      if (prio != gc_PRIO_TP_DATA)
+      {
+        snprintf(errText, elcount(errText), "TP.DT's at t=%.6f has wrong prio. (got: %d, expected: %d)", CT_Ns2Sec(tpdtMsgs[bi].time_ns), prio, gc_PRIO_TP_DATA );
+        CT_STEP_END_FAIL(4, errText);
+        return; // leave on fail.
+      }
+    }
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+
+// ==============================================================================================================
+// functionality of the test A7 20 TP EOM - Part: Normal
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: RTS Timeout (FAIL)
+// 3: TP.DT timeout (FAIL)
+// 4: TP.DT sequence number failure.(FAIL)
+// 5: DUT aborts valid transport after EOM (FAIL)
+// 6: PGI inconsistency (FAIL)
+void CTF_A07_20_EOM_P01_Normal(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 requestTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpdtRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPCMxx pgAbrt;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(6, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(6, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // wait until no TP running from dutAddr to testerAddr.
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    // ====================
+    // step 1/1 Check normal transport working.
+    // ====================
+    requestTime = CT_STEP_BEGIN(-1, "Check normal transport working.");
+    CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr) != 0)
+    {
+      CT_STEP_END_FAIL(2, "RTS timeout.");
+      return; // leave on fail.
+    }
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    if ((tpdtRes=CT_WaitForDTs( pgDT, pgCTS )) >0)
+    {
+      CT_STEP_END_FAIL(3, "DT timeout.");
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(reportText, elcount(reportText), "DT sequence number failure. (got seq nr %d, expected %d)", pgDT.SequenceNumber, abs(tpdtRes));
+      CT_STEP_END_FAIL(4, reportText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    CT_SendEOM(pgEOM, pgn, pgCTS.sa, pgCTS.da, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    
+    if (CT_AWAIT_ABORT(pgAbrt, pgn, pgRTS.sa, pgRTS.da, gc_TIMEOUT_T3)==0)
+    {
+      snprintf(errText, elcount(errText), "DUT aborts valid transport at t=%.6f after EOM at t=%.6f.", CT_Ns2Sec(pgAbrt.time_ns), CT_Ns2Sec(pgEOM.time_ns));
+      CT_STEP_END_FAIL(5, errText);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(1);
+    
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+// ==============================================================================================================
+// functionality of the test A7 20 TP EOM - Part: Abort Missing
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: RTS timeout (FAIL)
+// 3: TP.DT timeout (FAIL)
+// 4: TP.DT sequence number failure. (FAIL)
+// 5: DUT does not ABORT a missing TP.CM_EndOfMsgACK within Tr (200ms). (FAIL)
+// 6: DUT aborts too early within T3 (1250ms) before TP.CM_EndOfMsgACK (FAIL)
+// 7: PGI inconsistency (FAIL)
+void CTF_A07_20_EOM_P02_Abort_Missing_EOM(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 requestTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpdtRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(7, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(7, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // wait until no TP running from dutAddr to testerAddr.
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    // ====================
+    // step 1/1 Check DUT does abort missing EOM
+    // ====================
+    requestTime = CT_STEP_BEGIN(-1, "Check DUT does abort missing EOM");
+    CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr) != 0)
+    {
+      CT_STEP_END_FAIL(2, "RTS timeout.");
+      return; // leave on fail.
+    }
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    if ((tpdtRes=CT_WaitForDTs( pgDT, pgCTS )) >0)
+    {
+      CT_STEP_END_FAIL(3, "TP.DT timeout.");
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(reportText, elcount(reportText), "TP.DT sequence number failure. (got seq nr %d, expected %d)", pgDT.SequenceNumber, abs(tpdtRes));
+      CT_STEP_END_FAIL(4, reportText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    
+    // do not send EOM, check DUT sends no abort within this time.
+    if (CT_AWAIT_ABORT( pgn, pgRTS.sa, pgRTS.da, gc_TIMEOUT_T3-2) == 0)
+    {
+      // Abort too early
+      snprintf(errText, elcount(errText), "DUT aborts too early within T3 (1250ms) before TP.CM_EndOfMsgACK");
+      CT_STEP_END_FAIL(6, errText);
+      return; // leave on fail.
+    }
+    // Now await an abort from DUT due the missing EOM after T3. Abort has to be sent within Tr+2 (202ms)
+    if (CT_AWAIT_ABORT( pgn, pgRTS.sa, pgRTS.da, gc_TIMEOUT_TR+2) == 1)
+    {
+      // NO abort
+      snprintf(errText, elcount(errText), "DUT does not ABORT a missing TP.CM_EndOfMsgACK within TR (200ms).");
+      CT_STEP_END_FAIL(5, errText);
+      return; // leave on fail.
+    }
+
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+// ==============================================================================================================
+// functionality of the test A7 20 TP EOM - Part: DP
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: RTS timeout (FAIL)
+// 3: TP.DT timeout (FAIL)
+// 4: TP.DT sequence number error. (FAIL)
+// 5: DUT seems not inspect DP bit in EOM and does not abort within T3 after last DT (FAIL)
+// 6: PGI inconsistency (FAIL)
+void CTF_A07_20_EOM_P03_DP(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 requestTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpdtRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(6, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(6, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // wait until no TP running from dutAddr to testerAddr.
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    // ====================
+    // step 1/1 Check DP bit in EOM
+    // ====================
+    requestTime = CT_STEP_BEGIN(-1, "Check DP bit in EOM.");
+    CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr) != 0)
+    {
+      CT_STEP_END_FAIL(2, "RTS timeout.");
+      return; // leave on fail.
+    }
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    if ((tpdtRes=CT_WaitForDTs( pgDT, pgCTS )) >0)
+    {
+      CT_STEP_END_FAIL(3, "TP.DT timeout.");
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(reportText, elcount(reportText), "DT sequence number failure. (got seq nr %d, expected %d)", pgDT.SequenceNumber, abs(tpdtRes));
+      CT_STEP_END_FAIL(4, reportText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    
+    CT_SendEOM(pgEOM, pgn | 0x00010000, pgCTS.sa, pgCTS.da, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets); // + DP
+    
+    if (CT_AWAIT_ABORT(pgn, pgRTS.sa, pgRTS.da, gc_TIMEOUT_T3 + gc_TIMEOUT_TR) == 1)
+    {
+      snprintf(errText, elcount(errText), "DUT seems not inspect the DP bit in the EOM at t=%.6f and does not abort within T3 after last TP.DT at t=%.6f.", CT_Ns2Sec(pgEOM.time_ns), CT_Ns2Sec(pgDT.time_ns));
+      CT_STEP_END_FAIL(5, errText);
+      return; // leave on fail
+    }
+    CT_STEP_END_PASS(1);
+    
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+// ==============================================================================================================
+// functionality of the test A7 20 TP EOM - Part: EDP
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: RTS timeout (FAIL)
+// 3: TP.DT timeout (FAIL)
+// 4: TP.DT sequence number error. (FAIL)
+// 5: DUT seems not inspect EDP bit in EOM and does not abort within T3 after last DT (FAIL)
+// 6: PGI inconsistency (FAIL)
+void CTF_A07_20_EOM_P04_EDP(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 requestTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpdtRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(6, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(6, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // wait until no TP running from dutAddr to testerAddr.
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    // ====================
+    // step 1/1 Check EDP bit in EOM
+    // ====================
+    requestTime = CT_STEP_BEGIN(-1, "Check EDP bit in EOM.");
+    CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr) != 0)
+    {
+      CT_STEP_END_FAIL(2, "RTS timeout.");
+      return; // leave on fail.
+    }
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    if ((tpdtRes=CT_WaitForDTs( pgDT, pgCTS )) >0)
+    {
+      CT_STEP_END_FAIL(3, "TP.DT timeout.");
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(reportText, elcount(reportText), "TP.DT sequence number failure. (got seq nr %d, expected %d)", pgDT.SequenceNumber, abs(tpdtRes));
+      CT_STEP_END_FAIL(4, reportText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    CT_SendEOM(pgEOM, pgn | 0x00020000, pgCTS.sa, pgCTS.da, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets); // + EDP
+    if (CT_AWAIT_ABORT(pgn, pgRTS.sa, pgRTS.da, gc_TIMEOUT_T3 + gc_TIMEOUT_TR) == 1)
+    {
+      snprintf(errText, elcount(errText), "DUT seems not inspect the DP bit in the EOM at t=%.6f and does not abort within T3 after last TP.DT at t=%.6f.", CT_Ns2Sec(pgEOM.time_ns), CT_Ns2Sec(pgDT.time_ns));
+      CT_STEP_END_FAIL(5, errText);
+      return; // leave on fail
+    }
+    CT_STEP_END_PASS(1);
+    
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+// ==============================================================================================================
+// functionality of the test A7 20 TP EOM - Part: CTS hold
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: RTS timeout (FAIL)
+// 3: TP.DT timeout (FAIL)
+// 4: TP.DT sequence number error. (FAIL)
+// 5: DUT ignores a CTS hold prior to TP.CM_EndOfMsgACK by aborting it (FAIL)
+// 6: DUT does not abort a missing EOM after connection hold within Tr (FAIL)
+// 7: DUT aborts after EOM within Tr (FAIL)
+// 8: DUT aborts missing EOM too late. (FAIL)
+// 9: PGI inconsistency (FAIL)
+void CTF_A07_20_EOM_P05_CTS_Hold(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 requestTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpdtRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPCMxx pgAbrt;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(9, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(9, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // wait until no TP running from dutAddr to testerAddr.
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    // ====================
+    // step 1/2 Check CTS hold before EOM 
+    // ====================
+    requestTime = CT_STEP_BEGIN(-2, "Check CTS hold before EOM");
+    CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr) != 0)
+    {
+      CT_STEP_END_FAIL(2, "RTS timeout.");
+      return; // leave on fail.
+    }
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    if ((tpdtRes=CT_WaitForDTs( pgDT, pgCTS )) >0)
+    {
+      CT_STEP_END_FAIL(3, "TP.DT timeout.");
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(reportText, elcount(reportText), "TP.DT sequence number failure. (got seq nr %d, expected %d)", pgDT.SequenceNumber, abs(tpdtRes));
+      CT_STEP_END_FAIL(4, reportText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    
+    CT_WAIT(10); // wait to not send the next message toooo fast.
+    
+    // Instead of EOM send a CTS HOLD after last TD...
+    CT_SendCTSHold( pgCTS, pgn, testerAddr, dutAddr); // hold
+    
+    // the CTS hold now should be received at the DUT after T3.
+    // When the test now leaves out the EOM after T4, check the DUT sends an abort within T4+Tr.
+    
+    // Wait for T4-5ms before sending EOM...
+    CT_WAIT(gc_MAX_CTS_HOLD);
+
+    // check abort for pgn since CTS hold...
+    snprintf(reportText, elcount(reportText), "DUT ignores a CTS hold at t=%.6f prior to TP.CM_EndOfMsgACK by aborting it.", CT_Ns2Sec(pgCTS.time_ns));
+    if (CT_CHECK_ABORTS_BY_PGN(pgn, pgRTS.sa, pgRTS.da, pgCTS.time_ns))
+    {
+      CT_STEP_END_FAIL(5, reportText);
+      return; // leave on fail.
+    }
+
+    // and send the EOM now...
+    CT_SendEOM(pgEOM, pgn, pgCTS.sa, pgCTS.da, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    
+    // After EOM the DUT shall not abort within Tr (200ms)
+    if (CT_AWAIT_ABORT(pgn, pgRTS.sa, pgRTS.da, gc_TIMEOUT_TR)==0)
+    {
+      CT_STEP_END_FAIL(7, "DUT aborts after EOM within Tr");
+      return; // leave on fail.
+    }    
+    
+    CT_STEP_END_PASS(0);
+    
+    CT_WAIT(gc_TIMEOUT_T3);
+    
+    // ====================
+    // step 2/2 Check DUT aborts after CTS hold when EOM is missing.
+    // ====================
+    requestTime = CT_STEP_BEGIN("Check DUT aborts after CTS hold when EOM is missing.");
+    CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr) != 0)
+    {
+      CT_STEP_END_FAIL(2, "RTS timeout.");
+      return; // leave on fail.
+    }
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    if ((tpdtRes=CT_WaitForDTs( pgDT, pgCTS )) >0)
+    {
+      CT_STEP_END_FAIL(3, "TP.DT timeout.");
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(reportText, elcount(reportText), "TP.DT sequence number failure. (got seq nr %d, expected %d)", pgDT.SequenceNumber, abs(tpdtRes));
+      CT_STEP_END_FAIL(4, reportText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    
+    CT_WAIT(10); // wait to not send the next message toooo fast.
+    
+    // Instead of EOM send a CTS HOLD after last TD...
+    CT_SendCTSHold( pgCTS, pgn, testerAddr, dutAddr);
+    
+    // the CTS hold now should be received at the DUT after T3.
+    // When the test now leaves out the EOM after T4, check the DUT sends an abort within T4+Tr.
+    
+    // Wait exactly (!) T4
+    CT_WAIT(gc_TIMEOUT_T4);
+
+    // check abort for pgn since CTS hold...
+    snprintf(reportText, elcount(reportText), "DUT ignores a CTS hold at t=%.6f prior to TP.CM_EndOfMsgACK by aborting it.", CT_Ns2Sec(pgCTS.time_ns));
+    if (CT_CHECK_ABORTS_BY_PGN(pgn, pgRTS.sa, pgRTS.da, pgCTS.time_ns))
+    {
+      CT_STEP_END_FAIL(5, reportText);
+      return; // leave on fail.
+    }
+    
+    // now wait for an abort within Tr. (Due the EOM is missing)
+    if (CT_AWAIT_ABORT(pgn, pgRTS.sa, pgRTS.da, gc_TIMEOUT_TR)==1)
+    {
+      // now wait max T3 and check if the DUTs abort is sent too late.
+      if (CT_AWAIT_ABORT(pgn, pgRTS.sa, pgRTS.da, gc_TIMEOUT_T3)==0)
+      {
+        CT_STEP_END_FAIL(8, "DUT aborts a missing EOM too late.");
+        return; // leave on fail.
+      }    
+ 
+      snprintf(reportText, elcount(reportText), "DUT does not abort a missing EOM after connection hold within Tr");
+      // DUT missed to send abort for a missing EOM after CTS HOLD after last TD.
+      CT_STEP_END_FAIL(6, reportText);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(1);
+    
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+// ==============================================================================================================
+// functionality of the test A7 20 TP EOM - Part: Ignore extra EOM
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: RTS timeout. DUT reacts on TP.CM_EndOfMsgACK prior to the final TP.DT by stopping transport (FAIL)
+// 3: TP.DT timeout. DUT reacts on TP.CM_EndOfMsgACK prior to the final TP.DT by stopping transport (FAIL)
+// 4: TP.DT sequence number failure. (FAIL)
+// 5: DUT reacts on wrong TP.CM_EndOfMsgACK with abort(FAIL)
+// 6: PGI inconsistency (FAIL)
+void CTF_A07_20_EOM_P06_Ignore_Extra_EOM(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  char reportText[1024];
+  char errText[1024];
+  int64 requestTime;
+  byte ok;
+  dword pgn;
+  word i;
+  int tpdtRes;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;  
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(6, pgis)) return;
+  
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(6, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // wait until no TP running from dutAddr to testerAddr.
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    // ====================
+    // step 1/1 Check DUT ignores EOM before last TP.DT
+    // ====================
+    requestTime = CT_STEP_BEGIN(-1, "Check DUT ignores EOM before last TP.DT");
+    CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    CT_SendEOM(pgEOM, pgn, testerAddr, dutAddr, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr) != 0)
+    {
+      snprintf(errText, elcount(errText), "RTS Timeout. DUT reacts on wrong TP.CM_EndOfMsgACK at t=%.6f, prior to the final TP.DT by stopping transport.", CT_Ns2Sec(pgEOM.time_ns));
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+    CT_SendEOM(pgEOM, pgn, testerAddr, dutAddr, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    CT_SendEOM(pgEOM, pgn, testerAddr, dutAddr, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    
+    gReactor_ReactWithEOMOnDT_Active = 1;
+    
+    gReactor_ReactWithEOMOnDT_pgEOM     = pgEOM;
+    gReactor_ReactWithEOMOnDT_pgEOM.sa  = pgEOM.sa; // somehow sa and da are not copied using the assignment operator for pg's. ?
+    gReactor_ReactWithEOMOnDT_pgEOM.da  = pgEOM.da; // somehow sa and da are not copied using the assignment operator for pg's. ?
+    if ((tpdtRes=CT_WaitForDTs( pgDT, pgCTS )) >0)
+    {
+      snprintf(errText, elcount(errText), "TP.DT timeout. DUT reacts on wrong TP.CM_EndOfMsgACK at t=%.6f prior to the final TP.DT with seq #%d, by stopping transport.", CT_Ns2Sec(pgEOM.time_ns), pgRTS.TotalNumberOfPackets);
+      CT_STEP_END_FAIL(3, errText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    else if (tpdtRes < 0)
+    {
+      snprintf(reportText, elcount(reportText), "TP.DT sequence number failure. (got seq nr %d, expected %d)", pgDT.SequenceNumber, abs(tpdtRes));
+      CT_STEP_END_FAIL(4, reportText);
+      CT_WAIT(gc_TIMEOUT_T3);
+      return; // leave on fail.
+    }
+    
+    // Check there are not Aborts since Request and last DT.
+    if (CT_CHECK_ANY_ABORTS_BETWEEN(pgRTS.sa, pgRTS.da, gc_BC_ADDR, requestTime, pgDT.time_ns)==1)
+    {
+      snprintf(errText, elCount(errText), "DUT reacts on wrong TP.CM_EndOfMsgACK with abort between TP.CM_RTS at t=%.6f and the final TP.DT at t=%.6f ", CT_Ns2Sec(pgRTS.time_ns), CT_Ns2Sec(pgDT.time_ns));
+      CT_STEP_END_FAIL(5, reportText);
+      return; // leave on fail.
+    }
+    
+    gReactor_ReactWithEOMOnDT_Active = 0;
+    CT_SendEOM(pgEOM, pgn, testerAddr, dutAddr, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    
+    // Wait T3
+    CT_WAIT(gc_TIMEOUT_T3);
+    
+    CT_STEP_END_PASS(1);
+    
+    
+    CT_WAIT(350); // do not request too fast.
+  } // end CT-LOOP
+}
+
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A7 21 TP Originator Abort
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT abort ok. (PASS)
+// 2: DUT abort contains invalid PGN (FAIL)
+// 3: DUT abort contains invalid Connection Abort Reason (FAIL)
+// 4: PGI inconsistency (FAIL)
+// 5: Unexpected TP.DT sequence number detected (FAIL)
+// 6: DUT does not send an expected abort. (FAIL)
+// 7: Timeout. (FAIL)
+// 8: DUT abort contains invalid Connection Abort Reason within reserved range (FAIL)
+// 9: DUT sends abort if the very first TP.CM_CTS is missing (FAIL)
+void CTF_A07_21_TP_Originator_Abort(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  char reportText[1024];
+  int64 stepTime;
+  int64 tpStartTime;
+  int64 treq;
+  byte rtsTimeout, dtTimeout;
+  byte dtWrongSeqNr, dtExpectedSeqNr;
+  byte wrongAbortReason, expectedAbortReason;
+  byte isWrongPgn;
+  byte isAbortTimeout;
+  dword pgn;
+  int dtres;
+  byte ok;
+  int i;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;
+  pg J1939::J1939_CT_RT::TPCMxx pgABRT;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(4, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(4, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  rtsTimeout = 0;
+  dtTimeout = 0;
+  dtWrongSeqNr = 0;
+  dtExpectedSeqNr = 0;
+  wrongAbortReason = 0;
+  expectedAbortReason = 0;
+  isWrongPgn = 0;
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+
+/* Reasons marked with * are supported.
+    
+1	Already in one or more connection managed sessions and cannot support another.
+2	System resources were needed for another task so this connection managed session was terminated.
+3*	A timeout occurred and this is the connection abort to close the session.
+4*	CTS messages received when data transfer is in progress.
+5*	Maximum retransmit request limit reached
+6*	Unexpected data transfer packet
+7*	Bad sequence number (software cannot recover)
+8*	Duplicate sequence number (software cannot recover)
+9*	"Total Message Size" is greater than 1785 bytes
+10-249*	Reserved for SAE assignment.
+250	If a Connection Abort reason is identified that is not listed in the table use code 250
+251-255	Per J1939-71 definitions.
+    
+*/
+    
+    // ====================
+    // step 1/4 Abort Reason 3: A timeout occurred and this is the connection abort to close the session.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    stepTime = CT_STEP_BEGIN(-4, "Abort Reason 3: A timeout occurred and this is the connection abort to close the session.");
+    
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if ((rtsTimeout = CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr)) != 0) break;
+
+    // send CTS for only one package
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, 1);
+    
+    // await the DT packets...
+    if ((dtres = CT_WaitForDTs( pgDT, pgCTS )) == 1)
+    {
+      dtTimeout = 1;
+      break; // leave on dt-timeout.
+    }
+    if ( (dtExpectedSeqNr = abs(dtres)) != 0 ) break; // leave on unexpected seqNr.
+    
+    // Leave out CTS...
+    CT_WAIT(gc_TIMEOUT_T3);
+    
+    // Now expect the DUT aborts within the next Tr (200ms)
+    if ( (isAbortTimeout = CT_AWAIT_ABORT(pgABRT, dutAddr, testerAddr, gc_TIMEOUT_TR)) != 0 ) break;
+    
+    // check for PGN...
+    if ( (isWrongPgn = (pgn != pgABRT.PGNumber)) != 0 ) break;
+    
+    // check for Abort reason 3...
+    expectedAbortReason = 3;
+    if ( (wrongAbortReason = (pgABRT.byte(1) != expectedAbortReason)) != 0) break;
+    
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+    
+    
+    // ====================
+    // step 2/4 Abort Reason 4: CTS messages received when data transfer is in progress.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    stepTime = CT_STEP_BEGIN("Abort Reason 4: CTS messages received when data transfer is in progress.");
+    
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if ((rtsTimeout = CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr)) != 0) break;
+
+    // send CTS for all the packets...
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    
+    // await the first DT packet...
+    if ((dtres = CT_WaitForDTs( pgDT, pgCTS, 1 )) == 1)
+    {
+      dtTimeout = 1;
+      break; // leave on dt-timeout.
+    }
+    if ( (dtExpectedSeqNr = abs(dtres)) != 0 ) break; // leave on unexpected seqNr.
+    
+    // ... and send a CTS for retransmission - this may lead to an abort at the DUT.
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    
+    // wait abort with pgn within Tr ( this is a normal DT time. )
+    if ( (isAbortTimeout = CT_AWAIT_ABORT(pgABRT, dutAddr, testerAddr, gc_TIMEOUT_TR)) != 0 ) break;
+    
+    // check for PGN...
+    if ( (isWrongPgn = (pgn != pgABRT.PGNumber)) != 0) break;
+    
+    // check for Abort reason 4...
+    expectedAbortReason = 4;
+    if (( wrongAbortReason = (pgABRT.byte(1) != expectedAbortReason)) != 0) break;
+    
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+
+    
+    // ====================
+    // step 3/4 Abort Reason 5: Maximum retransmit request limit reached.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    stepTime = CT_STEP_BEGIN("Abort Reason 5: Maximum retransmit request limit reached");
+    
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if ((rtsTimeout = CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr)) != 0) break;
+
+    ok = 1;
+    for (i=0; i<3; i++)
+    {
+      // send CTS for packet #1 / two retransmissions
+      CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, 1);
+      
+      // await the first DT packet...
+      if ((dtres = CT_WaitForDTs( pgDT, pgCTS, 1 )) == 1)
+      {
+        dtTimeout = 1;
+        break; // leave on dt-timeout.
+      }
+      if ( (dtExpectedSeqNr = abs(dtres)) != 0 ) 
+      {
+        ok = 0;
+        break; // leave on unexpected seqNr.
+      }
+    }
+    
+    if (!ok) break; // break outer loop on error of the last steps.
+    
+    // now send CTS for the third retransmission ( above limitation )
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, 1);
+
+    // wait abort with pgn within Tr ( this is a normal DT time. )
+    if ( (isAbortTimeout = CT_AWAIT_ABORT(pgABRT, dutAddr, testerAddr, gc_TIMEOUT_TR)) != 0 ) break;
+    
+    // check for PGN...
+    if ( (isWrongPgn = (pgn != pgABRT.PGNumber)) != 0) break;
+    
+    // check for Abort reason 5...
+    expectedAbortReason = 5;
+    if (( wrongAbortReason = (pgABRT.byte(1) != expectedAbortReason)) != 0) break;
+    
+    CT_WAIT(1);
+    CT_STEP_END_PASS(0);
+    
+    
+    // ====================
+    // step 4/4 No abort before if the very first TP.CM_CTS is missing.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    stepTime = CT_STEP_BEGIN("No abort before if the very first TP.CM_CTS is missing.");
+    
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if ((rtsTimeout = CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr)) != 0) break;
+
+    // CTS missing...
+    
+    // Now expect the DUT does NOT abort within T3+TR (!!!!) (200ms)
+    // Leave this time as is. Dut shall not abort within T3+Tr - nevertheless it aborts too early or not - it shall not abort a first CTS at all.
+    if ( CT_AWAIT_ABORT(pgABRT, dutAddr, testerAddr, gc_TIMEOUT_TR + gc_TIMEOUT_T3) == 0 )
+    {
+      CT_STEP_END_FAIL(9, "DUT sends abort if the very first TP.CM_CTS is missing.");
+      return; // leave on fail.
+    }
+    
+    CT_WAIT(1);
+    CT_STEP_END_PASS(1);
+  } // end pgn loop (CT_LOOP)
+    
+  CT_WAIT(gc_TIMEOUT_T3); // wait before continuing....
+  
+  // -----------------------
+  // --- ERROR HANDLING ----
+  // -----------------------
+  // check for errors after leaving loop...
+  if (rtsTimeout)
+  {
+    snprintf(reportText, elcount(reportText), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+    CT_STEP_END_Failed_To_Detect_Requested_PGN(7, reportText, gc_RESP_TIMEOUT);
+    return;
+  }
+  if (dtTimeout)
+  {
+    CT_STEP_END_FAIL(7, "Timeout. DUT didn't sent expected data package after CTS.");
+    return;
+  }
+  if ( dtExpectedSeqNr && (pgDT.SequenceNumber != dtExpectedSeqNr) )
+  {
+    snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, dtExpectedSeqNr);
+    CT_STEP_END_FAIL(5, reportText);
+    return;
+  }
+  if ( wrongAbortReason && (pgABRT.byte(1) != expectedAbortReason) )
+  {
+    char additionalText[1024];
+    byte funcPath;
+    // additionally check the reason to be reserved (10-249) and report it when detected.
+    funcPath = 3;
+    if ( (pgABRT.byte(1) >=10) && (pgABRT.byte(1) <=249) )
+    {
+      snprintf(additionalText, elcount(additionalText), "Reasons [10;249] are Reserved for SAE !");
+      funcPath = 8;
+    }
+    snprintf( reportText, elcount(reportText), "DUT answers with wrong abort reason. (Got #%d, Expected #%d) %s", pgABRT.byte(1), expectedAbortReason, additionalText);
+    CT_STEP_END_FAIL(funcPath, reportText);
+    return;
+  }
+  if ( isWrongPgn && (pgABRT.PGNumber != pgn) )
+  {
+    snprintf( reportText, elcount(reportText), "DUT answers with wrong PGN. (Got 0x%.05X, Expected 0x%.05X)", pgABRT.PGNumber, pgn);
+    CT_STEP_END_FAIL(2, reportText);
+    return;
+  }
+  if (isAbortTimeout)
+  {
+    CT_STEP_END_FAIL(6, "DUT does not send an expected connection abort.");
+    return;
+  }
+}
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A7 22 TP Behaviour After Receiver Abort
+// ==============================================================================================================
+// FuncPath's:
+// 01: DUT behaviour ok. (PASS)
+// 02: DUT does not stop sending TP.DTs after 50ms after receiver aborted (FAIL)
+// 03: DUT sends more than 32 data packets after receiver aborted (FAIL)
+// 04: DUT seems not to inspect DP bit within the PGN of the receivers abort message (FAIL)
+// 05: DUT seems not to inspect EDP bit within the PGN of the receivers abort message (FAIL)
+// 06: RTS timeout (FAIL)
+// 07: TP DT timeout (FAIL)
+// 08: TP DT sequence number failure (FAIL)
+// 09: DUT aborted unexpectedly (FAIL)
+// 10: PGI inconsistency (FAIL)
+//
+void CTF_A07_22_TP_Behaviour_After_Receiver_Abort(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  int64 stepTime, testStartTime;
+  int64 tpStartTime;
+  int64 treq;
+  byte rtsTimeout, dtTimeout;
+  byte dtWrongSeqNr, dtExpectedSeqNr;
+  dword pgn;
+  int dtres;
+  byte ok;
+  int i;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;
+  pg J1939::J1939_CT_RT::TPCMxx pgABRT;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(10, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(10, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  rtsTimeout = 0;
+  dtTimeout = 0;
+  dtWrongSeqNr = 0;
+  dtExpectedSeqNr = 0;
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+        
+    // ====================
+    // step 1/5 Request PGN and abort after first TP.DT
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    stepTime = CT_STEP_BEGIN(-5, "Request PGN and abort after first TP.DT...");
+    testStartTime = stepTime;
+    
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if ((rtsTimeout = CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr)) != 0) break;
+
+    // send CTS for all packets
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+    
+    // await the first DT packet...
+    if ((dtres = CT_WaitForDTs( pgDT, pgCTS, 1 )) == 1)
+    {
+      CT_STEP_END_FAIL(7, "TP.DT Timeout. DUT didn't sent expected data package.");
+      break; // leave on dt-timeout.
+    }
+
+    if ( (dtExpectedSeqNr = abs(dtres)) != 0 ) break; // leave on unexpected seqNr.
+    // send abort to the dut..
+    CT_SendABORT(pgABRT, pgn, testerAddr, dutAddr, 2);
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/5 Checking DUT stops sending TP.DTs after abort within 50ms...
+    // ====================
+    CT_STEP_BEGIN("Checking DUT stops sending TP.DTs after abort within 50ms...");
+    
+    // await last DT from dut to tool
+    while (CT_WaitForNextDT(pgDT, dutAddr, testerAddr, gc_TIMEOUT_TR)) if (pgDT.SequenceNumber == pgRTS.TotalNumberOfPackets) break;
+    
+    // inspect last retrieved DT from DUT...
+    if (pgDT.time_ns> pgABRT.time_ns)
+    {
+      //write("dtres=%d, pgDT.SequenceNumber=%d, pgDT.time_ns=%lld, pgAbrt.time_ns=%lld, dt(abrt,pgDt)=%f", dtres, pgDT.SequenceNumber, pgDT.time_ns,pgABRT.time_ns, CT_Ns2Sec( pgDT.time_ns - pgABRT.time_ns ));
+      if (CT_Ns2Sec( pgDT.time_ns - pgABRT.time_ns ) > 0.050)
+      {
+        CT_STEP_END_FAIL(2, "DUT sends TP.DTs after abort beyond 50ms.");
+        break; // leave loop on failure.
+      }
+      if (pgDT.SequenceNumber>0x20)
+      {
+        CT_STEP_END_FAIL(3, "DUT sends more than 32 TP.DTs after abort within 50ms.");
+        break; // leave loop on failure.
+      }
+    }
+    CT_STEP_END_PASS(0);
+    
+    CT_WAIT(1);
+    
+    ok = 1;
+    for (i=1; i<=2; i++)
+    {
+      // 1st run DP bit
+      // 2nd run EDP bit
+      
+      // ====================
+      // step 3+4/5 Request PGN and abort with (E)DP bit in abort PGN after first TP.DT
+      // ====================
+      CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+      if (i==1) stepTime = CT_STEP_BEGIN("Request PGN and abort with DP bit in PGN after first TP.DT...");
+      if (i==2) stepTime = CT_STEP_BEGIN("Request PGN and abort with EDP bit in PGN after first TP.DT...");
+      
+      // request pgn from testerAddr to dutAddr and check following up tp.
+      treq = CT_SendRequest(pgn, testerAddr, dutAddr); // request
+      
+      // await rts
+      if ((rtsTimeout = CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr)) != 0)
+      {
+        ok = 0;
+        break;
+      }
+
+      // send CTS for all packets
+      CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+      
+      // await the first DT packet...
+      if ((dtres = CT_WaitForDTs( pgDT, pgCTS, 1 )) == 1)
+      {
+        ok = 0;
+        CT_STEP_END_FAIL(7, "TP.DT Timeout. DUT didn't sent expected data package.");
+        break; // leave on dt-timeout.
+      }
+      if ( (dtExpectedSeqNr = abs(dtres)) != 0 )
+      {
+        ok = 0;
+        break; // leave on unexpected seqNr.
+      }
+      
+      // send wrong abort (DP bit in pgn) to the dut..
+      if (i==1) CT_SendABORT(pgABRT, pgn | 0x00010000, testerAddr, dutAddr, 2);
+      if (i==2) CT_SendABORT(pgABRT, pgn | 0x00020000, testerAddr, dutAddr, 2);
+
+      // await last DT from dut to tool
+      while (CT_WaitForNextDT(pgDT, dutAddr, testerAddr, gc_TIMEOUT_TR)) if (pgDT.SequenceNumber == pgRTS.TotalNumberOfPackets) break;
+      // tester sent wrong abort - DUT shall ignore it. check for any DT-error (timeout or sequence error)
+      //write("pgDT.Seq = %x, pgRTS.TotalPkgs = %x", pgDT.SequenceNumber, pgRTS.TotalNumberOfPackets);
+      if (pgDT.SequenceNumber != pgRTS.TotalNumberOfPackets)
+      {
+        ok = 0;
+        if (i==1) CT_STEP_END_FAIL(4, "TP.DT Timeout. DUT didn't sent the last TP.DT. DUT seems not to inspect DP bit in abort's PGN.");
+        if (i==2) CT_STEP_END_FAIL(5, "TP.DT Timeout. DUT didn't sent the last TP.DT. DUT seems not to inspect EDP bit in abort's PGN.");
+        break; // leave on dt-timeout.
+      }
+      if ( (dtExpectedSeqNr = abs(dtres)) != 0 ) 
+      {
+        ok = 0;
+        break; // leave on unexpected seqNr.
+      }
+      if (ok)
+      {
+        // send EOM..
+        CT_SendEOM(pgn, testerAddr, dutAddr, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+        CT_WAIT(1);
+      }
+      
+      CT_STEP_END_PASS(0);
+      CT_WAIT(gc_TIMEOUT_TR); // dont continue too fast.
+    } // end i==1: DP / i==2: EDP loop
+    
+    if(!ok) break; // leave CT_LOOP on error after DP / EDP loop
+    
+    // ====================
+    // step 5/5 Check that DUT does not send any aborts.
+    // ====================
+    CT_STEP_BEGIN("Check that DUT does not send any aborts.");
+    if (CT_CHECK_ANY_ABORTS(bufIndices, dutAddr, testerAddr, gc_BC_ADDR, testStartTime)==1)
+    {
+      snprintf(reportText, elcount(reportText), "DUT aborted unexpectedly @~%.6f", CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+      CT_STEP_END_FAIL(9, reportText);
+      break; // leave loop on failure.
+    };
+  
+    CT_STEP_END_PASS(1);
+  } // end pgn loop (CT_LOOP)
+  
+  CT_WAIT(gc_TIMEOUT_T3); // wait before continuing....
+  
+  // -----------------------
+  // --- ERROR HANDLING ----
+  // -----------------------
+  // check for errors after leaving loop...
+  if (rtsTimeout)
+  {
+    snprintf(reportText, elcount(reportText), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+    CT_STEP_END_Failed_To_Detect_Requested_PGN(6, reportText, gc_RESP_TIMEOUT);
+    return;
+  }
+  if ( dtExpectedSeqNr && (pgDT.SequenceNumber != dtExpectedSeqNr) )
+  {
+    snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, dtExpectedSeqNr);
+    CT_STEP_END_FAIL(8, reportText);
+    return;
+  }
+}
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A7 23 TP Singularity
+// ==============================================================================================================
+// FuncPath's:
+// 01: DUT behaviour ok. (PASS)
+// 02: RTS timeout (FAIL)
+// 03: TP DT timeout (FAIL)
+// 04: TP DT sequence number failure (FAIL)
+// 05: DUT sends TP.CM_RTS during active transport (FAIL)
+// 06: PGI inconsistency (FAIL)
+//
+void CTF_A07_23_TP_Singularity(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  int64 stepTime, eomTime, rtsTime;
+  int64 treq, treq2;
+  byte dtWrongSeqNr, dtExpectedSeqNr;
+  dword pgn;
+  dword pgn2;
+  int dtres;
+  byte ok;
+  int i;
+  pg * pgR;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(6, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(6, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  dtWrongSeqNr = 0;
+  dtExpectedSeqNr = 0;
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    pgn2 = pgis[0].PGN;
+    if ( (pgis.size()>0) && (k==0) )
+    {
+      pgn2 = pgis[1].PGN;
+    }
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+
+    // ====================
+    // step 1/3 Request PGN and await first TP.DT
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    stepTime = CT_STEP_BEGIN(-3, "Request PGN and await first TP.DT...");
+    
+    MsgBuf_StartRecording();
+    
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    treq = CT_SendRequest(pgn, testerAddr, dutAddr); // request
+    
+    // await rts
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr)!= 0)
+    {
+      snprintf(reportText, elcount(reportText), "RTS timeout for request @~%.6f", CT_Ns2Sec(treq));
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, reportText, gc_RESP_TIMEOUT);
+      return; // leave on fail.
+    }
+
+    // send CTS for one packet
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 1, 1);
+    
+    // await the first DT packet...
+    if ((dtres = CT_WaitForDTs( pgDT, pgCTS, 1 )) == 1)
+    {
+      CT_STEP_END_FAIL(3, "TP.DT Timeout. DUT didn't sent expected data package.");
+      return; // leave on fail.
+    }
+    dtExpectedSeqNr = abs(dtres);
+    if ( dtExpectedSeqNr && (pgDT.SequenceNumber != dtExpectedSeqNr) )
+    {
+      snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, dtExpectedSeqNr);
+      CT_STEP_END_FAIL(4, reportText);
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/3 Start second request for same PGN during active transport.
+    // ====================
+    CT_STEP_BEGIN("Start second request for same PGN during active transport.");
+
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    treq2 = CT_SendRequest(pgn2, testerAddr, dutAddr); // request
+    
+    CT_SendCTS(pgCTS, pgn, testerAddr, dutAddr, 2, pgRTS.TotalNumberOfPackets-1);
+    
+    // await all DTs from dut to tool for the first transport...
+    if ((dtres = CT_WaitForDTs( pgDT, pgCTS, 2, pgRTS.TotalNumberOfPackets-1 )) == 1)
+    {
+      CT_STEP_END_FAIL(3, "TP.DT Timeout. DUT didn't sent expected data package.");
+      return; // leave on fail.
+    }
+    dtExpectedSeqNr = abs(dtres);
+    if ( dtExpectedSeqNr && (pgDT.SequenceNumber != dtExpectedSeqNr) )
+    {
+      snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, dtExpectedSeqNr);
+      CT_STEP_END_FAIL(4, reportText);
+      return;
+    }
+
+    if (ok) CT_STEP_END_PASS(1);
+    
+    // ====================
+    // step 3/3 Check and Finalize TP1 and TP2
+    // ====================
+    CT_STEP_BEGIN("Check and Finalize TP1 and TP2");
+    
+    // Send EOM for TP1
+    CT_SendEOM(pgEOM, pgn, testerAddr, dutAddr, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    
+    // Finalize TP2 (dut starts with RTS...)
+    if (CT_WaitForRTS(pgRTS, pgn2, dutAddr, testerAddr) == 0)
+    {
+      // DUT sent rts... for finalizing TP2.. it expects CTS...
+      // send CTS for all packets
+      CT_SendCTS(pgCTS, pgn2, testerAddr, dutAddr, 1, pgRTS.TotalNumberOfPackets);
+      
+      // await all DTs from dut to tool for the first transport...
+      if ((dtres = CT_WaitForDTs( pgDT, pgCTS, 1, pgRTS.TotalNumberOfPackets )) == 1)
+      {
+        CT_STEP_END_FAIL(3, "TP.DT Timeout. DUT didn't sent expected data package.");
+        return; // leave on fail.
+      }
+      dtExpectedSeqNr = abs(dtres);
+      if ( dtExpectedSeqNr && (pgDT.SequenceNumber != dtExpectedSeqNr) )
+      {
+        snprintf( reportText, elcount(reportText), "DUT answers with wrong / unexpected data sequence number. (Got #%d, Expected #%d)", pgDT.SequenceNumber, dtExpectedSeqNr);
+        CT_STEP_END_FAIL(4, reportText);
+        return;
+      }
+
+      // Finalize PG2 with EOM...
+      CT_SendEOM(pgn2, testerAddr, dutAddr, pgRTS.TotalMessageSize, pgRTS.TotalNumberOfPackets);
+    }
+
+    // check for inner RTS in msgbuffer.
+    // Get all TP.CM_RTS for current pgn from DUT (dutAddr) since the request 2 (treq2 timestamp)
+    if ( CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, treq2, dutAddr, gc_TPCM_CTRL_WORD_RTS, pgn2))
+    {
+      rtsTime = gMsgBuf[bufIndices[0]].time_ns;
+      eomTime = pgEOM.time_ns;
+      //write("RTSTIME=%.6f, EOMTime=%.6f", CT_Ns2Sec(rtsTime), CT_Ns2Sec(eomTime));
+      // there are RTS found...
+      if (rtsTime <= eomTime)
+      {
+        snprintf(reportText, elcount(reportText), "DUT sends TP.CM_RTS for PGN2 request, during active transport @~%.6f", CT_Ns2Sec(rtsTime));
+        CT_STEP_END_FAIL(5, reportText);
+        return; // leave on fail.
+      }
+    }
+  
+    CT_STEP_END_PASS(1);
+    
+    // wait T3 to timeout every potentially open.
+    CT_WAIT(gc_TIMEOUT_T3);
+  
+  } // end pgn loop (CT_LOOP)
+  
+}
+
+
+
+// ==============================================================================================================
+// COMBI for 24-27 - core functionality. 
+// ==============================================================================================================
+// FuncPath's:
+// 01: DUT behaviour ok. (PASS)
+// 02: Finalization of TP1 from DUT to TOOL not detected. (FAIL)
+// 03: RTS of TP1 timeout (FAIL)
+// 04: RTS of TP2 timeout (FAIL)
+// 05: TP.DT of TP1 timeout (FAIL)
+// 06: TP.DT of TP2 timeout (FAIL)
+// 07: TP.DT of TP1 sequence number error (FAIL)
+// 08: TP.DT of TP2 sequence number error (FAIL)
+// 09: DUT sends aborts for TP1. (FAIL)
+// 10: DUT sends aborts for TP2. (FAIL)
+// 11: TPs seem not to be simultaneous due R2 is not within [R1;E1] (FAIL)
+// 12: PGI inconsistency (FAIL)
+// 13: CTS of TP2 timeout (FAIL)
+// 14: CTS of TP2 Error: Number of packets that can be sent error. (FAIL)
+// 15: CTS of TP2 Error: Next packet number to be send error. (FAIL)
+// 16: EOM of TP2 error (FAIL)
+// 17: EOM of TP2 error (FAIL)
+// 18: BAM of TP2 timeout (FAIL)
+// 19: RTS of TP2 Error: Total number of packets error. (FAIL)
+// 20: BAM of TP2 error: Total number of packets error. (FAIL)
+// 21: Multiple CTS or CTS within transport error in TP2. (FAIL)
+void CTF_A07_COMBI_24_TO_26(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long], byte caseNr)
+{
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 stepTime;
+  dword pgn;
+  dword tcid;
+  byte ok;
+  byte eomFound;
+  int tpChkRes;
+  int tdChkRes;
+  byte thirdNodeAddr;
+  int64 treq1,treq2;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS1;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS2;
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS2;
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM2;
+  pg J1939::J1939_CT_RT::TPCMxx pgBAM2;
+  pg J1939::J1939_CT_RT::TPDT pgFirstDT2;
+  pg J1939::J1939_CT_RT::TPDT pgLastDT2;
+  pg J1939::J1939_CT_RT::TPDT pgDT2;
+  pg * pgR;
+  qword R1,R2,E1;
+  byte inRange;
+  int64 cts1time;
+  byte ctsLatency,tpdtLatency,eomLatency;
+  
+  R2=0;
+  ctsLatency = 50;
+  tpdtLatency = 50;
+  eomLatency = 50;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(12, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(12, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+    if (caseNr==25)
+    {
+      if (!CT_IsRTSCTS(pgis[k]))
+      {
+        CT_STEP_PGI_CFG_ERROR(12, pgis[k], "requestable non cyclic PG with DLC>8 and RTS->CTS flag");
+        ok = 0;
+      }
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  thirdNodeAddr = CT_Get_Third_Node_Adr(testerAddr, dutAddr);
+
+  // enable the IL to have the tool's node handle TP 1 (auto deactivates again after the test method is done.)
+  CT_ENABLE_TESTNODE_IL();
+  
+  // configure the IL's transport behaviour - send as slowly as possible with one packet per CTS. ( reset at the end of the function again - so do no early returns!) 
+  TestILSetNodeProperty(TOOL, "Packets_Per_CTS", 1);
+  TestILSetNodeProperty(TOOL, "CTSLatency", ctsLatency);
+  TestILSetNodeProperty(TOOL, "TPDTLatency", tpdtLatency);
+  TestILSetNodeProperty(TOOL, "EoMALatency", eomLatency);  
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+        
+    // ====================
+    // step 1/3 Request PGNs from TOOL and from a third node simultaneously.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Request PGNs from TOOL (0x%X) and from a third node (0x%X) simultaneously.", testerAddr, thirdNodeAddr);
+    stepTime = CT_STEP_BEGIN(-3, reportText);
+    
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    // request 1 - IL handles this TP 1
+    treq1 = CT_SendRequest(pgn, testerAddr, dutAddr);
+    if (CT_WaitForRTS(pgRTS1, pgn, dutAddr, testerAddr))
+    {
+        snprintf(reportText, elcount(reportText), "RTS of TP1 from DUT (0x%X) to the TOOL (0x%X) timeout.", dutAddr, testerAddr);
+        CT_STEP_END_FAIL(3, reportText);
+        break; // leave on fail.
+    }
+    cts1time = pgRTS1.time_ns + ((int64)ctsLatency-1) * 1000000;
+    
+    R1 = pgRTS1.time_ns;
+
+    // =============================================== TP 2  ==================================================================
+    if ( caseNr == 24 )
+    {
+      // ----------------------------------------------------------------------------------------------------[TC24: 0x001800]-
+      // 0: OK
+      // 1: DT Timeout
+      // 2: RTS timeout
+      // 3: DT seq nr failure
+      // 4: BAM timeout ( not here due asBAM is set to false )
+      // 5: RTS error (inconsistent size and total number of packages)
+      // 6: BAM error (inconsistent size and total number of packages) ( not here due as BAM is sset to false )
+      tpChkRes = CT_Check_TP_AsResponder(   thirdNodeAddr, dutAddr        //   byte reqSrcAddr, byte reqDstAddr
+                                          , pgn                           // , dword pgn
+                                          , treq2                         // , int64& reqTime
+                                          , pgR                           // , pg* pgOutResponse
+                                          , pgRTS2                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                          , pgBAM2                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutBAM
+                                          , pgCTS2                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutCTS
+                                          , pgDT2                         // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                          , pgEOM2                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                          , 100                           // , word eomDelay
+                                          , 0                             // , byte asBAM
+                                          , reportText);                  // , char errText[])
+      if (tpChkRes != 0)
+      {
+        switch(tpChkRes)
+        {
+          case 1: CT_STEP_END_FAIL(6, reportText); break;
+          case 2: CT_STEP_END_FAIL(4, reportText); break;
+          case 3: CT_STEP_END_FAIL(8, reportText); break;
+          case 5: CT_STEP_END_FAIL(19, reportText); break;
+        }
+        
+        return; // leave on fail.
+      };
+      R2 = pgRTS2.time_ns;
+      // ---------------------------------------------------------------------------------------------------------------------
+    }
+    else if (caseNr == 25)
+    {
+      // ----------------------------------------------------------------------------------------------------[TC25: 0x001900]-
+      // 0: OK
+      // 1: CTS Timeout
+      // 2: CTS Error: Number of packets that can be sent error.
+      // 3: CTS Error: Next packet number to be send error.
+      // 4: EOM Timeout
+      // 5: EOM Error: Total message size error.
+      // 6: responder sent abort.
+      // 7: Dut declined with abort. (answer in pgOutLastCTS)
+      // 8: Sending TP.DT error.
+      // 9: Multiple CTS or CTS within transport error.
+      tpChkRes = CT_Check_TP_AsOriginator(   thirdNodeAddr, dutAddr       //   byte originatorAddr, byte responderAddr
+                                           , pgn                          // , dword pgn
+                                           , 1                            // , pgnTest
+                                           , 16                           // , byte messageSize
+                                           , 255                          // , byte rtsMaxPkgs
+                                           , pgRTS2                       // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                           , pgCTS2                       // , pg J1939::J1939_CT_RT::TPCMxx pgOutLastCTS
+                                           , pgFirstDT2                   // , pg J1939::J1939_CT_RT::TPDT pgOutFirstDT
+                                           , pgLastDT2                    // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                           , pgEOM2                       // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                           , 50                           // , word dtDistance
+                                           , 1                            // , useDefaultDtPrio
+                                           , reportText);                 // , char errText[])
+      if (tpChkRes != 0)
+      {
+        ok = 0;
+        switch(tpChkRes)
+        {
+          case 1: CT_STEP_END_FAIL(13, reportText); break;
+          case 2: CT_STEP_END_FAIL(14, reportText); break;
+          case 3: CT_STEP_END_FAIL(15, reportText); break;
+          case 4: CT_STEP_END_FAIL(16, reportText); break;
+          case 5: CT_STEP_END_FAIL(17, reportText); break;
+          case 6: CT_STEP_END_FAIL(10, "DUT sends aborts for TP2"); break;
+          case 7: CT_STEP_END_FAIL(10, "DUT sends aborts for TP2"); break;
+          case 8: /* ignore */; break;
+          case 9: CT_STEP_END_FAIL(21, reportText); break;
+        }
+        
+        return; // leave on fail.
+      };
+      R2 = pgCTS2.time_ns;
+      // ---------------------------------------------------------------------------------------------------------------------
+    }
+    else if (caseNr == 26)
+    {
+      // ----------------------------------------------------------------------------------------------------[TC26: 0x001A00]-
+      // 0: OK
+      // 1: DT Timeout
+      // 2: RTS timeout
+      // 3: DT seq nr failure
+      // 4: BAM timeout
+      // 5: RTS error (inconsistent size and total number of packages) ( not here due asBAM is used )
+      // 6: BAM error (inconsistent size and total number of packages)
+      tpChkRes = CT_Check_TP_AsResponder(   thirdNodeAddr, dutAddr //   byte reqSrcAddr, byte reqDstAddr
+                                          , pgn                           // , dword pgn
+                                          , treq2                         // , int64& reqTime
+                                          , pgR                           // , pg* pgOutResponse
+                                          , pgRTS2                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutRTS
+                                          , pgBAM2                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutBAM
+                                          , pgCTS2                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutCTS
+                                          , pgDT2                         // , pg J1939::J1939_CT_RT::TPDT pgOutLastDT
+                                          , pgEOM2                        // , pg J1939::J1939_CT_RT::TPCMxx pgOutEOM
+                                          , 100                           // , word eomDelay
+                                          , 1                             // , byte asBAM
+                                          , reportText);                  // , char errText[])
+      if (tpChkRes != 0)
+      {
+        switch(tpChkRes)
+        {
+          case 1: CT_STEP_END_FAIL(6, reportText); break;
+          case 2: CT_STEP_END_FAIL(4, reportText); break;
+          case 3: CT_STEP_END_FAIL(8, reportText); break;
+          case 4: CT_STEP_END_FAIL(18, reportText); break;
+          case 6: CT_STEP_END_FAIL(20, reportText); break;
+        }
+        
+        return; // leave on fail.
+      };
+      R2 = pgBAM2.time_ns;
+      // ---------------------------------------------------------------------------------------------------------------------
+    }
+    // ======================================================================================================================
+    
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/3 Wait TP1 to be done.
+    // ====================
+    CT_STEP_BEGIN("Check for TP1 to be done and wait if already running...");
+    
+    // seach for EOM of TP1, in the case the test missed it...
+    if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, testerAddr, dutAddr, gc_TPCM_CTRL_WORD_EOM, pgn))
+    {
+      E1 = gMsgBuf[bufIndices[0]].time_ns;
+      eomFound = 1; // mark eom found.
+    }
+    else
+    {
+      pg* pgResp1;
+      eomFound = 1;
+      if (testWaitForJ1939PG(pgn, dutAddr, testerAddr, gc_TP_MAX_DURATION) != 1)
+      {
+        snprintf(reportText, elcount(reportText), "Finalization of TP1 from DUT (0x%X) to TOOL (0x%X) not detected.", dutAddr, testerAddr);
+        eomFound = 0;
+      }
+      
+      // now check the finalization error case...
+      if (eomFound)
+      {
+        testGetWaitJ1939PGData(pgResp1);
+        E1 = pgResp1.time_ns;
+      }
+      
+    }
+
+    // Check TP.DT seq error and timeout for TP1...
+    tdChkRes = CT_Check_TPDT_In_MsgBuf(pgRTS1.TotalNumberOfPackets, cts1time, dutAddr, testerAddr, errText);
+    if (tdChkRes>0)
+    {
+      // dt timeout
+      CT_STEP_END_FAIL(5, errText);
+      return; // leave on fail.
+    }
+    if (tdChkRes<0)
+    {
+      // td seq error.
+      CT_STEP_END_FAIL(7, errText);
+      return; // leave on fail.
+    }
+
+    // if the prevously eom check faild, then finalization error of TP1 is left to report AFTER the TD's in buffer are checked with a higher error prio.
+    if (!eomFound) 
+    {
+      CT_STEP_END_FAIL(2, reportText);
+      return; // leave on fail.
+    }
+    
+    
+    CT_WAIT(gc_TIMEOUT_TR);
+    CT_STEP_END_PASS(0);
+    
+    if (!CT_STEP_CHECK_NO_ABORTS(0, 9, dutAddr, testerAddr, gc_BC_ADDR, stepTime, "DUT sends aborts for TP1."))
+    {
+      break;
+    }
+    if (!CT_STEP_CHECK_NO_ABORTS(1, 10, dutAddr, thirdNodeAddr, gc_BC_ADDR, stepTime, "DUT sends aborts for TP2."))
+    {
+      break;
+    }
+    
+    
+    // ====================
+    // step 3/3 Check TP's to be simultaneous.
+    // ====================
+    CT_STEP_BEGIN("Check TP1 runs simultaneous to TP2...");
+    {
+      inRange = (R2>=R1) && (R2<=E1);
+      
+      snprintf(reportText, elcount(reportText), "R1 = %.06f", CT_Ns2Sec(R1));
+      CT_Info(1, "", reportText);
+      snprintf(reportText, elcount(reportText), "R2 = %.06f", CT_Ns2Sec(R2));
+      CT_Info(1, "", reportText);
+      snprintf(reportText, elcount(reportText), "E1 = %.06f", CT_Ns2Sec(E1));
+      CT_Info(1, "", reportText);
+      snprintf(reportText, elcount(reportText), "R2 is in range of [R1;E1]: %d", inRange);
+      CT_Info(1, "", reportText);
+      if (!inRange)
+      {
+        CT_STEP_END_FAIL(11,"TPs seem not to be simultaneous due R2 is not within [R1;E1]");
+        break; // leave on error.
+      }
+    }
+    CT_STEP_END_PASS(1);
+    
+  } // end pgn loop (CT_LOOP)
+    
+}
+
+// ==============================================================================================================
+// functionality of the test A7 24 TP Simultaneous TX
+// ==============================================================================================================
+void CTF_A07_24_TP_Simultaneous_TX(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  CTF_A07_COMBI_24_TO_26(testerAddr, dutAddr, pgis, 24);
+}
+
+
+// ==============================================================================================================
+// functionality of the test A7 25 TP Simultaneous TX RX
+// ==============================================================================================================
+void CTF_A07_25_TP_Simultaneous_TX_RX(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  CTF_A07_COMBI_24_TO_26(testerAddr, dutAddr, pgis, 25);
+}
+
+// ==============================================================================================================
+// functionality of the test A7 26 TP Simultaneous TX BAM
+// ==============================================================================================================
+void CTF_A07_26_TP_Simultaneous_TX_BAM(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  CTF_A07_COMBI_24_TO_26(testerAddr, dutAddr, pgis, 26);
+}
+
+// ==============================================================================================================
+// functionality of the test A7 27 TP Simultaneous TX RX BAM
+// ==============================================================================================================
+// FuncPath's:
+// 01: DUT behaviour ok. (PASS)
+// 02: DUT does not respond simultaneous with ACL on new address (timeout). (FAIL)
+// 03: DUT's address claimed but with wrong content. (FAIL)
+// 04: RTS of TP1 from DUT to the TOOL not found. (FAIL)
+// 05: PGI inconsistency (FAIL)
+// 06: DUT does not support commanded address (CA). (INCONCLUSIVE)
+void CTF_A07_27_TP_Simultaneous_TX_RX_BAM(byte testerAddr, byte dutAddr, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  char reportText[1024];
+  int64 stepTime;
+  dword pgn;
+  byte ok;
+  byte thirdNodeAddr;
+  byte newAdr;
+  word treq1,treq2;
+  pg* pgResp1;
+  qword R1,R2,E1;
+  byte inRange;
+  byte caResult;
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  pg J1939::J1939_CT_RT::AC pgACDUT;
+  pg J1939::J1939_CT_RT::CA pgCA;
+  pg J1939::J1939_CT_RT::TPCMxx pgAbrt;
+
+  // PRECONDITIONS...
+  if (!CT_CHECK_CA_SUPPORT_INCONCLUSIVE(6)) return;
+  
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  thirdNodeAddr = CT_Get_Third_Node_Adr(testerAddr, dutAddr);
+  newAdr = CT_Get_Fourth_Node_Adr(testerAddr, dutAddr, thirdNodeAddr);
+  pgCA.edp = 0;
+  pgCA.dp = 0;
+  pgCA.sa = thirdNodeAddr;
+  pgCA.AddressAssignment = newAdr;
+
+  // enable the IL to have the tool's node handle TP 1 (auto deactivates again after the test method is done.)
+  CT_ENABLE_TESTNODE_IL();
+  
+  // configure the IL's transport behaviour - send as slowly as possible with one packet per CTS. ( reset at the end of the function again - so do no early returns!) 
+  TestILSetNodeProperty(TOOL, "Packets_Per_CTS", 1);
+  TestILSetNodeProperty(TOOL, "CTSLatency", 50);
+  TestILSetNodeProperty(TOOL, "TPDTLatency", 50);
+  TestILSetNodeProperty(TOOL, "EoMALatency", 50);
+  
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+        
+    // ====================
+    // step 1/2 Request PGNs from TOOL and start TP2 from a third node simultaneously.
+    // ====================
+    CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+    
+    MsgBuf_StartRecording(); // for subsequent runs also clears the messagebuffer, to keep it small.
+    
+    snprintf(reportText, elcount(reportText), "Request PGNs from TOOL (0x%X) and start TP2 from a third node (0x%X) simultaneously.", testerAddr, thirdNodeAddr);
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+    
+    // request pgn from testerAddr to dutAddr and check following up tp.
+    // request 1 - IL handles this TP 1
+    treq1 = CT_SendRequest(pgn, testerAddr, dutAddr);
+    if (CT_WaitForRTS(pgRTS, pgn, dutAddr, testerAddr))
+    {
+        snprintf(reportText, elcount(reportText), "RTS of TP1 from DUT (0x%X) to the TOOL (0x%X) not found.", dutAddr, testerAddr);
+        CT_STEP_END_FAIL(4, reportText);
+        break; // leave on fail.
+    }
+    R1 = pgRTS.time_ns;
+    
+    // TP2 - an IL testfunction handles this
+    ok = 1;
+    caResult = CT_CommandedDUTAdressAndAwaitResponse(pgACDUT, pgCA, gc_RESP_TIMEOUT,0, 0);
+    if (caResult == 1)
+    {
+      CT_STEP_END_FAIL(2, "DUT does not respond simultaneous with ACL on new address (timeout).");
+      return;
+    }
+    else if (caResult == 2)
+    {
+      snprintf(reportText, elcount(reportText), "DUT's address claimed but with wrong content. Got:0x%llX. Expected:0x%llX.", pgACDUT.qword(0), gDUT_DevName);
+      CT_STEP_END_FAIL(3, reportText);
+      ok = 0;
+    }
+    if (ok) CT_STEP_END_PASS(0);
+    R2 = pgACDUT.time_ns;
+    E1 = pgACDUT.time_ns;
+    
+    
+    // ====================
+    // step 2/2 Reset DUT's address
+    // ====================
+    CT_STEP_CA_RESET_DUT_ADR(gFuncPath);
+    
+    CT_WAIT(gc_TIMEOUT_T3);
+    
+    // 
+    // Left out. Seems not to make sense or is too complex to determin this way.
+    //
+    // // ====================
+    // // step 3/3 Check TP's to be simultaneous.
+    // // ====================
+    // CT_STEP_BEGIN("Check TP1 runs simultaneous to TP2...");
+    // {
+    //   if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, newAdr, gc_BC_ADDR, gc_TPCM_CTRL_WORD_EOM, pgn))
+    //   {
+    //     E1 = gMsgBuf[bufIndices[0]].time_ns;
+    //   }
+    //   inRange = (R2>=R1) && (R2<=E1);
+    //   
+    //   snprintf(reportText, elcount(reportText), "R1 = %.06f", CT_Ns2Sec(R1));
+    //   CT_Info(1, "", reportText);
+    //   snprintf(reportText, elcount(reportText), "R2 = %.06f", CT_Ns2Sec(R2));
+    //   CT_Info(1, "", reportText);
+    //   snprintf(reportText, elcount(reportText), "E1 = %.06f", CT_Ns2Sec(E1));
+    //   CT_Info(1, "", reportText);
+    //   snprintf(reportText, elcount(reportText), "R2 is in range of [R1;E1]: %d", inRange);
+    //   CT_Info(1, "", reportText);
+    //   if (!inRange)
+    //   {
+    //     CT_STEP_END_FAIL(5,"TPs seem not to be simultaneous due R2 is not within [R1;E1]");
+    //     break; // leave on error.
+    //   }
+    // }
+    if (ok) CT_STEP_END_PASS(1);
+    
+  } // end pgn loop (CT_LOOP)
+  
+}
+
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A7 28 TP Component ID format
+// ==============================================================================================================
+// FuncPath's:
+// 1: DUT response ok. (PASS)
+// 2: Timeout (INCONCLUSIVE)
+// 3: DUT sends NACK (INCONCLUSIVE)
+// 4: Payload does not contain 4 asteris-delimiter bytes in ASCII (0x2A) (FAIL)
+// 5: Extranous field error. Payload does not end with asterisk-delimiter byte. (FAIL)
+void CTF_A07_28_TP_Component_ID_Format(byte testerAddr, byte dutAddr)
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  word bufIndices[long];
+  char reportText[1024];
+  int64 stepTime;
+  byte prio;
+  dword pgn;
+  long lRes;
+  byte timedout;
+  word i;
+  byte delimcount;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  prio = gc_PRIO_DEFAULT;
+  pgn = gc_PGN_COMPONENT_ID;
+  
+  // ====================
+  // step 1/2 request
+  // ====================
+  snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) over TP...", testerAddr, testerAddr, pgn, pgn, dutAddr, dutAddr);
+  stepTime = CT_STEP_BEGIN(-2, reportText);
+
+  CT_WAIT_UNTIL_NO_TP(dutAddr, gc_BC_ADDR); // Await no node started a TP. else there may be a DT with sequence #1 before the TP init and the step-time.
+
+  MsgBuf_StartRecording();
+  
+  timedout = 0;
+  pgR.pgn = pgn;
+  lRes = J1939TestRequest(pgR, pgR.dlc, testerAddr, dutAddr, gc_RESP_TIMEOUT, 2);
+  
+  if (lRes == 0)
+  {
+    // timeout
+    timedout = 1;
+  }
+  else if (lRes == 1)
+  {
+    // response received.
+    // do nothing but continue with next step...
+  }
+  else if (lRes == 2)
+  {
+    // nack
+    CT_STEP_END_INCONCLUSIVE(3, "NACK received for Component ID PGN. Checking format of the PGN's data is not possible.");
+    return; // leave on fail.
+  }
+  else if (lRes == 3)
+  {
+    // positive ack - await pg within T3
+    if (testWaitForJ1939PG(pgn, dutAddr, testerAddr, gc_TIMEOUT_T3) != 1)
+    {
+      timedout = 1;
+    }
+    testGetWaitJ1939PGData(pgR);
+  }
+  else
+  {
+    timedout = 1;
+  }
+  
+  if (timedout)
+  {
+    CT_STEP_END_INCONCLUSIVE(2, "Component ID PGN timeout. Checking format of the PGN's data is not possible.");
+    return; // leave on fail.
+  }
+  
+  CT_WAIT(1); // syncs trance output.
+  CT_STEP_END_PASS(0);
+
+  // ====================
+  // step 2/2 Check data...
+  // ====================
+  CT_STEP_BEGIN("Checking data contains 4 asterisk-delimiters in ASCII (0x2A)...");
+  
+  delimcount = 0;
+  for (i=0; i<pgR.dlc; i++)
+  {
+    if (pgR.byte(i)==0x2a) delimcount++;
+    if (delimcount>4) break;
+  }
+  
+  if (delimcount != 4)
+  {
+    CT_STEP_END_FAIL(4, "Payload does not contain 4 asterisk delimiter bytes in ASCII (0x2A)");
+    return; // leave on fail.
+  }
+  else
+  {
+    // delimcount is 4... check that the last byte is a delimiter. (else this is an extranous beyond.
+    if (pgR.byte(pgR.dlc-1) != 0x2a)
+    {
+      CT_STEP_END_FAIL(5, "Extranous field error. Payload does not end with asterisk-delimiter byte.");
+      return; // leave on fail.
+    }
+  }
+  
+  CT_STEP_END_PASS(1);
+    
+}

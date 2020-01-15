@@ -1,0 +1,59 @@
+/*@!Encoding:1252*/
+
+variables
+{
+  UdpSocket gSocket;
+}
+
+on start
+{
+  long result;
+  
+  // Open an UDP socket. As source address 0.0.0.0 is used, this means that
+  // the configure address of the TCP/IP stack is used. See TCP/IP stack
+  // configuration dialog in the simulation setup
+  // No port is used, this means a source port is dynamically assign
+  // by the TCP/IP stack.
+  gSocket = UdpSocket::Open( IP_Endpoint(0.0.0.0) );
+  
+  if (IpGetLastError() != 0)
+  {
+    // if UdpSocket::Open fails, we print a message to the write window
+    write( "<%BASE_FILE_NAME%> UdpSocket::Open failed with result %d", IpGetLastError() );
+  }
+
+  // Set the inteface by means of multicast transmitts should be sent.
+  // The TCP/IP stack has configured 2 VLANs, every VLAN is represented
+  // as an additional Ethernet adapter of the node. The first adapter,
+  // without VLAN has the interface index 1.
+  // Here we want to transmit the multicasts in VLAN with ID 2, which
+  // is represented by the interface index 3
+  result = gSocket.SetMulticastInterface( 3 );
+  
+  if (result != 0)
+  {
+    write( "<%BASE_FILE_NAME%> ERROR: IpSetMulticastInterface failed with result %d", result);
+  }
+}
+
+on preStop
+{
+  // Close socket on measurement stop
+  gSocket.Close();
+}
+
+on sysvar sysvar::Sender::TxButton
+{
+  // send on button down
+  if (@this == 1)
+  {
+    char text[200];
+    
+    // get string from sysvar 
+    sysGetVariableString( sysvar::Sender::TxText, text, elcount(text) );
+    
+    // send text to IP address/UDP port of the receiver
+    gSocket.SendTo( IP_Endpoint(239.0.2.1:40001), text, strlen(text) );
+  }
+}
+

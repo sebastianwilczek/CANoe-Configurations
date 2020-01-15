@@ -1,0 +1,430 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "General.cin"
+  #include "Avb.cin"
+  #include "Media.cin"
+}
+
+variables
+{
+  const word kMixer_UniqueId = 0xFF;
+  
+  const byte kMixer_MaxInputs = 3;
+  const word kMixer_MaxBuffers = 512;
+  
+  const dword kMixer_MaxBufferSize = 1024 * 32;
+     
+  byte gMixer_StreamDestinationAddress[6] = { 1, 0, 0, 0, 0, 0xFF };
+  
+  dword gMixer_ListenerWildcardHandle,
+        gMixer_TalkerHandle,  
+        mMixer_ReadIndex, 
+        mMixer_WriteIndex;
+  
+  struct 
+  {
+    dword mHandle;
+    byte  mBuffer[kMixer_MaxBufferSize];
+    dword mWriteIndex;
+    dword mReadIndex;
+  } gListenerContext[kMixer_MaxInputs];
+}
+
+on preStop
+{
+  long i;
+  dword ret;
+    
+  for (i = elCount(gListenerContext) - 1; i >= 0; i--)
+  {
+    if (gListenerContext[i].mHandle != 0)
+    {
+      ret = AvbCloseListener(gListenerContext[i].mHandle);
+      
+      if (Avb_StopIfError(ret, "AvbCloseTalker") != 0)
+      {
+        return;
+      }
+    
+      gListenerContext[i].mHandle = kMedia_InvalidHandle;
+    }
+  }  
+     
+  if (gMixer_ListenerWildcardHandle != 0)
+  {
+    ret = AvbCloseListener(gMixer_ListenerWildcardHandle);
+    
+    if (Avb_StopIfError(ret, "AvbCloseTalker") != 0)
+    {
+      return;
+    }
+  
+    gMixer_ListenerWildcardHandle = kAvb_InvalidHandle;
+  }
+}
+
+on start
+{
+  long ret; 
+  
+  ret = AvbSetVerbosity(3);
+  
+  if (Avb_StopIfError(ret, "AvbSetVerbosity") != 0)
+  {
+    return;
+  }
+    
+  ret = AvbSetProperty("StreamReservation", 0);
+    
+  if (Avb_StopIfError(ret, "AvbSetProperty") != 0)
+  {
+    return;
+  }
+  
+  gMixer_ListenerWildcardHandle = AvbOpenListener();
+    
+  if (Avb_CheckHandleAndStopIfError(gMixer_ListenerWildcardHandle, "AvbOpenListener") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbListen(gMixer_ListenerWildcardHandle, "OnAvbListen");
+  
+  if (Avb_StopIfError(ret, "AvbListen") != 0)
+  {
+    return;
+  }
+  
+  gMixer_TalkerHandle = AvbOpenTalker(kMixer_UniqueId);
+  
+  if (Avb_CheckHandleAndStopIfError(gMixer_TalkerHandle, "AvbOpenTalker") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbSetAafFormat(gMixer_TalkerHandle, 4);
+ 
+  if (Avb_StopIfError(ret, "AvbSetAafFormat") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbSetAafBitDepth(gMixer_TalkerHandle, 16);
+ 
+  if (Avb_StopIfError(ret, "AvbSetAafBitDepth") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbConnect(gMixer_TalkerHandle, gMixer_StreamDestinationAddress, "OnAvbConnect");
+  
+  if (Avb_StopIfError(ret, "AvbConnect") != 0)
+  {
+    return;
+  }
+}
+
+void OnAvbConnect(dword talkerHandle, dword result)
+{  
+  if (result != kAvb_OK)
+  {
+    Avb_WriteErrorAndStop(result, "OnAvbConnect");
+    return;
+  }
+}
+
+void OnAvbListen(dword listenerHandle, dword result)
+{
+  long ret;
+  dword handle, streamUniqueId;
+  byte buffer[kMixer_MaxInputs][kMixer_MaxBufferSize];
+  
+  if (result != kAvb_OK)
+  {
+    Avb_WriteErrorAndStop(result, "OnAvbListen");
+    return;
+  }
+  
+  handle = AvbAccept(listenerHandle);
+  
+  if (Avb_CheckHandleAndStopIfError(handle, "AvbAccept") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbGetStreamUniqueId(handle, streamUniqueId);
+  
+  if (Avb_StopIfError(ret, "AvbGetStreamUniqueId") != 0)
+  {
+    return;
+  }
+      
+  if (streamUniqueId > kMixer_MaxInputs)
+  {
+    ret = AvbCloseListener(handle);
+    
+    if (Avb_StopIfError(ret, "AvbCloseListener") != 0)
+    {
+      return;
+    }
+    
+    return;
+  }
+  
+  gListenerContext[streamUniqueId - 1].mHandle = handle; 
+  
+  Mixer_Receive(handle, buffer[streamUniqueId - 1], elCount(buffer[streamUniqueId - 1]));
+}
+
+void OnAvbSend(dword listenerHandle, dword result, byte buffer[], dword length)
+{
+  if (Avb_StopIfError(result, "OnAvbSend") != 0)
+  {
+    return;
+  }
+  
+  mMixer_ReadIndex++;
+  mMixer_ReadIndex %= kMixer_MaxBuffers;
+}
+
+void OnAvbReceive(dword listenerHandle, dword result, byte buffer[], dword length)
+{
+  dword i, streamUniqueId, size1, size2;
+  double energy;
+  
+  if (result == kAvb_InsufficientBuffer)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: insufficient buffer, data truncated...", result);
+  }
+  else if (result == kAvb_PresentationTimeLessThanPacketTime)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: presentation time is less than global PTP time at packet reception...", result);
+  }
+  else if (result != 0)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: result is %d", result);
+    Stop();
+    return;
+  }
+  
+  result = AvbGetStreamUniqueId(listenerHandle, streamUniqueId);
+  
+  if (Avb_StopIfError(result, "AvbGetStreamUniqueId") != 0)
+  {
+    return;
+  }
+  
+  energy = 0;
+  
+  for (i = 0; i < length - 1; i += 2)
+  {   
+    energy += _pow((((double)(((int)((int)buffer[i + 1] << 8) | ((int)buffer[i])))) / (double)kMaxInt), 2.);
+  }
+    
+  switch (streamUniqueId)
+  {
+    case 1:
+      @Mixer::AmplitudeInput1 = 100. * sqrt(energy / length * __size_of(int)) / 0.4;
+      break;
+    case 2:
+      @Mixer::AmplitudeInput2 = 100. * sqrt(energy / length * __size_of(int)) / 0.4;
+      break;
+    case 3:
+      @Mixer::AmplitudeInput3 = 100. * sqrt(energy / length * __size_of(int)) / 0.4;
+      break;
+    default:
+      break;
+  }
+    
+  if (gListenerContext[streamUniqueId - 1].mWriteIndex >= gListenerContext[streamUniqueId - 1].mReadIndex)
+  {
+    size1 = elCount(gListenerContext[streamUniqueId - 1].mBuffer) - gListenerContext[streamUniqueId - 1].mWriteIndex;
+    size2 = gListenerContext[streamUniqueId - 1].mReadIndex;
+  }
+  else
+  {
+    size1 = gListenerContext[streamUniqueId - 1].mReadIndex - gListenerContext[streamUniqueId - 1].mWriteIndex;
+    size2 = 0;
+  }
+  
+  Assert(size1 + size2 >= length, "size1 + size2 >= length, overflow of rcv buffer!");
+  
+  size1 = _min(length, size1);
+  size2 = length - size1;
+  
+  Assert(size1 + size2 == length, "size1 + size2 == length");
+  
+  memcpy_off(gListenerContext[streamUniqueId - 1].mBuffer, gListenerContext[streamUniqueId - 1].mWriteIndex, buffer, 0, size1);
+  memcpy_off(gListenerContext[streamUniqueId - 1].mBuffer, 0, buffer, size1, size2);
+  
+  gListenerContext[streamUniqueId - 1].mWriteIndex += length;
+  gListenerContext[streamUniqueId - 1].mWriteIndex %= elCount(gListenerContext[streamUniqueId - 1].mBuffer);
+     
+  Mixer_Send();
+  
+  Mixer_Receive(listenerHandle, buffer, elCount(buffer));
+}
+
+void Mixer_Receive(dword listenerHandle, byte buffer[], dword size)
+{
+  long ret;
+  
+  if (size == 0)
+  {
+    write("!!");
+  }
+  
+  ret = AvbReceive(listenerHandle, buffer, size, "OnAvbReceive");
+  
+  if (Avb_StopIfError(ret, "AvbReceive") != kAvb_OK)
+  {
+    return;
+  }
+  
+  if (ret != kAvb_IoPending)
+  {
+    OnAvbReceive(listenerHandle, ret, buffer, size);
+  }
+}
+
+void Mixer_Send()
+{
+  struct
+  {
+    dword mSize1;
+    dword mSize2;
+  } readContext[kMixer_MaxInputs];
+ 
+  byte masterBuffer[kMixer_MaxBuffers][kMixer_MaxBufferSize];
+  
+  dword i, j, k, initial, length, result, size1, size2;
+  double energy;
+  int value, volume;
+  char uniqueId[16], numberedVolumeInput[64];
+   
+  length = elCount(gListenerContext[0].mBuffer);
+  
+  for (j = 0; j < elCount(gListenerContext); j++)
+  {
+    if (gListenerContext[j].mWriteIndex >= gListenerContext[j].mReadIndex)
+    {
+      readContext[j].mSize1 = gListenerContext[j].mWriteIndex - gListenerContext[j].mReadIndex;
+      readContext[j].mSize2 = 0;
+    }
+    else
+    {
+      readContext[j].mSize1 = elCount(gListenerContext[j].mBuffer) - gListenerContext[j].mReadIndex;
+      readContext[j].mSize2 = gListenerContext[j].mWriteIndex;
+    }
+  
+    length = _min(length, readContext[j].mSize1 + readContext[j].mSize2);
+  }
+  
+  if (initial == 0)
+  {
+    // Buffer a few ms, then start
+    
+    if (length > 10000)
+    {
+      initial = 1;
+    }
+    else return;
+  }
+  
+  if (length == 0)
+  {
+    return;
+  }
+  
+  if (mMixer_WriteIndex >= mMixer_ReadIndex)
+  {
+    size1 = kMixer_MaxBuffers - mMixer_WriteIndex;
+    size2 = mMixer_ReadIndex;
+  }
+  else
+  {
+    size1 = mMixer_ReadIndex - mMixer_WriteIndex;
+    size2 = 0;
+  }
+  
+  if (size1 + size2 < 2)
+  {
+    WriteAndStop("Overflow of send buffer, size1 = %d, size2 = %d, length = %d", size1, size2, length);
+    return;
+  }
+  
+  if (length > kMixer_MaxBufferSize)
+  {
+    WriteAndStop("Overflow of send buffer, length = %d", length);
+    return;
+  }
+        
+  for (i = 0; i < length; i++)
+  {
+    masterBuffer[mMixer_WriteIndex][i] = 0;
+  }
+    
+  for (j = 0; j < elCount(gListenerContext); j++)
+  {
+    ltoa(j + 1, uniqueId, 10);
+    
+    strncpy(numberedVolumeInput, "VolumeInput", elCount(numberedVolumeInput));
+    strncat(numberedVolumeInput, uniqueId, elCount(numberedVolumeInput));
+    
+    volume = sysGetVariableInt("Mixer", numberedVolumeInput);
+    
+    size1 = _min(readContext[j].mSize1, length);
+    
+    for (i = 0; i < size1; i += __size_of(int))
+    {
+      value = (int)((double)volume / 100. * (double)@Mixer::VolumeOutput / 100. * ((int)(gListenerContext[j].mBuffer[gListenerContext[j].mReadIndex  + i + 1] << 8) | (int)gListenerContext[j].mBuffer[gListenerContext[j].mReadIndex + i]));
+      
+      masterBuffer[mMixer_WriteIndex][i]     += value & 0xFF;//gListenerContext[j].mBuffer[gListenerContext[j].mReadIndex  + i];
+      masterBuffer[mMixer_WriteIndex][i + 1] += value >> 8;
+    }
+    
+    size2 = length - i;
+          
+    for (k = 0; k < size2; k += __size_of(int))
+    {
+      value = (int)((double)volume / 100. * (double)@Mixer::VolumeOutput / 100. * ((int)(gListenerContext[j].mBuffer[k + 1] << 8) | (int)gListenerContext[j].mBuffer[k]));
+      
+      masterBuffer[mMixer_WriteIndex][i + k]     += value & 0xFF;
+      masterBuffer[mMixer_WriteIndex][i + k + 1] += value >> 8;
+    }
+    
+    Assert(size1 + size2 == length, "size1 + size2 != length");
+  }
+  
+  for (j = 0; j < elCount(gListenerContext); j++)
+  {
+    gListenerContext[j].mReadIndex += length;
+    gListenerContext[j].mReadIndex %= elCount(gListenerContext[j].mBuffer);
+  }
+  
+  result = AvbSend(gMixer_TalkerHandle, masterBuffer[mMixer_WriteIndex], length, "OnAvbSend");
+      
+  if (Avb_StopIfError(result, "AvbSend") != 0)
+  {
+    return;
+  }
+  
+  if (result != kAvb_IoPending)
+  { 
+    mMixer_ReadIndex++;
+    mMixer_ReadIndex %= kMixer_MaxBuffers;
+  }
+    
+  energy = 0;
+  
+  for (i = 0; i < length - 1; i += 2)
+  {   
+    energy += _pow((((double)(((int)((int)masterBuffer[mMixer_WriteIndex][i + 1] << 8) | ((int)masterBuffer[mMixer_WriteIndex][i])))) / (double)kMaxInt), 2.);
+  }
+    
+  @Mixer::AmplitudeOutput = 100. * sqrt(energy / length * __size_of(int)) / 0.4;
+    
+  mMixer_WriteIndex++;
+  mMixer_WriteIndex %= kMixer_MaxBuffers;
+}

@@ -1,0 +1,188 @@
+/*@!Encoding:1252*/
+/*
+ * Panel - Panel Galley Insert Basic Functionality Version 1.0
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Pr) Created 
+ */
+ variables
+{
+  const int kPanel_MaxMenuEntries = 256;
+  const int kPanel_MaxScreens     = 256;
+  
+  const int kPanel_MaxText        = 10000;
+
+  int  gPanel_Width;
+  int  gPanel_Height;
+
+  char gPanel_OutString[kPanel_MaxText];
+
+  int  gPanel_CurrentScreen;
+  int  gPanel_CurrentSelection[kPanel_MaxScreens];
+
+  int  gPanel_MenuCount;
+  int  gPanel_MenuPos[kPanel_MaxMenuEntries];
+  int  gPanel_MenuInputPos[kPanel_MaxMenuEntries];
+
+  char gPanel_CurrentCursor;
+
+  int  gPanel_Active;
+
+  msTimer gPanel_InputCursorLoop;
+  const int gPanel_CursorTimeMs = 500;
+
+  word gColumnCount = 51;
+}
+
+void Panel_AddMenu (char text[], char input[])
+{
+  int i, maxlen, inputLen;
+
+  if (kPanel_MaxMenuEntries > gPanel_MenuCount) {
+    maxlen = strlen(text);
+
+    for (i = gPanel_MenuPos[gPanel_MenuCount]; i < gPanel_MenuPos[gPanel_MenuCount] + 3; i++) {
+      gPanel_OutString[i] = ' ';
+    }
+    for (i = gPanel_MenuPos[gPanel_MenuCount] + 3; i < gPanel_MenuPos[gPanel_MenuCount] + 3 + maxlen; i++) {
+      gPanel_OutString[i] = text[i-gPanel_MenuPos[gPanel_MenuCount]-3];
+    }
+
+    gPanel_OutString[i++] = ' ';
+    gPanel_OutString[i]   = ' ';
+
+    inputLen = strlen(input);
+
+    if (inputLen > 0) {
+      gPanel_MenuInputPos[gPanel_MenuCount] = i;
+      for (i; i < gPanel_MenuInputPos[gPanel_MenuCount] + inputLen; i++) {
+        gPanel_OutString[i] = input[i-gPanel_MenuInputPos[gPanel_MenuCount]];
+      }
+    }
+    gPanel_OutString[i] = ' ';
+    gPanel_MenuInputPos[gPanel_MenuCount] = i;
+    gPanel_CurrentCursor = gPanel_OutString[i++];
+
+    while (i % gColumnCount != 0) {
+      gPanel_OutString[i++] = ' ';
+    }
+
+    gPanel_MenuPos[++gPanel_MenuCount] = i;
+  }
+}
+
+void Panel_FlushScreen ()
+{
+  int i;
+
+  if (gPanel_Active) {
+    for (i = 0; i < gPanel_MenuCount; i++) {
+      if (i == gPanel_CurrentSelection[gPanel_CurrentScreen]) {
+        gPanel_OutString[gPanel_MenuPos[gPanel_CurrentSelection[gPanel_CurrentScreen]]] = '>';
+      }
+      else {
+        gPanel_OutString[gPanel_MenuPos[i]] = ' ';
+      }
+    }
+    Panel_OnOutput(gPanel_OutString);
+  }
+}
+
+void Panel_SetCaption (char text[]) // returns next free line index
+{
+  int i, maxlen;
+
+  maxlen = strlen(text);
+  strncpy(gPanel_OutString, text, maxlen+1);
+
+  i = maxlen;
+
+  while (i % gColumnCount != 0) {
+    gPanel_OutString[i++] = ' ';
+  }
+
+  while (maxlen-- > 0) {
+    gPanel_OutString[i++] = '=';
+  }
+
+  while (i % gColumnCount != 0) {
+    gPanel_OutString[i++] = ' ';
+  }
+
+  gPanel_MenuPos[0] = i;
+}
+
+on timer gPanel_InputCursorLoop
+{
+  int i;
+  i = (i+1) % 2;
+
+  if (i) {
+    gPanel_CurrentCursor = gPanel_OutString[gPanel_MenuInputPos[gPanel_CurrentSelection[gPanel_CurrentScreen]]];
+  }
+  else {
+    gPanel_OutString[gPanel_MenuInputPos[gPanel_CurrentSelection[gPanel_CurrentScreen]]] = gPanel_CurrentCursor;
+  }
+      
+  Panel_FlushScreen();
+  SetTimer(gPanel_InputCursorLoop, gPanel_CursorTimeMs);
+}
+
+void Panel_Activate ()
+{
+  GAIN_PowerUp();
+
+  gPanel_Active = 1;
+
+  setTimer(gPanel_InputCursorLoop, gPanel_CursorTimeMs);
+}
+
+void Panel_Deactivate ()
+{
+  CancelTimer(gPanel_InputCursorLoop);
+  gPanel_Active = 0;
+  
+  GAIN_PowerDown();
+}
+
+void Panel_Input (char charCode)
+{
+  byte right[kPanel_MaxText];
+  int i, j, k;
+
+  for (j = gPanel_MenuInputPos[gPanel_CurrentSelection[gPanel_CurrentScreen]]; (j < kPanel_MaxText); j++) {
+    right[j-gPanel_MenuInputPos[gPanel_CurrentSelection[gPanel_CurrentScreen]]] = gPanel_OutString[j];
+  }
+
+  gPanel_CurrentCursor = right[0];
+  gPanel_OutString[gPanel_MenuInputPos[gPanel_CurrentSelection[gPanel_CurrentScreen]]] = charCode;
+
+  i++;
+  k = 0;
+  for (i = gPanel_MenuInputPos[gPanel_CurrentSelection[gPanel_CurrentScreen]] + 1; i < j; i++) {
+    gPanel_OutString[i] = right[k++];
+  }
+
+  gPanel_MenuInputPos[gPanel_CurrentSelection[gPanel_CurrentScreen]]++;
+
+  Panel_FlushScreen();
+}
+
+void Panel_CursorNext ()
+{
+}
+
+void Panel_CursorBack ()
+{
+}
+
+void Panel_Backspace ()
+{
+}
+
+void Panel_Delete ()
+{
+}
+

@@ -1,0 +1,1494 @@
+/*@!Encoding:1252*/
+/*@!Encoding:1252*/
+includes
+{
+  #include "RT_checks.cin"
+}
+
+variables
+{
+}
+
+
+// ==============================================================================================================
+// functionality of the test A6 01
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not react (timeout) (FAIL)
+// 3: DUT reacts with wrong content in ACL.(FAIL)
+// 4: DUT seems not to inspect DP = 1 (FAIL)
+// 5: DUT seems not to inspect EDP = 1 (FAIL)
+// 6: DUT seems not to inspect EDP+DP = 1 (FAIL)
+// 7: DUT does not support CA (INCONCLUSIVE)
+void CTF_A06_01_BAM_Receive_PGN(byte src, byte dst)
+{
+  pg J1939::J1939_CT_RT::AC pgACDUT;
+  pg J1939::J1939_CT_RT::CA pgCA;
+  char reportText[1024];
+  byte newAdr;
+  dword timeout;
+  byte resultResponse;
+  byte ok;
+  enum eVerdict verdict;
+
+  timeout = gc_RESP_TIMEOUT;
+
+  newAdr = CT_Get_Third_Node_Adr(src, dst);
+  
+  pgCA.sa = src;
+  pgCA.AddressAssignment = newAdr;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  if (!CT_CHECK_CA_SUPPORT_INCONCLUSIVE(7)) return;
+  
+  // ====================
+  // step 1/5 Command address.
+  // ====================
+  snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) commands DUT %d (0x%.02X) to use address %d (0x%.02X)...", src, src, dst, dst, newAdr, newAdr);
+  CT_STEP_BEGIN(-5, reportText);
+
+  pgCA.dp  = 0;
+  pgCA.edp = 0;
+  ok = 1;
+  resultResponse = CT_CommandedDUTAdressAndAwaitResponse(pgACDUT, pgCA, timeout);
+  if (resultResponse == 1)
+  {
+    CT_STEP_END_FAIL(2, "DUT does not respond with ACL on new address (timeout).");
+    return;
+  }
+  else if (resultResponse == 2)
+  {
+    snprintf(reportText, elcount(reportText), "DUT's address claimed but with wrong content. Got:0x%llX. Expected:0x%llX.", pgACDUT.qword(0), gDUT_DevName);
+    CT_STEP_END_FAIL(3, reportText);
+    ok = 0;
+    // do not return to do a reset dut address in the last step bellow...
+  }
+  if (ok) CT_STEP_END_PASS(0);
+  
+  if (ok)
+  {
+    // ====================
+    // step 2/5 Check if DUT inspects DP=1.
+    // ====================
+    CT_STEP_BEGIN("Check if DUT inspects DP=1...");
+    pgCA.AddressAssignment = dst;
+    pgCA.dp  = 1;
+    pgCA.edp = 0;
+    if (CT_CommandedDUTAdressAndAwaitResponse(pgACDUT, pgCA, timeout) == 0)
+    {
+      CT_STEP_END_FAIL(4, "DUT seems not to inspect DP=1");
+      ok = 0;
+      // do not return to do a reset dut address in the last step bellow...
+    };
+    if (ok) CT_STEP_END_PASS(0);
+  }
+  
+  if (ok)
+  {
+    // ====================
+    // step 3/5 Check if DUT inspects EDP=1.
+    // ====================
+    CT_STEP_BEGIN("Check if DUT inspects EDP=1...");
+    pgCA.AddressAssignment = dst;
+    pgCA.dp  = 0;
+    pgCA.edp = 1;
+    if (CT_CommandedDUTAdressAndAwaitResponse(pgACDUT, pgCA, timeout) == 0)
+    {
+      CT_STEP_END_FAIL(5, "DUT seems not to inspect EDP=1");
+      ok = 0;
+      // do not return to do a reset dut address in the last step bellow...
+    };
+    if (ok) CT_STEP_END_PASS(0);
+  }
+  
+  if (ok)
+  {
+    // ====================
+    // step 4/5 Check if DUT inspects DP=1 and EDP=1.
+    // ====================
+    CT_STEP_BEGIN("Check if DUT inspects DP=1 and EDP=1...");
+    pgCA.AddressAssignment = dst;
+    pgCA.dp  = 1;
+    pgCA.edp = 1;
+    if (CT_CommandedDUTAdressAndAwaitResponse(pgACDUT, pgCA, timeout) == 0)
+    {
+      CT_STEP_END_FAIL(6, "DUT seems not to inspect DP=1 and EDP=1");
+      ok = 0;
+      // do not return to do a reset dut address in the last step bellow...
+    };
+    if (ok) CT_STEP_END_PASS(1);
+  }
+  
+  // ====================
+  // step 5/5 Reset DUT's address
+  // ====================
+  CT_STEP_CA_RESET_DUT_ADR(gFuncPath);
+  if (!ok) CT_VERDICT(VERDICT_FAIL);
+  
+}
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A06 02
+// FuncPath's:
+// 1: DUT does not react. (PASS)
+// 2: DUT sends abort. (FAIL)
+// 3: DUT reacts. (FAIL)
+// 4: DUT does not support CA (INCONCLUSIVE)
+void CTF_A06_02_BAM_Receive_Discard_Invalid(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  message * msg;
+  pg * pgAny = {dlc = 15};
+  pg J1939::J1939_CT_RT::TPCMxx pgTPCM;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  byte i;
+  word wi;
+  char reportText[1024];
+  char errText[1024];
+  byte newAdr;
+  int64 stepTime;
+  dword pgn;
+  byte ok;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  if (!CT_CHECK_CA_SUPPORT_INCONCLUSIVE(4)) return;
+  
+  newAdr = CT_Get_Third_Node_Adr(src, dst);
+  
+  CT_WAIT_UNTIL_NO_BAM(dst);
+  CT_WAIT_UNTIL_NO_BAM(src);
+  CT_WAIT_UNTIL_NO_BAM(newAdr);
+  
+  // ====================
+  // step 1/2 Send 2 invalid BAMs.
+  // ====================
+  stepTime = CT_STEP_BEGIN(-2, "Send some invalid CA like BAMs...");
+  
+  for (i=0; i<2; i++)
+  {
+    // BAM init...
+    initJ1939PGData(pgTPCM);
+    pgTPCM.ControlByte = gc_TPCM_CTRL_WORD_BAM;
+    pgTPCM.TotalNumberOfPacketsBAM  = i ? 3 : 2;   // invalid combination (loop1: 3/9, loop2: 2/15)
+    pgTPCM.TotalMessageSizeBAM      = i ? 9 : 15;  // invalid combination (loop1: 3/9, loop2: 2/15)
+    pgTPCM.PGNumber = gc_PGN_AC_COMMANDED;
+    pgTPCM.sa = src;
+    pgTPCM.da = gc_BC_ADDR;
+    output(pgTPCM);
+    CT_WAIT(gc_TP_BAM_MIN_DT + 10);
+    
+    // SEQUENCES...
+    initJ1939PGData(pgDT);
+    pgDT.sa = src;
+    pgDT.da = gc_BC_ADDR;
+    pgDT.qword(0) = gDUT_DevName<<8;
+    pgDT.SequenceNumber = 1;
+    output(pgDT);
+    CT_WAIT(gc_TP_BAM_MIN_DT + 10);
+    
+    initJ1939PGData(pgDT);
+    pgDT.SequenceNumber = 2;
+    pgDT.byte(1) = (byte)(gDUT_DevName>>56&0xFF);
+    pgDT.byte(2) = newAdr;
+    output(pgDT);
+    CT_WAIT(gc_TP_BAM_MIN_DT + 10);
+
+    initJ1939PGData(pgDT);
+    pgDT.SequenceNumber = 3;
+    pgDT.byte(1) = 0x66;
+    output(pgDT);
+    // if DUT supports CA, it can react or ignore it. We assume it reacts.
+    // if it ignores it - in this case test is passed, due it does the same as ignoring a wrong CA-BAM.
+    // in the case it yells, it reacts on a wrong CA - this is definately wrong.
+    // if DUT does NOT support CA, then it has no reason to send any ACL nevertheless.
+    // the time between CA and response is not properly defined in the specs.
+    // so we assume it reacts within the "highest" available time of T3 wich is enough time to declare this as an ignore.
+    if (TestWaitForJ1939PG(gc_PGN_AC, newAdr, gc_BC_ADDR, gc_TIMEOUT_T3) != 0)
+    {
+      // Dut reacts on invalid BAM with ACL...
+      CT_WAIT(gc_TIMEOUT_AC);
+      CT_STEP_END_FAIL(3, "DUT reacts on invalid BAM with ACL.");
+      CT_STEP_CA_RESET_DUT_ADR(gFuncPath);
+      CT_VERDICT(VERDICT_FAIL);
+      return;
+    }
+  }
+  
+  msg.dlc=8;
+  // Another invalid CA BAM... but let them "look alike CA"
+  // Total length of 8
+  // INIT
+  msg.id = 0x98ECFF00|src;
+  msg.qword(0) = swapQWord(0x20080002FFD8FE00LL);
+  output(msg);
+  CT_WAIT(gc_TP_BAM_MIN_DT + 10);
+
+  initJ1939PGData(pgDT);
+  pgDT.sa = src;
+  pgDT.da = gc_BC_ADDR;
+  pgDT.qword(0) = gDUT_DevName<<8;
+  pgDT.SequenceNumber = 1;
+  output(pgDT);
+  CT_WAIT(gc_TP_BAM_MIN_DT + 10);
+  
+  initJ1939PGData(pgDT);
+  pgDT.SequenceNumber = 2;
+  pgDT.byte(1) = (byte)(gDUT_DevName>>56&0xFF);
+  pgDT.byte(2) = newAdr;
+  output(pgDT);
+  // check for reaction...
+  if (TestWaitForJ1939PG(gc_PGN_AC, newAdr, gc_BC_ADDR, gc_TIMEOUT_T3) != 0)
+  {
+    // Dut reacts on invalid CA BAM with ACL...
+    CT_WAIT(gc_TIMEOUT_AC);
+    CT_STEP_END_FAIL(3, "DUT reacts on invalid BAM with ACL.");
+    CT_STEP_CA_RESET_DUT_ADR(gFuncPath);
+    CT_VERDICT(VERDICT_FAIL);
+    return;
+  }
+
+  // oversized total length...
+  // BAM INIT
+  msg.id = 0x98ECFF00|src;
+  msg.qword(0) = swapQWord(0x200007FFFFD8FE00LL);
+  output(msg);
+  CT_WAIT(gc_TP_BAM_MIN_DT + 10);
+
+  // SEQUENCES
+  initJ1939PGData(pgDT);
+  pgDT.sa = src;
+  pgDT.da = gc_BC_ADDR;
+  pgDT.qword(0) = gDUT_DevName<<8;
+  pgDT.SequenceNumber = 1;
+  output(pgDT);
+  CT_WAIT(gc_TP_BAM_MIN_DT + 10);
+  
+  initJ1939PGData(pgDT);
+  pgDT.SequenceNumber = 2;
+  pgDT.byte(1) = (byte)(gDUT_DevName>>56&0xFF);
+  pgDT.byte(2) = newAdr;
+  output(pgDT);
+  // check for reaction...
+  if (TestWaitForJ1939PG(gc_PGN_AC, newAdr, gc_BC_ADDR, gc_TIMEOUT_T3) != 0)
+  {
+    // Dut reacts on invalid BAM with ACL...
+    CT_WAIT(gc_TIMEOUT_AC);
+    CT_STEP_END_FAIL(3, "DUT reacts on invalid BAM with ACL.");
+    CT_STEP_CA_RESET_DUT_ADR(gFuncPath);
+    CT_VERDICT(VERDICT_FAIL);
+    return;
+  }
+  
+  CT_STEP_END_PASS(0);
+  
+  // check if there are more pgis given that can be sent per BAM...
+  ok = (pgis.size()>0);
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      ok = 0;
+    }
+  }
+
+  // ====================
+  // step 2/2 Send some more invalid BAM messages...
+  // ====================
+  CT_STEP_BEGIN("Send some more invalid BAM messages...");
+  if (ok)
+  {
+    CT_LOOP(-pgis.size());
+    for(long k: pgis)
+    {
+      pgn = pgis[k].PGN;
+      // snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+      // CT_LOOP(reportText);
+      // init a wrong BAM for the given PGN...
+      msg.qword(0) = swapQWord(0x20150002FF000000LL);
+      msg.dword(5) = pgn;
+      output(msg);
+      CT_WAIT(gc_TP_BAM_MIN_DT + 10);
+      // send 2 sequences...
+      initJ1939PGData(pgDT);
+      pgDT.SequenceNumber = 1;
+      output(pgDT);
+      CT_WAIT(gc_TP_BAM_MIN_DT + 10);
+      pgDT.SequenceNumber = 2;
+      output(pgDT);
+      CT_WAIT(gc_TIMEOUT_T3);
+      // if now DUT sends an abort this is checked within the last step.
+    }
+    CT_STEP_END_PASS(0);
+  }
+  else
+  {
+    CT_STEP_END_PASS(0, "No suitable PGIs given. Skipping this optional step.");
+  }
+  
+  // ====================
+  // step 3/3 Checking for DUT aborts...
+  // ====================
+  CT_STEP_CHECK_NO_ABORTS(1, 2, dst, src, newAdr, stepTime, "DUT shall not react with aborts to invalid BAM messages, but it does.");
+}
+
+// ==============================================================================================================
+// functionality of the test A06 03
+// FuncPath's:
+// 1: DUT shall not react. (PASS)
+// 2: DUT sends abort. (FAIL)
+void CTF_A06_03_BAM_Receive_No_Abort_Unsupported_PGN(byte src, byte dst)
+{
+  pg* pgMsg = {dlc=gc_J1939_PG_DLC_MAX};
+  pg J1939::J1939_CT_RT::TPCMxx pgAb;
+  char reportText[1024];
+  word i,n;
+  dword step;
+  byte fastMode;
+  int64 stepTime;
+
+  pgMsg.dlc = gc_J1939_PG_DLC_MAX;
+
+  fastMode = 1-@CT::TEST::CTRL::Fullmode;
+  step = fastMode ? 10 : 1;
+  
+  initJ1939PGData(pgMsg);
+  pgMsg.dlc = 9;
+  pgMsg.sa = src;
+  pgMsg.da = gc_BC_ADDR;
+  
+  // ====================
+  // step 1/2 send BAM messages...
+  // ====================
+  stepTime = CT_STEP_BEGIN(-2, "Sending BAM messages on a bunch of PGNs...");
+  // PDU1
+  for (i=0; i<0xEF; i+=step)
+  {
+    CT_WAIT_UNTIL_NO_BAM(dst);
+    pgMsg.pgn = i<<8;
+    J1939TestOutputBAM(pgMsg,0, 3, gc_TP_BAM_MIN_DT+5);
+  }
+  // PDU2
+  for (i=0xF0; i<=0xFF; i+=step)
+  {
+    for(n=0x0; n<=0xFF; n+=step)
+    {
+      CT_WAIT_UNTIL_NO_BAM(dst);
+      pgMsg.pgn = i<<8|n;
+      J1939TestOutputBAM(pgMsg,0, 3, gc_TP_BAM_MIN_DT+5);
+    }
+  }
+  CT_STEP_END_PASS(1);
+
+  // ====================
+  // step 2/2 Check data...
+  // ====================
+  CT_STEP_CHECK_NO_ABORTS(1, 2, dst, src, 0xFF, stepTime, "DUT transmits abort to BAM of unsupported PGN.");
+}
+
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A06 04 / 05
+// FuncPath's:
+// 01: DUT reaction as expected. (PASS)
+// 02: DUT does not react on valid CA BAM with ACL. (min timing) (FAIL)
+// 03: DUT transmits ABORT to correct timed BAM. (min timing) (FAIL)
+// 04: DUT transmits NACK to correct timed BAM. (min timing) (FAIL)
+// 05: DUT does not react on valid CA BAM with ACL. (max timing) (FAIL)
+// 06: DUT transmits ABORT to correct timed BAM. (max timing) (FAIL)
+// 07: DUT transmits NACK to correct timed BAM. (max timing) (FAIL)
+// 08: DUT transmits ABORT to incorrect timed BAM. (min timing) (FAIL)
+// 09: DUT transmits NACK to incorrect timed BAM. (min timing) (FAIL)
+// 10: DUT does react on invalid CA BAM with ACL. (max timing) (FAIL)
+// 11: DUT transmits ABORT to invlalid timed BAM. (max timing) (FAIL)
+// 12: DUT transmits NACK to invalid timed BAM. (max timing) (FAIL)
+// 13: DUT does not support CA (INCONCLUSIVE)
+void CTF_A06_COMBI_04_TO_05(byte src, byte dst, byte TPDT_MODE)
+{
+  int64 stepTime;
+  char reportText[1024];
+  word bufIndices[long];
+  byte newAdr;
+  dword dt_min, dt_max;
+  pg J1939::J1939_CT_RT::CA pgCA;
+  dword timeout;
+  byte ok;
+  dword t1, t2, ta, tb;
+  
+  timeout = 3*gc_TP_BAM_MAX_RECEIVE_DT;
+
+  newAdr = CT_Get_Third_Node_Adr(src, dst);
+  
+  CT_WAIT_UNTIL_NO_BAM(dst);
+  
+  pgCA.sa = src;
+  pgCA.qword(0) = gDUT_DevName;
+  pgCA.AddressAssignment = newAdr;
+  
+  dt_min = gc_TP_BAM_MIN_DT;
+  dt_max = gc_TP_BAM_MAX_RECEIVE_DT;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  if (!CT_CHECK_CA_SUPPORT_INCONCLUSIVE(13)) return;
+  
+  // ============================================================================================================================================
+  // step 1/12 Send CA within allowed BAM timing. (min timing)
+  // ====================
+  ta = dt_min+1;
+  tb = gc_TIMEOUT_TR-10;
+  t1 = (TPDT_MODE ? tb : ta);
+  t2 = (TPDT_MODE ? ta : tb);
+  stepTime = CT_STEP_BEGIN(-12, "Send CA within allowed BAM timing (min timing)");
+  J1939TestOutputBAM(pgCA, 0, 1, t1);   // BAM init 
+  J1939TestOutputBAM(pgCA, 1, 1, t2);   // BAM seq 1
+  J1939TestOutputBAM(pgCA, 2, 1, 0, 1); // BAM seq 2 ( ca is done. )
+  ok = 1;
+  if (TestWaitForJ1939PG(gc_PGN_AC, newAdr, gc_BC_ADDR, timeout) != 1)
+  {
+    // Dut does not react on valid BAM with ACL...
+    ok = 0;
+  }
+  CT_STEP_END_PASS(0);
+  CT_WAIT(gc_TIMEOUT_AC);
+  
+  // ====================
+  // Check for ABORTS...
+  // ====================
+  if (!CT_STEP_CHECK_NO_ABORTS(0, 3, dst, src, newAdr, stepTime, "DUT transmits ABORT to correct timed BAM. (min timing)"))
+  {
+    return; // leave on fail.
+  }
+  
+  
+  // ====================
+  // step 2/12 Check for NACKs...
+  // ====================
+  CT_STEP_BEGIN("Checking for DUT NACKs...");
+  // -----------------------------
+  // CHECK DUT TRANSMITS NACKs...
+  // -----------------------------
+  // check that DUT (dst) did not sent any NACK to the sender (src) or global address...
+  // for the transport for current pgn
+  if (
+          CT_Check_For_NACKs_In_MsgBuf(bufIndices, stepTime, dst, src, pgCA.pgn)
+      ||  CT_Check_For_NACKs_In_MsgBuf(bufIndices, stepTime, newAdr, src, pgCA.pgn)
+    )
+  {
+    // there are abort tpcm's from dut...
+    snprintf(reportText, elcount(reportText), "DUT transmits NACK to correct timed BAM. (min timing)");
+    CT_STEP_END_FAIL(4, reportText);
+    return; // leave on fail.
+  }
+  CT_STEP_END_PASS(0);
+  
+  if (!ok) 
+  {
+    CT_STEP_END_FAIL(2, "DUT does not react on valid CA BAM with ACL. (min timing)");  
+    return; // leave on fail.
+  }
+  
+  // ====================
+  // Step 3/12 Reset DUT's adress...
+  // ====================
+  CT_STEP_CA_RESET_DUT_ADR(14);
+  
+  
+  // ============================================================================================================================================
+  // step 4/12 Send CA within allowed BAM timing (max timing)
+  // ====================
+  ta = dt_max-3;
+  tb = gc_TIMEOUT_TR-10;
+  t1 = (TPDT_MODE ? tb : ta);
+  t2 = (TPDT_MODE ? ta : tb);
+  stepTime = CT_STEP_BEGIN("Send CA within allowed BAM timing (max timing)");
+  J1939TestOutputBAM(pgCA, 0, 1, t1);    // BAM init 
+  J1939TestOutputBAM(pgCA, 1, 1, t2);    // BAM seq 1
+  J1939TestOutputBAM(pgCA, 2, 1, 0, 1);  // BAM seq 2 ( ca is done. )
+  ok = 1;
+  if (TestWaitForJ1939PG(gc_PGN_AC, newAdr, gc_BC_ADDR, timeout) != 1)
+  {
+    // Dut does not react on valid BAM with ACL...
+    ok = 0;
+  }
+  CT_STEP_END_PASS(0);
+  CT_WAIT(gc_TIMEOUT_AC);
+  
+  // ====================
+  // Check for ABORTS...
+  // ====================
+  if (!CT_STEP_CHECK_NO_ABORTS(0, 6, dst, src, newAdr, stepTime, "DUT transmits ABORT to correct timed BAM. (max timing)"))
+  {
+    return; // leave on fail.
+  }
+  
+  
+  // ====================
+  // step 5/12 Check for NACKs...
+  // ====================
+  CT_STEP_BEGIN("Checking for DUT NACKs...");
+  // -----------------------------
+  // CHECK DUT TRANSMITS NACKs...
+  // -----------------------------
+  // check that DUT (dst) did not sent any NACK to the sender (src) or global address...
+  // for the transport for current pgn
+  if (
+          CT_Check_For_NACKs_In_MsgBuf(bufIndices, stepTime, dst, src,  pgCA.pgn)
+      ||  CT_Check_For_NACKs_In_MsgBuf(bufIndices, stepTime, newAdr, src,  pgCA.pgn)
+    )
+  {
+    // there are abort tpcm's from dut...
+    snprintf(reportText, elcount(reportText), "DUT transmits NACK to correct timed BAM. (max timing)");
+    CT_STEP_END_FAIL(7, reportText);
+    return; // leave on fail.
+  }
+  CT_STEP_END_PASS(0);
+  
+  if (!ok)
+  {
+    CT_STEP_END_FAIL(5, "DUT does not react on valid CA BAM with ACL. (max timing)");
+    return; // leave on fail.
+  }
+  
+  // ====================
+  // Step 6/12 Reset DUT's adress...
+  // ====================
+  CT_STEP_CA_RESET_DUT_ADR(14);
+  
+  
+  
+  // ============================================================================================================================================
+  // step 7/12 Send CA out of allowed BAM timing (min timing)
+  // ====================
+  ta = dt_min-3;
+  tb = gc_TIMEOUT_TR-10;
+  t1 = (TPDT_MODE ? tb : ta);
+  t2 = (TPDT_MODE ? ta : tb);
+  stepTime = CT_STEP_BEGIN("Send CA out of allowed BAM timing (min timing).");
+  J1939TestOutputBAM(pgCA, 0, 1, t1);    // BAM init
+  J1939TestOutputBAM(pgCA, 1, 1, t2);    // BAM seq 1
+  J1939TestOutputBAM(pgCA, 2, 1, 0, 1);  // BAM seq 2 ( ca is done. )
+  CT_STEP_END_PASS(0);
+  CT_WAIT(timeout);
+  CT_WAIT(gc_TIMEOUT_AC);
+  ok = 1;
+  
+  // ====================
+  // Check for ABORTS...
+  // ====================
+  if (!CT_STEP_CHECK_NO_ABORTS(0, 8, dst, src, newAdr, stepTime, "DUT transmits ABORT to incorrect timed BAM. (min timing)"))
+  {
+    return; // leave on fail.
+  }
+  
+  // ====================
+  // step 8/12 Check for NACKs...
+  // ====================
+  CT_STEP_BEGIN("Checking for DUT NACKs...");
+  // -----------------------------
+  // CHECK DUT TRANSMITS NACKs...
+  // -----------------------------
+  // check that DUT (dst) did not sent any NACK to the sender (src) or global address...
+  // for the transport for current pgn
+  if (
+          CT_Check_For_NACKs_In_MsgBuf(bufIndices, stepTime, dst, src,  pgCA.pgn)
+      ||  CT_Check_For_NACKs_In_MsgBuf(bufIndices, stepTime, newAdr, src,  pgCA.pgn)
+    )
+  {
+    // there are abort tpcm's from dut...
+    snprintf(reportText, elcount(reportText), "DUT transmits NACK to incorrect timed BAM. (min timing)");
+    CT_STEP_END_FAIL(9, reportText);
+    return; // leave on fail.
+  }
+  CT_STEP_END_PASS(0);
+    
+  // ====================
+  // Step 9/12 Reset DUT's adress... ( just in case it changed - it's unclear and depends on the DUT's implementation )
+  // ====================
+  CT_STEP_CA_RESET_DUT_ADR(14);
+
+  
+  
+  
+  // ============================================================================================================================================
+  // step 10/12 Send CA out of allowed BAM timing (max timing)
+  // ====================
+  stepTime = CT_STEP_BEGIN("Send CA out of allowed BAM timing (max timing)");
+  ta = dt_max+10;
+  tb = gc_TIMEOUT_TR-10;
+  t1 = (TPDT_MODE ? tb : ta);
+  t2 = (TPDT_MODE ? ta : tb);
+  J1939TestOutputBAM(pgCA, 0, 1, t1);    // BAM init
+  J1939TestOutputBAM(pgCA, 1, 1, t2);    // BAM seq 1
+  J1939TestOutputBAM(pgCA, 2, 1, 0, 1);  // BAM seq 2 ( ca is done. )
+  ok = 1;
+  if (TestWaitForJ1939PG(gc_PGN_AC, newAdr, gc_BC_ADDR, timeout) != 0)
+  {
+    // Dut does react on invalid BAM with ACL...
+    ok = 0;
+  }
+  CT_STEP_END_PASS(0);
+  CT_WAIT(gc_TIMEOUT_AC);
+  
+  // ====================
+  // Check for ABORTS...
+  // ====================
+  if (!CT_STEP_CHECK_NO_ABORTS(0, 11, dst, src, newAdr, stepTime, "DUT transmits ABORT to invalid timed BAM. (max timing)"))
+  {
+    return; // leave on fail.
+  }
+  
+  // ====================
+  // step 11/12 Check for NACKs...
+  // ====================
+  CT_STEP_BEGIN("Checking for DUT NACKs...");
+  // -----------------------------
+  // CHECK DUT TRANSMITS NACKs...
+  // -----------------------------
+  // check that DUT (dst) did not sent any NACK to the sender (src) or global address...
+  // for the transport for current pgn
+  if (
+          CT_Check_For_NACKs_In_MsgBuf(bufIndices, stepTime, dst, src,  pgCA.pgn)
+      ||  CT_Check_For_NACKs_In_MsgBuf(bufIndices, stepTime, newAdr, src,  pgCA.pgn)
+    )
+  {
+    // there are abort tpcm's from dut...
+    snprintf(reportText, elcount(reportText), "DUT transmits NACK to invalid timed BAM. (max timing)");
+    CT_STEP_END_FAIL(12, reportText);
+    return; // leave on fail.
+  }
+  
+  if (!ok)
+  {
+    pg J1939::J1939_CT_RT::AC pgACDUT;
+    CT_STEP_END_FAIL(10, "DUT does react on invalid CA BAM with ACL. (max timing)");
+  }
+  else
+  {
+    CT_STEP_END_PASS(1);
+  }
+
+  // ===============================
+  // Step 12/12 Reset DUT's adress...
+  // ===============================
+  CT_STEP_CA_RESET_DUT_ADR(gFuncPath);
+  
+  if (!ok) CT_VERDICT(VERDICT_FAIL);
+  
+}
+void CTF_A06_04_BAM_Receive_Timing(byte src, byte dst)
+{
+  CTF_A06_COMBI_04_TO_05(src,dst,0);
+}
+void CTF_A06_05_BAM_Receive_Timing_DT(byte src, byte dst)
+{
+  CTF_A06_COMBI_04_TO_05(src,dst,1);
+}
+
+
+// ==============================================================================================================
+// functionality of the test A06 06
+// FuncPath's:
+// 01: DUT reaction as expected. (PASS)
+// 02: DUT does not react on valid CA BAM with ACL. (FAIL)
+// 03: DUT does react on invalid DT sequence in CA BAM. (FAIL)
+// 04: DUT reacts on invalid DT destination in BAM with ACL. (FAIL)
+// 05: DUT does not support CA (INCONCLUSIVE)
+// 06: DUT Reset failure (FAIL)
+void CTF_A06_06_BAM_Receive_DT_Seq(byte src, byte dst)
+{
+  int64 stepTime;
+  char reportText[1024];
+  byte newAdr;
+  dword dt_min, dt_max;
+  pg J1939::J1939_CT_RT::CA pgCA;
+  pg J1939::J1939_CT_RT::TPCMxx pgTPCM;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  dword timeout;
+  dword t1, t2;
+  
+  t1 = gc_TIMEOUT_TR-100;
+  t2 = gc_TIMEOUT_TR-100;
+  
+  timeout = 3*gc_TP_BAM_MAX_RECEIVE_DT;
+
+  newAdr = CT_Get_Third_Node_Adr(src, dst);
+  
+  CT_WAIT_UNTIL_NO_BAM(dst);
+  
+  pgCA.sa = src;
+  pgCA.qword(0) = gDUT_DevName;
+  pgCA.AddressAssignment = newAdr;
+  
+  dt_min = gc_TP_BAM_MIN_DT;
+  dt_max = gc_TP_BAM_MAX_RECEIVE_DT;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  if (!CT_CHECK_CA_SUPPORT_INCONCLUSIVE(5)) return;
+  
+  // ====================
+  // step 1/4 Send CA with correct DT sequence.
+  // ====================
+  stepTime = CT_STEP_BEGIN(-4,"Send CA with correct DT sequence.");
+  J1939TestOutputBAM(pgCA, 0, 1, t1);   // BAM init 
+  J1939TestOutputBAM(pgCA, 1, 1, t2);   // BAM seq 1
+  J1939TestOutputBAM(pgCA, 2, 1, 0, 1); // BAM seq 2 ( ca is done. )
+  if (TestWaitForJ1939PG(gc_PGN_AC, newAdr, gc_BC_ADDR, timeout) != 1)
+  {
+    // Dut does not react on valid BAM with ACL...
+    CT_WAIT(1);
+    CT_STEP_END_FAIL(2, "DUT does not react on valid CA BAM with ACL.");
+    return; // leave on fail.
+  }
+  CT_STEP_END_PASS(0);
+  CT_WAIT(gc_TIMEOUT_AC);
+
+  // ===============================
+  // Step 2/4 Reset DUT's adress...
+  // ===============================
+  CT_STEP_CA_RESET_DUT_ADR(6);
+  
+  
+  // ====================
+  // step 3/4 Send CA with invalid DT sequence.
+  // ====================
+  stepTime = CT_STEP_BEGIN("Send CA with invalid DT sequence.");
+  J1939TestOutputBAM(pgCA, 0, 1, t1);   // BAM init 
+  J1939TestOutputBAM(pgCA, 2, 1, t2);   // BAM seq 2 ( wrong order... )
+  J1939TestOutputBAM(pgCA, 1, 1, 0, 1); // BAM seq 1
+  
+  testJoinJ1939PGEvent(gc_PGN_AC, newAdr, gc_BC_ADDR);
+  testJoinJ1939PGEvent(gc_PGN_AC, dst, gc_BC_ADDR);
+  if ( TestWaitForAnyJoinedEvent(timeout) >0 )
+  {
+    // Dut reacts on invalid BAM with ACL...
+    CT_WAIT(gc_TIMEOUT_AC);
+    CT_WAIT(timeout);
+    CT_STEP_END_FAIL(3, "DUT does react on invalid DT sequence in CA BAM.");
+    CT_STEP_CA_RESET_DUT_ADR(gFuncPath);
+    CT_VERDICT(VERDICT_FAIL);
+    return; // leave on fail.
+  }
+  CT_STEP_END_PASS(0);
+  CT_WAIT(1);
+  
+  // ====================
+  // step 4/4 Send CA with invalid DT destintion address (specific)
+  // ====================
+  stepTime = CT_STEP_BEGIN("Send CA within invalid DT destination address (specific).");
+  // BAM init...
+  initJ1939PGData(pgTPCM);
+  pgTPCM.ControlByte = gc_TPCM_CTRL_WORD_BAM;
+  pgTPCM.TotalNumberOfPacketsBAM = 2;
+  pgTPCM.TotalMessageSizeBAM = 9;
+  pgTPCM.PGNumber = gc_PGN_AC_COMMANDED;
+  pgTPCM.sa = src;
+  pgTPCM.da = gc_BC_ADDR;
+  output(pgTPCM);
+  CT_WAIT(gc_TP_BAM_MIN_DT+10);
+  
+  // SEQUENCES...
+  initJ1939PGData(pgDT);
+  pgDT.sa = src;
+  pgDT.da = gc_BC_ADDR;
+  pgDT.qword(0) = gDUT_DevName<<8;
+  pgDT.SequenceNumber = 1;
+  output(pgDT);
+  CT_WAIT(gc_TP_BAM_MIN_DT+10);
+  
+  initJ1939PGData(pgDT);
+  pgDT.da = dst; // invalid TP.DT BAM destination (specific)
+  pgDT.SequenceNumber = 2;
+  pgDT.byte(1) = (byte)(gDUT_DevName>>56&0xFF);
+  pgDT.byte(2) = newAdr;
+  output(pgDT);
+  
+  testJoinJ1939PGEvent(gc_PGN_AC, newAdr, gc_BC_ADDR);
+  testJoinJ1939PGEvent(gc_PGN_AC, dst, gc_BC_ADDR);
+  
+  if ( TestWaitForAnyJoinedEvent(timeout) >0 )
+  {
+    // Dut reacts on invalid BAM with ACL...
+    CT_WAIT(gc_TIMEOUT_AC);
+    CT_WAIT(timeout);
+    CT_STEP_END_FAIL(4, "DUT reacts on invalid DT destination in BAM with ACL.");
+    CT_STEP_CA_RESET_DUT_ADR(gFuncPath);
+    CT_VERDICT(VERDICT_FAIL);
+    return; // leave on fail.
+  }
+  
+  CT_STEP_END_PASS(1);
+  
+  
+  
+}
+
+
+// ==============================================================================================================
+// functionality of the test A06 07
+// FuncPath's:
+// 01: DUT does not react on invalid BAM with DT of DLC<8. (PASS)
+// 02: DUT does react on invalid BAM with DT of DLC<8. (FAIL)
+// 03: DUT does not support CA (INCONCLUSIVE)
+// 04: CA Reset failed (FAIL)
+void CTF_A06_07_BAM_Receive_DT_Wrong_DLC(byte src, byte dst)
+{
+  int64 stepTime;
+  char reportText[1024];
+  byte newAdr;
+  dword dt_min, dt_max;
+  pg J1939::J1939_CT_RT::CA pgCA;
+  pg J1939::J1939_CT_RT::TPCMxx pgTPCM;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  dword timeout;
+  dword t1, t2;
+  byte ok;
+  
+  t1 = gc_TIMEOUT_TR-100;
+  t2 = gc_TIMEOUT_TR-100;
+  
+  timeout = 3*gc_TP_BAM_MAX_RECEIVE_DT;
+  
+  newAdr = CT_Get_Third_Node_Adr(src, dst);
+  
+  CT_WAIT_UNTIL_NO_BAM(dst);
+  
+  pgCA.sa = src;
+  pgCA.qword(0) = gDUT_DevName;
+  pgCA.AddressAssignment = newAdr;
+  
+  dt_min = gc_TP_BAM_MIN_DT;
+  dt_max = gc_TP_BAM_MAX_RECEIVE_DT;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  if (!CT_CHECK_CA_SUPPORT_INCONCLUSIVE(3)) return;
+  
+
+  // ====================
+  // step 1/1 Send CA with DLC<8
+  // ====================
+  stepTime = CT_STEP_BEGIN(-1, "Send CA with DLC<8");
+  // BAM init...
+  initJ1939PGData(pgTPCM);
+  pgTPCM.ControlByte = gc_TPCM_CTRL_WORD_BAM;
+  pgTPCM.TotalNumberOfPacketsBAM = 2;
+  pgTPCM.TotalMessageSizeBAM = 9;
+  pgTPCM.PGNumber = gc_PGN_AC_COMMANDED;
+  pgTPCM.sa = src;
+  pgTPCM.da = gc_BC_ADDR;
+  output(pgTPCM);
+  CT_WAIT(gc_TP_BAM_MIN_DT+10);
+  
+  // SEQUENCES...
+  initJ1939PGData(pgDT);
+  pgDT.sa = src;
+  pgDT.da = gc_BC_ADDR;
+  pgDT.qword(0) = gDUT_DevName<<8;
+  pgDT.SequenceNumber = 1;
+  output(pgDT);
+  CT_WAIT(gc_TP_BAM_MIN_DT+10);
+  
+  initJ1939PGData(pgDT);
+  pgDT.dlc = 7; // invalid DT dlc
+  pgDT.SequenceNumber = 2;
+  pgDT.byte(1) = (byte)(gDUT_DevName>>56&0xFF);
+  pgDT.byte(2) = newAdr;
+  output(pgDT);
+  ok = 1;
+  testJoinJ1939PGEvent(gc_PGN_AC, newAdr, gc_BC_ADDR);
+  testJoinJ1939PGEvent(gc_PGN_AC, dst, gc_BC_ADDR);
+  if ( TestWaitForAnyJoinedEvent(timeout) >0 )
+  {
+    ok = 0;
+    // Dut reacts on invalid BAM with ACL...
+    CT_WAIT(gc_TIMEOUT_AC);
+    CT_WAIT(timeout);
+    CT_STEP_END_FAIL(2, "DUT reacts on invalid BAM with DT of DLC<8.");
+    CT_STEP_CA_RESET_DUT_ADR(4);
+    CT_VERDICT(VERDICT_FAIL);
+    return;
+  }
+  
+  CT_STEP_END_PASS(1);    
+  
+}
+
+// ==============================================================================================================
+// functionality of the test A06 08
+// FuncPath's:
+// 01: DUT reaction as expected. (PASS)
+// 02: DUT does not react on BAM with DT use another prio than 7. (FAIL)
+// 03: DUT does not support CA (INCONCLUSIVE)
+// 04: CA reset failed (FAIL)
+void CTF_A06_08_BAM_Receive_DT_Prios(byte src, byte dst)
+{
+  int64 stepTime;
+  char reportText[1024];
+  byte newAdr;
+  dword dt_min, dt_max;
+  pg J1939::J1939_CT_RT::CA pgCA;
+  pg J1939::J1939_CT_RT::TPCMxx pgTPCM;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  dword timeout;
+  dword t1, t2;
+  byte prio;
+  
+  t1 = gc_TIMEOUT_TR-100;
+  t2 = gc_TIMEOUT_TR-100;
+  
+  timeout = 3*gc_TP_BAM_MAX_RECEIVE_DT;
+
+  newAdr = CT_Get_Third_Node_Adr(src, dst);
+  
+  CT_WAIT_UNTIL_NO_BAM(dst);
+  
+  pgCA.sa = src;
+  pgCA.qword(0) = gDUT_DevName;
+  pgCA.AddressAssignment = newAdr;
+  
+  dt_min = gc_TP_BAM_MIN_DT;
+  dt_max = gc_TP_BAM_MAX_RECEIVE_DT;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  if (!CT_CHECK_CA_SUPPORT_INCONCLUSIVE(3)) return;
+  
+  // ====================
+  // steps Send CA with DT of different prios.
+  // ====================
+  for (prio = 0; prio<=7; prio++)
+  {
+    snprintf(reportText, elcount(reportText), "Send CA with DT of prio %d", prio);
+    stepTime = CT_STEP_BEGIN((prio==0) ? -17 : 2*(prio+1), reportText);
+    // BAM init...
+    initJ1939PGData(pgTPCM);
+    pgTPCM.ControlByte = gc_TPCM_CTRL_WORD_BAM;
+    pgTPCM.TotalNumberOfPacketsBAM = 2;
+    pgTPCM.TotalMessageSizeBAM = 9;
+    pgTPCM.PGNumber = gc_PGN_AC_COMMANDED;
+    pgTPCM.sa = src;
+    pgTPCM.da = gc_BC_ADDR;
+    output(pgTPCM);
+    CT_WAIT(gc_TP_BAM_MIN_DT+10);
+    
+    // SEQUENCES...
+    initJ1939PGData(pgDT);
+    pgDT.prio = prio;
+    pgDT.sa = src;
+    pgDT.da = gc_BC_ADDR;
+    pgDT.qword(0) = gDUT_DevName<<8;
+    pgDT.SequenceNumber = 1;
+    output(pgDT);
+    CT_WAIT(gc_TP_BAM_MIN_DT+10);
+    
+    initJ1939PGData(pgDT);
+    pgDT.SequenceNumber = 2;
+    pgDT.byte(1) = (byte)(gDUT_DevName>>56&0xFF);
+    pgDT.byte(2) = newAdr;
+    output(pgDT);
+    
+    testJoinJ1939PGEvent(gc_PGN_AC, newAdr, gc_BC_ADDR);
+    testJoinJ1939PGEvent(gc_PGN_AC, dst, gc_BC_ADDR);
+    if ( TestWaitForAnyJoinedEvent(timeout) == 0 )
+    {
+      // Dut does not reacts on valid BAM
+      CT_WAIT(100);
+      CT_STEP_END_FAIL(2, "DUT does not react on BAM with DT use another prio than 7.");
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+
+    CT_WAIT(timeout); // wait before doing next step...
+
+    // RESET DUT's ADR...
+    if (!CT_STEP_CA_RESET_DUT_ADR(4))
+    {
+      return;
+    }
+    
+    CT_WAIT(gc_RESP_TIMEOUT); // wait before doing BAM again...
+  }
+  
+  CT_STEP_END_PASS(1);
+  
+  
+}
+
+
+// ==============================================================================================================
+// functionality of the test A06 09
+// FuncPath's:
+// 01: DUT reaction as expected. (PASS)
+// 02: DUT does not react on BAM with DT using pading bytes. (FAIL)
+// 03: DUT does not support CA (INCONCLUSIVE)
+// 04: CA reset failed (FAIL)
+void CTF_A06_09_BAM_Receive_DT_Uses_Padding(byte src, byte dst)
+{
+  int64 stepTime;
+  char reportText[1024];
+  byte newAdr;
+  dword dt_min, dt_max;
+  pg J1939::J1939_CT_RT::CA pgCA;
+  pg J1939::J1939_CT_RT::TPCMxx pgTPCM;
+  pg J1939::J1939_CT_RT::TPDT pgDT;
+  dword timeout;
+  dword t1, t2;
+  
+  t1 = gc_TIMEOUT_TR-100;
+  t2 = gc_TIMEOUT_TR-100;
+  
+  timeout = 3*gc_TP_BAM_MAX_RECEIVE_DT;
+
+  newAdr = CT_Get_Third_Node_Adr(src, dst);
+  
+  CT_WAIT_UNTIL_NO_BAM(dst);
+  
+  pgCA.sa = src;
+  pgCA.qword(0) = gDUT_DevName;
+  pgCA.AddressAssignment = newAdr;
+  
+  dt_min = gc_TP_BAM_MIN_DT;
+  dt_max = gc_TP_BAM_MAX_RECEIVE_DT;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  if (!CT_CHECK_CA_SUPPORT_INCONCLUSIVE(3)) return;
+  
+  // ====================
+  // Step 1/2 Send CA with DT using padding bytes.
+  // ====================
+  stepTime = CT_STEP_BEGIN(-2, "Send CA with DT using padding bytes.");
+  // BAM init...
+  initJ1939PGData(pgTPCM);
+  pgTPCM.ControlByte = gc_TPCM_CTRL_WORD_BAM;
+  pgTPCM.TotalNumberOfPacketsBAM = 2;
+  pgTPCM.TotalMessageSizeBAM = 9;
+  pgTPCM.PGNumber = gc_PGN_AC_COMMANDED;
+  pgTPCM.sa = src;
+  pgTPCM.da = gc_BC_ADDR;
+  output(pgTPCM);
+  CT_WAIT(gc_TP_BAM_MIN_DT+10);
+  
+  // SEQUENCES...
+  initJ1939PGData(pgDT);
+  pgDT.sa = src;
+  pgDT.da = gc_BC_ADDR;
+  pgDT.qword(0) = gDUT_DevName<<8;
+  pgDT.SequenceNumber = 1;
+  output(pgDT);
+  CT_WAIT(gc_TP_BAM_MIN_DT+10);
+  
+  initJ1939PGData(pgDT);
+  pgDT.SequenceNumber = 2;
+  pgDT.byte(1) = (byte)(gDUT_DevName>>56&0xFF);
+  pgDT.byte(2) = newAdr;
+  pgDT.byte(3) = 1;
+  pgDT.byte(4) = 2;
+  pgDT.byte(5) = 3;
+  pgDT.byte(6) = 4;
+  pgDT.byte(7) = 5;
+  output(pgDT);
+  
+  testJoinJ1939PGEvent(gc_PGN_AC, newAdr, gc_BC_ADDR);
+  testJoinJ1939PGEvent(gc_PGN_AC, dst, gc_BC_ADDR);
+  if ( TestWaitForAnyJoinedEvent(timeout) == 0 )
+  {
+    CT_WAIT(1);
+    // Dut does not reacts on valid BAM
+    CT_STEP_END_FAIL(2, "DUT does not react on BAM with DT using 'invalid' padding bytes.");
+    return; // leave on fail.
+  }
+  CT_WAIT(1);
+
+  if (!CT_STEP_CA_RESET_DUT_ADR(4))
+  {
+    return;
+  }
+  
+  CT_STEP_END_PASS(1);
+  
+  
+}
+
+
+// ==============================================================================================================
+// functionality of the test A06 10
+// FuncPath's:
+// 01: DUT reaction as expected. (PASS)
+// 02: DUT does not respond to CA (FAIL)
+// 03: DUT sends TP.CM_EndOfMsgACK after the BAM (FAIL)
+// 04: DUT does not support CA (INCONCLUSIVE)
+// 05: CA reset failed (FAIL)
+void CTF_A06_10_BAM_Receive_NoEOM(byte src, byte dst)
+{
+  pg J1939::J1939_CT_RT::AC pgACDUT;
+  word bufIndices[long];
+  pg J1939::J1939_CT_RT::CA pgCA;
+  char reportText[1024];
+  byte newAdr;
+  dword timeout;
+  byte resultResponse;
+  int64 stepTime;
+  byte ok;
+
+  timeout = 3*gc_TP_BAM_MAX_RECEIVE_DT;
+  
+  newAdr = CT_Get_Third_Node_Adr(src, dst);
+  
+  CT_WAIT_UNTIL_NO_BAM(dst);
+  
+  pgCA.sa = src;
+  pgCA.AddressAssignment = newAdr;
+  
+  // =============
+  // PRECONDITIONS
+  // =============
+  if (!CT_CHECK_CA_SUPPORT_INCONCLUSIVE(4)) return;
+  
+  // ====================
+  // step 1/4 Command address.
+  // ====================
+  snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) commands DUT %d (0x%.02X) to use address %d (0x%.02X)...", src, src, dst, dst, newAdr, newAdr);
+  stepTime = CT_STEP_BEGIN(-3, reportText);
+  pgCA.dp  = 0;
+  pgCA.edp = 0;
+  resultResponse = CT_CommandedDUTAdressAndAwaitResponse(pgACDUT, pgCA, timeout);
+  if (resultResponse == 1)
+  {
+    CT_STEP_END_FAIL(2, "DUT does not respond with ACL on new address (timeout).");
+    return;
+  }
+  CT_STEP_END_PASS(0);
+
+  // ====================
+  // step 2/3 Reset DUT's address...
+  // ====================
+  if (!CT_STEP_CA_RESET_DUT_ADR(5))
+  {
+    return;
+  }
+  
+  // ====================
+  // step 3/3 Check if DUT sent TP.CM_EndOfMsgACK
+  // ====================
+  CT_STEP_BEGIN("Check if DUT sent TP.CM_EndOfMsgACK...");
+    // -----------------------------
+    // CHECK DUT sent any TP.CM_EndOfMsgACK's...
+    // ----------------------------_
+    // check that DUT (dst or newAdr) did not sent any TP.CM_EndOfMsgACK's to the sender (src) or global address...
+    // for the transport for current pgn
+      if (
+          CT_Check_For_EOM_In_MsgBuf(bufIndices, stepTime, dst, src)
+      ||  CT_Check_For_EOM_In_MsgBuf(bufIndices, stepTime, newAdr, src)
+    )
+    {
+        // there are TP.CM_EndOfMsgACKs...
+      CT_STEP_END_FAIL(3, "DUT sends TP.CM_EndOfMsgACK after the BAM.");
+      return; // leave on fail.
+    }
+  CT_STEP_END_PASS(1);
+    
+ }
+
+// ==============================================================================================================
+// functionality of the test A06 11
+// FuncPath's:
+// 1: All steps passed. (PASS)
+// 2: DUT sends aborts. (FAIL)
+// 3: CA not supported.
+void CTF_A06_11_BAM_Receive_No_Abort_Invalid(byte src, byte dst)
+{
+  byte result;
+  byte newAdr;
+  byte gMemNoVerdicts;
+  int64 stepTime;
+  
+  stepTime = timeNowInt64();
+  newAdr = CT_Get_Third_Node_Adr(src, dst);
+  
+  gMemNoVerdicts = gNoVerdicts;
+  gNoVerdicts = 0; // avoid verdicts from the functions...
+  
+  // call all the functions that did not check for aborts...
+  CT_Sub("Executing test A06_01");
+  CTF_A06_01_BAM_Receive_PGN(src, dst);
+  
+  CT_Sub("Executing test A06_06");
+  CTF_A06_06_BAM_Receive_DT_Seq(src, dst);
+  
+  CT_Sub("Executing test A06_07");
+  CTF_A06_07_BAM_Receive_DT_Wrong_DLC(src, dst);
+  
+  CT_Sub("Executing test A06_08");
+  CTF_A06_08_BAM_Receive_DT_Prios(src, dst);
+  
+  CT_Sub("Executing test A06_09");
+  CTF_A06_09_BAM_Receive_DT_Uses_Padding(src, dst);
+  
+  CT_Sub("Executing test A06_10");
+  CTF_A06_10_BAM_Receive_NoEOM(src, dst);
+  
+  CT_Sub("Executing test A06_12");
+  CTF_A06_12_BAM_Receive_Singularity(src, dst);
+  
+  CT_Sub("Executing test A06_13");
+  CTF_A06_13_BAM_Receive_Multiple_Transport(src, dst);
+  
+  if (CT_RT()) gNoVerdicts = 0;
+  if (CT_STEP_CHECK_NO_ABORTS(1, 2, dst, src, newAdr, stepTime, ""))
+  
+  // reset the no-verdicts variable to the value it had before entering this function.
+  gNoVerdicts = gMemNoVerdicts;
+  
+}
+
+// ==============================================================================================================
+// functionality of the test A06 12
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT answers to invalid CA (FAIL)
+// 3: No ACL where it was expected (FAIL)
+// 4: CA not supported. (INCONCLUSIVE)
+// 5: DUT CA reset failed. (FAIL)
+void CTF_A06_12_BAM_Receive_Singularity(byte src, byte dst)
+{
+  pg* longPG = {dlc=70};
+  pg J1939::J1939_CT_RT::AC pgACDUT;
+  pg J1939::J1939_CT_RT::CA pgCA;
+  dword timeout;
+  dword seqNr;
+  dword seqCount;
+  byte newAdr;
+  int64 stepTime;
+  
+  timeout = gc_RESP_TIMEOUT;
+
+  newAdr = dst+1;
+  if (newAdr==src) newAdr++;
+  
+  pgCA.sa = src;
+  pgCA.qword(0) = gDUT_DevName;
+  pgCA.AddressAssignment = newAdr;
+  
+  if (!CT_CHECK_CA_SUPPORT_INCONCLUSIVE(4)) return;
+  
+  CT_WAIT_FOR_BAM_GAP(src, dst, newAdr);
+  
+  // ====================
+  // step 1/4 CA interrupts BAM 
+  // ====================
+  stepTime = CT_STEP_BEGIN(-4, "CA interrupts BAM that continues sending.");
+  // SEND a long BAM...
+  longPG.sa = src;
+  longPG.da = gc_BC_ADDR;
+  for (seqNr = 0; seqNr<=10; seqNr++)
+  {
+    J1939TestOutputBAM(longPG, seqNr, 1, gc_TP_BAM_MIN_DT+1, 0);
+    if (seqNr == 5)
+    {
+      output(pgCA);
+    }
+  };
+  CT_WAIT(timeout);
+  CT_STEP_END_PASS(0);
+  
+  // ====================
+  // step 2/4 BAM interrupts CA
+  // ====================
+  // vice versa...
+  CT_STEP_BEGIN("BAM interrupts CA.");
+  output(pgCA);
+  CT_Wait(gc_TP_BAM_MIN_DT + 5);
+  for (seqNr = 0; seqNr<=10; seqNr++)
+  {
+    J1939TestOutputBAM(longPG, seqNr, 1, gc_TP_BAM_MIN_DT+1, 0);
+  };
+  
+  CT_STEP_END_PASS(0);
+  
+  // wait for transport to be done...
+  CT_WAIT(timeout);
+  
+  // ====================
+  // step 3/4 Check for BAM (CA) discard
+  // ====================
+  CT_STEP_BEGIN("Checking BAM were discarded...");
+  
+  if (CT_Check_For_AC_In_MsgBuf(stepTime, newAdr))
+  {
+    CT_STEP_END_FAIL(2, "DUT reacts on CA but it shall be discarded, due both BAM got defected through the interruption.");
+    CT_STEP_CA_RESET_DUT_ADR(gFuncPath);
+    CT_VERDICT(VERDICT_FAIL);
+    
+    return; // leave on fail.
+  };
+  CT_STEP_END_PASS(0);
+  
+  // ====================
+  // step 4/4 CA interrupts BAM but is complete
+  // ====================
+  stepTime = CT_STEP_BEGIN("CA interrupts BAM completely. CA will be valid.");
+  for (seqNr = 0; seqNr<=10; seqNr++)
+  {
+    J1939TestOutputBAM(longPG, seqNr, 1, gc_TP_BAM_MIN_DT+1, 0);
+    if (seqNr == 2)
+    {
+      output(pgCA);
+      CT_WAIT(4*timeout); // wait init, 2 sequences and a reaction time = 4* response timeout.
+      if (!CT_Check_For_AC_In_MsgBuf(stepTime, newAdr))
+      {
+        CT_STEP_END_FAIL(3, "DUT does not react on a complete valid CA that was used to interrupt another BAM.");
+        return;
+      }
+      if (!CT_STEP_CA_RESET_DUT_ADR(5))
+      {
+        return;
+      }
+      break;
+    }
+  };
+  CT_WAIT(timeout);
+  CT_STEP_END_PASS(1);
+  
+}
+
+// ==============================================================================================================
+// functionality of the test A06 13
+// FuncPath's:
+// 1: DUT reacts with CA. (PASS)
+// 2: DUT does not react.(FAIL)
+// 3: CA not supported. (INCONCLUSIVE)
+// 4: CA reset failed (FAIL)
+void CTF_A06_13_BAM_Receive_Multiple_Transport(byte src, byte dst)
+{
+  pg* longPG = {dlc=70};
+  pg J1939::J1939_CT_RT::AC pgACDUT;
+  pg J1939::J1939_CT_RT::CA pgCA;
+  dword timeout;
+  dword seqNr;
+  dword seqCount;
+  byte newAdr;
+  byte thirdAdr;
+  int64 stepTime;
+  
+  longPG.dlc = 70;
+  
+  timeout = 14 * gc_TP_BAM_MAX_RECEIVE_DT; // 11 for long BAM, 3 for CA BAM
+
+  newAdr = dst+1;
+  if (newAdr==src) newAdr++;
+  
+  thirdAdr = src-1;
+  if (thirdAdr==dst) thirdAdr--;
+  
+  pgCA.sa = src;
+  pgCA.qword(0) = gDUT_DevName;
+  pgCA.AddressAssignment = newAdr;
+  
+  if (!CT_CHECK_CA_SUPPORT_INCONCLUSIVE(3)) return;
+  
+  CT_WAIT_FOR_BAM_GAP(src, dst, newAdr);
+  
+  // ====================
+  // step 1/6 Check CA during bam transport
+  // ====================
+  stepTime = CT_STEP_BEGIN(-6, "Check accepting CA during an active BAM transport...");
+    
+  // SEND a long BAM...
+  longPG.sa = thirdAdr;
+  longPG.da = gc_BC_ADDR;
+  for (seqNr = 0; seqNr<=10; seqNr++)
+  {
+    J1939TestOutputBAM(longPG, seqNr, 1, gc_TP_BAM_MIN_DT+1, 0);
+    if (seqNr == 5)
+    {
+      output(pgCA);
+    }
+  };
+  
+  CT_STEP_END_PASS(0);
+  
+  // wait for transport to be done...
+  CT_WAIT(timeout);
+  
+  // ====================
+  // step 2/6 Check for BAM (CA)
+  // ====================
+  CT_STEP_BEGIN("Checking for CA from DUT...");
+  
+  if (!CT_Check_For_AC_In_MsgBuf(stepTime, newAdr))
+  {
+    CT_STEP_END_FAIL(2, "DUT does not react on CA.");
+    return; // leave on fail.
+  };
+  
+  // ====================
+  // step 3/6 CA reset
+  // ====================
+  if (!CT_STEP_CA_RESET_DUT_ADR(4))
+  {
+    return;
+  }
+
+  CT_STEP_END_PASS(0);
+
+  // ====================
+  // step 4/6 Check CA interrupting by other node's BAM
+  // ====================
+  stepTime = CT_STEP_BEGIN("Check accepting CA interrupting by other node's BAM...");
+    
+  // SEND CA...
+  output(pgCA);
+  CT_WAIT(gc_TP_BAM_MIN_DT + 10);
+  
+  // BAM from other node within CA...
+  longPG.sa = thirdAdr;
+  longPG.da = gc_BC_ADDR;
+  for (seqNr = 0; seqNr<=10; seqNr++)
+  {
+    J1939TestOutputBAM(longPG, seqNr, 1, gc_TP_BAM_MIN_DT+1, 0);
+  };
+  
+  CT_STEP_END_PASS(0);
+  
+  // wait for transport to be done...
+  CT_WAIT(timeout);
+  
+  // ====================
+  // step 5/6 Check for BAM (CA)
+  // ====================
+  CT_STEP_BEGIN("Checking for CA from DUT...");
+  
+  if (!CT_Check_For_AC_In_MsgBuf(stepTime, newAdr))
+  {
+    CT_STEP_END_FAIL(2, "DUT does not react on CA.");
+    return; // leave on fail.
+  };
+  
+  // ====================
+  // step 6/6 CA reset
+  // ====================
+  if (!CT_STEP_CA_RESET_DUT_ADR(4))
+  {
+    return;
+  }
+
+  CT_STEP_END_PASS(1);
+  
+  
+}

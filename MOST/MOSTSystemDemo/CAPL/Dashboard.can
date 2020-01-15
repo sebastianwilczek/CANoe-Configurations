@@ -1,0 +1,177 @@
+/*@@var:*/
+//
+// Dashboard
+//
+// Visualizes audio system and engine states in the Dashboard panel.
+//
+variables
+{
+  // constants for simple "automatic" gear
+  // only for pseudo rotational speed calculation
+  const int kMaxSpeedGear1 = 30;  // km/h
+  const int kMaxSpeedGear2 = 60;  // km/h
+  const int kFactorGear1 = 100;
+  const int kFactorGear2 = 50;
+  const int kFactorGear3 = 30;
+  
+  byte gCurrentAudioSource = 0;
+  byte gMuteStatus;
+  byte gDeckStatus;
+  byte gTrackStatus;
+  word gTimeRelative;
+  byte gIgnition;
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::SpeedNotify (0x103):*/
+// receive speed notification and update
+// dashboard (speed and rpm)
+on message SpeedNotify
+{
+  int rpm;
+
+  // just copy speed value, no conversion needed
+  @sysvar::DB::Speed = this.Speed;
+
+  // display pseudo rpm
+  rpm = RpmFromSpeed (this.Speed);
+  @sysvar::DB::Rpms = rpm;
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::TimeRelative (0x100):*/
+// receive time notification from CDPlayer
+// and update dashboard display
+on message TimeRelative
+{
+  gTimeRelative = this.TrackTime;
+  UpdateDisplay();
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::TrackStatus (0x104):*/
+// receive track notification from CDPlayer
+// and update dashboard display
+on message TrackStatus
+{
+  gTrackStatus = this.Track;
+  UpdateDisplay();
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::VolumeCtrlNotify (0x107):*/
+// receive notification of automatic volume
+// control status and update dashboard display
+on message VolumeCtrlNotify
+{
+  // display Volume Control Status
+  @sysvar::DB::VolCtrl = this.VolCtrlStatus;
+}
+/*@@end*/
+
+/*@@caplFunc:RpmFromSpeed(int):*/
+// very simple rpm calculation simulating
+// a three level automatic gear
+int RpmFromSpeed (int speed)
+{
+  if (speed < kMaxSpeedGear1)
+  {
+    // gear 1
+    return speed * kFactorGear1;
+  }
+  if (speed < kMaxSpeedGear2)
+  {
+    // gear 2
+    return speed * kFactorGear2;
+  }
+  // gear 3
+  return speed * kFactorGear3;
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::DeckStatusStatus (0x109):*/
+on message DeckStatusStatus
+{
+  gDeckStatus = this.CDPlayerCmd;
+  UpdateDisplay();
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::MuteStatus (0x110):*/
+on message MuteStatus
+{
+  gMuteStatus = this.MuteStatus;
+  UpdateDisplay();
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::IgnitionKeyStatus (0x111):*/
+on message IgnitionKeyStatus
+{
+  gIgnition = this.Ignition;
+  UpdateDisplay();
+}
+/*@@end*/
+
+/*@@msg:CAN1.CANbus::CurrentAudioSource (0x112):*/
+on message CurrentAudioSource
+{
+  gCurrentAudioSource = this.SourceID;
+  UpdateDisplay();
+}
+/*@@end*/
+
+/*@@caplFunc:UpdateDisplay():*///function
+UpdateDisplay()
+{
+  char buf[50];
+  long min,sec;  // minutes, seconds
+
+  if(gIgnition == 0)
+  {
+    sysSetVariableString(sysvar::DB::Track, "");
+    sysSetVariableString(sysvar::DB::TrackTime, "");
+    sysSetVariableString(sysvar::DB::DisplCDStatus, "");
+    @sysvar::DB::DisplMute = 0;
+    return;
+  }
+
+  if(gCurrentAudioSource == CurrentAudioSource.SourceID::DiscPlayer)
+  {
+    snprintf(buf, elcount(buf), "Track %02d", gTrackStatus);
+    sysSetVariableString(sysvar::DB::Track, buf);
+  
+    min = gTimeRelative / 60;
+    sec = gTimeRelative - (min*60);
+    snprintf(buf, elcount(buf), "%02d:%02d", min, sec);
+    sysSetVariableString(sysvar::DB::TrackTime, buf);
+
+    if(gDeckStatus == DeckStatusStatus.CDPlayerCmd::Play)
+      sysSetVariableString(sysvar::DB::DisplCDStatus,"Play");
+    else if(gDeckStatus == DeckStatusStatus.CDPlayerCmd::Stop)
+      sysSetVariableString(sysvar::DB::DisplCDStatus,"Stop");
+    else if(gDeckStatus == DeckStatusStatus.CDPlayerCmd::Load)
+      sysSetVariableString(sysvar::DB::DisplCDStatus,"Load");
+    else if(gDeckStatus == DeckStatusStatus.CDPlayerCmd::Unload)
+      sysSetVariableString(sysvar::DB::DisplCDStatus,"Unload");
+    else if(gDeckStatus == DeckStatusStatus.CDPlayerCmd::Pause)
+      sysSetVariableString(sysvar::DB::DisplCDStatus,"Pause"); 
+  }
+  else
+  {
+    sysSetVariableString(sysvar::DB::Track, "");
+    sysSetVariableString(sysvar::DB::TrackTime, "");
+    sysSetVariableString(sysvar::DB::DisplCDStatus, "");
+  }
+
+  if(gCurrentAudioSource == CurrentAudioSource.SourceID::None)
+  {
+    @sysvar::DB::DisplMute = 0;
+  }
+  else
+  {
+    @sysvar::DB::DisplMute = gMuteStatus;
+  }
+}
+/*@@end*/
+

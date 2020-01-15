@@ -1,0 +1,1101 @@
+/*@!Encoding:1252*/
+includes
+{
+#include "ECL_Constants.cin"
+}
+
+//
+// ECL.cin:
+//  Common include file for MOST150 ECL system test and Electrical-Wakeup functionality (both initiator and participants)
+//  Version 0.75
+//
+// This file provides the API for:
+//  System Test Initiator: ECL_STI_*
+//  System Test Participant: ECL_STP_*
+//  Electrical-Wakeup Initiator: ECL_WI_*
+//  Electrical-Wakeup Participant: ECL_WP_*
+//
+// Note: when using this file, the following callbacks must be implemented:
+//  void ECL_CB_OnECLError(char msg[])
+//  void ECL_STI_CB_OnSystemTestResultsReceived(long testParameter, long electricalStates[], long opticalStates[], long numResults)
+//  void ECL_STI_CB_OnSystemTestStartupError(char msg[])
+//  void ECL_STP_CB_OnStartupSequenceReceived()
+//  void ECL_STP_CB_OnSystemTestParameterReceived(long testParameter)
+//  void ECL_STP_CB_OnSystemTestSendResults(long testParameter, long classID)
+//  void ECL_WP_CB_OnElectricalWakeupReceived()
+//  void ECL_CB_OnECLStateChanged(long newState)
+//
+//
+variables
+{
+  long _isSystemTestInitiator, _isSystemTestParticipant, _isElectricalWakup;
+
+  /* ecl signal state */
+  long _gECLSignalLevel;
+  char _gECLSignalLevelSysVarName[256];
+  char _gECLSysVarNamesSpace[256];
+
+  long _gECLLastHigh;
+  long _gECLLastHighInterval;
+  long _gECLLastLow;
+  long _gECLLastLowInterval;
+  long _gECLLastChange;
+
+  msTimer _tCheckECLPulledDownConnection;
+  msTimer _tCheckECLInactiveTestSeparator;
+
+  long _gECLMostChannel;
+
+  /*********************** ECL SystemTest Initiator **************************/
+  enum ECLInitiatorState { ECLIStateError = -1, ECLIStateOff = 0,
+    ECLIStateSendStartup = 1, ECLIStateSendSystemTest, ECLIStateReceiveTestResults /* ECLIStateIdle ...*/}
+    _gECLIState = ECLIStateOff;
+  long _gECLIStateTimegate;
+
+  long _gECLINumParticipantClasses;
+
+  msTimer _tInitiatorReceiveSTResults;
+  long _gECLIReceiveTestTimeSlot;
+  long _gECLIReceivedTestResultsEl[cECL_MAX_PARTICIPANTS];
+  long _gECLIReceivedTestResultsOpt[cECL_MAX_PARTICIPANTS];
+
+  msTimer _tInitiatorSendSTParameterSequence;
+  long _gECLISystemTestParameter;
+  long _gECLITestPause;
+
+
+  /*********************** ECL SystemTest Participant ************************/
+  enum ECLParticipantState { ECLPStateError = -1, ECLPStateOff = 0,
+    ECLPStateStartSeqRead = 1, ECLPStateReadParameterSequence, ECLPStateSendResultSeq, ECLPStateIdle }
+    _gECLPState = ECLPStateOff;
+
+  //long _gECLPNumPartitiantClasses = cECL_MAX_PARTICIPANTS; // participant needs this to reset his state in time ...
+
+  long _gECLPParticipantClassIDs[cECL_MAX_PARTICIPANTS], _gECLPNumParticipantClassIDs;
+
+  msTimer _tParticipantReceiveSTParameterSequence;
+  long _gECLPReadParamSeqBitTimeSlot;
+  long _gECLPTestParamValue;
+
+  msTimer _tParticipantSendSTResults;
+  long _gECLPSendParticipantResultTimeSlot;
+  long _gECLPTestResultsEl[cECL_MAX_PARTICIPANTS];
+  long _gECLPTestResultsOpt[cECL_MAX_PARTICIPANTS];
+
+  enum ECLTestSequenceParts {
+    eTestStart = 0,
+    eTestParam1 = 1,
+    eTestParam2 = 2,
+    eTestParam3 = 3,
+    eTestParam4 = 4,
+    eTestParam5 = 5,
+    eTestParamSync = 6,
+    eTestPause = 7,
+    eTestSync = 8
+  };
+    
+  long gTestSequenceDurationDeviation[9];
+  
+  long gTSIDeviation = 0;
+  
+  enum ECLResultParts {
+    eTestSep = 0,
+    eTestResultEn = 1,
+    eTestResultOn = 2
+  };
+  
+  long gResultsDurationDeviation[3];
+
+  /************************** ECL Electrical Wakeup **************************/
+  //long _gECLELastLow;
+}
+
+long ECL_GetTestPause(enum eECL_TestResults systemTestKind)
+{
+	if(systemTestKind == ECL_TR_MOSTSignRes_RBD || systemTestKind == ECL_TR_MOSTSignRes_Threshold)
+    return cECL_tTestPause2;
+  else
+    return cECL_tTestPause;
+}
+
+void ECL_STI_SetTSIDeviation(long deviation)
+{
+  if((-deviation) <= cECL_tTSI)
+	  gTSIDeviation = deviation;
+}
+
+void ECL_STI_ReSetTSIDeviation()
+{
+	gTSIDeviation = 0;
+}
+
+void ECL_STI_SetTestSequenceDurationDeviation(enum ECLTestSequenceParts part, long deviation)
+{
+	gTestSequenceDurationDeviation[part] = deviation;
+}
+
+void ECL_STI_ReSetTestSequenceDurationDeviation(enum ECLTestSequenceParts part)
+{
+	gTestSequenceDurationDeviation[part] = 0;
+}
+
+void ECL_STI_ReSetTestSequenceDurationDeviation()
+{
+  int i;
+  for(i = 0; i < elcount(gTestSequenceDurationDeviation); ++i)
+	  gTestSequenceDurationDeviation[i] = 0;
+}
+
+void ECL_STP_SetTestResultsDurationDeviation(enum ECLResultParts part, long deviation)
+{
+	gResultsDurationDeviation[part] = deviation;
+}
+
+void ECL_STP_ReSetTestResultsDurationDeviation(enum ECLResultParts part)
+{
+	gResultsDurationDeviation[part] = 0;
+}
+
+void ECL_STP_ReSetTestResultsDurationDeviation()
+{
+  int i;
+  for(i = 0; i < elcount(gResultsDurationDeviation); ++i)
+	  gResultsDurationDeviation[i] = 0;
+}
+
+OnMostEcl(long eclState)
+{
+  long timeNowInMS, period;
+
+  timeNowInMS = timeNowInt64() / 1000000;
+
+  // filter out interefence from other event channels
+  if (ECL_GetMostChannel() != mostEventChannel())
+    return;
+
+  if (_gECLSignalLevel == eclState)
+    return; // only react on level/pegel change
+
+  ECL_CB_OnECLStateChanged(eclState);
+
+  if (gECL_Verbose >= ECL_Verbose_Default)
+    write("%s: OnMostEcl: timeNowInMS: %d, eclState: %d -> %d", _gECLSysVarNamesSpace, timeNowInMS, _gECLSignalLevel, eclState);
+
+  _gECLSignalLevel = eclState;
+
+  _gECLLastChange = timeNowInMS;
+
+  if (eclState == 0) {
+    /* ECL signal change from 1 to 0 */
+    _gECLLastHighInterval = timeNowInMS - _gECLLastHigh;
+    _gECLLastLow = timeNowInMS;
+  } else if (eclState == 1) {
+    /* ECL signal change from 0 to 1 */
+    _gECLLastLowInterval = timeNowInMS - _gECLLastLow;
+    _gECLLastHigh = timeNowInMS;
+  }
+
+  // set system variable if possible - this will be obsolete with new ECL feature in version 8
+  if (_gECLSignalLevelSysVarName[0] != 0)
+  {
+    //write("DEBUG: setting variable %s::%s to %d", _gECLSysVarNamesSpace, _gECLSignalLevelSysVarName, _gECLSignalLevel);
+    SysSetVariableInt(_gECLSysVarNamesSpace, _gECLSignalLevelSysVarName, _gECLSignalLevel);
+  }
+
+  // dispatch ecl signal level to active state machines ...
+
+  if (_isSystemTestInitiator)
+    _internalOnMostECLSysTestInitiator(eclState, timeNowInMS);
+
+  if (_isSystemTestParticipant)
+    _internalOnMostECLSysTestParticipant(eclState, timeNowInMS);
+
+  if (_isElectricalWakup)
+    _internalOnMostECLElWakeup(eclState, timeNowInMS);
+}
+
+//
+// This procedure starts the ECL system test according to "ECL_startSystemTest"
+// definition in section 5.3.4 of the ECL specification. These method initiates
+// the corresponding CANoe node to work as an ECL system test initiator capable
+// of receiving the results from the ECL system test.
+//
+// Parameters:
+//  <retries> specifies number of startup retries,
+//  <startupTime> defines the tStartUp before the parameter sequence starts. According to ECL
+//   specification 1.1.1, <startupTime> is valid for the interval 100 to 10000 (0.1s <= tStartUp <= 10s).
+//  <testParameter> defines the system test to be
+//    performed (see table 3-2/3-2 of the ECL specification).
+//  <testPauseTime> defines the time the initiator has to wait for the participants
+//   for their test execution.
+//  <mc> defines the number of slots used by participants during the result sequence.
+//
+// Return values:
+//  This procedure returns 0 on success. If sending on the ECL fails or a system test is already running, a non-zero value will be returned.
+//
+long ECL_STI_StartSystemTest(long retries, long startupTime, long testParameter, long testPauseTime, long mc)
+{
+  long ret, i, duration, eclStartupSequenceLen;
+  const long cStartupSeqLenMin = 2; // 3;
+  const long cStartupSeqLenMax = cStartupSeqLenMin + cECL_MAX_RETRIES*2 + 1;  // +1 include the last high
+
+  // startup sequence ... no optional retries yet ...
+  dword eclStartupSequenceStates[cStartupSeqLenMax]; // = { 1, 0 //, 1 };
+  dword eclStartupSequenceDuration[cStartupSeqLenMax]; // = {...}
+
+
+  eclStartupSequenceStates[0] = 1;
+  eclStartupSequenceStates[1] = 0;
+
+  eclStartupSequenceDuration[0] = 1/*initialDelay*/;
+  eclStartupSequenceDuration[1] = cECL_tTSI + gTSIDeviation; //, cECL_tPause
+
+  eclStartupSequenceLen = cStartupSeqLenMin + retries*2;
+
+
+  if (mc < 0 || mc > cECL_MAX_PARTICIPANTS) {
+    write("%s: ECL_STI_StartSystemTest: error parameter <mc> has invalid value %d (must be inside 0..%d)", _gECLSysVarNamesSpace, mc, cECL_MAX_PARTICIPANTS);
+    _gECLIState = ECLIStateError;
+    return -1;
+  }
+
+  if (_gECLIState != ECLIStateOff && _gECLIState != ECLIStateError) {
+    write("%s: ECL_STI_StartSystemTest: a system test is already running, aborting request!", _gECLSysVarNamesSpace);
+    return 1;
+  }
+
+  /* init initiator */
+  _gECLIState = ECLIStateOff;
+  _gECLISystemTestParameter = testParameter;
+  _gECLINumParticipantClasses = mc;
+  _isSystemTestInitiator = 1;
+
+  duration = 0;
+
+  // convert all durations from ms to 100microseconds
+  for(i=0; i < eclStartupSequenceLen; i++) {
+    // set retries
+    if (i >= cStartupSeqLenMin) {
+      if (((i-cStartupSeqLenMin)% 2) == 0) {
+        eclStartupSequenceDuration[i] = cECL_tPause;
+        eclStartupSequenceStates[i] = 1;
+      } else {
+        eclStartupSequenceDuration[i] = cECL_tTSI;
+        eclStartupSequenceStates[i] = 0;
+      }
+    }
+    duration += eclStartupSequenceDuration[i];
+    eclStartupSequenceDuration[i] *= cMS_TO_100MuS;
+  }
+  
+  // set the last impulse actively to high, so it appears inside of the sequence
+  duration += cECL_tFinalHigh;
+  eclStartupSequenceStates[eclStartupSequenceLen] = 1;
+  eclStartupSequenceDuration[eclStartupSequenceLen] = cECL_tFinalHigh * cMS_TO_100MuS;
+  eclStartupSequenceLen++;
+  
+  // check for ECL errors inside 'OnMostEcl'
+  _gECLIState = ECLIStateSendStartup;
+  _gECLIStateTimegate = timeNowInt64() / 1000000 + eclStartupSequenceDuration[0]/cMS_TO_100MuS;
+
+  mostGenerateEclSequence(ECL_GetMostChannel(), 0); // stop previous sequence
+  ret = mostConfigureEclSequence(ECL_GetMostChannel(), eclStartupSequenceLen, eclStartupSequenceStates, eclStartupSequenceDuration);
+  if (ret == 0)
+    ret = mostGenerateEclSequence(ECL_GetMostChannel(), 1 /*1 -> start generation*/);
+
+  if (ret != 0) {
+    write("%s: ECL_STI_StartSystemTest: error - returned from most*EclSequence: %d", _gECLSysVarNamesSpace, ret);
+    _gECLIState = ECLIStateError;
+    return ret;
+  }
+
+  // set timer to send the system test parameter
+  _gECLITestPause = testPauseTime;
+  setTimer(_tInitiatorSendSTParameterSequence, duration+startupTime);
+
+  // check if the ECL is connected (the signal gets pulled down)
+  setTimer(_tCheckECLPulledDownConnection, cECL_TOLERANCE*2);
+
+  return ret;
+}
+
+on timer _tInitiatorReceiveSTResults
+{
+  long deviceNum, currentECLBit, electricalState, opticalState;
+
+  currentECLBit = _gECLSignalLevel; // mostGetEcl();
+  _gECLIState = ECLIStateReceiveTestResults;
+
+  if (gECL_Verbose >= ECL_Verbose_Default)
+    write("%s on _tInitiatorReceiveSTResults: timeNow in ms: %d", _gECLSysVarNamesSpace, (timeNowInt64() / 1000000) );
+
+  if (_gECLIReceiveTestTimeSlot < 0) {
+    // prepare to receive results from system test
+    _gECLIReceiveTestTimeSlot = 0;
+    setTimer(_tInitiatorReceiveSTResults, 2*cECL_tTestSep + cECL_tTestResult/2);
+
+    // check if the ECL is inactive between test results (the signal stays high)
+    setTimerCyclic(_tCheckECLInactiveTestSeparator, 3*cECL_tTestSep + 2*cECL_tTestResult - cECL_TOLERANCE, 2*cECL_tTestResult + cECL_tTestSep);
+  } else if (_gECLIReceiveTestTimeSlot < 2*_gECLINumParticipantClasses) {
+    // 2 result slots for every ECL device class
+    deviceNum = _gECLIReceiveTestTimeSlot/2;
+
+    // read 2 bits (Ex and Ox) for every ECL device 
+    if ( (_gECLIReceiveTestTimeSlot % 2) == 0) {
+      setTimer(_tInitiatorReceiveSTResults, cECL_tTestResult);
+      if (gECL_Verbose >= ECL_Verbose_Default)
+        write("%s: _tInitiatorReceiveSTResults E%d: %d", _gECLSysVarNamesSpace, deviceNum+1, currentECLBit);
+
+      _gECLIReceivedTestResultsEl[deviceNum] = (currentECLBit ? 1 : 0); /* electrical state */
+    } else {
+      setTimer(_tInitiatorReceiveSTResults, cECL_tTestSep + cECL_tTestResult);
+      if (gECL_Verbose >= ECL_Verbose_Default)
+        write("%s: _tInitiatorReceiveSTResults O%d: %d", _gECLSysVarNamesSpace, deviceNum+1, currentECLBit);
+
+      _gECLIReceivedTestResultsOpt[deviceNum] = (currentECLBit ? 1 : 0); /* optical state */
+
+      // [use this if you want to receive results individually] IMPLEMENT THIS CALLBACK: ECL test result output
+      //ECL_STI_CB_OnSystemTestResultReceived(deviceNum, _gECLISystemTestParameter, electricalState, opticalState);
+    }
+
+    _gECLIReceiveTestTimeSlot++;
+
+    // stop checking of test pause if we reach the last test result
+    if (_gECLIReceiveTestTimeSlot >= 2*_gECLINumParticipantClasses)
+      cancelTimer(_tCheckECLInactiveTestSeparator);
+
+  } else {
+
+    // report results for all ECL device classes...
+    // IMPLEMENT THIS CALLBACK: ECL test result output
+    ECL_STI_CB_OnSystemTestResultsReceived(_gECLISystemTestParameter, _gECLIReceivedTestResultsEl, _gECLIReceivedTestResultsOpt, _gECLINumParticipantClasses);
+
+    // reset state
+    _gECLIState = ECLIStateOff;
+    _isSystemTestInitiator = 0; // unregister event dispatch for initiator
+  }
+}
+
+//
+// Get-functionality to request the electrical state for the last
+// system test performed for a given participant class. If an internal error
+// has occurred or the system test was not completed for the specified
+// system test participant class, this method returns -1.
+//
+// Parameter:
+//  participantClassID - STP device class
+//
+// Return values:
+//  electrical state (1 or 0) or -1 on failure
+//
+long ECL_STI_GetElectricalResult(long participantClassID)
+{
+  if (participantClassID < 1 || participantClassID > _gECLINumParticipantClasses)
+    return -1;
+  return _gECLIReceivedTestResultsEl[participantClassID-1];
+}
+
+//
+// Get-functionality to request the optical state for the last
+// system test performed for a given participant class. If an internal error
+// has occurred or the system test was not completed for the specified
+// system test participant class, this method returns -1.
+//
+// Parameters:
+//  participantClassID - STP device class
+//
+// Return values:
+//  optical state (1 or 0) or -1 on failure
+//
+long ECL_STI_GetOpticalResult(long participantClassID)
+{
+  if (participantClassID < 1 || participantClassID > _gECLINumParticipantClasses)
+    return -1;
+  return _gECLIReceivedTestResultsOpt[participantClassID-1];
+}
+
+// 
+// Initiate a single ECL participant or a series of "virtual" ECL participants by specifying a set of participant node classes (class-IDs).
+// Calling ECL_STP_Start(1); ECL_STP_Start(2); will initiate two system test participants with node classes 1 and 2.
+//
+void ECL_STP_Start(long participantClassID)
+{
+  int i, insertIdx;
+
+  if (_gECLPNumParticipantClassIDs < cECL_MAX_PARTICIPANTS) {
+    // insert class-id in a sorted manner..
+    insertIdx = 0;
+    for(i = _gECLPNumParticipantClassIDs-1; i >= 0; i--) {
+      insertIdx = i;
+      if (_gECLPParticipantClassIDs[i] > participantClassID) {
+        if (i+1 < cECL_MAX_PARTICIPANTS)
+          _gECLPParticipantClassIDs[i+1] = _gECLPParticipantClassIDs[i];
+      } else if (_gECLPParticipantClassIDs[i] == participantClassID) {
+        write("ECL_STP_Start: Error: participant class-id %d already defined!", participantClassID);
+        return;
+      } else /* _gECLPParticipantClassIDs[i] < participantClassID */ {
+        insertIdx = i+1; // put new class-id in this slot
+        break;
+      }
+    }
+
+    _gECLPParticipantClassIDs[insertIdx] = participantClassID;
+    _gECLPNumParticipantClassIDs++;
+    _isSystemTestParticipant = 1;
+  } else {
+    write("ECL_STP_Start: Error: maximum %d of system test participants reached!", cECL_MAX_PARTICIPANTS);
+  }
+
+  if (gECL_Verbose >= ECL_Verbose_Default) {
+    write("%s: _gECLPParticipantClassIDs[%d]: ", _gECLSysVarNamesSpace, _gECLPNumParticipantClassIDs);
+
+	for(i = 0; i < _gECLPNumParticipantClassIDs; i++)
+      write("%d, ", _gECLPParticipantClassIDs[i]);
+  }
+}
+
+//
+// Set electrical state of a participant specified by the participant class-id
+//
+void ECL_STP_SetElectricalState(long value, long participantClassID)
+{
+  int i;
+
+  for (i = 0; i < _gECLPNumParticipantClassIDs; i++) {
+    if (_gECLPParticipantClassIDs[i] == participantClassID) {
+      _gECLPTestResultsEl[i] = value;
+
+      if (gECL_Verbose >= ECL_Verbose_Default) {
+        write("%s: _gECLPTestResultsEl[%d]: ", _gECLSysVarNamesSpace, _gECLPNumParticipantClassIDs);
+        for(i = 0; i < _gECLPNumParticipantClassIDs; i++)
+          write("%d, ", _gECLPTestResultsEl[i]);  
+      }
+      return;
+    }
+  }
+
+  write("ECL_STP_SetElectricalState: Error: no participant with class-id %d is active!", participantClassID);
+}
+
+//
+// Set optical state of a participant with specified class-id
+//
+void ECL_STP_SetOpticalState(long value, long participantClassID)
+{
+  int i;
+
+  for (i = 0; i < _gECLPNumParticipantClassIDs; i++) {
+    if (_gECLPParticipantClassIDs[i] == participantClassID) {
+      _gECLPTestResultsOpt[i] = value;
+      return;
+    }
+  }
+
+  write("ECL_STP_SetOpticalState: Error: no participant with class-id %d is active!", participantClassID);
+}
+
+//
+// Send the electrical wakeup impulse. This procedure returns 0 on success.
+// If sending on the ECL fails or another electrical wakeup
+// (e.g. from another device) is already in progress, a non-zero value will be returned.
+//
+long ECL_WI_SendElectricalWakeup()
+{
+  long ret, i, timeNowInMS;
+  dword EWUstates[2] = {0, 1};
+  dword EWUduration[2] = {cECL_tEWU * cMS_TO_100MuS, cECL_tFinalHigh * cMS_TO_100MuS};
+
+  timeNowInMS = timeNowInt64() / 1000000;
+
+  // check whether there is a system test already running and abort EWU detection ...
+  if (_gECLIState != ECLIStateOff && _gECLIState != ECLIStateError)
+    return -1;
+
+  if (_gECLPState != ECLPStateOff && _gECLPState != ECLPStateError && _gECLPState != ECLPStateIdle)
+    return -1;
+
+  // detect wakeup collision
+  if ( _gECLSignalLevel == 0 && (timeNowInMS-_gECLLastLow) >= (cECL_tEWU_Min) ) {
+    write("%s: ECL_WI_SendElectricalWakeup: wakeup collision detected! aborting", _gECLSysVarNamesSpace);
+    return -1;
+  }
+  
+  mostGenerateEclSequence(ECL_GetMostChannel(), 0); // stop previous ECL sequence (if possible)
+  ret = mostConfigureEclSequence(ECL_GetMostChannel(), elCount(EWUstates), EWUstates, EWUduration);
+  if (ret == 0)
+    ret = mostGenerateEclSequence(ECL_GetMostChannel(), 1 /*1 -> start generation*/);
+
+  if (ret != 0) {
+    write("%s: ECL_WI_SendElectricalWakeup: error - returned from most*EclSequence: %d", _gECLSysVarNamesSpace, ret);
+    _gECLIState = ECLIStateError;
+    return ret;
+  }
+
+  // check if the ECL is connected (the signal gets pulled down)
+  setTimer(_tCheckECLPulledDownConnection, cECL_TOLERANCE*2);
+
+  return 0;
+}
+
+void _internalOnMostECLSysTestInitiator(long eclState, long timeNowInMS)
+{
+  long period;
+
+  period = timeNowInMS - _gECLIStateTimegate;
+
+  if (period <= cECL_TOLERANCE)
+    return;
+
+  // reaction on malfunction see 3.1.4 of ECL spec
+  if (_gECLIState == ECLIStateSendStartup) {
+    char errorString[256];
+    errorString[0] = 0; // reset static buffer!
+
+    if (period <= ((cECL_tTSI + gTSIDeviation) - cECL_TOLERANCE)) {
+      // malfunction in tTSI window or tPause ? -> abort generation of test sequence
+      if (eclState != 0) {
+        strncpy(errorString, "ERROR detected: high level in tTSI startup sequence!", elCount(errorString));
+        write("%s: _internalOnMostECLInitiator: %s", errorString, _gECLSysVarNamesSpace);
+        _gECLIState = ECLIStateError;
+      }
+    }
+    else if ( abs(period-cECL_tTSI) > cECL_TOLERANCE &&  period <= (cECL_tTSI+cECL_tPause-cECL_TOLERANCE) ) {
+      if (eclState != 1) {
+        strncpy(errorString, "ERROR detected: low level in tPause startup sequence!", elCount(errorString));
+        _gECLIState = ECLIStateError;
+      }
+    }
+
+    if (errorString[0] != 0) {
+      write("%s: _internalOnMostECLInitiator: %s", errorString, _gECLSysVarNamesSpace);
+      // IMPLEMENT THIS CALLBACK: ECL system test startup error
+      ECL_STI_CB_OnSystemTestStartupError(errorString);
+    }
+  }
+
+  if (_gECLIState == ECLIStateError) {
+    // abort generation of system test
+    write("%s: _internalOnMostECLInitiator: aborting system test due to errors!", _gECLSysVarNamesSpace);
+    cancelTimer(_tInitiatorSendSTParameterSequence);
+    cancelTimer(_tInitiatorReceiveSTResults);
+    cancelTimer(_tCheckECLInactiveTestSeparator);
+    mostGenerateEclSequence(ECL_GetMostChannel(), 0 /* 0 -> stop generation */);
+    _isSystemTestInitiator = 0; // unregister event dispatch for initiator
+  }
+}
+
+// internal timer callback - send test parameter sequence according to chapter 3.1.2 of the ECL spec
+on timer _tInitiatorSendSTParameterSequence
+{
+  long ret, i, duration;
+
+  // test sequence ...
+  dword eclTestSequenceStates[10] = {0, /*5 parameter bits*/0,0,0,0,0,  0, 1,0,1};
+  dword eclTestSequenceDuration[10]; // = {cECL_tTestStart,
+    //cECL_tTestParam, cECL_tTestParam, cECL_tTestParam, cECL_tTestParam, cECL_tTestParam,
+    //cECL_tTestParam, cECL_tTestPause/*_gECLITestPause*/, cECL_tTestSync};
+  eclTestSequenceDuration[0] =   cECL_tTestStart + gTestSequenceDurationDeviation[0];
+  eclTestSequenceDuration[1] = cECL_tTestParam + gTestSequenceDurationDeviation[1];
+  eclTestSequenceDuration[2] = cECL_tTestParam + gTestSequenceDurationDeviation[2];
+  eclTestSequenceDuration[3] = cECL_tTestParam + gTestSequenceDurationDeviation[3];
+  eclTestSequenceDuration[4] = cECL_tTestParam + gTestSequenceDurationDeviation[4];
+  eclTestSequenceDuration[5] = cECL_tTestParam + gTestSequenceDurationDeviation[5];
+  eclTestSequenceDuration[6] = cECL_tTestParam + gTestSequenceDurationDeviation[6];
+  eclTestSequenceDuration[7] =   _gECLITestPause + gTestSequenceDurationDeviation[7];
+  eclTestSequenceDuration[8] = cECL_tTestSync + gTestSequenceDurationDeviation[8];
+  eclTestSequenceDuration[9] = cECL_tFinalHigh;
+
+  if (gECL_Verbose >= ECL_Verbose_Default)
+    write("%s: on timer _tInitiatorSendSTParameterSequence!", _gECLSysVarNamesSpace);
+
+  duration = 0;
+  // convert all durations from ms to 100microseconds
+  for(i=0; i < elCount(eclTestSequenceDuration); i++) {
+    duration += eclTestSequenceDuration[i];
+    eclTestSequenceDuration[i] *= cMS_TO_100MuS;
+  }
+
+  // set the test parameter bit mask (5 bits P1...P5)
+  for(i = 0; i < 5; i++)
+    eclTestSequenceStates[i+1] = ((_gECLISystemTestParameter&(1<<(4-i))) ? 1:0);
+
+  // send the sequence to ECL
+  _gECLIState = ECLIStateSendSystemTest;
+  _gECLIStateTimegate =  timeNowInt64() / 1000000;
+
+  mostGenerateEclSequence(ECL_GetMostChannel(), 0); // stop previous ECL sequence (if possible)
+  ret = mostConfigureEclSequence(ECL_GetMostChannel(), elCount(eclTestSequenceStates),
+    eclTestSequenceStates, eclTestSequenceDuration );
+  if (ret == 0)
+    ret = mostGenerateEclSequence(ECL_GetMostChannel(), 1 /*1 -> start generation*/);
+
+  if (ret != 0) {
+    write("%s: ECL_STI_SendSystemTest: error - returned from most*EclSequence: %d", _gECLSysVarNamesSpace, ret);
+    _gECLIState = ECLIStateError;
+    return;
+  }
+
+  _gECLIReceiveTestTimeSlot = -1;
+  setTimer(_tInitiatorReceiveSTResults, duration); // start test result receiver
+}
+
+on timer _tParticipantReceiveSTParameterSequence
+{
+  long readBit;
+
+  // read current ECL level
+  readBit = _gECLSignalLevel; // MostGetEcl(ECL_GetMostChannel());
+
+  if (readBit < 0) {
+    write("%s: on timer _tParticipantReceiveSTParameterSequence: got ECL error: %d!", readBit, _gECLSysVarNamesSpace);
+    _gECLPState = ECLPStateError;
+    return;
+  }
+
+  if (_gECLPState != ECLPStateReadParameterSequence) {
+    cancelTimer(_tParticipantReceiveSTParameterSequence);
+    return;
+  }
+
+  // read bits P1..P5
+  if (_gECLPReadParamSeqBitTimeSlot < 5) {
+
+    _gECLPTestParamValue |= (readBit << (4-_gECLPReadParamSeqBitTimeSlot));
+
+    // set timer to read the next bit
+    _gECLPReadParamSeqBitTimeSlot++;
+  } else if (_gECLPReadParamSeqBitTimeSlot >= 5) {
+     cancelTimer(_tParticipantReceiveSTParameterSequence);
+
+    // bit after parameter sequence has to be 0
+    if (readBit != 0) {
+      write("%s: on timer _tParticipantReceiveSTParameterSequence: Error: parameter synchronization bit not zero! going invalid ...", _gECLSysVarNamesSpace);
+      _gECLPState = ECLPStateError;
+    } else {
+      // parameter reading finished -> go to 'send' state
+      _gECLPState = ECLPStateSendResultSeq;
+
+      // test states will be reset upon detection of the startup sequence ...
+
+      // IMPLEMENT THIS CALLBACK: ECL system test parameter received
+      ECL_STP_CB_OnSystemTestParameterReceived(_gECLPTestParamValue);
+    }
+  }
+
+  if (gECL_Verbose >= ECL_Verbose_Default)
+    write("%s: on timer _tParticipantReceiveSTParameterSequence: _gECLPTestParamValue %d", _gECLSysVarNamesSpace, _gECLPTestParamValue);
+}
+
+on timer _tParticipantSendSTResults
+{
+  long i, ret, duration, classID, maxClassID;
+  /* 3 states: electr-state, opt-state, pause*/
+  dword testResultStates[4] = {1, 1, 1, 1}; // inactive/passive level by default ...
+  dword testResultDuration[4];
+  testResultDuration[0] = cECL_tTestSep + gResultsDurationDeviation[0];
+  testResultDuration[1] = cECL_tTestResult + gResultsDurationDeviation[1];
+  testResultDuration[2] = cECL_tTestResult + gResultsDurationDeviation[2];
+  testResultDuration[3] = cECL_tFinalHigh;
+  
+  _gECLPSendParticipantResultTimeSlot++;
+
+  if (gECL_Verbose >= ECL_Verbose_Default)
+    write("%s: on timer _tParticipantSendSTResults: timeSlot: %d, timeNowInMS: %d", _gECLSysVarNamesSpace, _gECLPSendParticipantResultTimeSlot, (timeNowInt64() / 1000000) );
+
+  maxClassID = -1; // use the maximal class-id to reset the internal state if all participants have sent their test results
+  for (i = 0; i < _gECLPNumParticipantClassIDs; i++) {
+    classID = _gECLPParticipantClassIDs[i];
+
+    if (maxClassID < classID)
+      maxClassID = classID;
+
+    if (classID == _gECLPSendParticipantResultTimeSlot) {
+      if (_gECLPTestResultsEl[i] == -1 || _gECLPTestResultsOpt[i] == -1) {
+        write("%s: on timer _tParticipantSendSTResults: Error: uninitialized electrical/optical state (class-id %d)!", _gECLSysVarNamesSpace, classID);
+        continue;
+      }
+      testResultStates[1] = _gECLPTestResultsEl[i];
+      testResultStates[2] = _gECLPTestResultsOpt[i];
+      break; // mark to send sequence
+    }
+  }
+
+  // reset the STI state if the system test result send period is over
+  if (_gECLPSendParticipantResultTimeSlot > maxClassID ||
+      _gECLPSendParticipantResultTimeSlot > cECL_MAX_PARTICIPANTS) {
+    _gECLPState = ECLPStateOff;
+    cancelTimer(_tParticipantSendSTResults);
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s: on timer _tParticipantSendSTResults: max timeslot reached (maxClassID: %d)", _gECLSysVarNamesSpace, maxClassID);
+    return;
+  }
+
+  if (i >= _gECLPNumParticipantClassIDs) {
+    // don't send anything in this timeslot
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s: on timer _tParticipantSendSTResults: aborting (%d >= %d)", _gECLSysVarNamesSpace, i, _gECLPNumParticipantClassIDs);
+    return;
+  }
+
+  duration = 0;
+  // convert all durations from ms to 100microseconds
+  for(i=0; i < elCount(testResultDuration); i++) {
+    duration += testResultDuration[i];
+    testResultDuration[i] *= cMS_TO_100MuS;
+  }
+
+  mostGenerateEclSequence(ECL_GetMostChannel(), 0); // stop previous sequence
+  ret = mostConfigureEclSequence(ECL_GetMostChannel(), elCount(testResultStates), testResultStates, testResultDuration);
+  if (ret == 0)
+    ret = mostGenerateEclSequence(ECL_GetMostChannel(), 1 /*1 -> start generation*/);
+
+  // IMPLEMENT THIS CALLBACK: ECL system test results will be sent for a participant
+  ECL_STP_CB_OnSystemTestSendResults(_gECLPTestParamValue, classID);
+
+  if (gECL_Verbose >= ECL_Verbose_Default) {
+    for(i=0; i < elCount(testResultStates); i++) {
+      write("%s _tParticipantSendSTResults-sequence: state:%d duration:%d", _gECLSysVarNamesSpace, testResultStates[i], testResultDuration[i]/cMS_TO_100MuS);
+    }
+  }
+
+  if (ret != 0) {
+    write("%s on timer _tParticipantSendSTResults: error generating ecl sequence: %d", _gECLSysVarNamesSpace, ret);
+    _gECLPState = ECLPStateError;
+    cancelTimer(_tParticipantSendSTResults);
+    return;
+  }
+
+  if (gECL_Verbose >= ECL_Verbose_Low)
+    write("sending ecl sequence (%d,%d,%d) at %d", testResultStates[0], testResultStates[1], testResultStates[2], timeNowInt64() / 1000000);
+}
+
+//
+// Set the system variable name for the signal-level variable.
+//
+void ECL_SetSignalLevelSysVarName(char name[])
+{
+  strncpy(_gECLSignalLevelSysVarName, name, elCount(_gECLSignalLevelSysVarName));
+}
+
+//
+// Set system variable namespace (used for verbose messages as well).
+//
+void ECL_SetSysVarNamesSpace(char name[])
+{
+  strncpy(_gECLSysVarNamesSpace, name, elCount(_gECLSysVarNamesSpace));
+}
+
+//
+// Marks a CANoe node as ECL electrical wakeup participant which makes it possible
+// to receive the EWU impulse and ECL_WP_CB_OnElectricalWakeupReceived() will be
+// called. This mode can be combined with ECL system test intitator and participants.
+//
+void ECL_WP_Start ()
+{
+  // start dispatching ECL signal level for EWU detection
+  _isElectricalWakup = 1;
+}
+
+// 
+// Initiate a series of ECL participants by specifying a set of participant node classes (class-IDs).
+// Calling ECL_STP_Start(arr, 2) with arr[2] = {1, 2}. is equivalent to call ECL_STP_Start(1); ECL_STP_Start(2); as a sequence.
+//
+void ECL_STP_Start(long participanClassIDs[], long numParticipantClassIDs)
+{
+  int i;
+  for (i = 0; i < _min(numParticipantClassIDs, elCount(participanClassIDs)); i++) {
+    ECL_STP_Start(participanClassIDs[i]);
+  }
+}
+
+//
+// Set optical states of multiple participants with an array for the values and participant class-ids
+// The arrays <values> and <participantClassIDs> must have at least <numStates> elements.
+//
+void ECL_STP_SetOpticalStates(long values[], long participantClassIDs[], long numStates)
+{
+  long i, size;
+
+  size = _min(_min(numStates, elCount(participantClassIDs)), elCount(values));
+  for (i = 0; i < size; i++)
+    ECL_STP_SetOpticalState(values[i], participantClassIDs[i]);
+}
+
+//
+// Set electrical states of multiple participants with an array for the values and participant class-ids.
+// The arrays <values> and <participantClassIDs> must have at least <numStates> elements.
+//
+void ECL_STP_SetElectricalStates(long values[], long participantClassIDs[], long numStates)
+{
+  long i, size;
+
+  size = _min(_min(numStates, elCount(participantClassIDs)), elCount(values));
+  for (i = 0; i < size; i++)
+    ECL_STP_SetElectricalState(values[i], participantClassIDs[i]);
+}
+
+//
+// Set electrical state for the first participant class defined using ECL_STP_Start()
+//
+void ECL_STP_SetElectricalState(long value)
+{
+  ECL_STP_SetElectricalState(value, _gECLPParticipantClassIDs[0]);
+}
+
+//
+// Set optical state for the first participant - defined using ECL_STP_Start(classID).
+//
+void ECL_STP_SetOpticalState(long value)
+{
+  ECL_STP_SetOpticalState(value, _gECLPParticipantClassIDs[0]);
+}
+
+void _internalOnMostECLSysTestParticipant(long eclState, long timeNowInMS)
+{
+  long i;
+
+  switch(_gECLPState) {
+  case ECLPStateError:
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s: _internalOnMostECLSysTestParticipant: ECLPStateError", _gECLSysVarNamesSpace);
+  //break;
+  case ECLPStateOff:
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s: _internalOnMostECLSysTestParticipant: ECLPStateOff. _gECLLastLowInterval: %d", _gECLSysVarNamesSpace, _gECLLastLowInterval);
+    if (eclState == 1 &&
+        (timeNowInMS-_gECLLastLow) >= (cECL_tTSI-eECL_TOLRANCE_RECV) &&
+        (timeNowInMS-_gECLLastLow) <= (cECL_tTSI+eECL_TOLRANCE_RECV)  ) {
+      _gECLPState = ECLPStateStartSeqRead;
+      if (gECL_Verbose >= ECL_Verbose_Default)
+        write("%s: system test start impulse received!", _gECLSysVarNamesSpace);
+
+      // reset test states
+      for(i = 0; i < elCount(_gECLPTestResultsEl); i++)
+        _gECLPTestResultsEl[i] = -1;
+      for(i = 0; i < elCount(_gECLPTestResultsOpt); i++)
+        _gECLPTestResultsOpt[i] = -1;
+
+      // IMPLEMENT THIS CALLBACK: ECL system test startup sequence received
+      ECL_STP_CB_OnStartupSequenceReceived();
+    }
+    else if(eclState)
+    {
+      write("impuls outside of tolerance, _gECLLastLow %d, timeNowInMS %d, ", _gECLLastLow, timeNowInMS);
+    }
+    break;
+  case ECLPStateStartSeqRead:
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s: _internalOnMostECLSysTestParticipant: ECLPStateStartSeqRead", _gECLSysVarNamesSpace);
+    // check until we get the startup time (4000 to 10000 ms)
+    if (eclState == 0 && (timeNowInMS-_gECLLastHigh)>=(cECL_tStartUp-eECL_TOLRANCE_RECV)
+          /* && (timeNowInMS-_gECLLastHigh)<=(cECL_tStartUpMax+cECL_TOLERANCE) ?? */ ) {
+      _gECLPState = ECLPStateReadParameterSequence;
+      _gECLPReadParamSeqBitTimeSlot = 0;
+      _gECLPTestParamValue = 0;
+
+      cancelTimer(_tParticipantReceiveSTParameterSequence); // in case the timer is still running ...
+
+      setTimerCyclic(_tParticipantReceiveSTParameterSequence, cECL_tTestStart + cECL_tTestParam/2, cECL_tTestParam);
+    }
+    break;
+  case ECLPStateReadParameterSequence:
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s: _internalOnMostECLSysTestParticipant: ECLPStateReadParameterSequence", _gECLSysVarNamesSpace);
+    break;
+  case ECLPStateSendResultSeq:
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s: _internalOnMostECLSysTestParticipant: ECLPStateSendResultSeq. _gECLLastHighInterval: %d, _gECLLastLowInterval: %d",
+            _gECLSysVarNamesSpace, _gECLLastHighInterval, _gECLLastLowInterval);
+    if (eclState == 1) {
+      /* start of tTestPause or test result synchronization - range from 100ms up to 7s ?! */
+      /* test for sync interval */
+      if ( abs(_gECLLastLowInterval-cECL_tTestSync) <= eECL_TOLRANCE_RECV) {
+        if (gECL_Verbose >= ECL_Verbose_Default)
+          write("%s >>>>>>>>>>> setTimer!", _gECLSysVarNamesSpace);
+
+        cancelTimer(_tParticipantSendSTResults); // in case the timer is still running ...
+
+        _gECLPSendParticipantResultTimeSlot = 0;
+        //setTimer(_tParticipantSendSTResults, 2*cECL_tTestSep /*+ _gECLPParticipantClassIDs[0]*(2*cECL_tTestResult+cECL_tTestSep)*/);
+        // set the timer for every time-slot. The on-timer routine decides whether to send results in a given timeslot
+        setTimerCyclic(_tParticipantSendSTResults, cECL_tTestSep + gResultsDurationDeviation[eTestResultOn] + cECL_tFinalHigh, 2*cECL_tTestResult + cECL_tTestSep + cECL_tFinalHigh);
+        _gECLPState = ECLPStateIdle;
+      }
+    } else if (eclState == 0 &&
+        _gECLLastHighInterval >= (cECL_tTestPause-eECL_TOLRANCE_RECV)
+     /*   && _gECLLastHighInterval <= (cECL_tTestPause+cECL_TOLERANCE)*/ ) {
+      //_gECLPTS_BitNo = 0;
+      //setTimer(_tPartSendTestResult, cECL_tTestSync + 2*cECL_tTestSep + _gECLPParticipantID*(2*cECL_tTestResult+cECL_tTestSep));
+    } else {
+      _gECLPState = ECLPStateError;
+    }
+    break;
+  default:
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s: _internalOnMostECLSysTestParticipant: invalid state?", _gECLSysVarNamesSpace);
+    break;
+  }
+}
+
+void _internalOnMostECLElWakeup(long eclState, long timeNowInMS)
+{
+
+  // check whether there is a system test already running (initiator or participant side) and abort EWU detection ...
+  if ( !(_gECLIState == ECLIStateOff || _gECLIState == ECLIStateError) )
+    return;
+
+  if ( !(_gECLPState == ECLPStateOff || _gECLPState == ECLPStateError /*&& _gECLPState != ECLPStateIdle*/) )
+    return;
+
+  // this is not used ATM - bug might come in handy sometime
+//  if (eclState == 0) _gECLELastLow = timeNowInMS;
+
+  if (eclState == 1 &&
+        (timeNowInMS-_gECLLastLow) >= (cECL_tEWU_Min) &&
+        (timeNowInMS-_gECLLastLow) <= (cECL_tEWU_Max)  ) {
+
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s _internalOnMostECLElWakeup: interval: %d, STI-State: %d, STP-State: %d", _gECLSysVarNamesSpace, timeNowInMS-_gECLLastLow, _gECLIState, _gECLPState);
+
+    // IMPLEMENT THIS CALLBACK: ECL electrical wakeup sequence received
+    ECL_WP_CB_OnElectricalWakeupReceived();
+  }
+
+}
+
+//
+// Stops all ECL participant(s) activated by ECL_STP_Start(*) and resets the internal state machine.
+//
+void ECL_STP_Stop()
+{
+  /* reset state, participant device classes, timers and ecl sequence generator */
+  _isSystemTestParticipant = 0;
+  _gECLPState = ECLPStateOff;
+  _gECLPNumParticipantClassIDs = 0;
+  cancelTimer(_tParticipantReceiveSTParameterSequence);
+  cancelTimer(_tParticipantSendSTResults);
+  mostGenerateEclSequence(ECL_GetMostChannel(), 0);
+}
+
+//
+// Stop receiving of electrical wakeup impulses - initiated by ECL_WP_Start().
+//
+void ECL_WP_Stop()
+{
+  _isElectricalWakup = 0;
+}
+
+on timer _tCheckECLPulledDownConnection
+{
+  char errorString[256];
+  long timeNowInMS;
+  errorString[0] = 0; // reset static buffer!
+
+  timeNowInMS = timeNowInt64() / 1000000;
+
+  if (gECL_Verbose >= ECL_Verbose_Default)
+  {
+    write(">>>>>>>>>>>> _tCheckECLPulledDownConnection: _gECLSignalLevel: %d, mostGetEcl: %d, timeNowInMS: %d, _gECLLastChange: %d, _gECLLastLow %d",
+      _gECLSignalLevel, mostGetEcl(ECL_GetMostChannel()), timeNowInMS, _gECLLastChange, _gECLLastLow);
+  }
+
+  // check variable integrity
+  if (_gECLSignalLevel != mostGetEcl(ECL_GetMostChannel()))
+  {
+    snprintf(errorString, elCount(errorString), "ERROR detected: ECL signal level inconsistent (ECL not connected?)");
+  }
+
+  if (_gECLSignalLevel != 0)
+  {
+    snprintf(errorString, elCount(errorString), "ERROR detected: ECL signal level was not pulled down - ECL not connected?!");
+  }
+  else if ( (timeNowInMS-_gECLLastChange) > 3*cECL_TOLERANCE)
+  {
+    snprintf(errorString, elCount(errorString), "ERROR detected: no OnMostEcl-event received - ECL not connected?!");
+  }
+
+  if (errorString[0] != 0) {
+    write("%s: _tCheckECLPulledDownConnection: %s", _gECLSysVarNamesSpace, errorString);
+
+    cancelTimer(_tInitiatorSendSTParameterSequence);
+    cancelTimer(_tInitiatorReceiveSTResults);
+    cancelTimer(_tCheckECLInactiveTestSeparator);
+    mostGenerateEclSequence(ECL_GetMostChannel(), 0 /* 0 -> stop generation */);
+
+    _gECLIState = ECLIStateError;
+    _gECLPState = ECLPStateError;
+
+    // IMPLEMENT THIS CALLBACK: general ECL error
+    ECL_CB_OnECLError(errorString);
+
+    // unregister event dispatch for ...
+    _isSystemTestInitiator = 0; 
+    //_isSystemTestParticipant = 0;
+    //_isElectricalWakup = 0;
+  }
+}
+
+//
+// This helper function is needed to make this demo compatible to CANalyzer
+//
+long ECL_GetMostChannel ()
+{
+  if (_gECLMostChannel == 0) {
+#if CANOE
+    // default behaviour for CANoe if channel was not set ...
+    _gECLMostChannel = mostGetChannel();
+#else
+    // default behaviour for CANalyzer if channel was not set ...
+    _gECLMostChannel = 1;
+
+    if (_isSystemTestParticipant)
+      _gECLMostChannel = 2;
+#endif
+  }
+
+  return _gECLMostChannel;
+}
+
+on timer _tCheckECLInactiveTestSeparator
+{
+  char errorString[256];
+  long timeNowInMS;
+  errorString[0] = 0; // reset static buffer!
+
+  timeNowInMS = timeNowInt64() / 1000000;
+
+  if (gECL_Verbose >= ECL_Verbose_Default)
+  {
+    write(">>>>>>>>>>>> _tCheckECLInactiveTestSeparator: _gECLSignalLevel: %d, mostGetEcl: %d, timeNowInMS: %d, _gECLLastChange: %d, _gECLLastLow %d",
+      _gECLSignalLevel, mostGetEcl(ECL_GetMostChannel()), timeNowInMS, _gECLLastChange, _gECLLastLow);
+  }
+
+  // check variable integrity
+  if (_gECLSignalLevel != mostGetEcl(ECL_GetMostChannel()))
+  {
+    snprintf(errorString, elCount(errorString), "ERROR detected: ECL signal level inconsistent (ECL not connected?)");
+  }
+
+  // check if the current level is high and has stayed high for the test separator period
+  if (_gECLSignalLevel != 1 || (timeNowInMS-_gECLLastChange) < (cECL_tTestSep - 4*cECL_TOLERANCE))
+  {
+    snprintf(errorString, elCount(errorString), "ERROR detected: ECL signal level was not inactive during test separator - wrong number of participants?!");
+  }
+
+  if (errorString[0] != 0)
+  {
+    write("%s: _tCheckECLInactiveTestSeparator: %s", _gECLSysVarNamesSpace, errorString);
+
+    // IMPLEMENT THIS CALLBACK: general ECL error
+    ECL_CB_OnECLError(errorString);
+  }
+}
+
+//
+// Set MOST channel manually - useful when using CANalyzer
+//
+void ECL_SetMostChannel(long channel)
+{
+  _gECLMostChannel = channel;
+}
+

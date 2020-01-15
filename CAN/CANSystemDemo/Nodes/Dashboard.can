@@ -1,0 +1,153 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "TPExchange.cin"
+}
+
+variables
+{
+  // Variables for ESP, ABS etc....
+  msTimer tConsoleElementsDsp1;   
+  msTimer tConsoleElementsDsp2;
+
+  int gIg_15R = 0 ; // remarked the signal value  
+  int gGear   = 0;
+
+  char gECU[10] = "%NODE_NAME%";
+  
+  float gAdjustmentRange[6] = {0.0, 1.5, 1.8, 1.9, 1.9, 2.0};
+  float gAdjustmentFactor   = 0.0;
+}
+
+on start
+{
+  // set to 2 to get more information into write-window 
+  setWriteDbgLevel(1);
+  writeDbgLevel(2,gECU);
+}
+
+on message Console_1
+{
+  if(this.WN_right_down)
+  {
+    @sysvar::ComfortBus::DashboardWNRStateDisplay = 1;
+  }
+  else if(this.WN_right_up)
+  {
+    @sysvar::ComfortBus::DashboardWNRStateDisplay = 2;
+  }
+  else 
+  {
+    @sysvar::ComfortBus::DashboardWNRStateDisplay = 0;
+  }
+
+  if(this.WN_left_down) 
+  {
+    @sysvar::ComfortBus::DashboardWNLStateDisplay = 1;
+  }
+  else if(this.WN_left_up)
+  {
+    @sysvar::ComfortBus::DashboardWNLStateDisplay = 2;
+  }
+  else 
+  {
+    @sysvar::ComfortBus::DashboardWNLStateDisplay = 0;
+  }
+}
+
+on message Console_2
+{
+  switch(this.Active) 
+  {
+    case this.Active::None:
+            @sysvar::ComfortBus::DashboardTurnIndRightDisplay = 0;
+            @sysvar::ComfortBus::DashboardTurnIndLeftDisplay = 0;
+            @sysvar::ComfortBus::DashboardWarnIndDisplay = 0;
+    break;
+    case this.Active::Warning:
+            @sysvar::ComfortBus::DashboardTurnIndRightDisplay = this.Phase;
+            @sysvar::ComfortBus::DashboardTurnIndLeftDisplay = this.Phase;
+            @sysvar::ComfortBus::DashboardWarnIndDisplay = this.Phase;
+    break;
+    case this.Active::Turn_left:
+            @sysvar::ComfortBus::DashboardTurnIndRightDisplay = 0;
+            @sysvar::ComfortBus::DashboardTurnIndLeftDisplay = this.Phase;
+            @sysvar::ComfortBus::DashboardWarnIndDisplay = 0;
+    break;
+    case this.Active::Turn_right:
+            @sysvar::ComfortBus::DashboardTurnIndRightDisplay = this.Phase;
+            @sysvar::ComfortBus::DashboardTurnIndLeftDisplay = 0;
+            @sysvar::ComfortBus::DashboardWarnIndDisplay = 0;
+    break;
+    default:
+            runError(1010,1010);
+    break;
+  }
+}
+
+on timer tConsoleElementsDsp1
+{
+  // Shows the elements "ABS" & "ESP" in the Dashboard.
+  // When the devices are ok the lights will disappear. 
+  if(gIg_15R) 
+  {
+    @sysvar::ComfortBus::DashboardESPDisplay = 0;
+    @sysvar::ComfortBus::DashboardABSDisplay = 0;
+  }
+}
+
+on timer tConsoleElementsDsp2
+{
+  // Shows the elements "Oil", "Water" & "Battery" in the Dashboard.
+  // When the devices are ok the lights will disappear. 
+  if(gIg_15R) 
+  {
+    @sysvar::ComfortBus::DashboardEngineOilDisplay = 0;
+    @sysvar::ComfortBus::DashboardEngineWaterDisplay = 0;
+    @sysvar::ComfortBus::DashboardBatteryDisplay = 0;
+  }
+}
+
+on Message Gateway_1
+{
+  gGear = this.Gear;
+  gAdjustmentFactor = gAdjustmentRange[this.Gear];
+
+  if(gIg_15R == this.Ig_15R) return;
+  
+  gIg_15R = this.Ig_15R;  
+
+  if(gIg_15R) 
+  {
+    @sysvar::ComfortBus::DashboardESPDisplay = 1;
+    @sysvar::ComfortBus::DashboardABSDisplay = 1;
+    @sysvar::ComfortBus::DashboardEngineOilDisplay = 1;
+    @sysvar::ComfortBus::DashboardEngineWaterDisplay = 1;
+    @sysvar::ComfortBus::DashboardBatteryDisplay = 1;
+  
+    setTimer(tConsoleElementsDsp1,2000);
+    setTimer(tConsoleElementsDsp2,3000);
+  }
+  else
+  {
+    @sysvar::ComfortBus::DashboardESPDisplay = 0;
+    @sysvar::ComfortBus::DashboardABSDisplay = 0;
+    @sysvar::ComfortBus::DashboardEngineOilDisplay = 0;
+    @sysvar::ComfortBus::DashboardEngineWaterDisplay = 0;
+    @sysvar::ComfortBus::DashboardBatteryDisplay = 0;
+  
+    cancelTimer(tConsoleElementsDsp1);
+    cancelTimer(tConsoleElementsDsp2);
+  }
+}
+
+on signal Gateway_2::CarSpeed
+{
+  @sysvar::ComfortBus::CarSpeedEuropean = this.phys * 1.6;
+}
+
+on sysvar sysvar::WiperSystem::Active
+{
+	@sysvarInt::WiperSystem::Position = @sysvarInt::WiperSystem::Active / 100; 
+}
+

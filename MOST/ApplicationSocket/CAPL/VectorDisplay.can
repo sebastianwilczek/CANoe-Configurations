@@ -1,0 +1,159 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  // Simulation of FBlock VectorDisplay
+
+  // number of rows of the display
+  const int kNumberOfRows = 3;
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // React on node messages from connected channel only; ignore spy messages
+  mostApplicationNode();
+
+  // Enable function service
+  // The function service implements FktIds.Get/Status and
+  // provides automatic error reply on commands to non-registred
+  // functions of this FBlock.
+  mostAsFsEnable();
+
+  // Enable all functions and all operations defined in the function catalog
+  // for this FBlock. 
+  mostAsFsFunctionEnable(kFctAllInFCat, kOpTFAllInFCat);
+
+}
+/*@@end*/
+
+/*@@sysvarChange:Display::Register:*/
+on sysvar Display::Register
+{
+  if(@this != 1)
+    return;
+ 
+  MostApRegister();
+}
+/*@@end*/
+
+/*@@sysvarChange:Display::Unregister:*/
+on sysvar Display::Unregister
+{
+  if(@this != 1)
+    return;
+ 
+  MostApUnregister();
+
+  Reset();
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  @sysvar::Display::FBlockID = MostApGetFBlockID();
+  @sysvar::Display::InstID = MostApGetInstID();
+  @sysvar::Display::IsRegistered = MostApIsRegistered();
+}
+/*@@end*/
+
+/*@@mostAmsMsg:VectorDisplay.Viewport.Set (0xC0C000):*/
+on mostAMSMessage VectorDisplay.Viewport.Set
+{
+  char textstr[100];
+
+  if(!CheckValidReception(this))
+    return;
+
+  if(this.dlc < 1)
+  {
+    // return "invalid length" error
+    mostSendError_Code(this, kErrInvalidLength);
+    return;
+  }
+  
+  // check the first parameter (row)
+  if(this.Row > kNumberOfRows - 1)
+  {
+    mostSendError_CodeByteByte(this, kErrParamWrong, 1, this.Row); // first parameter wrong
+    return;
+  }
+
+  // extract text string
+  if(mostParamGetString(this, "Text", textstr, 100) <= 0)
+  {
+    mostSendError_CodeByte(this, kErrParamWrong, 2); // second parameter wrong
+    return;
+  }
+
+  // display text string in the appropriate row
+  switch(this.Row)
+  {
+    case 0:
+      sysSetVariableString(sysvar::Display::Row0, textstr);
+      break;
+    case 1:
+      sysSetVariableString(sysvar::Display::Row1, textstr);
+      break;
+    case 2:
+      sysSetVariableString(sysvar::Display::Row2, textstr);
+      break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:Reset():*/
+Reset()
+{
+  sysSetVariableString(sysvar::Display::Row0, " ");
+  sysSetVariableString(sysvar::Display::Row1, " ");
+  sysSetVariableString(sysvar::Display::Row2, " ");
+}
+/*@@end*/
+
+/*@@mostApInstID:OnMostApInstID():*/
+OnMostApInstID()
+{
+  @sysvar::Display::InstID = MostApGetInstID();
+}
+/*@@end*/
+
+/*@@mostAsRegistry:OnMostAsRegistry(long):*/
+OnMostAsRegistry(long rgtype)
+{
+  long size,i;
+  long rxtxlog, fblockid, instid;
+
+  // local registry changed
+  if(rgtype == kLocalFBlockList)
+  {
+    @sysvar::Display::IsRegistered = MostApIsRegistered();
+  }
+}
+/*@@end*/
+
+/*@@mostNetState:OnMostNetState(long,long):*/
+OnMostNetState(long oldstate, long newstate)
+{
+  if(newstate == kNetStateConfigNotOk)
+  {
+    Reset();
+  }
+}
+/*@@end*/
+
+/*@@mostNodeAdr:OnMostNodeAdr(long):*/
+OnMostNodeAdr(long nodeadr)
+{
+  @sysvar::Display::NodeAdr = nodeadr;
+}
+/*@@end*/
+

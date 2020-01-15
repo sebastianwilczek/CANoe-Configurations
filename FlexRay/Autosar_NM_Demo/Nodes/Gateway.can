@@ -1,0 +1,107 @@
+/*@@var:*/
+variables
+{   
+   char gECU[10]       = "Gateway";
+   char gPanelName[10] = "Gateway";
+
+   BYTE sUserData[8] = {0xFF, 0xFF, 0, 0, 0, 0, 0, 0};
+   msTimer tWakeupReq;
+
+   BYTE reqBitsPn1[2] = {0x80, 0x00};
+   BYTE reqBitsPn2[2] = {0x00, 0x02};
+   
+   const cBusSleepState = 1;
+   const cRepeatMessageState = 5;
+   const cNormalOperationState = 4; 
+
+   int pn1Requested;
+   int pn2Requested;
+   BYTE reqBits[2];
+}
+/*@@end*/
+
+/*@@timer:tWakeupReq:*/
+on timer tWakeupReq
+{
+  // Clear wakeup bit
+  @sysvar::NetworkManagement::SendCarWakeUp = 0;
+  FrNm_SetCarWakeUpBit(0);
+
+  if( pn1Requested == 0 && pn2Requested == 0)
+    FrNm_NetworkRelease();  
+}
+/*@@end*/
+
+/*@@caplFunc:FrNm_StateChangeNotification(long,long):*///callback
+void FrNm_StateChangeNotification( long previousState, long currentState)
+{
+  char line[50];
+  long status;
+  snprintf( line, elcount(line), "Transition from %d to %d"
+    , previousState, currentState);
+  Trace( "FrNm_StateChangeNotification", "", line);
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  FrNm_SetVerbosity(3);
+}
+/*@@end*/
+
+/*@@caplFunc:Trace(char[],char[]):*///function
+void Trace( char functionName[], char info[])
+{
+  Trace( functionName, info, "");
+}
+/*@@end*/
+
+/*@@caplFunc:Trace(char[],char[],char[]):*///function
+void Trace( char functionName[], char info[], char verbose[])
+{
+  char sep[2] = "/";
+  sep[0] = functionName[0] ? '/' : 0;
+  if( verbose[0])
+  {
+    write( "[%.3f]%s%s%s: %s", timeNow()/100000.0, gECU
+           , sep
+           , functionName
+           , verbose
+           );
+  } else
+  {
+    write( "[%.3f]%s%s%s: %s", timeNow()/100000.0, gECU
+           , sep
+           , functionName
+           , info
+           );
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:Trace(char[],char[],char[],long):*///function
+void Trace( char functionName[], char info[], char verbose[], long argument)
+{
+  char line[100];
+  snprintf( line, elcount(line), verbose, argument);
+  Trace( functionName, info, line);
+}
+/*@@end*/
+
+/*@@sysvarUpdate:NetworkManagement::SendCarWakeUp:*/
+on sysvar_update NetworkManagement::SendCarWakeUp
+{
+  if ( @this == 1 )
+  { 
+
+    FrNm_NetworkRequest();
+    FrNm_SetCarWakeUpBit(1);
+    // Nm_SetUserData(sUserData, 8);  // CWU Bit is in user data, so this works too
+   
+    setTimer(tWakeupReq, 500);
+
+  }
+}
+/*@@end*/
+

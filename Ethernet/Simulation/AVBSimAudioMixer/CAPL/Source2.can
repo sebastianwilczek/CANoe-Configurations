@@ -1,0 +1,109 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "General.cin"
+  #include "Avb.cin"
+  #include "Media.cin"
+  #include "Source.cin"
+}
+
+variables
+{
+  byte gSource_StreamDestinationAddress[6] = { 1, 0, 0, 0, 0, 2 };
+  
+  const word kSource_UniqueId = 2;
+}
+
+on sysvar Source2::MicLine
+{
+  if (@this == 1)
+  {
+    Source_StopReader();
+    Source_StartCapture();
+    
+    @Source2::File = 0;
+  }
+}
+
+on sysvar Source2::File
+{
+  long ret;
+  char filePath[1024];
+  
+  if (@this == 1)
+  {   
+    ret = SysGetVariableString("Source2", "FilePath", filePath, elCount(filePath));
+
+    if (Avb_StopIfError(ret, "SysGetVariableString") != 0)
+    {
+      return;
+    }
+
+    Source_StopReader();
+    Source_StartFile(filePath);
+    
+    @Source2::MicLine = 0;
+  }
+}
+
+on sysvar Source2::FilePath
+{
+  long ret;
+  char filePath[1024];
+  
+  if (@Source2::File == 1)
+  {      
+    Source_StopReader();
+    Source2_StartFile();
+  }
+}
+
+on preStop
+{ 
+  Source_StopReader();
+  Source_StopTalker();
+}
+
+on start
+{
+  long ret;
+  char filePath[1024];
+  
+  if (@Source2::MicLine == 1)
+  {
+    Source_StartCapture();
+  }
+  else
+  {
+    Source2_StartFile();
+  }
+}
+
+void OnSource_EndReached()
+{
+  
+  if (@Source2::MicLine == 1)
+  {
+    @Source2::MicLine = 0;
+    @Source2::MicLine = 1;
+  }
+  else if (@Source2::File == 1)
+  {
+    Source2_StartFile();
+  }
+}
+
+void Source2_StartFile()
+{
+  long ret;
+  char filePath[1024]; 
+  
+  ret = SysGetVariableString("Source2", "FilePath", filePath, elCount(filePath));
+
+  if (Avb_StopIfError(ret, "SysGetVariableString") != 0)
+  {
+    return;
+  }
+  
+  Source_StartFile(filePath);
+}

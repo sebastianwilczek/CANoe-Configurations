@@ -1,0 +1,103 @@
+/*@!Encoding:1252*/
+includes
+{
+  
+}
+
+variables
+{
+  
+}
+
+on sysvar sysvar::ADAS::SubscribeService
+{
+  char  eventGroup[80] = "CameraObjectDetection::camera_object_detection_evg1";
+  char  text[200];
+  long  result;
+  dword ceg;
+  
+  ceg = SomeIpGetConsumedObjectHandle( eventGroup );
+  
+  if (ceg == 0)
+  {
+    SomeIpGetLastErrorText( elcount(text), text );
+    writeLineEx( 0, 3, "<%NODE_NAME%> SomeIpGetConsumedObjectHandle(%s) failed: %s", eventGroup, text );
+    return;
+  }
+  
+  if (@this == 1)
+  {
+    result = SomeIpSDSubscribeEventGroup( ceg , 0 );
+
+    if (result != 0)
+    {
+      SomeIpGetLastErrorText( elcount(text), text );
+      writeLineEx( 0, 3, "<%NODE_NAME%> SomeIpSDSubscribeEventGroup( %s, 0) failed: %s", eventGroup, text );
+      return;
+    }
+  }
+  else
+  {
+    result = SomeIpSDDesubscribeEventGroup( ceg  );
+
+    if (result != 0)
+    {
+      SomeIpGetLastErrorText( elcount(text), text );
+      writeLineEx( 0, 3, "<%NODE_NAME%> SomeIpSDDesubscribeEventGroup( %s ) failed: %s", eventGroup, text );
+      return;
+    }
+  }
+}
+
+on sysvar sysvar::ADAS::MethodRequest::StartStop::Call
+{
+  char  methodName[80] = "CameraObjectDetection::StartStop";
+  char  text[200];
+  long  result;
+  dword method;
+  
+  if (@this == 1)
+  {
+    method = SomeIpGetConsumedObjectHandle( methodName );
+    
+    if (method == 0)
+    {
+      SomeIpGetLastErrorText( elcount(text), text );
+      writeLineEx( 0, 3, "<%NODE_NAME%> SomeIpGetConsumedObjectHandle(%s) failed: %s", methodName, text );
+      return;
+    }
+    
+    // set method parameter
+    SomeIpSetValueLong( method, "Activate", @sysvar::ADAS::MethodRequest::StartStop::Activate );
+  
+    // call method
+    result = SomeIpCallMethod( method );
+
+    if (result != 0)
+    {
+      SomeIpGetLastErrorText( elcount(text), text );
+      writeLineEx( 0, 3, "<%NODE_NAME%> SomeIpCallMethod( %s, %d) failed: %s", methodName, @sysvar::ADAS::MethodRequest::StartStop::Activate, text );
+      return;
+    }
+    
+    // register callback fro method response
+    result = SomeIpRegisterCallback( method, "OnMethodResponse" );
+    
+    if (result != 0)
+    {
+      SomeIpGetLastErrorText( elcount(text), text );
+      writeLineEx( 0, 3, "<%NODE_NAME%> SomeIpRegisterCallback( OnMethodResponse) failed: %s", text );
+      return;
+    }
+  }
+}
+
+void OnMethodResponse(dword methodCallHandle, dword messageResponseHandle )
+{
+  DWORD result; // value of return parameter
+
+  // get the returned parameter value
+  result= SomeIpGetValueDWord( messageResponseHandle, "Result" );
+
+  writeLineEx( -3, 0, "<%BASE_FILE_NAME%> StartStop response - Result %d", result );
+}

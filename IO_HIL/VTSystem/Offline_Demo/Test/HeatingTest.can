@@ -1,0 +1,235 @@
+/*@@var:*/
+variables
+{
+}
+/*@@end*/
+
+/*@@mainTest:MainTest():*/
+void MainTest()
+{
+  /* Test description:
+  // In this test case the VT2004's resistor decade is set to a very low resistance value.
+  // This should make the ECU turn on the heating and turn off the cooling unit. That
+  // behavior is then validated.
+  */
+
+  // Variables
+  int r=0;
+  double expectedVoltage=0.0;
+
+
+  // Prepare system by bringing it to the default state
+  @sysvar::VTS_simulated::M1_Ch1::RelayShortCircuit = 0;
+  @sysvar::VTS_simulated::M1_Ch1::Resistor = 2300;
+  @sysvar::VTS_simulated::M2_Ch2::RelayShortCircuit = 0;
+  @sysvar::VTS_simulated::M2_Ch1::IntLoadResistor = 500;
+  @sysvar::VTS_simulated::M3_SupInt::RefVoltage = 12;
+  TestWaitForTimeout(100);
+
+
+
+  TestGroupBegin("Heating Tests", "Performs several heating tests");
+
+  // Start test case
+  for( r=100; r < 2000; r += 100 )
+  {
+    expectedVoltage = 18-r*0.0097;
+    if( expectedVoltage > 5.0 ) expectedVoltage = 5.0;
+    HeatingTest( r, expectedVoltage, 1.0 );
+  }//end for
+
+  TestGroupEnd();
+
+
+
+  TestGroupBegin("Cooling Tests", "Performs several cooling tests");
+
+  // Start test case
+  for( r=2000; r < 3600; r += 100 )
+  {
+    expectedVoltage = r*0.0097-24;
+    if( expectedVoltage < 0.0 ) expectedVoltage = 0.0;
+    if( expectedVoltage > 5.0 ) expectedVoltage = 5.0;
+    CoolingTest( r, expectedVoltage, 1.0 );
+  }//end for
+
+  TestGroupEnd();
+
+
+
+  TestGroupBegin("Fault Reaction Tests", "Performs several fault reaction tests");
+
+  SensorShortCircuitTest();
+  HeatingShortCircuitTest();
+
+  for( r=100; r < 1000; r += 100 )
+  {
+    CoolingInternalLoadTests(r, (r>300 && r<700) );
+  }//end for
+
+
+  TestGroupEnd();
+}
+/*@@end*/
+
+/*@@testcase:HeatingTest(int,float,float):*/
+testcase HeatingTest ( int resistanceValue, double expectedVoltage, double tolerance )
+{
+  // Set test case title
+  char title[64];
+  snprintf( title, 64, "Heating Test at %d Ohm", resistanceValue );
+  TestCaseTitle ("HeatingTest", title);
+  snprintf( title, 64, "Appling R=%d Ohm, expecting %dV (+-%dV)", resistanceValue, (int)expectedVoltage, (int)tolerance );
+  TestCaseDescription(title);
+
+  // Step 1: Set the decade resistor of the simulated VT2004 module to the given resistance value
+  @sysvar::VTS_simulated::M1_Ch1::Resistor = resistanceValue;
+
+  // Step 2: Wait 100ms to make sure the settings take effect
+  TestWaitForTimeout(100);
+
+  // Step 3: Check if cooling is turned off
+  if( @sysvar::VTS_simulated::M2_Ch1::Cur != 0.0 ) {
+    TestStepFail("Cooling not turned off.");
+    return;
+  }//end if
+
+  // Step 3: Check if heating is at full power and cooling is turned off
+  if( @sysvar::VTS_simulated::M2_Ch2::Cur > expectedVoltage+tolerance || @sysvar::VTS_simulated::M2_Ch2::Cur < expectedVoltage-tolerance )
+  {
+    TestStepFail("Heating not in expected voltage range.");
+    return;
+  }//end if
+
+  TestStepPass("HeatingTest completed successfully");
+
+  // Testcase successfull
+  TestStepPass("Correct voltage was measured");
+}
+/*@@end*/
+
+/*@@testcase:CoolingTest(int,float,float):*/
+testcase CoolingTest ( int resistanceValue, double expectedVoltage, double tolerance )
+{
+  // Set test case title
+  char title[64];
+  snprintf( title, 64, "Cooling Test at %d Ohm", resistanceValue );
+  TestCaseTitle ("CoolingTest", title);
+  snprintf( title, 64, "Appling R=%d Ohm, expecting %dV (+-%dV)", resistanceValue, (int)expectedVoltage, (int)tolerance );
+  TestCaseDescription(title);
+
+  // Step 1: Set the decade resistor of the simulated VT2004 module to the given resistance value
+  @sysvar::VTS_simulated::M1_Ch1::Resistor = resistanceValue;
+
+  // Step 2: Wait 100ms to make sure the settings take effect
+  TestWaitForTimeout(100);
+
+  // Step 3: Check if cooling is turned off
+  if( @sysvar::VTS_simulated::M2_Ch2::Cur != 0.0 ) {
+    TestStepFail("Heating not turned off.");
+    return;
+  }//end if
+
+  // Step 3: Check if heating is at full power and cooling is turned off
+  if( @sysvar::VTS_simulated::M2_Ch1::Cur > expectedVoltage+tolerance || @sysvar::VTS_simulated::M2_Ch1::Cur < expectedVoltage-tolerance )
+  {
+    snprintf( title, 64, "Cooling (%dV) not in expected voltage range.", (int)@sysvar::VTS_simulated::M2_Ch1::Cur );
+    TestStepFail(title);
+    return;
+  }//end if
+
+  TestStepPass("CoolingTest completed successfully");
+
+  // Testcase successfull
+  TestStepPass("Correct voltage was measured");
+}
+/*@@end*/
+
+/*@@testcase:SensorShortCircuitTest():*/
+testcase SensorShortCircuitTest ()
+{
+  // Set test case title
+  TestCaseTitle ("SensorTest", "Sensor ShortCircuit Test");
+  TestCaseDescription("Simulating a short circuit on the temperature sensor.");
+
+  // Step 1: Setup the decade resistor of the simulated VT2004 module
+  @sysvar::VTS_simulated::M1_Ch1::Resistor = 800;
+  TestWaitForTimeout(10);
+  @sysvar::VTS_simulated::M1_Ch1::RelayShortCircuit = 1;
+
+  // Step 2: Wait 100ms to make sure the settings take effect
+  TestWaitForTimeout(100);
+
+  // Step 3: Check if heating is turned off
+  if( @sysvar::VTS_simulated::M2_Ch2::Cur != 0.0 ) {
+    TestStepFail("Heating not turned off.");
+    return;
+  }//end if
+
+  TestStepPass("SensorShortCircuitTest completed successfully");
+
+  // Reset
+  @sysvar::VTS_simulated::M1_Ch1::RelayShortCircuit = 0;
+  TestWaitForTimeout(10);
+}
+/*@@end*/
+
+/*@@testcase:HeatingShortCircuitTest():*/
+testcase HeatingShortCircuitTest ()
+{
+  // Set test case title
+  TestCaseTitle ("HeatingTest", "Heating Short Circuit Test");
+  TestCaseDescription("Simulating a short circuit on the heating unit.");
+
+  // Step 1: Setup the decade resistor of the simulated VT2004 module
+  @sysvar::VTS_simulated::M1_Ch1::Resistor = 800;
+  TestWaitForTimeout(10);
+  @sysvar::VTS_simulated::M2_Ch2::RelayShortCircuit = 1;
+
+  // Step 2: Wait 100ms to make sure the settings take effect
+  TestWaitForTimeout(100);
+
+  // Step 3: Check if heating is turned off
+  if( @sysvar::ECU::OutAnalogHeating != 0.0 ) {
+    TestStepFail("Heating not turned off.");
+    return;
+  }//end if
+
+  TestStepPass("HeatingShortCircuitTest completed successfully");
+
+  // Reset
+  @sysvar::VTS_simulated::M2_Ch2::RelayShortCircuit = 0;
+  TestWaitForTimeout(10);
+}
+/*@@end*/
+
+/*@@testcase:CoolingInternalLoadTests(int,int):*/
+testcase CoolingInternalLoadTests ( int resistance, int expected )
+{
+  // Set test case title
+  char title[64];
+  snprintf( title, 64, "Cooling Internal Load Test at %d Ohm", resistance );
+  TestCaseTitle ("CoolingIntLoadTest", title);
+  TestCaseDescription("Simulating different internal load values on the cooling unit.");
+
+  // Step 1: Setup the decade resistor of the simulated VT2004 module
+  @sysvar::VTS_simulated::M1_Ch1::Resistor = 3000;
+  @sysvar::VTS_simulated::M2_Ch1::IntLoadResistor = resistance;
+
+  // Step 2: Wait 100ms to make sure the settings take effect
+  TestWaitForTimeout(100);
+
+  // Step 3: Check if heating is turned off
+  if( @sysvar::ECU::OutAnalogCooling > 0.0 && expected == 0 || @sysvar::ECU::OutAnalogCooling == 0.0 && expected == 1 ) {
+    TestStepFail("Wrong cooling value.");
+    return;
+  }//end if
+
+  TestStepPass("CoolingInternalLoadTest completed successfully");
+
+  // Reset
+  @sysvar::VTS_simulated::M2_Ch2::RelayShortCircuit = 0;
+  TestWaitForTimeout(10);
+}
+/*@@end*/
+

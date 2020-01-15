@@ -1,0 +1,631 @@
+/*@!Encoding:1252*/
+/*
+ * Navigation node (GPS)                                Version 1.2
+ *
+ * Copyright 2002-2005, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.2 (Jr) Changed gDbgLevel from kDbgInfo to kDbgWarning
+ * 1.0 (Jr) Created 
+ */
+variables
+{
+  // some constants
+  const BYTE kNullAddr   = 0xfe;
+  const BYTE kGlobalAddr = 0xff;
+
+  BYTE gECUAddress   = kNullAddr;  // Address of this node
+  char gECUName[8];                // Device name
+  char gECULabel[20] = "GPS";  // Label for output to write window
+
+  // error codes
+  const int kOk         = 0;
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel         = kDbgWarning; // Set debug level for output to write window
+  
+  //Number of line segment
+  int gSegmentNumber = 0;
+  int gStageNumber = 0;
+  
+  //Reference point (Stuttgart - Weilimdorf, Germany)
+  double gRefLat = 48.82751;
+  double gRefLon = 9.0903;
+  double gRefAlt = 322.0;
+  
+  msTimer brake_Release;
+  msTimer resumeSpraying;
+  msTimer gearMode_Press;
+  msTimer gearMode_Release;
+  msTimer acceleratorTimer;
+  msTimer rearPto_Press;
+  msTimer vtOn_Press;
+  msTimer vtOn_Release;
+  msTimer vtOff_Press;
+  msTimer vtOff_Release;
+  
+  int gNextBlinker = 0; //0: no blinker; 1: left blinker; 2: right blinker.
+  int gBrakeAtEndOfsegment = 0;
+}
+
+void ActivateBlinkerBeforeEndOfSegment(int leftBlinker, int rightBlinker)
+{
+  if(leftBlinker == 1)
+  {
+    gNextBlinker = 1;
+  }
+  else if(rightBlinker == 1)
+  {
+    gNextBlinker = 2;
+  }
+}
+
+on sysVar sysvar::ISO11783Bus::TECU::ECU_PWR
+{
+  if ((gECUAddress == kNullAddr) && (@this > 10.0))
+    EcuStartUp();
+  else if ((gECUAddress != kNullAddr) && (@this < 8.0)) 
+    EcuShutDown();
+}
+
+/**
+*/
+void EcuInit ()
+{
+  // init device name
+  GNSSMakeName( gECUName,
+                GPS.NmJ1939AAC,
+                GPS.NmJ1939IndustryGroup,
+                GPS.NmJ1939SystemInstance,
+                GPS.NmJ1939System,
+                GPS.NmJ1939Function,
+                GPS.NmJ1939FunctionInstance,
+                GPS.NmJ1939ECUInstance,
+                GPS.NmJ1939ManufacturerCode,
+                GPS.NmJ1939IdentityNumber 
+              );
+}
+
+/**
+*/
+on preStart
+{
+  setWriteDbgLevel( gDbgLevel );
+
+  EcuInit();
+}
+
+/**
+*/
+EcuStartUp()
+{
+  long                           result;
+  pg GNSSPositionRapidUpdate_GPS gpsPG;
+
+  if (gECUAddress == kNullAddr) 
+  {
+    gECUAddress = GPS.NmStationAddress;
+    result = GNSSStartUp( gECUName, gECUAddress );
+    if (result != kOk) 
+      writeDbgLevel( kDbgInfo, "<%s> ERROR, GNSSStartUp failed", gECULabel );
+
+    // Initialze the waypoints
+    // set reference point
+    gSegmentNumber = 0;
+    gStageNumber = 1;
+    GNSSSetRefPoint( gRefLat, gRefLon, gRefAlt ); // start position is in Stuttgart-Weilimdorf
+    GNSSAddWpRef( 0,  0, 0 );
+    InitBottomUpLine(0);
+
+    GNSSSetPGSettings( 129027, 1, 255, 2, 100 ); // activate "Position Delta, High Precision Rapid Update" message
+    GNSSSetPGSettings( 129025, 0, 255, 2, 100 ); // deactivate "Position, Rapid Update" message 
+    // Start replay of the position
+    result = GNSSStartSimulation( 0 );
+    if (result != kOk) 
+      writeDbgLevel( kDbgInfo, "<%s> ERROR, GNSSStartReplay failed", gECULabel );
+
+    writeDbgLevel( kDbgInfo, "<%s> start up", gECULabel );
+  }
+}
+
+on sysvar sysvar::ISO11783Bus::AutoPlay
+{
+  int curTime, delayTime;
+  if(@this == 1)
+  {
+    curTime = timeNow() / 100;//in milliseconds
+    if(curTime < 7000)
+      delayTime = 7000 - curTime;
+    else 
+      delayTime = 0;
+    
+    gNextBlinker = 2;
+    gBrakeAtEndOfsegment = 1;
+    
+    setTimer(gearMode_Press, delayTime);
+    setTimer(gearMode_Release, delayTime + 1000);
+    setTimer(acceleratorTimer, delayTime + 2000);
+    setTimer(rearPto_Press, delayTime + 3000);
+    setTimer(vtOn_Press, delayTime + 3500);
+    setTimer(vtOn_Release, delayTime + 4000);
+  }
+}
+  
+
+/**
+*/
+on timer gearMode_Press
+{
+  if(@sysvar::ISO11783Bus::AutoPlay == 0)
+    return;
+  
+  @sysvar::ISO11783Bus::TECU::GearModeDriveSwitch = 1;
+}
+
+/**
+*/
+on timer gearMode_Release
+{
+  if(@sysvar::ISO11783Bus::AutoPlay == 0)
+    return;
+  
+  @sysvar::ISO11783Bus::TECU::GearModeDriveSwitch = 0;
+}
+
+/**
+Initial setting of gaz pedal
+*/
+on timer acceleratorTimer
+{
+  if(@sysvar::ISO11783Bus::AutoPlay == 0)
+    return;
+  
+  @sysvar::ISO11783Bus::TECU::Accelerator = 0.6;
+}
+
+/**
+*/
+on timer rearPto_Press
+{
+  if(@sysvar::ISO11783Bus::AutoPlay == 0)
+    return;
+  
+  @sysvar::ISO11783Bus::TECU::RearPTOShaftEngagement = 1;
+}
+
+/**
+*/
+on timer vtOn_Press
+{
+  if(@sysvar::ISO11783Bus::AutoPlay == 0)
+    return;
+  
+  SendSoftKeyActivation(1, 151, 100, 1);
+}
+
+/**
+*/
+on timer vtOn_Release
+{
+  if(@sysvar::ISO11783Bus::AutoPlay == 0)
+    return;
+  
+  SendSoftKeyActivation(1, 151, 100, 0);
+}
+
+/**
+*/
+on timer vtOff_Press
+{
+  if(@sysvar::ISO11783Bus::AutoPlay == 0)
+    return;
+  
+  SendSoftKeyActivation(2, 152, 100, 1);
+}
+
+/**
+*/
+on timer vtOff_Release
+{
+  if(@sysvar::ISO11783Bus::AutoPlay == 0)
+    return;
+  
+  SendSoftKeyActivation(2, 152, 100, 0);
+}
+
+/**
+*/
+void SendSoftKeyActivation(int softKeyCode, int keyObjectId, int keyObjectParentId, int activationCode)
+{
+  pg VT12_VT pgVTtoSprayer;
+  
+  pgVTtoSprayer.sa = 0x26;
+  pgVTtoSprayer.da = 0x80;
+  pgVTtoSprayer.dlc = 8;
+  
+  pgVTtoSprayer.VTFunctionVTtoECU = VtSig_VTFunctionVTtoECU::SoftKeyActivation;
+  pgVTtoSprayer.KeyActivationCode = activationCode;
+  pgVTtoSprayer.KeyObjectID = keyObjectId;
+  pgVTtoSprayer.KeyObjectParentID = keyObjectParentId;
+  pgVTtoSprayer.SoftKeyCode = softKeyCode;
+  
+  output(pgVTtoSprayer);
+}
+
+
+/**
+*/
+EcuShutDown()
+{
+  long result;
+
+  if (gECUAddress != kNullAddr) {
+    GNSSRemoveWp();
+
+    result = GNSSShutDown();
+	if (result != kOk) {
+      writeDbgLevel( kDbgInfo, "<%s> ERROR, GNSSShutDown failed", gECULabel );
+	}
+
+	gECUAddress = kNullAddr;
+    writeDbgLevel( kDbgInfo, "<%s> start up", gECULabel );
+  }
+}
+
+on start
+{
+  if (@sysvar::ISO11783Bus::TECU::ECU_PWR > 10.0) {
+    EcuStartUp();
+  }
+}
+
+on sysvar sysvar::ISO11783Bus::TECU::TractorSpeed
+{
+  if (gECUAddress != kNullAddr) {
+    GNSSSetSpeed( @this );
+  }
+}
+/**
+*/
+void InitBottomUpLine(int i)
+{
+  GNSSAddWpRel( 120 + i*4 - 10,  0, 0 );
+  GNSSAddWpRel( 10, 0, 0 );
+}
+
+/**
+*/
+void InitTopDownLine(int i)
+{
+  GNSSAddWpRel(-120 - i*4 + 12,  0, 0 );
+  GNSSAddWpRel(-10,  0, 0 );
+}
+
+/**
+*/
+void InitUpperCurve()
+{
+    GNSSAddWpRel(   0.9, 0.1, 0 );
+    GNSSAddWpRel(   0.8, 0.2, 0 );
+    GNSSAddWpRel(   0.7, 0.3, 0 );
+    GNSSAddWpRel(   0.6, 0.4, 0 );
+    GNSSAddWpRel(   0.5, 0.5, 0 );
+    GNSSAddWpRel(   0.4, 0.6, 0 );
+    GNSSAddWpRel(   0.3, 0.7, 0 );
+    GNSSAddWpRel(   0.2, 0.8, 0 );
+    GNSSAddWpRel(   0.1, 0.9, 0 );
+    GNSSAddWpRel(   0.0, 6.0, 0 );//short line
+    GNSSAddWpRel(   -0.1, 0.9, 0 );
+    GNSSAddWpRel(   -0.2, 0.8, 0 );
+    GNSSAddWpRel(   -0.3, 0.7, 0 );
+    GNSSAddWpRel(   -0.4, 0.6, 0 );
+    GNSSAddWpRel(   -0.5, 0.5, 0 );
+    GNSSAddWpRel(   -0.6, 0.4, 0 );
+    GNSSAddWpRel(   -0.7, 0.3, 0 );
+    GNSSAddWpRel(   -0.8, 0.2, 0 );
+    GNSSAddWpRel(   -0.9, 0.1, 0 );
+}
+
+/**
+*/
+void InitLowerCurve()
+{
+    GNSSAddWpRel(   -0.9, 0.1, 0 );
+    GNSSAddWpRel(   -0.8, 0.2, 0 );
+    GNSSAddWpRel(   -0.7, 0.3, 0 );
+    GNSSAddWpRel(   -0.6, 0.4, 0 );
+    GNSSAddWpRel(   -0.5, 0.5, 0 );
+    GNSSAddWpRel(   -0.4, 0.6, 0 );
+    GNSSAddWpRel(   -0.3, 0.7, 0 );
+    GNSSAddWpRel(   -0.2, 0.8, 0 );
+    GNSSAddWpRel(   -0.1, 0.9, 0 );
+    GNSSAddWpRel(   0.0, 6.0, 0 );//short line
+    GNSSAddWpRel(   0.1, 0.9, 0 );
+    GNSSAddWpRel(   0.2, 0.8, 0 );
+    GNSSAddWpRel(   0.3, 0.7, 0 );
+    GNSSAddWpRel(   0.4, 0.6, 0 );
+    GNSSAddWpRel(   0.5, 0.5, 0 );
+    GNSSAddWpRel(   0.6, 0.4, 0 );
+    GNSSAddWpRel(   0.7, 0.3, 0 );
+    GNSSAddWpRel(   0.8, 0.2, 0 );
+    GNSSAddWpRel(   0.9, 0.1, 0 );
+}
+
+/**
+*/
+void InitBigTopDownLine(int i)
+{
+  GNSSAddWpRel(-125 - i*4 + 6,  0, 0 );
+  GNSSAddWpRel(-10,  0, 0 );
+  //GNSSAddWpRel(-125 - i*4 - 4,  0, 0 );
+}
+
+/**
+*/
+InitRightToLeftLine()
+{
+  GNSSAddWpRel(   -8.0, -155.0, 0 );
+}
+
+/**
+*/
+void InitDownToLeftCurve()
+{
+  GNSSAddWpRel(   -0.9, -0.1, 0 );
+  GNSSAddWpRel(   -0.8, -0.2, 0 );
+  GNSSAddWpRel(   -0.7, -0.3, 0 );
+  GNSSAddWpRel(   -0.6, -0.4, 0 );
+  GNSSAddWpRel(   -0.5, -0.5, 0 );
+  GNSSAddWpRel(   -0.4, -0.6, 0 );
+  GNSSAddWpRel(   -0.3, -0.7, 0 );
+  GNSSAddWpRel(   -0.2, -0.8, 0 );
+  GNSSAddWpRel(   -0.1, -0.9, 0 );
+}
+
+/**
+*/
+void InitLeftToUpCurve()
+{
+  GNSSAddWpRel(   0.1, -0.9, 0 );
+  GNSSAddWpRel(   0.2, -0.8, 0 );
+  GNSSAddWpRel(   0.3, -0.7, 0 );
+  GNSSAddWpRel(   0.4, -0.6, 0 );
+  GNSSAddWpRel(   0.5, -0.5, 0 );
+  GNSSAddWpRel(   0.6, -0.4, 0 );
+  GNSSAddWpRel(   0.7, -0.3, 0 );
+  GNSSAddWpRel(   0.8, -0.2, 0 );
+  GNSSAddWpRel(   0.9, -0.1, 0 );
+}
+
+/**
+*/
+void SetBlinker(int leftBlinker, int rightBlinker)
+{
+  @sysvar::ISO11783Bus::TECU::LeftTurnLightsSwitch = leftBlinker;
+  @sysvar::ISO11783Bus::TECU::RightTurnLightsSwitch = rightBlinker;
+}
+
+/**
+*/
+void SetBrake(int brakeState)
+{
+  @sysvar::ISO11783Bus::TECU::BrakeSwitch = brakeState;
+}
+
+/**
+*/
+void GNSSOnWpBeforeLastReached()
+{
+  if(@sysvar::ISO11783Bus::AutoPlay == 0)
+    return;
+  
+  if(gBrakeAtEndOfsegment == 1)
+  {
+    SetBrake(1);
+    setTimer(brake_Release, 500);
+    @sysvar::ISO11783Bus::TECU::Accelerator = @sysvar::ISO11783Bus::TECU::Accelerator / 3.0;
+    
+    setTimer(vtOff_Press, 1200);
+    setTimer(vtOff_Release, 1400);
+  }
+  
+  if(gNextBlinker == 1)
+    SetBlinker(1, 0);
+  else if(gNextBlinker == 2)
+    SetBlinker(0, 1);
+}
+
+on timer brake_Release
+{
+  if(@sysvar::ISO11783Bus::AutoPlay == 0)
+    return;
+  
+  SetBrake(0);
+}
+
+void SpeedUp()
+{
+  @sysvar::ISO11783Bus::TECU::Accelerator = @sysvar::ISO11783Bus::TECU::Accelerator * 3.0;
+}
+
+/**
+*/
+void GNSSOnLastWpReached()
+{
+  double curSpeed, curCourse;
+  
+  curSpeed = GNSSGetCurSpeed();
+  curCourse = GNSSGetCurCourse();
+
+  //deactivate break
+  SetBrake(0);
+  
+  //Reinit next segment
+  GNSSRemoveWp();
+  // Add current position as the first position in the next way segment
+  GNSSSetRefPoint( gRefLat,  gRefLon, gRefAlt ); // start position is in Stuttgart-Weilimdorf
+  GNSSAddWpRel( 0,  0, 0 );
+
+  switch (gSegmentNumber)
+  {
+    case 0:
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+    {
+      switch(gStageNumber)
+      {
+        case 0:
+          ResumeSprayingSoon();
+          InitBottomUpLine(gSegmentNumber);
+          gStageNumber++;
+          ActivateBlinkerBeforeEndOfSegment(0, 1); //right blinker
+          gBrakeAtEndOfsegment = 1;
+          break;
+        case 1:
+          InitUpperCurve();
+          gStageNumber++;
+          gBrakeAtEndOfsegment = 0;
+          break;
+        case 2:
+          ResumeSprayingSoon();
+          InitTopDownLine(gSegmentNumber);
+          gStageNumber++;
+          ActivateBlinkerBeforeEndOfSegment(1, 0); //left blinker
+          gBrakeAtEndOfsegment = 1;
+          break;
+        case 3:
+          InitLowerCurve();
+          gStageNumber = 0;
+          gSegmentNumber++;
+          gBrakeAtEndOfsegment = 0;
+          break;
+      }
+    }
+    break;
+
+    case 5:
+    {
+      switch(gStageNumber)
+      {
+        case 0:
+          ResumeSprayingSoon();
+          InitBottomUpLine(gSegmentNumber);
+          gStageNumber++;
+          ActivateBlinkerBeforeEndOfSegment(0, 1); //right blinker
+          gBrakeAtEndOfsegment = 1;
+          break;
+          
+        case 1:
+          InitUpperCurve();
+          gStageNumber++;
+          gBrakeAtEndOfsegment = 0;
+          break;
+          
+        case 2:
+          ResumeSprayingSoon();
+          InitBigTopDownLine(gSegmentNumber);
+          gStageNumber++;
+          ActivateBlinkerBeforeEndOfSegment(0, 1); //right blinker
+          gBrakeAtEndOfsegment = 1;
+          break;
+          
+        case 3:
+          InitDownToLeftCurve();
+          gStageNumber++;
+          gBrakeAtEndOfsegment = 0;
+          break;
+          
+        case 4:
+          ResumeSprayingSoon();
+          InitRightToLeftLine();
+          gStageNumber++;
+          ActivateBlinkerBeforeEndOfSegment(0, 1); // right blinker
+          gBrakeAtEndOfsegment = 1;
+          break;
+          
+        case 5:
+          InitLeftToUpCurve();
+          gStageNumber++;
+          gBrakeAtEndOfsegment = 0;
+          break;
+          
+        case 6:
+          GNSSAddWpRef( 0.0, 0.0, 0.0 ); // back to start point
+          gStageNumber = 0;
+          gSegmentNumber = 0;
+          break;
+      }
+    }
+    break;
+  }
+  
+  //Restore curent speed and course
+  GNSSSetCourse(curCourse, 0);
+  GNSSSetSpeed(curSpeed);
+}
+
+/**
+*/
+void ResumeSprayingSoon()
+{
+  if(@sysvar::ISO11783Bus::AutoPlay == 0)
+    return;
+  
+  setTimer(resumeSpraying, 1000);
+}
+
+/**
+*/
+on timer resumeSpraying
+{
+  if(@sysvar::ISO11783Bus::AutoPlay == 0)
+    return;
+  
+  SetBlinker(0, 0);
+  SpeedUp();
+  setTimer(vtOn_Press, 10);
+  setTimer(vtOn_Release, 250);
+}
+
+//
+// Error indication
+//
+void GNSSAppErrorIndication( long errorClass, long errorNumber, long addCode)
+{
+  char strErrClass[32];
+  char strErrInfo[64];
+
+  switch(errorClass) {
+    case 1: snprintf( strErrClass, elCount(strErrClass), "TimeOut" ); break;
+    case 2: snprintf( strErrClass, elCount(strErrClass), "AddressClaiming" ); break;
+    case 3: snprintf( strErrClass, elCount(strErrClass), "CAN Error" ); break;
+    case 4: snprintf( strErrClass, elCount(strErrClass), "System Error" ); break;
+	case 5: snprintf( strErrClass, elCount(strErrClass), "Transport Protocol Error Error" ); break;
+  }
+
+  switch( errorNumber ) {
+    case 0x1: snprintf( strErrInfo, elCount(strErrInfo), "cts error" ); break;
+    case 0x2: snprintf( strErrInfo, elCount(strErrInfo), "peer to peer data timeout" ); break;
+    case 0x3: snprintf( strErrInfo, elCount(strErrInfo), "BAM data timeout" ); break;
+    case 0x4: snprintf( strErrInfo, elCount(strErrInfo), "acknowledge timeout" ); break;
+	case 0x10: snprintf( strErrInfo, elCount(strErrInfo), "lost address claiming or received address claim with higher priority" ); break;
+    case 0x15: snprintf( strErrInfo, elCount(strErrInfo), "init error: node name detected two times" ); break;
+    case 0x17: snprintf( strErrInfo, elCount(strErrInfo), "init error: node address detected two times" ); break;
+    case 0x30: snprintf( strErrInfo, elCount(strErrInfo), "exeption while choosing protokoll BAM or CMDT" ); break;
+    case 0x40: snprintf( strErrInfo, elCount(strErrInfo), "internal data buffer full" ); break;
+    case 0x60: snprintf( strErrInfo, elCount(strErrInfo), "user sends system pg " ); break;
+    case 0x71: snprintf( strErrInfo, elCount(strErrInfo), "transmission abort by receiver" ); break;
+    case 0x72: snprintf( strErrInfo, elCount(strErrInfo), "transmission abort by sender" ); break;
+  }
+
+  writeDbgLevel( kDbgInfo, "<%s> ERROR(0x%x) %s, %s", gECULabel, errorNumber, strErrClass, strErrInfo );
+}
+

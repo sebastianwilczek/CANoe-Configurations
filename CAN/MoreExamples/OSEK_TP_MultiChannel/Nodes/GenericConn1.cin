@@ -1,0 +1,553 @@
+/*@!Encoding:1252*/
+variables
+{
+  msTimer tSwitchOffRxLEDConn1;
+  msTimer tSwitchOffTxLEDConn1;
+  msTimer tSwitchOffErrLEDConn1;
+  msTimer tFlashRxLEDConn1;
+  msTimer tFlashTxLEDConn1;
+  msTimer tFlashErrLEDConn1;
+  long gHandleConn1;
+
+  long gECUAddress_Conn1 = 0;
+  long gTargetAddress_Conn1 = 0;
+  long gTxIdentifier_Conn1 = 0;
+  long gRxIdentifier_Conn1 = 0;
+}
+
+on timer tSwitchOffRxLEDConn1
+{
+  // Switch off led for RcvdData
+  cancelTimer(tFlashRxLEDConn1);
+  @sysvar::%NODE_NAME%::Conn1::sysDataReceivedInd = 0;
+}
+
+on timer tSwitchOffTxLEDConn1
+{
+  cancelTimer(tFlashTxLEDConn1);
+  @sysvar::%NODE_NAME%::Conn1::sysDataTransmittedConf = 0;
+}
+
+on timer tSwitchOffErrLEDConn1
+{
+  cancelTimer(tFlashErrLEDConn1);
+  @sysvar::%NODE_NAME%::Conn1::sysErrorInd = 0;
+}
+
+on timer tFlashRxLEDConn1
+{
+  // toggle Rx LED
+  @sysvar::%NODE_NAME%::Conn1::sysDataReceivedInd = @sysvar::%NODE_NAME%::Conn1::sysDataReceivedInd ? 0 : 1;
+}
+
+on timer tFlashTxLEDConn1
+{
+  // toggle Tx LED
+  @sysvar::%NODE_NAME%::Conn1::sysDataTransmittedConf = @sysvar::%NODE_NAME%::Conn1::sysDataTransmittedConf ? 0 : 1;
+}
+
+on timer tFlashErrLEDConn1
+{
+  // toggle Err LED
+  @sysvar::%NODE_NAME%::Conn1::sysErrorInd = @sysvar::%NODE_NAME%::Conn1::sysErrorInd ? 0 : 1;
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysTxIdentifier
+{
+  long addressingMode;
+  long extIdFlag;
+  
+  extIdFlag = 0;
+
+  if (@this == gTxIdentifier_Conn1) {
+    //change has already been done in Init function
+    return;
+  }
+
+  gTxIdentifier_Conn1 = @this;
+  addressingMode = CanTpGetAddressingMode(gHandleConn1);
+
+  if (addressingMode == kNormal ||
+      addressingMode == kExtendedFree ||
+      addressingMode == kMixed11Bit)
+  {
+    if (@sysvar::%NODE_NAME%::Conn1::sysUseExtId) {
+      extIdFlag = 0x80000000;
+    }
+    CanTpSetTxIdentifier(gHandleConn1, extIdFlag | @this);
+    writeDbgLevel(1, "%s, connection %d: Tx Id = 0x%x", gECU, kIdConn1,
+                  CanTpGetTxIdentifier(gHandleConn1));
+  }
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysTargetAddress
+{
+  long addressingMode;
+
+  if (@this == gTargetAddress_Conn1) {
+    //change has already been done in Init function
+    return;
+  }
+
+  gTargetAddress_Conn1 = @this;
+  addressingMode = CanTpGetAddressingMode(gHandleConn1);
+
+  if (addressingMode == kExtendedBased ||
+      addressingMode == kExtendedFree ||
+      addressingMode == kNormalFixed ||
+      addressingMode == kMixed)
+  {
+    CanTpSetTargetAddress(gHandleConn1, @this);
+    writeDbgLevel(1,"%s, connection %d: Target address = 0x%x", gECU, kIdConn1,
+                  CanTpGetTargetAddress(gHandleConn1));
+  }
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysRxIdentifier
+{
+  long addressingMode;
+  long extIdFlag;
+  
+  extIdFlag = 0;
+
+  if (@this == gRxIdentifier_Conn1) {
+    //change has already been done in Init function
+    return;
+  }
+
+  gRxIdentifier_Conn1 = @this;
+  addressingMode = CanTpGetAddressingMode(gHandleConn1);
+
+  if (addressingMode == kNormal ||
+      addressingMode == kExtendedFree ||
+      addressingMode == kMixed11Bit)
+  {
+    if (@sysvar::%NODE_NAME%::Conn1::sysUseExtId) {
+      extIdFlag = 0x80000000;
+    }
+    CanTpSetRxIdentifier(gHandleConn1, extIdFlag | @this);
+    writeDbgLevel(1, "%s, connection %d: Rx Id = 0x%x", gECU, kIdConn1,
+                  CanTpGetRxIdentifier(gHandleConn1));
+  }
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysECUAddress
+{
+  long addressingMode;
+
+  if (@this == gECUAddress_Conn1) {
+    //change has already been done in Init function
+    return;
+  }
+
+  gECUAddress_Conn1 = @this;
+  addressingMode = CanTpGetAddressingMode(gHandleConn1);
+
+  if (addressingMode == kExtendedBased ||
+      addressingMode == kExtendedFree ||
+      addressingMode == kNormalFixed ||
+      addressingMode == kMixed)
+  {
+    CanTpSetEcuAddress(gHandleConn1, @this);
+    writeDbgLevel(1,"%s, connection %d: ECU address = 0x%02x", gECU, kIdConn1,
+                  CanTpGetEcuAddress(gHandleConn1));
+  }
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysAddrMode
+{
+  InitConn1();
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysBaseAddress
+{
+  long addressingMode;
+
+  addressingMode = CanTpGetAddressingMode(gHandleConn1);
+  if (addressingMode == kExtendedBased)
+  {
+    CanTpSetBaseIdentifier(gHandleConn1, @this);
+    writeDbgLevel(1,"%s, connection %d: Base address = 0x%x",
+                  gECU, kIdConn1, CanTpGetBaseIdentifier(gHandleConn1));
+  }
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysAddrExtension
+{
+  long addressingMode;
+
+  addressingMode = CanTpGetAddressingMode(gHandleConn1);
+  if (addressingMode == kMixed || addressingMode == kMixed11Bit)
+  {
+    CanTpSetAddressExtension(gHandleConn1, @this);
+    writeDbgLevel(1,"%s, connection %d: Address extension = %d",
+                  gECU, kIdConn1, CanTpGetAddressExtension(gHandleConn1));
+  }
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysUseExtId
+{
+  InitConn1();
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysUseFC
+{
+  CanTpUseFlowControlFrames(gHandleConn1, @this);
+  writeDbgLevel(1,"%s, connection %d: Use flow control = %d",
+                gECU, kIdConn1, CanTpIsUseFlowControlFrames(gHandleConn1));
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysBlockSize
+{
+  CanTpSetBlockSize(gHandleConn1, @this);
+  writeDbgLevel(1,"%s, connection %d: Block size = %d",
+                gECU, kIdConn1, CanTpGetBlockSize(gHandleConn1));
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysSTmin
+{
+  CanTpSetSTmin(gHandleConn1, @this);
+  writeDbgLevel(1,"%s, connection %d: ST min = %d",
+                gECU, kIdConn1, CanTpGetSTmin(gHandleConn1));
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysFlowControlDelay
+{
+  CanTpSetFlowControlDelay(gHandleConn1, @this);
+  writeDbgLevel(1,"%s, connection %d: Flow control delay = %d ms",
+                gECU, kIdConn1, @this);
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysUseFCBlockSize
+{
+  CanTpUseFlowControlBlockSize(gHandleConn1, @this);
+  writeDbgLevel(1,"%s, connection %d: Use FC block size setting in panel = %d",
+                gECU, kIdConn1, @this);
+  writeDbgLevel(1,"%s, connection %d: Use FC block size = %d",
+                gECU, kIdConn1, CanTpIsUseFlowControlBlockSize(gHandleConn1));
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysStartSN
+{
+  CanTpSetFirstSequenceNumber(gHandleConn1, @this);
+  writeDbgLevel(1,"%s, connection %d: Start SN = %d",
+                gECU, kIdConn1, CanTpGetFirstSequenceNumber(gHandleConn1));
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysMaxReceiveLength
+{
+  CanTpSetMaximumReceiveLength(gHandleConn1, @this);
+  writeDbgLevel(1,"%s, connection %d: Max. receiver length = %d",
+                gECU, kIdConn1, CanTpGetMaximumReceiveLength(gHandleConn1));
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysPaddingValue
+{
+  CanTpSetPadding(gHandleConn1, @this);
+  writeDbgLevel(1,"%s, connection %d: Padding value = %d",
+                gECU, kIdConn1, CanTpGetPadding(gHandleConn1));
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysBitRateSwitch
+{
+  if( 1 != gbCANFDactive)
+  {
+    writeDbgLevel( 0, "%s, sysCANFDactive: Cannot configure CAN FD since not active", gECU);
+    return;
+  }
+
+  CanTpSetBitRateSwitch(gHandleConn1, @this);
+  writeDbgLevel(1,"%s, connection %d: CAN FD bit rate switch = %d",
+                gECU, kIdConn1, @this);
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysMaxFDFrameLen
+{
+  if( 1 != gbCANFDactive)
+  {
+    writeDbgLevel( 0, "%s, sysMaxFDFrameLen: Cannot configure CAN FD since not active", gECU);
+    return;
+  }
+
+  CanTpSetMaxCANFDFrameLength(gHandleConn1, @this);
+  if( @this > 0)
+    writeDbgLevel(1,"%s, connection %d: Max CAN FD frame length = %d",
+                  gECU, kIdConn1, @this);
+  else
+    writeDbgLevel(1,"%s, connection %d: Activating CAN 2.0",
+                  gECU, kIdConn1);
+  
+  {
+    // Update padding value since the default may have changed
+    long paddingValue;
+    paddingValue = CanTpGetPadding( gHandleConn1); // same default for all configurations
+    writeDbgLevel( 1, "%s, connection %d: Padding value = %d"
+    , gECU, kIdConn1, paddingValue);
+    @sysvar::%NODE_NAME%::Conn1::sysPaddingValue = paddingValue;
+  }
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysSendData
+{
+  long txCount;
+  byte txDataBuffer[kBufferSizeJumbo + 1];  // add 1 for zero termination
+
+  // Prevent from sending when button is released
+  if (@this == 0)
+      return;
+
+  txCount = GetDataToTransmit(txDataBuffer);
+
+  // OSEK TP supports up to 4 GiB with Jumbo frames, but limit that to a much lower value for this demo
+  if (txCount > kBufferSizeJumbo)
+      txCount = kBufferSizeJumbo;
+
+  writeDbgLevel(1,"%s, connection %d: Send request for %d data bytes",
+                gECU, kIdConn1, txCount);
+
+  setTimerCyclic(tFlashTxLEDConn1, kDuration_LEDFlash_ms);
+  setTimer(tSwitchOffTxLEDConn1, kDuration_RxLEDFlashOff_ms);
+
+  CanTpSendData(gHandleConn1, txDataBuffer, txCount);
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysResetToDefaultSettings
+{
+  if (@this > 0) {
+    ResetToDefaultSettingsConn1();
+  }
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysResetToGeneralSettings
+{
+  if (@this > 0) {
+    ResetToGeneralSettingsConn1();
+  }
+}
+
+on sysVar sysvar::%NODE_NAME%::Conn1::sysApplySettingsToAllConns
+{
+  if (@this > 0) {
+    ApplySettingsToAllConnsConn1();
+  }
+}
+
+InitConn1()
+{
+  long connHandle;
+  long addressingMode;
+  long extIdFlag;
+  
+  extIdFlag = 0;
+
+  if (gHandleConn1 > 0) {
+    CanTpCloseConnection(gHandleConn1);
+  }
+
+  gHandleConn1 = CanTpCreateConnection(@sysvar::%NODE_NAME%::Conn1::sysAddrMode);
+  connHandle = gHandleConn1;
+
+  /* Addressing */
+  addressingMode = CanTpGetAddressingMode(connHandle);
+
+  switch (addressingMode) {
+    case kNormal:        writeDbgLevel(1,"%s, connection %d: Addressing mode = Normal", gECU, kIdConn1); break;
+    case kExtendedBased: writeDbgLevel(1,"%s, connection %d: Addressing mode = Extended (based)", gECU, kIdConn1); break;
+    case kNormalFixed:   writeDbgLevel(1,"%s, connection %d: Addressing mode = NormalFixed", gECU, kIdConn1); break;
+    case kMixed:         writeDbgLevel(1,"%s, connection %d: Addressing mode = Mixed", gECU, kIdConn1); break;
+    case kMixed11Bit:    writeDbgLevel(1,"%s, connection %d: Addressing mode = Mixed (11 bit)", gECU, kIdConn1); break;
+    case kExtendedFree:  writeDbgLevel(1,"%s, connection %d: Addressing mode = Extended (free)", gECU, kIdConn1); break;
+  }
+
+  if (addressingMode == kMixed || addressingMode == kMixed11Bit)
+  {
+    CanTpSetAddressExtension(connHandle, @sysvar::%NODE_NAME%::Conn1::sysAddrExtension);
+  }
+
+  if (addressingMode == kExtendedBased)
+  {
+    CanTpSetBaseIdentifier(connHandle, @sysvar::%NODE_NAME%::Conn1::sysBaseAddress);
+  }
+
+
+  if (addressingMode == kExtendedBased ||
+      addressingMode == kExtendedFree ||
+      addressingMode == kNormalFixed ||
+      addressingMode == kMixed)
+  {
+    CanTpSetEcuAddress(connHandle, @sysvar::%NODE_NAME%::Conn1::sysECUAddress);
+    CanTpSetTargetAddress(connHandle, @sysvar::%NODE_NAME%::Conn1::sysTargetAddress);
+    writeDbgLevel(1,"%s, connection %d: ECU address = 0x%02x", gECU, kIdConn1,
+                  CanTpGetEcuAddress(connHandle));
+    writeDbgLevel(1,"%s, connection %d: Target address = 0x%x", gECU, kIdConn1,
+                  CanTpGetTargetAddress(connHandle));
+  }
+
+  if (addressingMode == kNormal ||
+      addressingMode == kExtendedFree ||
+      addressingMode == kMixed11Bit)
+  {
+    if (@sysvar::%NODE_NAME%::Conn1::sysUseExtId) {
+      extIdFlag = 0x80000000;
+    }
+    CanTpSetRxIdentifier(connHandle, extIdFlag | @sysvar::%NODE_NAME%::Conn1::sysRxIdentifier);
+    CanTpSetTxIdentifier(connHandle, extIdFlag | @sysvar::%NODE_NAME%::Conn1::sysTxIdentifier);
+    writeDbgLevel(1, "%s, connection %d: Rx Id = 0x%x", gECU, kIdConn1,
+                  CanTpGetRxIdentifier(connHandle));
+    writeDbgLevel(1, "%s, connection %d: Tx Id = 0x%x", gECU, kIdConn1,
+                  CanTpGetTxIdentifier(connHandle));
+  }
+
+  gECUAddress_Conn1 = @sysvar::%NODE_NAME%::Conn1::sysECUAddress;
+  gTargetAddress_Conn1 = @sysvar::%NODE_NAME%::Conn1::sysTargetAddress;
+  gTxIdentifier_Conn1 = @sysvar::%NODE_NAME%::Conn1::sysTxIdentifier;
+  gRxIdentifier_Conn1 = @sysvar::%NODE_NAME%::Conn1::sysRxIdentifier;
+  writeDbgLevel(1,"%s, connection %d: Base address = 0x%x",
+                gECU, kIdConn1, CanTpGetBaseIdentifier(connHandle));
+  writeDbgLevel(1,"%s, connection %d: Address extension = %d",
+                gECU, kIdConn1, CanTpGetAddressExtension(connHandle));
+  writeDbgLevel(1,"%s, connection %d: Use extended IDs = %d",gECU, kIdConn1,
+                @sysvar::%NODE_NAME%::Conn1::sysUseExtId);
+
+  /* Flow Control */
+  CanTpUseFlowControlFrames(connHandle, @sysvar::%NODE_NAME%::Conn1::sysUseFC);
+  writeDbgLevel(1,"%s, connection %d: Use flow control = %d",
+                gECU, kIdConn1, CanTpIsUseFlowControlFrames(connHandle));
+  CanTpSetBlockSize(connHandle, @sysvar::%NODE_NAME%::Conn1::sysBlockSize);
+  writeDbgLevel(1,"%s, connection %d: Block size = %d",
+                gECU, kIdConn1, CanTpGetBlockSize(connHandle));
+  CanTpSetSTmin(connHandle, @sysvar::%NODE_NAME%::Conn1::sysSTmin);
+  writeDbgLevel(1,"%s, connection %d: ST min = %d",
+                gECU, kIdConn1, CanTpGetSTmin(connHandle));
+  CanTpSetFlowControlDelay(connHandle, @sysvar::%NODE_NAME%::Conn1::sysFlowControlDelay);
+  writeDbgLevel(1,"%s, connection %d: Flow control delay = %d ms",
+                gECU, kIdConn1, @sysvar::%NODE_NAME%::Conn1::sysFlowControlDelay);
+  CanTpUseFlowControlBlockSize(connHandle, @sysvar::%NODE_NAME%::Conn1::sysUseFCBlockSize);
+  writeDbgLevel(1,"%s, connection %d: Use FC block size = %d",
+                gECU, kIdConn1, CanTpIsUseFlowControlBlockSize(connHandle));
+
+  /* Other settings */
+  CanTpSetFirstSequenceNumber(connHandle, @sysvar::%NODE_NAME%::Conn1::sysStartSN);
+  writeDbgLevel(1,"%s, connection %d: Start SN = %d",
+                gECU, kIdConn1, CanTpGetFirstSequenceNumber(connHandle));
+  CanTpSetPadding(connHandle, @sysvar::%NODE_NAME%::Conn1::sysPaddingValue);
+  writeDbgLevel(1,"%s, connection %d: Padding value = %d",
+                gECU, kIdConn1, CanTpGetPadding(connHandle));
+  CanTpSetMaximumReceiveLength(connHandle, @sysvar::%NODE_NAME%::Conn1::sysMaxReceiveLength);
+  writeDbgLevel(1,"%s, connection %d: Max. receiver length = %d",
+                gECU, kIdConn1, CanTpGetMaximumReceiveLength(connHandle));
+
+  /* CAN FD */
+  if( 1 == gbCANFDactive)
+  {
+    CanTpSetMaxCANFDFrameLength( connHandle, @sysvar::%NODE_NAME%::Conn1::sysMaxFDFrameLen);
+    writeDbgLevel(1,"%s, connection %d: Max. CAN FD frame length = %d",
+                  gECU, kIdConn1, @sysvar::%NODE_NAME%::Conn1::sysMaxFDFrameLen);
+
+    CanTpSetBitRateSwitch( connHandle, @sysvar::%NODE_NAME%::Conn1::sysBitRateSwitch);
+    writeDbgLevel(1,"%s, connection %d: Bit rate switch = %d",
+                  gECU, kIdConn1, @sysvar::%NODE_NAME%::Conn1::sysBitRateSwitch);
+  }
+//  CanTpWriteConnectionSettings(connHandle);
+}
+
+void ResetToDefaultSettingsConn1()
+{
+  //addressing
+  @sysvar::%NODE_NAME%::Conn1::sysAddrMode =         @sysvar::Global::DefaultSettings::sysAddrMode;
+  @sysvar::%NODE_NAME%::Conn1::sysBaseAddress =      @sysvar::Global::DefaultSettings::sysBaseAddress;
+  @sysvar::%NODE_NAME%::Conn1::sysAddrExtension =    @sysvar::Global::DefaultSettings::sysAddrExtension;
+  @sysvar::%NODE_NAME%::Conn1::sysUseExtId =         @sysvar::Global::DefaultSettings::sysUseExtId;
+
+  // flow control
+  @sysvar::%NODE_NAME%::Conn1::sysUseFC =            @sysvar::Global::DefaultSettings::sysUseFC;
+  @sysvar::%NODE_NAME%::Conn1::sysBlockSize =        @sysvar::Global::DefaultSettings::sysBlockSize;
+  @sysvar::%NODE_NAME%::Conn1::sysSTmin =            @sysvar::Global::DefaultSettings::sysSTmin;
+  @sysvar::%NODE_NAME%::Conn1::sysFlowControlDelay = @sysvar::Global::DefaultSettings::sysFlowControlDelay;
+  @sysvar::%NODE_NAME%::Conn1::sysUseFCBlockSize =   @sysvar::Global::DefaultSettings::sysUseFCBlockSize;
+
+  // miscellaneous
+  @sysvar::%NODE_NAME%::Conn1::sysStartSN =          @sysvar::Global::DefaultSettings::sysStartSN;
+  @sysvar::%NODE_NAME%::Conn1::sysMaxReceiveLength = @sysvar::Global::DefaultSettings::sysMaxReceiveLength;
+  @sysvar::%NODE_NAME%::Conn1::sysPaddingValue =     @sysvar::Global::DefaultSettings::sysPaddingValue;
+  @sysvar::%NODE_NAME%::Conn1::sysMaxFDFrameLen =    @sysvar::Global::DefaultSettings::sysMaxFDFrameLen;
+  @sysvar::%NODE_NAME%::Conn1::sysBitRateSwitch =    @sysvar::Global::DefaultSettings::sysBitRateSwitch;
+}
+
+void ResetToGeneralSettingsConn1()
+{
+  //addressing
+  @sysvar::%NODE_NAME%::Conn1::sysAddrMode =         @sysvar::Global::GeneralSettings::sysAddrMode;
+  @sysvar::%NODE_NAME%::Conn1::sysBaseAddress =      @sysvar::Global::GeneralSettings::sysBaseAddress;
+  @sysvar::%NODE_NAME%::Conn1::sysAddrExtension =    @sysvar::Global::GeneralSettings::sysAddrExtension;
+  @sysvar::%NODE_NAME%::Conn1::sysUseExtId =         @sysvar::Global::GeneralSettings::sysUseExtId;
+
+  // flow control
+  @sysvar::%NODE_NAME%::Conn1::sysUseFC =            @sysvar::Global::GeneralSettings::sysUseFC;
+  @sysvar::%NODE_NAME%::Conn1::sysBlockSize =        @sysvar::Global::GeneralSettings::sysBlockSize;
+  @sysvar::%NODE_NAME%::Conn1::sysSTmin =            @sysvar::Global::GeneralSettings::sysSTmin;
+  @sysvar::%NODE_NAME%::Conn1::sysFlowControlDelay = @sysvar::Global::GeneralSettings::sysFlowControlDelay;
+  @sysvar::%NODE_NAME%::Conn1::sysUseFCBlockSize =   @sysvar::Global::GeneralSettings::sysUseFCBlockSize;
+
+  // miscellaneous
+  @sysvar::%NODE_NAME%::Conn1::sysStartSN =          @sysvar::Global::GeneralSettings::sysStartSN;
+  @sysvar::%NODE_NAME%::Conn1::sysMaxReceiveLength = @sysvar::Global::GeneralSettings::sysMaxReceiveLength;
+  @sysvar::%NODE_NAME%::Conn1::sysPaddingValue =     @sysvar::Global::GeneralSettings::sysPaddingValue;
+  @sysvar::%NODE_NAME%::Conn1::sysMaxFDFrameLen =    @sysvar::Global::GeneralSettings::sysMaxFDFrameLen;
+  @sysvar::%NODE_NAME%::Conn1::sysBitRateSwitch =    @sysvar::Global::GeneralSettings::sysBitRateSwitch;
+}
+
+void ApplySettingsToAllConnsConn1()
+{
+  //addressing
+  @sysvar::Global::GeneralSettings::sysAddrMode =         @sysvar::%NODE_NAME%::Conn1::sysAddrMode;
+  @sysvar::Global::GeneralSettings::sysBaseAddress =      @sysvar::%NODE_NAME%::Conn1::sysBaseAddress;
+  @sysvar::Global::GeneralSettings::sysAddrExtension =    @sysvar::%NODE_NAME%::Conn1::sysAddrExtension;
+  @sysvar::Global::GeneralSettings::sysUseExtId =         @sysvar::%NODE_NAME%::Conn1::sysUseExtId;
+
+  // flow control
+  @sysvar::Global::GeneralSettings::sysUseFC =            @sysvar::%NODE_NAME%::Conn1::sysUseFC;
+  @sysvar::Global::GeneralSettings::sysBlockSize =        @sysvar::%NODE_NAME%::Conn1::sysBlockSize;
+  @sysvar::Global::GeneralSettings::sysSTmin =            @sysvar::%NODE_NAME%::Conn1::sysSTmin;
+  @sysvar::Global::GeneralSettings::sysFlowControlDelay = @sysvar::%NODE_NAME%::Conn1::sysFlowControlDelay;
+  @sysvar::Global::GeneralSettings::sysUseFCBlockSize =   @sysvar::%NODE_NAME%::Conn1::sysUseFCBlockSize;
+
+  // miscellaneous
+  @sysvar::Global::GeneralSettings::sysStartSN =          @sysvar::%NODE_NAME%::Conn1::sysStartSN;
+  @sysvar::Global::GeneralSettings::sysMaxReceiveLength = @sysvar::%NODE_NAME%::Conn1::sysMaxReceiveLength;
+  @sysvar::Global::GeneralSettings::sysPaddingValue =     @sysvar::%NODE_NAME%::Conn1::sysPaddingValue;
+  @sysvar::Global::GeneralSettings::sysMaxFDFrameLen =    @sysvar::%NODE_NAME%::Conn1::sysMaxFDFrameLen;
+  @sysvar::Global::GeneralSettings::sysBitRateSwitch =    @sysvar::%NODE_NAME%::Conn1::sysBitRateSwitch;
+
+  // reset all other connections
+  @sysvar::Global::GeneralSettings::sysApplySettingsToAllConns = 2;
+}
+
+
+void ErrorIndConn1()
+{
+  @sysvar::%NODE_NAME%::Conn1::sysErrorInd = 1;
+  setTimerCyclic(tFlashErrLEDConn1, kDuration_LEDFlash_ms);
+  setTimer(tSwitchOffErrLEDConn1, kDuration_ErrLEDOn_ms);
+  cancelTimer(tFlashRxLEDConn1);
+  cancelTimer(tFlashTxLEDConn1);
+  @sysvar::%NODE_NAME%::Conn1::sysDataReceivedInd = 0;
+  @sysvar::%NODE_NAME%::Conn1::sysDataTransmittedConf = 0;
+}
+
+
+void ReceptionIndConn1()
+{
+  @sysvar::%NODE_NAME%::Conn1::sysDataReceivedInd = 1;
+  cancelTimer(tFlashRxLEDConn1);
+  setTimer(tSwitchOffRxLEDConn1, kDuration_RxLEDOn_ms);
+}
+
+
+void SendConConn1()
+{
+  @sysvar::%NODE_NAME%::Conn1::sysDataTransmittedConf = 1;
+  cancelTimer(tFlashTxLEDConn1);
+  setTimer(tSwitchOffTxLEDConn1, kDuration_TxLEDOn_ms);
+}
+

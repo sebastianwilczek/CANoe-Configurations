@@ -1,0 +1,139 @@
+/*@!Encoding:1252*/
+/*
+DEMO: VT7900 with VT7870 Application Board for vehicle/EVSE - communication
+*/
+
+on start
+{
+  /* Tell EVSE DLL not to simulate attenuation */
+  @sysvar::Common::VT_Access::ChipPresent = 1;
+  
+  /* Prepare relays for EVSE operation */  
+  @sysvar::VT7870::EVSE_Connect = 1;
+  @sysvar::VT7870::EVSE_Enable_PLC = 1;
+  @sysvar::VT7870::EVSE_Enable_PWM = 1;
+}
+
+on stopMeasurement
+{
+  /* Prepare relays for EVSE operation */
+  @sysvar::VT7870::EVSE_Connect = 0;
+  @sysvar::VT7870::EVSE_Enable_PLC = 0;
+  @sysvar::VT7870::EVSE_Enable_PWM = 0;
+}
+
+on sysvar_update sysvar::VT7870::EVSE_Connect
+{
+  if (@this == 1)
+  {
+    @sysvar::VTS::EVSE_VT7870::Relay_K26 = 1;   // switch CP_EVSE
+    @sysvar::VTS::EVSE_VT7870::Relay_K27 = 0;   // switch CP_EV
+    @sysvar::VTS::EVSE_VT7870::Relay_K28 = 1;   // switch PE
+    write("VT_EVSE::Connected");
+  }
+  else
+  {
+    @sysvar::VTS::EVSE_VT7870::Relay_K26 = 0;   // switch CP_EVSE
+    @sysvar::VTS::EVSE_VT7870::Relay_K27 = 0;   // switch CP_EV
+    @sysvar::VTS::EVSE_VT7870::Relay_K28 = 0;   // switch PE
+    write("VT_EVSE::Disconnected");
+  }
+}
+
+on sysvar_update sysvar::VT7870::EVSE_Enable_PLC
+{
+  if (@this == 1)
+  {
+    @sysvar::VTS::EVSE_VT7870::Relay_K23 = 1;   // connect PLC
+    @sysvar::VTS::EVSE_VT7870::Relay_K24 = 1;   // connect PLC
+    write("VT_EVSE:: PLC relays connected");    
+  }
+  else
+  {
+    @sysvar::VTS::EVSE_VT7870::Relay_K23 = 0;   // connect PLC
+    @sysvar::VTS::EVSE_VT7870::Relay_K24 = 0;   // connect PLC
+    write("VT_EVSE:: PLC relays disconnected");    
+  }
+}
+
+on sysvar_update sysvar::VT7870::EVSE_Enable_PWM
+{
+  if (@this == 1)
+  {
+    @sysvar::VTS::EVSE_VT7870::StimDutyCycle = 5;
+    @sysvar::VTS::EVSE_VT7870::StimFrequency = 1000;
+    @sysvar::VTS::EVSE_VT7870::StimVoltageLow = -12.0;
+    @sysvar::VTS::EVSE_VT7870::StimVoltageHigh = 12.0;
+    
+    @sysvar::VTS::EVSE_VT7870::Relay_K10 = 1;   // short diode
+    @sysvar::VTS::EVSE_VT7870::Relay_K8  = 1;   // switch K8 (prep for 1Kohm)
+    @sysvar::VTS::EVSE_VT7870::Relay_K3  = 1;   // switch K3  (1 Kohm)
+    write("VT_EVSE:: PWM enabled");    
+  }
+  else
+  {
+    @sysvar::VTS::EVSE_VT7870::StimDutyCycle = 5;
+    @sysvar::VTS::EVSE_VT7870::StimFrequency = 1000;
+    @sysvar::VTS::EVSE_VT7870::StimVoltageLow = -12.0;
+    @sysvar::VTS::EVSE_VT7870::StimVoltageHigh = 12.0;
+    
+    @sysvar::VTS::EVSE_VT7870::Relay_K10 = 0;   // short diode
+    @sysvar::VTS::EVSE_VT7870::Relay_K8  = 0;    // switch K8 (prep for 1Kohm)
+    @sysvar::VTS::EVSE_VT7870::Relay_K3  = 0;    // switch K3 (1 Kohm)
+    write("VT_EVSE:: PWM disabled");
+  }
+}
+
+on sysvar_update VTS::EVSE_VT7870::MeasVoltageHigh
+{
+  int State_old = 0;
+  
+  
+  if (11 < @VTS::EVSE_VT7870::MeasVoltageHigh & @VTS::EVSE_VT7870::MeasVoltageHigh < 13)
+  {
+    //write("State A");
+    @VT_Control::IEC61851_State = 1;    
+  }
+  else if (8 < @VTS::EVSE_VT7870::MeasVoltageHigh & @VTS::EVSE_VT7870::MeasVoltageHigh < 10)
+  {
+    //write("State B");
+    @VT_Control::IEC61851_State = 2;
+  }
+  else if (5 < @VTS::EVSE_VT7870::MeasVoltageHigh & @VTS::EVSE_VT7870::MeasVoltageHigh < 7)
+  {
+    //write("State C");
+    @VT_Control::IEC61851_State = 3;
+  }
+  else if (2 < @VTS::EVSE_VT7870::MeasVoltageHigh & @VTS::EVSE_VT7870::MeasVoltageHigh < 4)
+  {
+    //write("State D");
+    @VT_Control::IEC61851_State = 4;
+  }
+  else if (-1 < @VTS::EVSE_VT7870::MeasVoltageHigh & @VTS::EVSE_VT7870::MeasVoltageHigh  <1)
+  {
+    //write("State E");
+    @VT_Control::IEC61851_State = 5;
+  }
+  else if (-13 < @VTS::EVSE_VT7870::MeasVoltageHigh & @VTS::EVSE_VT7870::MeasVoltageHigh < -11)
+  {
+    //write("State F");
+    @VT_Control::IEC61851_State = 6;
+  }
+  else
+  {
+    @VT_Control::IEC61851_State = 0;
+  }
+  
+  if (@VT_Control::IEC61851_State != State_old)
+  {
+    write("VT_EVSE::IEC61851: State changed to: %d", @VT_Control::IEC61851_State);
+    
+    // Detect transition into state E or F
+    if ((@VT_Control::IEC61851_State == 5 || @VT_Control::IEC61851_State == 6) && (State_old != 5 && State_old != 6))
+    {
+      @EVSE::Control::SysEVSE_NewNMK = 1;
+    }
+    
+    State_old = @VT_Control::IEC61851_State;
+  }
+}

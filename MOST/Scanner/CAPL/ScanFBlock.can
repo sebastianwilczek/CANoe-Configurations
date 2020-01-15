@@ -1,0 +1,678 @@
+/*@@var:*/
+variables
+{
+  // flag indicating whether device scan is processing
+  byte gbFBlockScan;
+
+  // Display options
+  long gDisplayEmptyLines = 1;
+
+
+  // Variables for currently running scan
+  byte gFBlockId;                 // FBlock to scan
+  byte gInstId;                   // InstId
+  long gFBlockFunctionIds[2000];  // functions of the FBlock
+  long gFBlockFunctionIdIdx = -1; // index of currently inquired function
+  word gFBlockFunctionId;         // currently inquired function
+  dword gTimeCompleted;           // in 10us
+  long gNumOfFktIds;
+
+  const long kMaxFunctions = 200;
+  const long kMaxDeviceIds = 200;
+  word gMatrix[kMaxFunctions][kMaxDeviceIds];
+  word gFunctionIds[kMaxFunctions];
+  long gFunctionIdsMaxIdx = -1;
+  word gDeviceIds[kMaxFunctions];
+  long gDeviceIdsMaxIdx = -1;
+
+  mstimer tScanStep;           // timer for scan state machine
+  const long kScanStepTimeout = 500; // in ms
+
+
+  // Constants
+  const byte kOpTypeSet    = 0x0;
+  const byte kOpTypeGet    = 0x1;
+  const byte kOpTypeSetGet = 0x2;
+  const byte kOpTypeStatus = 0xC;
+  const byte kOpTypeError  = 0xF;
+
+  const word kFunctionIdFktIds            = 0x000;
+  const word kFunctionIdNotification      = 0x001;
+  const word kFunctionIdNotificationCheck = 0x002;
+  const word kFunctionIdInvalid           = 0xFFFF;
+
+  // sink for displaying info (Tabs in write window)
+  DWORD tabScanFBlock;
+
+  // severity
+  const int kSeverity_Success = 0;
+  const int kSeverity_Info    = 1;
+  const int kSeverity_Warning = 2;
+  const int kSeverity_Error   = 3;
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  MostApplicationNode();
+
+  tabScanFBlock = writeCreate("ScanFBlock");
+  gbFBlockScan = 0;
+}
+/*@@end*/
+
+/*@@sysvarChange:ScanFBlockStart:*/
+on sysvar ScanFBlockStart
+{
+  if(@this == 0)
+    return;
+
+  gbFBlockScan = 1;
+  sysSetVariableString( sysvar::ScanStatus, "Scanning ..." );
+
+  StartScan(@sysvar::ScanFBlockID, @sysvar::ScanInstID);
+}
+/*@@end*/
+
+/*@@caplFunc:StartScan(byte,byte):*///function
+void StartScan(byte fblockId, byte instId)
+{
+  long i, j;
+  char fblock[100];
+  char function[100];
+  char optype[100];
+  int bufSize = 100;
+  mostAmsMessage 0x000001 msgFktIdsGet = { DLC = 0 };
+  mostAmsMessage * symMsg;
+  
+  // reset scanner
+  cancelTimer(tScanStep);
+
+  gFBlockFunctionIdIdx = -1;
+  gFBlockFunctionId = kFunctionIdInvalid;
+  gFunctionIdsMaxIdx = -1;
+  gDeviceIdsMaxIdx = -1;
+  gTimeCompleted = 0.0;
+
+  // clear all variables
+  for(i = 0; i < kMaxFunctions; ++i)
+  {
+    gFunctionIds[i] = kFunctionIdInvalid;
+    for(j = 0; j < kMaxDeviceIds; ++j)
+    {
+      gMatrix[i][j] = 0;
+    }
+    
+  }
+  for(j = 0; j < kMaxDeviceIds; ++j)
+  {
+    gDeviceIds[j] = 0;
+  }
+
+  // save new values
+  gFBlockId = fblockId;
+  gInstId = instId;
+
+  writeLineEx(tabScanFBlock, kSeverity_Info,  "****************************************************************");
+  writeLineEx(tabScanFBlock, kSeverity_Info,  "****************************************************************");
+
+  if(0xFFFF == GetRxTxLogOfFBlockIdInstId(fblockId, instId))
+  {
+    writeLineEx(tabScanFBlock, kSeverity_Warning, "Logical device address of FBlock (0x%02x) unknown!", fblockId);
+    @sysvar::ScanFBlockStart = 0;
+    return;
+  }
+
+  symMsg.FBlockId = fblockId;
+  if(MostMsgGetSymbols(symMsg, fblock, function, optype, bufSize) > 0)
+  {
+    writeLineEx(tabScanFBlock, kSeverity_Info, "Scanning FBlock %s.%02X ...\n", fblock, gInstId);
+  }
+  else
+  {
+    writeLineEx(tabScanFBlock, kSeverity_Info, "Scanning FBlock %02X.%02X ...\n", gFBlockId, gInstId);
+  }
+
+  // send FBlock.FktIds.Get() to get function Ids of FBlock
+  msgFktIdsGet.FBlockId = gFBlockId;
+  msgFktIdsGet.InstanceId = gInstId;
+  output(msgFktIdsGet);
+
+  // set index of currently inquired function to FktIDs function
+  gFBlockFunctionIdIdx = 0;
+  gFBlockFunctionId = kFunctionIdFktIds;
+
+  SetTimer(tScanStep, kScanStepTimeout);
+}
+/*@@end*/
+
+/*@@timer:tScanStep:*/
+on timer tScanStep
+{
+  // A timeout occured while scanning.
+
+  char buf[100];
+
+  if(gFBlockFunctionId == 0)
+  {
+    // no response on FktIds.Get() received
+    snprintf(buf, elcount(buf), "No response on %02X.%02X.FktIds.Get(). Scanning stopped!", gFBlockId, gInstId);
+    DisplayText(buf);
+    StopScan();
+  }
+  else
+  {
+    // no response on Notification.Get(functionId) received
+    NextStep();
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:NextStep():*///function
+void NextStep()
+{
+  mostAmsMessage 0x000011 msgNotifGet = { DLC = 2 };
+
+  // send FBlock.Notification.Get(functionId) to get list of registered device IDs
+
+  // get functionId to be inquired next
+  gFBlockFunctionIdIdx++;
+  if(gFBlockFunctionIdIdx < gNumOfFktIds)
+    gFBlockFunctionId = gFBlockFunctionIds[gFBlockFunctionIdIdx];
+  else
+    gFBlockFunctionId = kFunctionIdInvalid;
+
+  if(gFBlockFunctionId == kFunctionIdInvalid)
+  {
+    // no more functions to inquire
+    gTimeCompleted = timenow();
+    DisplayMatrix();
+
+    @sysvar::ScanFBlockStart = 0;
+    gbFBlockScan = 0;
+    sysSetVariableString( sysvar::ScanStatus, "ready" );
+  }
+  else
+  {
+    // assemble FBlock.Notification.Get message
+    msgNotifGet.FBlockId = gFBlockId;
+    msgNotifGet.InstanceId = gInstId;
+    msgNotifGet.word(0) = swapword(gFBlockFunctionId);
+
+    // send message
+    output(msgNotifGet);
+
+    setTimer(tScanStep, kScanStepTimeout);
+  }
+}
+/*@@end*/
+
+/*@@mostAmsMsg:*:*/
+on mostAMSMessage *
+{
+  word functionId;
+  byte opType, errorCode;
+  mostAmsMessage * _this = { DLC = 5000 };
+ 
+  if(gbFBlockScan == 0)
+    return;
+  if(gFBlockId != this.FBlockId)
+    return;
+  if(gInstId != this.InstanceId)
+    return;
+
+  _this = this; // get message data beyond 200 bytes length
+
+  functionId = _this.FunctionId;
+  opType = _this.OpType;
+
+  switch(functionId)
+  {
+    case kFunctionIdFktIds:
+    {
+      if(opType == kOpTypeStatus)
+      {
+        if(gFBlockFunctionId == kFunctionIdFktIds) // FktIds.Get was sent
+        {
+          // process message FktIds.Status()
+          gNumOfFktIds = mostMsgDecodeRLE(this, gFBlockFunctionIds, 2000);
+          if(gNumOfFktIds < 0)
+          {
+            // error in bitstream
+            DisplayText("FktIDs.Status(): Erroneous bitstream detected!");
+            StopScan();
+            break;
+
+          }
+
+          DisplayFktIDs();
+
+          cancelTimer(tScanStep);
+          NextStep();
+        }
+      }
+      else if((opType == kOpTypeError) && (_this.dlc > 0))
+      {
+        // process message FktIds.Error()
+
+        // read ErrorCode
+        errorCode = _this.byte(0);
+
+        switch(errorCode)
+        {
+          case 0x03: // 'FktID not available'
+          {
+            // Notification function not available
+            // stop Scan
+            DisplayText("FBlock has no FktIds function!");
+            StopScan();
+            break;
+          }
+        }
+      }
+      break;
+    }
+
+    case kFunctionIdNotification:
+    {
+      if(opType == kOpTypeStatus)
+      {
+        // process message Notification.Status()
+        if(gFBlockFunctionId > 0)
+        {
+          FillMatrixFromNotificationStatusMessage(_this);
+
+          cancelTimer(tScanStep);
+          NextStep();
+        }
+      }
+      else if((opType == kOpTypeError) && (_this.dlc > 0))
+      {
+        // process message Notification.Error()
+
+        // read ErrorCode
+        errorCode = _this.byte(0);
+
+        switch(errorCode)
+        {
+          case 0x03: // 'FktID not available'
+          {
+            // Notification function not available
+            // stop Scan
+            DisplayText("FBlock has no Notification function!");
+            StopScan();
+            break;
+          }
+          case 0x07: // 'Parameter not available'
+          {
+            if((_this.dlc > 3) && (_this.byte(1) == 1))
+            {
+              // error for currently processed function ID?
+              if(((_this.byte(2) << 8) + _this.byte(3)) == gFBlockFunctionId)
+              {
+                cancelTimer(tScanStep); // we need not wait for the timeout
+                NextStep(); // inquire next function
+              }
+            }
+            break;
+          }
+        }
+      }
+      break;
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:FillMatrixFromNotificationStatusMessage(mostAmsMessage*):*///function
+void FillMatrixFromNotificationStatusMessage(mostAmsMessage * msg)
+{
+  long i, idxFkt, idxDeviceId, pos;
+  word functionId, deviceId;
+
+  // read FunctionId
+  if(msg.DLC < 2)
+    return; // invalid length
+
+  functionId = (msg.byte(0) << 8) + msg.byte(1);
+
+  // get index for function in matrix
+  idxFkt = -1;
+  for(i = 0; i <= gFunctionIdsMaxIdx; ++i)
+  {
+    if(gFunctionIds[i] == functionId)
+    {
+      idxFkt = i;
+      break;
+    }
+  }
+
+  if(idxFkt == -1)
+  {
+    // function not registered yet
+    // register now
+    ++gFunctionIdsMaxIdx;
+    if(gFunctionIdsMaxIdx >= elcount(gFunctionIds))
+    {
+      write("Notification Matrix Scanner: Size of internal matrix too small!");
+      return; // matrix too small
+    }
+
+    gFunctionIds[gFunctionIdsMaxIdx] = functionId;
+    idxFkt = gFunctionIdsMaxIdx;
+  }
+
+  // read list of DeviceIds and fill matrix column
+  pos = 2; // byte position in message
+  while((pos + 1) < msg.DLC)
+  {
+    // read DeviceID parameter
+    deviceId = (msg.byte(pos) << 8) + msg.byte(pos + 1);
+
+    // get index for DeviceID in matrix
+    idxDeviceId = -1;
+    for(i = 0; i <= gDeviceIdsMaxIdx; ++i)
+    {
+      if(gDeviceIds[i] == deviceId)
+      {
+        idxDeviceId = i;
+        break;
+      }
+    }
+    if(idxDeviceId == -1)
+    {
+      // DeviceId not registered yet
+      // register now
+      ++gDeviceIdsMaxIdx;
+      if(gDeviceIdsMaxIdx >= elcount(gDeviceIds))
+      {
+        write("Notification Matrix Scanner: Size of internal matrix too small!");
+        return; // matrix too small
+      }
+
+      gDeviceIds[gDeviceIdsMaxIdx] = deviceId;
+      idxDeviceId = gDeviceIdsMaxIdx;
+    }
+
+    // write parameter index to cell
+    gMatrix[idxFkt][idxDeviceId] = deviceId;
+
+    pos += 2;
+  }
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  @sysvar::ScanFBlockID = 0x31;
+  @sysvar::ScanInstID = 0x1;
+}
+/*@@end*/
+
+/*@@caplFunc:DisplayMatrix():*///function
+void DisplayMatrix()
+{
+  mostAmsMessage * msg;
+  char buf1[10000];
+  char buf2[200];
+  char buf3[50];
+  char temp[100];
+  char fblock[100];
+  char function[100];
+  char optype[100];
+  int bufferSize = 100;
+  
+  long i, j, deviceCnt;
+
+  snprintf(buf1, elcount(buf1), "Notification Matrix");
+  DisplayText(buf1);
+  snprintf(buf1, elcount(buf1), "FctName             FctID: DeviceIDs \n");
+  
+  
+  if(gFunctionIdsMaxIdx >= 0)
+    strncat(buf1, "-----------------------------------------------------------\n", elcount(buf1));
+
+  for(i = 0; i <= gFunctionIdsMaxIdx; ++i)
+  {
+    msg.FBlockId = gFBlockId;
+    msg.FunctionId = gFunctionIds[i];
+  
+    // print FunctionId
+    if(mostMsgGetSymbols(msg, fblock, function, optype, bufferSize) > 1)
+    {
+      for(j=0; j<20; ++j)
+      {
+        if(function[j] == '\0')
+          break;
+      }
+
+      if(j==20)
+        function[20] = '\0';
+
+      temp[0] = '\0';
+
+      while(j<20)
+      {
+        strncat(temp, " ", elcount(temp));
+        ++j;
+      }
+
+      snprintf(buf2, elcount(buf2), "%s %s %03X: ", function, temp, gFunctionIds[i]);
+    }
+    else
+    {
+      snprintf(buf2, elcount(buf2), "---                   %03X: ", gFunctionIds[i]);
+    }
+  
+    
+    deviceCnt = 0;
+    for(j = 0; j <= gDeviceIdsMaxIdx; ++j)
+    {
+      // print DeviceID
+      if(gMatrix[i][j] > 0)
+      {
+        snprintf(buf3, elcount(buf3), "%04X ", gMatrix[i][j]);
+        deviceCnt++;
+      }
+      else
+        snprintf(buf3, elcount(buf3), "");
+      strncat(buf2, buf3, elcount(buf1));
+    }
+
+    if(gDisplayEmptyLines || (deviceCnt > 0))
+    {
+      // complete the line
+      strncat(buf1, buf2, elcount(buf1));
+      strncat(buf1, "\n", elcount(buf1));
+    }
+  }
+
+  DisplayText(buf1);
+}
+/*@@end*/
+
+/*@@caplFunc:StringToByteArray(char[],byte[],long,long):*///function
+/*******************************************************************************
+ * This function converts a string (char[]) to a byte[]                        *
+ *                                                                             *
+ * returns    the number of bytes in 'out[]'                                   *
+ *                                                                             *
+ * out[]      the conversion result                                            *
+ * string[]   the string (char[]) to convert                                   *
+ *                                                                             *
+ * example    int length;                                                      *
+ *            byte text[20];                                                   *
+ *            length = convert_StringToByteArray( text, "Hello World!" );      *
+ *******************************************************************************/
+long StringToByteArray(char string[], byte out[], long outsize, long columns)
+{
+  long i, length, col;
+  char c;
+  i = 0;
+  col = 0;
+  length = 0;
+  while((i < elcount(string)) && (length < outsize))
+  {
+    c = string[i];
+    if(c == '\n')
+    {
+      // fill with spaces
+      if((length + columns) >= outsize)
+      {
+        write("Buf %d %d", length, outsize);
+        return length;
+      }
+      for(; col < columns; ++col)
+      {
+        out[length] = ' ';
+        ++length;
+      }
+    }
+    else if(c == 0)
+    {
+      break;
+    }
+    else
+    {
+      out[length] = c;
+      col++;
+      length++;
+    }
+    if(col >= columns)
+      col = 0;
+    ++i;
+  }
+
+  return length;
+}
+/*@@end*/
+
+/*@@mostAsRegistry:OnMostAsRegistry(long):*/
+OnMostAsRegistry(long rgtype)
+{
+  if(rgtype == 2)
+    UpdateFBlockAvailable();
+}
+/*@@end*/
+
+/*@@caplFunc:UpdateFBlockAvailable():*///function
+void UpdateFBlockAvailable()
+{
+  // Test if is FBlock with FBlockId and InstId from panel is 
+  // known to the own device.
+  // Enables/disables 'Scan Matrix' button.
+
+  long fblockId, instId, bFound;
+
+  fblockId = @sysvar::ScanFBlockID;
+  instId = @sysvar::ScanInstID;
+
+  bFound = (0xFFFF != GetRxTxLogOfFBlockIdInstId(fblockId, instId));
+
+  @sysvar::FBlockAvailable = bFound;
+}
+/*@@end*/
+
+/*@@sysvarChange:ScanFBlockID:*/
+on sysvar ScanFBlockID
+{
+  UpdateFBlockAvailable();
+}
+/*@@end*/
+
+/*@@sysvarChange:ScanInstID:*/
+on sysvar ScanInstID
+{
+  UpdateFBlockAvailable();
+}
+/*@@end*/
+
+/*@@caplFunc:GetRxTxLogOfFBlockIdInstId(byte,byte):*///function
+long GetRxTxLogOfFBlockIdInstId(byte fblockId, byte instId)
+{
+  long i;
+  
+  for(i = 0; i < mostAsRgGetSize(2); ++i)
+  {
+    if((mostAsRgGetFBlockId(2, i) == fblockId) && (mostAsRgGetInstId(2, i) == instId))
+    {
+      return mostAsRgGetRxTxLog(2, i);
+    }
+  }
+  return 0xFFFF;
+}
+/*@@end*/
+
+/*@@caplFunc:DisplayText(char[]):*///function
+void DisplayText(char text[])
+{
+  writeLineEx(tabScanFBlock, kSeverity_Info, text);
+}
+/*@@end*/
+
+/*@@caplFunc:StopScan():*///function
+void StopScan()
+{
+  gFBlockFunctionIdIdx = -1;
+  gFBlockFunctionId = kFunctionIdInvalid;
+  gFunctionIdsMaxIdx = -1;
+  gDeviceIdsMaxIdx = -1;
+  gTimeCompleted = 0.0;
+
+  cancelTimer(tScanStep);
+  @sysvar::ScanFBlockStart = 0;
+  gbFBlockScan = 0;
+  sysSetVariableString( sysvar::ScanStatus, "ready" );
+}
+/*@@end*/
+
+/*@@caplFunc:DisplayFktIDs():*///function
+DisplayFktIDs ()
+{
+  char buf1[10000];
+  char buf2[200];
+  char buf3[50];
+  long i, j, deviceCnt;
+
+  snprintf(buf1, elcount(buf1), "FunctionID List");
+  DisplayText(buf1);
+
+  for(i=0; i<10000; ++i)
+    buf1[i] = '\0';
+   
+  if(gNumOfFktIds >= 0)
+    strncat(buf1, "-----------------------------------------------------------\n", elcount(buf1));
+
+  for(i = 0; i < gNumOfFktIds; ++i)
+  {
+    // print FunctionId
+    if(i > 0)
+    {
+      if(i%9 == 0)
+      {
+        strncat(buf1, "\n", elcount(buf1));
+        snprintf(buf2, elcount(buf2), "%03X,", gFBlockFunctionIds[i]);
+      }
+      else
+        snprintf(buf2, elcount(buf2), "  %03X,", gFBlockFunctionIds[i]);
+    }
+    else
+      snprintf(buf2, elcount(buf2), "%03X,", gFBlockFunctionIds[i]);
+        
+    // complete the line
+    strncat(buf1, buf2, elcount(buf1));
+  }
+
+  i = 0;
+  while(buf1[i] != '\0' && i < 10000)
+    ++i;
+
+  if(i > 0 && i < 10000)
+    buf1[i-1] = '\n';
+
+  DisplayText(buf1);
+}
+/*@@end*/
+

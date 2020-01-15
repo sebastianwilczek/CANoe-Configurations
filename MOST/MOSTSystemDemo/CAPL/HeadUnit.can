@@ -1,0 +1,1928 @@
+includes
+{
+  #include "MostDefs.cin"
+  #include "FCatDefs.cin"
+}
+
+//
+// Simulation of a MOST head unit.
+//
+// The program demonstrates how to apply the Shadow Service and 
+// Notification Shadow Service in simulated controller applications.
+//
+// Abbreviations:
+// AA  - AudioAmplifier
+// ADP - AudioDiskPlayer
+// AFT - AmFmTuner
+// CM  - ConnectionMaster 
+// NAV - Navigation
+// NM  - NetworkMaster
+// VSM - VectorSystemManager
+//
+variables
+{
+  // Application phase
+  const byte kAppOff      = 0; // no power; no communication
+  const byte kAppOn       = 1; // power on
+  const byte kAppShutdown = 2; // power on; shutdown started
+  byte  gAppPhase = kAppOff;
+
+  // Property shadow: VectorSystemManager.CurrentAudioSource
+  // currently active sound source
+  const byte kSourceIdNone        = 0;
+  const byte kSourceIdDiscPlayer  = 1;
+  const byte kSourceIdTuner       = 2;
+  const byte kSourceIdTv          = 3;
+  byte       gCurrentAudioSource  = kSourceIdNone;
+
+  // Control topic
+  const byte kTopicNone           = 0;
+  const byte kTopicDiscPlayer     = 1;
+  const byte kTopicTuner          = 2;
+  const byte kTopicTv             = 3;
+  const byte kTopicNavi           = 4;
+  byte       gCurrentTopic        = kTopicNone;
+
+  byte       gDisplayMap          = 1;
+
+  // Automatic start of audio source after initialisation
+  msTimer    tAudioAutoStart;
+  const long kAudioAutoStartDelay = 700; // in ms
+  byte       gLastActiveAudioSource = kSourceIdDiscPlayer; // will be activated on next start
+
+
+  // timer for supervision of ignition key status
+  msTimer    tIgnitionKeyStatus;
+  const int  kIgnitionKeyStatusTimeout = 2000;
+
+
+  // Navigation (the Navigation FBlock is not implemented in detail)
+  char       gRouteFrom[100] = "Vector Informatik; Stuttgart";
+  char       gRouteTo[100]   = "Schloss Solitude; Stuttgart";
+  const long kRouteMaxPos = 18;
+  const double kRouteDistance = 6.12;
+  long       gRouteDirection = 1;
+
+
+  //
+  // FBlock shadows
+  //
+
+  // VectorSystemManager
+  long  gInstId_VSM = -1; // -1: InstID not known yet
+  // VectorSystemManager properties of interest
+  word  gShadowProp_VSM[2] = {
+     kFct_VSM_CurrentAudioSource
+    ,kFct_VSM_AvailableAudioSources };
+  byte  gShadowProp_VSM_AvailableAudioSources;
+
+  // AudioAmplifier
+  long  gInstId_AA  = -1; // -1: InstID not known yet
+  // AudioAmplifier properties of interest
+  word  gShadowProp_AA[2] = {
+     kFct_AA_Mute
+    ,kFct_AA_Volume };
+  byte  gShadowProp_AA_Mute;
+  byte  gShadowProp_AA_Volume;
+
+  // AudioDiskPlayer
+  long  gInstId_ADP = -1; // -1: InstID not known yet
+  // AudioDiskPlayer properties of interest
+  word  gShadowProp_ADP[7] = {
+     kFct_ADP_DeckStatus
+    ,kFct_ADP_TimePosition
+    ,kFct_ADP_TrackPosition
+    ,kFct_ADP_MagazineStatus
+    ,kFct_ADP_ActiveDisk
+    ,kFct_ADP_MediaInfo
+    ,kFct_ADP_PeakLevel };
+  // shadowed properties
+  byte  gShadowProp_ADP_DeckStatus;
+  dword gShadowProp_ADP_TrackTime;
+  byte  gShadowProp_ADP_TrackPosition;
+  byte  gShadowProp_ADP_MagazineStatus;
+  byte  gShadowProp_ADP_ActiveDisk;
+  char  gShadowProp_ADP_MediaInfo_MediaTitle[6][50];
+  byte  gShadowProp_ADP_MediaInfo_MediaType[6];
+  char  gShadowProp_ADP_AudioDiskInfo_AudioTitle_Current[50];
+
+  // AmFmTuner
+  long  gInstId_AFT = -1; // -1: InstID not known yet
+  // AmFmTuner properties of interest
+  word  gShadowProp_AFT[5] = {
+     kFct_AFT_ATStationInfo
+    ,kFct_AFT_ATPI
+    ,kFct_AFT_Radiotext
+    ,kFct_AFT_ATPresetList1
+    ,kFct_AFT_PeakLevel };
+  // shadowed properties
+  byte  gShadowProp_AFT_ATPI;
+  char  gShadowProp_AFT_ATPresetList1_SenderName[6][50];
+  byte  gShadowProp_AFT_ATPresetList1_PresetSelection[6];
+  char  gShadowProp_AFT_RadioTextA[100];
+  char  gShadowProp_AFT_RadioTextB[100];
+  long  gShadowProp_AFT_ATStationInfoFreq; // in kHz
+
+  // Navigation
+  long  gInstId_Nav = -1; // -1: InstID not known yet
+  // Navigation properties of interest
+  word  gShadowProp_Nav[1] = {
+     kFct_Nav_CurrentPosition };
+  long  gShadowProp_Nav_CurrentPosition;
+  
+  // MOST High parameters
+  const long cDefaultFrameSize = 0x28;
+  const long cDefaultFramesPerBlock = 40;
+  const long cDefaultAIR = 5000;
+  const long cDefaultPrio = 0x7F;
+  // storage of handle for High Protocol data sink port  
+  // is set at port creation in preStart handler
+  dword gRxPort;
+}
+
+on sysvar HU::Button_Play
+{
+  if(@this == 0)
+    return;
+
+  if(gAppPhase != kAppOn) 
+    return;
+
+  //if(gCurrentAudioSource != kSourceIdDiscPlayer) 
+  //  return;
+
+  switch (gCurrentAudioSource)
+  {
+    case kSourceIdDiscPlayer:
+    {
+      // set mode to 'Play'
+      mostAmsOutput(mostGetChannel(), "AudioDiskPlayer.DeckStatus.Set(Play)", gInstId_ADP);
+      break;
+    }
+    default:
+    case kSourceIdTv:
+    {
+      @sysvar::TV::PlayMode=1;
+      //write("TV Play");
+      break;
+    }
+     
+  }
+}
+
+on sysvar HU::Button_Stop
+{
+  if(@this == 0)
+    return;
+
+  if(gAppPhase != kAppOn) 
+    return;
+
+  //if(gCurrentAudioSource != kSourceIdDiscPlayer)
+  //  return;
+
+    //if(gCurrentAudioSource != kSourceIdDiscPlayer) 
+  //  return;
+  
+  switch (gCurrentAudioSource) 
+  {
+    case kSourceIdDiscPlayer:
+    {
+      // set mode to 'Stop'
+      mostAmsOutput(mostGetChannel(), "AudioDiskPlayer.DeckStatus.Set(Stop)", gInstId_ADP);
+      break;
+    }
+    default:
+    case kSourceIdTv:
+    {
+      @sysvar::TV::PlayMode=0;
+      //write("TV Stop");
+      break;
+    }
+
+  }
+}
+
+on sysvar HU::Button_MagLoad
+{
+  if(@this == 0)
+    return;
+
+  if(gAppPhase != kAppOn) 
+    return;
+
+  mostAmsOutput(mostGetChannel(), "AudioDiskPlayer.DeckStatus.Set(Load)", gInstId_ADP);
+}
+
+on sysvar HU::Button_MagUnload
+{
+  if(@this == 0)
+    return;
+
+  if(gAppPhase != kAppOn) 
+    return;
+
+  mostAmsOutput(mostGetChannel(), "AudioDiskPlayer.DeckStatus.Set(Unload)", gInstId_ADP);
+}
+
+on sysvar HU::Button_VolumeInc
+{
+  if(@this == 0)
+    return;
+
+  if(gAppPhase != kAppOn) 
+    return;
+    
+  if(gCurrentAudioSource == kSourceIdNone)
+    return;
+
+  // increment volume by 1
+  mostAmsOutput(mostGetChannel(), "AudioAmplifier.Volume.Increment(1)", gInstId_AA);
+}
+
+on sysvar HU::Button_VolumeDec
+{
+  if(@this == 0)
+    return;
+  
+  if(gAppPhase != kAppOn) 
+    return;
+
+  if(gCurrentAudioSource == kSourceIdNone)
+    return;
+
+  // decrement volume by 1
+  mostAmsOutput(mostGetChannel(), "AudioAmplifier.Volume.Decrement(1)", gInstId_AA);
+}
+
+// initializes the multi media system
+on sysvar HU::Button_OnOff
+{
+  if(@this == 1)
+    return;
+
+  if(gAppPhase == kAppOn)
+  {
+    AppShutdown();
+  }
+  else
+  {
+    AppInit();
+  }
+}
+
+on sysvar HU::Button_SkipFwdTrack
+{
+  if(@this == 0)
+    return;
+
+  if(gAppPhase != kAppOn) 
+    return;
+
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+    return;
+
+  mostAmsOutput(mostGetChannel(), "AudioDiskPlayer.TrackPosition.Increment(1)", gInstId_ADP);
+}
+
+on sysvar HU::Button_SkipBckTrack
+{
+  if(@this == 0)
+    return;
+
+  if(gAppPhase != kAppOn) 
+    return;
+
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+    return;
+
+  mostAmsOutput(mostGetChannel(), "AudioDiskPlayer.TrackPosition.Decrement(1)", gInstId_ADP);
+}
+
+OnMostNetState(long oldstate, long newstate)
+{
+  if(newstate == kNetStatePowerOff)
+  {
+    AppExit();
+  }
+  else if(newstate == kNetStateConfigOk)
+  {
+    cancelTimer(tAudioAutoStart);
+    setTimer(tAudioAutoStart, kAudioAutoStartDelay);
+  }
+  else if(newstate == kNetStateConfigNotOk)
+  {
+    MH_RxStopTrans(gRxPort);
+  }
+
+  ConfigureShadowFBlocks();
+}
+
+on sysvar HU::Button_DiscPlayer
+{
+  if(!@this)
+    return;
+
+  if(gAppPhase == kAppOn)
+  {
+    if((gShadowProp_ADP_MagazineStatus == 1) && IsAudioSourceAvailable(kSourceIdDiscPlayer))
+    {
+      // activate source disc player
+      SwitchAudioSource(kSourceIdDiscPlayer);
+    }
+    else
+    {
+      // deactivate current source
+      SwitchAudioSource(kSourceIdNone);
+    }
+
+    SetCurrentTopic(kTopicDiscPlayer);
+  }
+}
+
+on preStart
+{
+  // configure CAPL node as application node (don't receive spy messages...)
+  mostApplicationNode();
+
+  // enable FBlock requests
+  // node will poll the Network Master for addresses of these FBlocks after ConfigOk
+  mostAsShdEnable(kFB_VSM, kInstIdBroadcast);
+  mostAsShdEnable(kFB_AA,  kInstIdBroadcast);
+  mostAsShdEnable(kFB_ADP, kInstIdBroadcast);
+  mostAsShdEnable(kFB_AFT, kInstIdBroadcast);
+  mostAsShdEnable(kFB_Nav, kInstIdBroadcast);
+
+  // adapt most high configuration for MOST 150
+  if (kMost150 == mostGetSpeedGrade(mostGetChannel()))
+  {
+    MH_UseProtocolRev(0, 3);
+    MH_SetRxCapacity(0, cDefaultFramesPerBlock, cDefaultFrameSize, cDefaultAIR, cDefaultPrio);
+  }
+
+  // create data sink port for High Protocol transmission 
+  gRxPort = MH_CreateRxPort(""); 
+}
+
+ClearPeakLevel()
+{
+  @sysvar::HU::Display_PeakLevelMaxLeft = 0;
+  @sysvar::HU::Display_PeakLevelMaxRight = 0;
+  @sysvar::HU::Display_PeakLevelLeft = 0;
+  @sysvar::HU::Display_PeakLevelRight = 0;
+}
+
+on mostAMSMessage AudioDiskPlayer.DeckStatus.Status
+{
+  gShadowProp_ADP_DeckStatus = this.DeckStatus;
+  Display_ADP_Info();
+
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+    return;
+
+  ClearPeakLevel();
+}
+
+on mostAMSMessage AudioDiskPlayer.PeakLevel.Status
+{
+  // update display
+
+  long peakLevelLeft;
+  long peakLevelRight;
+  
+  if(gAppPhase != kAppOn) 
+    return;
+
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+    return;
+
+  peakLevelLeft =  this.LevelLeft;
+  peakLevelRight = this.LevelRight;
+
+  if(peakLevelLeft > @sysvar::HU::Display_PeakLevelLeft) 
+    @sysvar::HU::Display_PeakLevelMaxLeft = peakLevelLeft;
+  if(peakLevelRight > @sysvar::HU::Display_PeakLevelRight) 
+    @sysvar::HU::Display_PeakLevelMaxRight = peakLevelRight;
+
+  @sysvar::HU::Display_PeakLevelLeft = peakLevelLeft;
+  @sysvar::HU::Display_PeakLevelRight = peakLevelRight; 
+
+
+}
+
+on mostAMSMessage AudioDiskPlayer.TimePosition.Status
+{
+  // get TrackTime from Record
+  if(mostParamIsAvailable(this, "Data.TrackTime"))
+    gShadowProp_ADP_TrackTime = mostParamGet(this, "Data.TrackTime");
+
+  Display_ADP_TrackTime();
+}
+
+on mostAMSMessage AudioDiskPlayer.TrackPosition.Status
+{
+  mostAMSMessage AudioDiskPlayer.AudioDiskInfo.Get msgAudioDiskInfoGet;
+
+  // store property value
+  gShadowProp_ADP_TrackPosition = this.Track;
+  // clear current title 
+  strncpy(gShadowProp_ADP_AudioDiskInfo_AudioTitle_Current, "", 20);
+
+  // display
+  Display_ADP_Info();
+
+  // get current AudioTitle
+  if((gInstId_ADP != -1) && (gShadowProp_ADP_TrackPosition > 0) && (gShadowProp_ADP_ActiveDisk > 0))
+  {
+    mostParamSet(msgAudioDiskInfoGet, "Pos", (gShadowProp_ADP_TrackPosition << 8) | 0x01);
+    msgAudioDiskInfoGet.InstanceId = gInstId_ADP;
+    output(msgAudioDiskInfoGet);
+  }
+}
+
+on mostAMSMessage Gateway.CANEvent.Status
+{
+  // Processes CAN message routed on MOST.
+
+  byte oldIgnitionState = 0;
+
+  // check if CAN event is of interest
+  if(this.CANID == 0x111) // IgnitionKeyStatus
+  {
+    
+    if(this.byte(2) == 0) // byte(2) is CAN data byte 0
+    {
+      // ignition off
+      AppShutdown();
+    }
+    else
+    {
+      // ignition on
+      if(gAppPhase != kAppOn)
+      {
+        // restart on a positive edge only
+        if(oldIgnitionState == 0)
+          AppInit();
+      }
+      // start supervising ignition key status
+      cancelTimer(tIgnitionKeyStatus);
+      setTimer(tIgnitionKeyStatus, kIgnitionKeyStatusTimeout);
+    }
+  }
+
+  oldIgnitionState = this.byte(2);
+}
+
+on mostAMSMessage AudioAmplifier.Volume.Status
+{
+  // store property value
+  gShadowProp_AA_Volume = this.Volume;
+
+  @sysvar::HU::Display_Volume = gShadowProp_AA_Volume;
+}
+
+on mostAMSMessage AudioAmplifier.Mute.Status
+{
+  // store property value
+  gShadowProp_AA_Mute = this.Status;
+}
+
+on sysvar HU::Button_Left1
+{
+  if(@this == 0)
+    return;
+  ButtonLeft(1);
+}
+
+on sysvar HU::Button_Left2
+{
+  if(@this == 0)
+    return;
+  ButtonLeft(2);
+}
+
+on sysvar HU::Button_Left3
+{
+  if(@this == 0)
+    return;
+  ButtonLeft(3);
+}
+
+on sysvar HU::Button_Left4
+{
+  if(@this == 0)
+    return;
+  ButtonLeft(4);
+}
+
+on sysvar HU::Button_Left5
+{
+  if(@this == 0)
+    return;
+  ButtonLeft(5);
+}
+
+on sysvar HU::Button_Left6
+{
+  if(@this == 0)
+    return;
+  ButtonLeft(6);
+}
+
+on mostAMSMessage AudioDiskPlayer.ActiveDisk.Status
+{
+  mostAMSMessage AudioDiskPlayer.AudioDiskInfo.Get msgAudioDiskInfoGet;
+
+  gShadowProp_ADP_ActiveDisk = this.MagazinPos;
+
+  // clear current title 
+  strncpy(gShadowProp_ADP_AudioDiskInfo_AudioTitle_Current, "", 20);
+
+  // display
+  Display_ADP_Info();
+
+  // get current AudioTitle
+  if((gInstId_ADP != -1) && (gShadowProp_ADP_TrackPosition > 0) && (gShadowProp_ADP_ActiveDisk > 0))
+  {
+    mostParamSet(msgAudioDiskInfoGet, "Pos", (gShadowProp_ADP_TrackPosition << 8) | 0x01);
+    output(msgAudioDiskInfoGet);
+  }
+}
+
+on mostAMSMessage AudioDiskPlayer.MagazineStatus.Status
+{
+  byte oldStatus;
+  oldStatus = gShadowProp_ADP_MagazineStatus;
+
+  gShadowProp_ADP_MagazineStatus = this.MagazineStatus;
+
+  // magazine was just inserted and topic is disc player
+  if((gShadowProp_ADP_MagazineStatus == 1) && (oldStatus != 1) &&
+     (gCurrentTopic == kTopicDiscPlayer) && 
+     IsAudioSourceAvailable(kSourceIdDiscPlayer))
+  {
+    // activate source disc player
+    SwitchAudioSource(kSourceIdDiscPlayer);
+    SetCurrentTopic(kTopicDiscPlayer);
+  }
+  else
+  {
+    Display_ADP_Info();
+  }
+}
+
+OnMostAsRegistry(long rgtype)
+{
+  // The event procedure indicates a change in the 
+  // Local FBlock list or Bus Registry
+ 
+  if(gAppPhase != kAppOn) 
+    return;
+
+  if(rgtype == kBusRegistry)
+  {
+    // Bus Registy has changed -> re-configure FBlock shadows
+    ConfigureShadowFBlocks();
+  }
+}
+
+on timer tIgnitionKeyStatus
+{
+  // no ignition key status so shutdown the MOST system
+  AppShutdown();
+}
+
+long GetInstIdOfFirstFBlock(byte fblockId)
+{
+  // Finds the first FBlock with fblockId in the Bus Registry
+  // and returns its InstId.
+  // Returns -1 if FBlock is not available.
+
+  long i;
+  if(mostGetNetState() != kNetStateConfigOk)
+    return -1;
+
+  for(i = 0; i < mostAsRgGetSize(kBusRegistry); ++i)
+  {
+    if(mostAsRgGetFBlockID(kBusRegistry, i) == fblockId)
+    {
+       return mostAsRgGetInstID(kBusRegistry, i);
+    }
+  }
+  return -1;
+}
+
+void ConfigureShadowFBlocks()
+{
+  // Configures the shadow FBlocks of interest.
+  // Therefore the properties of interest will be registered at the
+  // Notification Shadow Service, which registers the device in the
+  // Notification Matrix of the FBlocks as soon as the FBlock is
+  // known to the device.
+
+  long instId_VSM, instId_AA, instId_ADP, instId_AFT, instId_Nav;
+  byte mhpDestFctAdr[4];
+
+  // check InstIds of VectorSystemManager shadow
+  instId_VSM = GetInstIdOfFirstFBlock(kFB_VSM);
+
+  if(instId_VSM != gInstId_VSM)
+  {
+    // InstId has changed; update entries in notification matrix
+    if(gInstId_VSM != -1) // unregister old
+      ConfigureShadowProperties(kFB_VSM, gInstId_VSM, gShadowProp_VSM, 0);
+    if(instId_VSM != -1) // register new
+      ConfigureShadowProperties(kFB_VSM, instId_VSM, gShadowProp_VSM, 1);
+    
+    gInstId_VSM = instId_VSM; // set new InstId
+
+    // reset values of shadowed properties
+    gShadowProp_VSM_AvailableAudioSources = 0;
+
+    CurrentAudioSourceChanged(kSourceIdNone);
+  }
+
+
+  // check InstIds of AudioAmplifier shadow
+  instId_AA = GetInstIdOfFirstFBlock(kFB_AA);
+
+  if(instId_AA != gInstId_AA)
+  {
+    // InstId has changed; update entries in notification matrix
+    if(gInstId_AA != -1) // unregister old
+      ConfigureShadowProperties(kFB_AA, gInstId_AA, gShadowProp_AA, 0);
+    if(instId_AA != -1) // register new
+      ConfigureShadowProperties(kFB_AA, instId_AA, gShadowProp_AA, 1);
+    
+    gInstId_AA = instId_AA; // set new InstId
+  }
+
+
+  // check InstIds of AudioDiskPlayer shadow
+  instId_ADP = GetInstIdOfFirstFBlock(kFB_ADP);
+
+  if(instId_ADP != gInstId_ADP)
+  {
+    // InstId has changed; update entries in notification matrix
+    if(gInstId_ADP != -1) // unregister old
+      ConfigureShadowProperties(kFB_ADP, gInstId_ADP, gShadowProp_ADP, 0);
+    if(instId_ADP != -1) // register new
+      ConfigureShadowProperties(kFB_ADP, instId_ADP, gShadowProp_ADP, 1);
+    
+    gInstId_ADP = instId_ADP; // set new InstId
+  }
+
+
+  // check InstIds of AmFmTuner shadow
+  instId_AFT = GetInstIdOfFirstFBlock(kFB_AFT);
+
+  if(instId_AFT != gInstId_AFT)
+  {
+    // InstId has changed; update entries in notification matrix
+    if(gInstId_AFT != -1) // unregister old
+      ConfigureShadowProperties(kFB_AFT, gInstId_AFT, gShadowProp_AFT, 0);
+    if(instId_AFT != -1) // register new
+      ConfigureShadowProperties(kFB_AFT, instId_AFT, gShadowProp_AFT, 1);
+    
+    gInstId_AFT = instId_AFT; // set new InstId
+  }
+
+
+  // check InstIds of Navigation shadow
+  instId_Nav = GetInstIdOfFirstFBlock(kFB_Nav);
+
+  if(instId_Nav != gInstId_Nav)
+  {
+    // InstId has changed
+    if(gInstId_Nav != -1)
+    {
+      ConfigureShadowProperties(kFB_Nav, gInstId_Nav, gShadowProp_Nav, 0);
+    }
+    if(instId_Nav != -1)
+    {
+      ConfigureShadowProperties(kFB_Nav, instId_Nav, gShadowProp_Nav, 1);
+    }
+    gInstId_Nav = instId_Nav; // set new InstId
+  }
+}
+
+OnMostNetOn()
+{
+  AppInit();
+
+  // send a dealloc all
+  mostSyncDealloc(0x7F);
+}
+
+void ConfigureShadowProperties(byte fblockId, byte instId, word shadowProp[], long init)
+{
+  // Registers/unregisters properties at the Notification Shadow Service.
+  // Service will send Notification.Set(SetFunction/ClearFunction) as soon
+  // as the FBlock is known to this device.
+ 
+  long i;
+
+  if(init)
+  {
+    // register properties in Notification Shadow Service
+    for(i = 0; i < elcount(shadowProp); ++i)
+    {
+      mostAsNtfShdFunctionEnable(fblockId, instId, shadowProp[i]);
+    }
+  }
+  else
+  {
+    // unregister properties from Notification Shadow Service
+    for(i = 0; i < elcount(shadowProp); ++i)
+    {
+      mostAsNtfShdFunctionDisable(fblockId, instId, shadowProp[i]);
+    }
+  }
+}
+
+void AppInit()
+{
+  // Called on first start of the application.
+  byte oldAppPhase;
+
+  if(gAppPhase == kAppOn)
+    return;
+
+  oldAppPhase = gAppPhase;
+
+  // application has started now
+  gAppPhase = kAppOn;
+
+  // initialize FBlock shadows
+  ConfigureShadowFBlocks();
+
+  if(oldAppPhase == kAppShutdown)
+  {
+    // cancel shut down procedure in PowerMaster
+    mostPMShutDownCancel();
+
+    cancelTimer(tAudioAutoStart);
+    setTimer(tAudioAutoStart, kAudioAutoStartDelay);
+  }
+  else
+  {
+    if(mostGetSpeedGrade(mostGetChannel()) == kMost150)
+      mostWakeUp(mostGetChannel(), 500);
+    else
+      mostSetTxLight(mostGetChannel(), 1); // generate an optical wake-up
+  }
+
+  Display_Map();
+}
+
+void AppExit()
+{
+  // Called on final exit of the application.
+
+  if(gAppPhase == kAppOff)
+    return;
+
+  // power off
+  gAppPhase = kAppOff;
+
+  SetCurrentTopic(kTopicNone);
+  @sysvar::HU::Button_LowTraffic = 0;
+  @sysvar::HU::Display_Map = 0;
+}
+
+void AppShutdown()
+{
+  // Called for a regular shut down of the application.
+  
+  if(gAppPhase != kAppOn)
+    return;
+  
+  // application is in shutdown mode now
+  gAppPhase = kAppShutdown;
+
+  SetCurrentTopic(kTopicNone);
+  @sysvar::HU::Display_Map = 2;
+
+  if(mostGetNetState() == kNetStateConfigOk)
+  {
+    // start shutdown procedure of PowerMaster (if available in the device)
+    mostPMShutdownStart();
+
+    // deactivate audio source
+    SwitchAudioSource(kSourceIdNone);
+  }
+}
+
+on sysvar HU::Button_Tuner
+{
+  if(!@this)
+    return;
+
+  if(gAppPhase == kAppOn)
+  {
+    if(IsAudioSourceAvailable(kSourceIdTuner))
+    {
+      // activate source tuner
+      SwitchAudioSource(kSourceIdTuner);
+    }
+    else
+    {
+      // deactivate current source
+      SwitchAudioSource(kSourceIdNone);
+    }
+   
+    SetCurrentTopic(kTopicTuner);
+  }
+}
+
+on mostAMSMessage AmFmTuner.PeakLevel.Status
+{
+  // update display
+
+  long peakLevelLeft;
+  long peakLevelRight;
+  
+  if(gAppPhase != kAppOn) 
+    return;
+
+  if(gCurrentAudioSource != kSourceIdTuner)
+    return;
+
+  peakLevelLeft =  this.LevelLeft;
+  peakLevelRight = this.LevelRight;
+
+  if(peakLevelLeft > @sysvar::HU::Display_PeakLevelLeft) 
+    @sysvar::HU::Display_PeakLevelMaxLeft = peakLevelLeft;
+  if(peakLevelRight > @sysvar::HU::Display_PeakLevelRight) 
+    @sysvar::HU::Display_PeakLevelMaxRight = peakLevelRight;
+
+  @sysvar::HU::Display_PeakLevelLeft = peakLevelLeft;
+  @sysvar::HU::Display_PeakLevelRight = peakLevelRight;
+}
+
+on mostAMSMessage VectorSystemManager.CurrentAudioSource.Status
+{
+  if((gAppPhase != kAppOn) && (gAppPhase != kAppShutdown))
+    return;
+
+  CurrentAudioSourceChanged(this.SourceID);
+}
+
+void SwitchAudioSource(byte sourceID)
+{
+  // Activates a audio source.
+
+  mostAmsMessage VectorSystemManager.SwitchAudioSource.StartResultAck msg;
+
+  if(gCurrentAudioSource == sourceID)
+    return; // nothing to do
+
+  // VectorSystemManager available
+  if(gInstId_VSM == -1)
+    return;
+
+  // assemble message
+  msg.SenderHandle = mostGetNodeAdr(mostGetChannel());
+  msg.InstanceId = gInstId_VSM;
+  msg.SourceID = sourceID;
+  output(msg);
+
+  // note: the application will be notified through 
+  // VectorSystemManager.CurrentAudioSource on completion.
+}
+
+void CurrentAudioSourceChanged(byte sourceId)
+{
+  // Stores value of the shadowed property VectorSystemManager.CurrentAudioSource
+  // and updates the user interface
+
+  byte oldAudioSource, newTopic;
+
+  if(gCurrentAudioSource == sourceId)
+    return;
+
+  oldAudioSource = gCurrentAudioSource;
+
+  // store value of property
+  gCurrentAudioSource = sourceId;
+
+  // sound source has changed 
+  // visualize in user interface
+  switch(gCurrentAudioSource)
+  {
+    case kSourceIdDiscPlayer:
+      gLastActiveAudioSource = kSourceIdDiscPlayer;
+      if(gCurrentTopic == kTopicTuner)
+        newTopic = kTopicDiscPlayer;
+      else
+        newTopic = gCurrentTopic;
+      break;
+
+    case kSourceIdTuner:
+      gLastActiveAudioSource = kSourceIdTuner;
+      if(gCurrentTopic == kTopicDiscPlayer)
+        newTopic = kTopicTuner;
+      else
+        newTopic = gCurrentTopic;
+      break;
+          
+    case kSourceIdTv:                    
+      gLastActiveAudioSource = kSourceIdTv;
+      if(gCurrentTopic == kTopicDiscPlayer)
+        newTopic = kSourceIdTv;
+      else
+        newTopic = gCurrentTopic;
+      break;
+
+    default:
+      newTopic = gCurrentTopic;
+      break;
+  }
+
+  // refresh topic
+  SetCurrentTopic(newTopic);
+}
+
+on timer tAudioAutoStart
+{
+  // Automatic start of the last active audio source.
+ 
+  if(gAppPhase != kAppOn) 
+    return;
+
+  if(gCurrentAudioSource != kSourceIdNone)
+    return;
+
+  if(IsAudioSourceAvailable(gLastActiveAudioSource))
+    SwitchAudioSource(gLastActiveAudioSource);
+
+  if(gLastActiveAudioSource == kSourceIdDiscPlayer)
+    SetCurrentTopic(kTopicDiscPlayer);
+  else if(gLastActiveAudioSource == kSourceIdTuner)
+    SetCurrentTopic(kTopicTuner);
+}
+
+on mostAMSMessage VectorSystemManager.AvailableAudioSources.Status
+{
+  // store property value for later usage
+  gShadowProp_VSM_AvailableAudioSources = this.SourceIDBitfield;
+}
+
+on mostAMSMessage AudioDiskPlayer.MediaInfo.Status
+{
+  // MediaInfo has been reported from player.
+  // Update shadowed property MediaInfo.
+
+  long i;
+
+  if(gAppPhase != kAppOn)
+    return;
+
+  for(i = 0; i < 6; ++i)
+  {
+    // check if parameter is available in the message
+    // (considers Pos parameter)
+    if(mostParamIsAvailable(this, "Data.Record[].MediaTitle", i+1))
+      mostParamGetString(this, "Data.Record[].MediaTitle", i+1, gShadowProp_ADP_MediaInfo_MediaTitle[i], 50);
+
+    if(mostParamIsAvailable(this, "Data.Record[].MediaType", i+1))
+      gShadowProp_ADP_MediaInfo_MediaType[i] = mostParamGet(this, "Data.Record[].MediaType", i+1);
+  }
+
+  Display_ADP_Info();
+}
+
+Display_ADP_MediaInfo()
+{
+  // display meanings of left buttons on the left only if disc player is the source
+  char textNoDiscLeft[20] = "  - -";
+  char textNoDisc[20] = "- no disc -";
+  if(gAppPhase != kAppOn)
+    return;
+    
+  if((gCurrentTopic != kTopicDiscPlayer) && (gCurrentTopic != kTopicNavi))
+    return;
+
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+  {
+    Display_ClearList();
+    return;
+  }
+  if(gShadowProp_ADP_MediaInfo_MediaType[0] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow1Left, "CD 1");
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow1Left, textNoDiscLeft);
+
+  if(gShadowProp_ADP_MediaInfo_MediaType[1] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow2Left, "CD 2");
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow2Left, textNoDiscLeft);
+
+  if(gShadowProp_ADP_MediaInfo_MediaType[2] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow3Left, "CD 3");
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow3Left, textNoDiscLeft);
+
+  if(gShadowProp_ADP_MediaInfo_MediaType[3] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow4Left, "CD 4");
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow4Left, textNoDiscLeft);
+
+  if(gShadowProp_ADP_MediaInfo_MediaType[4] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow5Left, "CD 5");
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow5Left, textNoDiscLeft);
+
+  if(gShadowProp_ADP_MediaInfo_MediaType[5] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow6Left, "CD 6");
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow6Left, textNoDiscLeft);
+
+  // show media titles only if map is not visible
+  if(gDisplayMap == 1)
+    return;
+
+  // display media titles only if disc player is the current topic
+  if(gCurrentTopic != kTopicDiscPlayer)
+    return;
+
+  if(gShadowProp_ADP_MediaInfo_MediaType[0] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow1, gShadowProp_ADP_MediaInfo_MediaTitle[0]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow1, textNoDisc);
+  if(gShadowProp_ADP_MediaInfo_MediaType[1] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow2, gShadowProp_ADP_MediaInfo_MediaTitle[1]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow2, textNoDisc);
+  if(gShadowProp_ADP_MediaInfo_MediaType[2] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow3, gShadowProp_ADP_MediaInfo_MediaTitle[2]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow3, textNoDisc);
+  if(gShadowProp_ADP_MediaInfo_MediaType[3] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow4, gShadowProp_ADP_MediaInfo_MediaTitle[3]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow4, textNoDisc);
+  if(gShadowProp_ADP_MediaInfo_MediaType[4] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow5, gShadowProp_ADP_MediaInfo_MediaTitle[4]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow5, textNoDisc);
+  if(gShadowProp_ADP_MediaInfo_MediaType[5] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow6, gShadowProp_ADP_MediaInfo_MediaTitle[5]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow6, textNoDisc);
+}
+
+Display_ADP_Info()
+{
+  // Displays disc player infos
+
+  char buf[20];
+  long min,sec;
+
+  if(gAppPhase != kAppOn)
+    return;
+
+  if((gCurrentTopic != kTopicDiscPlayer) && (gCurrentTopic != kTopicNavi))
+    return;
+
+  if(gCurrentAudioSource == kSourceIdDiscPlayer)
+  {
+    sysSetVariableString(sysvar::HU::Display_InfoHeader1,"Track");
+    sysSetVariableString(sysvar::HU::Display_InfoHeader2,"Time");
+    
+    // ActiveDisk
+    @sysvar::HU::Display_ListCursor = gShadowProp_ADP_ActiveDisk;
+
+    Display_ADP_TrackTime();
+
+    // display song title or magazine status
+    if(gShadowProp_ADP_MagazineStatus == 0)
+    {
+      sysSetVariableString(sysvar::HU::Display_TopText1, "<<< Please insert disc magazine >>>");
+    }
+    else
+    {
+      sysSetVariableString(sysvar::HU::Display_TopText1, gShadowProp_ADP_AudioDiskInfo_AudioTitle_Current);
+    }
+    @sysvar::HU::Display_Volume = gShadowProp_AA_Volume;
+
+    Display_ADP_MediaInfo();
+  }
+  else
+  {
+    if(IsAudioSourceAvailable(kSourceIdDiscPlayer))
+    {
+      if(gShadowProp_ADP_MagazineStatus == 1)
+        sysSetVariableString(sysvar::HU::Display_TopText1, "");
+      else
+        sysSetVariableString(sysvar::HU::Display_TopText1, "<<< Please insert disc magazine >>>");
+    }
+    else
+      sysSetVariableString(sysvar::HU::Display_TopText1, "<<< Disc player not available >>>");
+
+    ClearPeakLevel();
+    Display_ClearList();
+    Display_ClearAudioInfo();
+  }
+}
+
+Display_AFT_ATPresetList1()
+{
+  // display meanings of left buttons on the left only if disc player is the source
+  if(gAppPhase != kAppOn)
+    return;
+
+  if((gCurrentTopic != kTopicTuner) && (gCurrentTopic != kTopicNavi))
+    return;
+
+  if(gCurrentAudioSource != kSourceIdTuner)
+    return;
+
+  if(gShadowProp_AFT_ATPresetList1_PresetSelection[0] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow1Left, gShadowProp_AFT_ATPresetList1_SenderName[0]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow1Left, "");
+
+  if(gShadowProp_AFT_ATPresetList1_PresetSelection[1] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow2Left, gShadowProp_AFT_ATPresetList1_SenderName[1]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow2Left, "");
+
+  if(gShadowProp_AFT_ATPresetList1_PresetSelection[2] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow3Left, gShadowProp_AFT_ATPresetList1_SenderName[2]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow3Left, "");
+
+  if(gShadowProp_AFT_ATPresetList1_PresetSelection[3] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow4Left, gShadowProp_AFT_ATPresetList1_SenderName[3]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow4Left, "");
+
+  if(gShadowProp_AFT_ATPresetList1_PresetSelection[4] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow5Left, gShadowProp_AFT_ATPresetList1_SenderName[4]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow5Left, "");
+
+  if(gShadowProp_AFT_ATPresetList1_PresetSelection[5] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow6Left, gShadowProp_AFT_ATPresetList1_SenderName[5]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow6Left, "");
+}
+
+Display_AFT_Info()
+{
+  // Displays tuner infos
+
+  char buf[200];
+  byte senderActive;
+
+  if(gAppPhase != kAppOn)
+    return;
+
+  if((gCurrentTopic != kTopicTuner) && (gCurrentTopic != kTopicNavi))
+    return;
+    
+  senderActive = 0;
+  if((gShadowProp_AFT_ATPI > 0) && (gShadowProp_AFT_ATPI <= 6))
+  {
+    if(gShadowProp_AFT_ATPresetList1_PresetSelection[gShadowProp_AFT_ATPI-1] > 0)
+      senderActive = 1;
+  }
+  if(gCurrentAudioSource != kSourceIdTuner)
+    senderActive = 0;
+
+  if(senderActive == 1)
+  {
+    // ATProgramIndex
+    @sysvar::HU::Display_ListCursor = gShadowProp_AFT_ATPI;
+
+    // RadioText
+    strncpy(buf, gShadowProp_AFT_RadioTextA, elcount(buf));
+    strncat(buf, gShadowProp_AFT_RadioTextB, elcount(buf));
+    sysSetVariableString(sysvar::HU::Display_TopText1, buf);
+
+    // frequency
+    snprintf(buf, elcount(buf), "%4.1f MHz", gShadowProp_AFT_ATStationInfoFreq / 1000.0);
+    sysSetVariableString(sysvar::HU::Display_InfoHeader1,"Frequency");
+    sysSetVariableString(sysvar::HU::Display_InfoText1, buf);
+    sysSetVariableString(sysvar::HU::Display_InfoHeader2,"Radio Text");
+    sysSetVariableString(sysvar::HU::Display_InfoText2,"   active");
+    if((gDisplayMap == 0) && (gCurrentTopic == kTopicTuner))
+    {
+      sysSetVariableString(sysvar::HU::Display_ListRow2, gShadowProp_AFT_ATPresetList1_SenderName[gShadowProp_AFT_ATPI-1]);
+      sysSetVariableString(sysvar::HU::Display_ListRow3, buf);
+      sysSetVariableString(sysvar::HU::Display_ListRow4, "Stereo");
+      sysSetVariableString(sysvar::HU::Display_ListRow5, "Radio text active");
+      sysSetVariableString(sysvar::HU::Display_ListRow6, "");
+    }
+    Display_AFT_ATPresetList1();
+    @sysvar::HU::Display_Volume = gShadowProp_AA_Volume;
+  }
+  else
+  {
+    if(IsAudioSourceAvailable(kSourceIdTuner))
+      sysSetVariableString(sysvar::HU::Display_TopText1, "");
+    else
+      sysSetVariableString(sysvar::HU::Display_TopText1, "<<< Tuner not available >>>");
+
+    Display_ClearList();
+    Display_ClearAudioInfo();
+  }
+}
+
+Display_ClearList()
+{
+  sysSetVariableString(sysvar::HU::Display_ListRow1, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow2, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow3, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow4, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow5, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow6, "");
+}
+
+SetCurrentTopic(byte newTopic)
+{
+  // Sets topic for the display.
+
+  if(newTopic != gCurrentTopic)
+  {
+    @sysvar::HU::Display_DiscPlayer = newTopic == kTopicDiscPlayer;
+    @sysvar::HU::Display_Tuner = newTopic == kTopicTuner;
+    @sysvar::HU::Display_Tv = newTopic == kSourceIdTv;
+    @sysvar::HU::Display_Navi = newTopic == kTopicNavi;
+    
+    @sysvar::TV::PlayMode = 0;
+  }
+
+  gCurrentTopic = newTopic;
+  
+  // update display
+  switch(gCurrentTopic)
+  {
+    case kTopicDiscPlayer:
+      Display_ADP_Info();
+      break;
+
+    case kTopicTuner:
+      //ShowHide_TV(0);
+      Display_AFT_Info();
+      break;
+
+    case kTopicTv:
+      @sysvar::TV::PlayMode = 1;
+      Display_Tel_Info();
+      break;
+
+    case kTopicNavi:
+      Display_Nav_Info();
+      break;
+
+    default:
+      @sysvar::HU::Display_Waypoint = 0;
+      sysSetVariableString(sysvar::HU::Display_TopText1, "");
+      Display_ClearAudioInfo();
+      Display_ClearList();
+      break;
+  }
+
+  ShowHide_Controls();
+
+}
+
+on sysvar HU::Button_Navi
+{
+  mostAmsMessage Navigation.CalculateRoute.StartResultAck msg;
+
+  if(!@this)
+    return;
+
+  if(gAppPhase != kAppOn)
+    return;
+
+  SetCurrentTopic(kTopicNavi);
+
+  // send message to start route calculation
+  msg.InstanceId = gInstId_Nav;
+  msg.SenderHandle = 0x1234;
+  mostParamSetString(msg, "From", gRouteFrom);
+  mostParamSetString(msg, "To",   gRouteTo);
+  output(msg);
+}
+
+on sysvar HU::Button_Tv
+{
+  if(!@this)
+    return;
+
+  if(gAppPhase == kAppOn)
+  {
+    if(IsAudioSourceAvailable(kSourceIdTv))
+    {
+      // activate source tuner
+      SwitchAudioSource(kSourceIdTv);
+    }
+    else
+    {
+      // deactivate current source
+      SwitchAudioSource(kSourceIdNone);
+    }
+
+    SetCurrentTopic(kTopicTv);
+  }
+}
+
+Display_Tel_Info ()   // obsolete
+{
+  return;
+
+  // display only if tv is the current topic
+  if((gCurrentTopic != kTopicTv) || (gAppPhase != kAppOn))
+    return;
+
+  Display_ClearAudioInfo();
+  Display_ClearList();
+  sysSetVariableString(sysvar::HU::Display_TopText1, "<<< Telephone not available >>>");
+}
+
+on mostAMSMessage AmFmTuner.ATPI.Status
+{
+  // store property value
+  gShadowProp_AFT_ATPI = this.ProgramIndex;
+  Display_AFT_Info();
+}
+
+on mostAMSMessage AmFmTuner.ATPresetList1.Status
+{
+  // Station list has been reported from tuner.
+  // Update shadowed property ATPresetList1.
+
+  long i;
+  for(i = 0; i < 6; ++i)
+  {
+    // check if parameter is available in the message
+    // (considers Pos parameter)
+    if(mostParamIsAvailable(this, "Data.Record[].SenderName", i+1))
+      mostParamGetString(this, "Data.Record[].SenderName", i+1, gShadowProp_AFT_ATPresetList1_SenderName[i], 50);
+
+    if(mostParamIsAvailable(this, "Data.Record[].PresetSelection", i+1))
+      gShadowProp_AFT_ATPresetList1_PresetSelection[i] = mostParamGet(this, "Data.Record[].PresetSelection", i+1);
+  }
+
+  Display_AFT_ATPresetList1();
+}
+
+on sysvar HU::Button_LowTraffic
+{
+  // In order to have less traffic on MOST, this environment variable disables/enables 
+  // all cyclic messages by removing the functions from the Notification Shadow servcie.
+
+  mostAmsMessage * msg;
+  long i;
+
+  if(gAppPhase != kAppOn) 
+    return;
+
+  if(@this == 1)
+  {
+    // clear from Notification Matrix
+    if(gInstId_ADP != -1)
+    {
+      mostAsNtfShdFunctionDisable(kFB_ADP, gInstId_ADP, kFct_ADP_TimePosition);
+      mostAsNtfShdFunctionDisable(kFB_ADP, gInstId_ADP, kFct_ADP_PeakLevel);
+    }
+    if(gInstId_AFT != -1)
+    {
+      mostAsNtfShdFunctionDisable(kFB_AFT, gInstId_AFT, kFct_AFT_PeakLevel);
+      mostAsNtfShdFunctionDisable(kFB_AFT, gInstId_AFT, kFct_AFT_Radiotext);
+    }
+    if(gInstId_Nav != -1)
+    {
+      mostAsNtfShdFunctionDisable(kFB_Nav, gInstId_Nav, kFct_Nav_CurrentPosition);
+    }
+    ClearPeakLevel();
+  }
+  else
+  {
+    // set in Notification Matrix
+    if(gInstId_ADP != -1)
+    {
+      mostAsNtfShdFunctionEnable(kFB_ADP, gInstId_ADP, kFct_ADP_TimePosition);
+      mostAsNtfShdFunctionEnable(kFB_ADP, gInstId_ADP, kFct_ADP_PeakLevel);
+    }
+    if(gInstId_AFT != -1)
+    {
+      mostAsNtfShdFunctionEnable(kFB_AFT, gInstId_AFT, kFct_AFT_PeakLevel);
+      mostAsNtfShdFunctionEnable(kFB_AFT, gInstId_AFT, kFct_AFT_Radiotext);
+    }
+    if(gInstId_Nav != -1)
+    {
+      mostAsNtfShdFunctionEnable(kFB_Nav, gInstId_Nav, kFct_Nav_CurrentPosition);
+    }
+  }
+}
+
+on mostAMSMessage AmFmTuner.Radiotext.Status
+{
+  if(mostParamIsAvailable(this, "TextA"))
+    mostParamGetString(this, "TextA", gShadowProp_AFT_RadioTextA, elcount(gShadowProp_AFT_RadioTextA));
+  else
+    gShadowProp_AFT_RadioTextA[0] = '\0';
+  if(mostParamIsAvailable(this, "TextB"))
+    mostParamGetString(this, "TextB", gShadowProp_AFT_RadioTextB, elcount(gShadowProp_AFT_RadioTextB));
+  else
+    gShadowProp_AFT_RadioTextB[0] = '\0';
+
+  Display_AFT_Info();
+}
+
+on mostAMSMessage AmFmTuner.ATStationInfo.Status
+{
+  if(mostParamIsAvailable(this, "Data.Frequency"))
+  {
+    gShadowProp_AFT_ATStationInfoFreq = mostParamGet(this, "Data.Frequency");
+    Display_AFT_Info();
+  }
+}
+
+on sysvar HU::Button_Map
+{
+  mostAMSMessage Navigation.Image.Get msg;
+
+  if(!@this)
+    return;
+
+  if(gAppPhase == kAppOn)
+  {
+    Display_Map();
+  }
+}
+
+on mostAMSMessage AudioDiskPlayer.AudioDiskInfo.Status
+{
+  // AudioDiskInfo has been reported from player.
+  // We are interested in the title of the current song only.
+
+  if(gAppPhase != kAppOn)
+    return;
+
+  // check if parameter is available in the message
+  // (considers Pos parameter)
+  if(mostParamIsAvailable(this, "Data.Record[].AudioTitle", gShadowProp_ADP_TrackPosition))
+  {
+    mostParamGetString(this, "Data.Record[].AudioTitle", gShadowProp_ADP_TrackPosition, gShadowProp_ADP_AudioDiskInfo_AudioTitle_Current, 50);
+    Display_ADP_Info();
+  }
+}
+
+Display_ADP_TrackTime()
+{
+  // Displays disc player infos
+
+  char buf[20];
+  long min,sec;
+
+  if(gAppPhase != kAppOn)
+    return;
+
+  if((gCurrentTopic != kTopicDiscPlayer) && (gCurrentTopic != kTopicNavi))
+    return;
+
+  if(gCurrentAudioSource == kSourceIdDiscPlayer)
+  {
+    // Track
+    snprintf(buf, elcount(buf), "%d", gShadowProp_ADP_TrackPosition);
+    sysSetVariableString(sysvar::HU::Display_InfoText1, buf);
+
+    // TrackTime
+    sec = gShadowProp_ADP_TrackTime / 1000;
+    min = sec / 60;
+    sec = sec - (min * 60);
+    snprintf(buf,20,"%02d:%02d",min,sec);
+    sysSetVariableString(sysvar::HU::Display_InfoText2, buf);
+  }
+}
+
+on sysvar HU::Button_Info
+{
+  if(!@this)
+    return;
+
+  if(gAppPhase == kAppOn)
+  {
+    Display_Info();
+  }
+}
+
+on mostAMSMessage Navigation.CurrentPosition.Status
+{
+  // Processes the reporting of the current location.
+  // Note: For simplicity, we do not evaluate the coordinates from the message.
+
+  if(gAppPhase != kAppOn) 
+    return;
+
+  gShadowProp_Nav_CurrentPosition = gShadowProp_Nav_CurrentPosition + gRouteDirection;
+  if(gShadowProp_Nav_CurrentPosition >= kRouteMaxPos)
+    gRouteDirection = -1;
+  else if(gShadowProp_Nav_CurrentPosition <= 1)
+    gRouteDirection = 1;
+ 
+  Display_Nav_Position();
+}
+
+Display_Nav_Position()
+{
+  char buf[100];
+  double distance;
+
+  if(gDisplayMap == 1)
+  {
+    @sysvar::HU::Display_Waypoint = gShadowProp_Nav_CurrentPosition; 
+  }
+  else
+  {
+    @sysvar::HU::Display_Waypoint = 0; 
+  }
+
+  if((gCurrentTopic == kTopicNavi) && (gAppPhase == kAppOn))
+  {
+    // do some distance calculations
+    if((gShadowProp_Nav_CurrentPosition == 0) || (gShadowProp_Nav_CurrentPosition == kRouteMaxPos))
+      distance = 0;
+    else
+    {
+      if(gRouteDirection == 1)
+        distance = kRouteDistance - (kRouteDistance / (kRouteMaxPos + 1)) * gShadowProp_Nav_CurrentPosition;
+      else
+        distance = (kRouteDistance / (kRouteMaxPos + 1)) * gShadowProp_Nav_CurrentPosition;
+    }
+    if(gCurrentAudioSource == kSourceIdNone)
+    {
+      snprintf(buf, elcount(buf), "%5.2f km", distance);
+      sysSetVariableString(sysvar::HU::Display_TopText1, buf);
+    }
+  }
+}
+
+on mostAMSMessage Navigation.CalculateRoute.ResultAck
+{
+  // Navigation FBlock has calculated a route
+
+  // in the demo, the route data will not be processed further
+}
+
+Display_Map()
+{
+  gDisplayMap = 1;
+  @sysvar::HU::Display_Map = 1;
+  Display_ClearList();
+  Display_Nav_Position();
+  
+  // refresh display
+  SetCurrentTopic(gCurrentTopic);
+}
+
+Display_Info()
+{
+  gDisplayMap = 0;
+  @sysvar::HU::Display_Map = 0;
+  Display_Nav_Position();
+  
+  // refresh display
+  SetCurrentTopic(gCurrentTopic);
+}
+
+ShowHide_Controls()
+{
+  long showTV, showInfo, showMap;
+  
+  showTV = (gCurrentTopic == kTopicTv);
+  showInfo = !gDisplayMap && !showTV;
+  showMap = gDisplayMap && !showTV;
+
+  
+  // map
+	setControlVisibility("Head Unit", "SwitchControlBSI1", showMap);
+  setControlVisibility("Head Unit", "SwitchControlBSI2", showMap);
+  
+  // text (center)
+  setControlVisibility("Head Unit", "TextBoxControl47", showInfo);
+  setControlVisibility("Head Unit", "TextBoxControl48", showInfo);
+  setControlVisibility("Head Unit", "TextBoxControl49", showInfo);
+  setControlVisibility("Head Unit", "TextBoxControl50", showInfo);
+  setControlVisibility("Head Unit", "TextBoxControl51", showInfo);
+  setControlVisibility("Head Unit", "TextBoxControl52", showInfo);
+  
+  // yellow arrows (left)
+  setControlVisibility("Head Unit", "SwitchControlBSI6", !showTV);
+  
+  // text (left)
+  setControlVisibility("Head Unit", "TextBoxControl15", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl16", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl17", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl18", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl19", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl20", !showTV);
+  
+  // text (right)
+  setControlVisibility("Head Unit", "TextBoxControl22", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl23", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl24", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl25", !showTV);
+  
+  // text (bottom)
+  setControlVisibility("Head Unit", "TextBoxControl21", !showTV);
+  
+  // Volume Peak level (right))
+  setControlVisibility("Head Unit", "SysVar:_HU_Display_PeakLevelLeft", !showTV);
+  setControlVisibility("Head Unit", "SysVar:_HU_Display_PeakLevelRight", !showTV);
+  setControlVisibility("Head Unit", "SysVar:_HU_Display_PeakLevelMaxLeft", !showTV);
+  setControlVisibility("Head Unit", "SysVar:_HU_Display_PeakLevelMaxRight", !showTV);
+
+  setControlVisibility("Head Unit", "Media Player", showTV); 
+}
+
+Display_Nav_Info()
+{
+  char buf[100];
+
+  if((gCurrentTopic != kTopicNavi) || (gAppPhase != kAppOn))
+    return;
+    
+                                     
+  setControlVisibility("Head Unit", "SwitchControlBSI1", 1);
+  setControlVisibility("Head Unit", "SwitchControlBSI2", 1);
+  
+  setControlVisibility("Head Unit", "Media Player", 0);
+  
+  setControlVisibility("Head Unit", "TextBoxControl47", 0);
+  setControlVisibility("Head Unit", "TextBoxControl48", 0);
+  setControlVisibility("Head Unit", "TextBoxControl49", 0);
+  setControlVisibility("Head Unit", "TextBoxControl50", 0);
+  setControlVisibility("Head Unit", "TextBoxControl51", 0);
+  setControlVisibility("Head Unit", "TextBoxControl52", 0);
+
+
+  if(gDisplayMap == 0)
+  {
+    snprintf(buf, elcount(buf), "Total distance: %5.2f km", kRouteDistance);
+    sysSetVariableString(sysvar::HU::Display_ListRow1, "");
+    sysSetVariableString(sysvar::HU::Display_ListRow2, "Route information:");
+    sysSetVariableString(sysvar::HU::Display_ListRow3, gRouteFrom);
+    sysSetVariableString(sysvar::HU::Display_ListRow4, "to");
+    sysSetVariableString(sysvar::HU::Display_ListRow5, gRouteTo);
+    sysSetVariableString(sysvar::HU::Display_ListRow6, buf);
+  }
+}
+
+Display_ClearAudioInfo()
+{
+  @sysvar::HU::Display_ListCursor = 0;
+  sysSetVariableString(sysvar::HU::Display_ListRow1Left, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow2Left, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow3Left, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow4Left, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow5Left, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow6Left, "");
+  sysSetVariableString(sysvar::HU::Display_InfoHeader1, "");
+  sysSetVariableString(sysvar::HU::Display_InfoHeader2, "");
+  sysSetVariableString(sysvar::HU::Display_InfoText1, "");
+  sysSetVariableString(sysvar::HU::Display_InfoText2, "");
+  ClearPeakLevel();
+  @sysvar::HU::Display_Volume = 0;
+}
+
+long IsAudioSourceAvailable(byte sourceId)
+{
+  // Returns true, if audio source is available in the system.
+  return ((gShadowProp_VSM_AvailableAudioSources >> sourceId) & 0x01 == 0x01);
+}
+
+MH_IndRxConnectionClosed(dword handle, long res)
+{
+  MH_ReportErrorsToWrite(res);
+}
+
+MH_IndRxBufferRequested (dword handle, long isPacketBegin)
+{
+  // A MOST High transmission request occured.
+  // Stream data to file.
+  int isToBeAppended = 0; // 0: Overwrite existing file content
+                          // 1: Append data to file
+  char strMH_FileAbs[200];
+  char strMH_FileAbsNew[250];
+
+  // get absolute file path from relative file (relative to configuration file)
+  sysGetVariableString(sysvar::HU::ImageFile, strMH_FileAbs, elCount(strMH_FileAbs));
+  if(strlen(strMH_FileAbs) == 0)
+  {
+    writeDbgLevel(0, "MOST HP: %NODE_NAME%: Unable to provide destination file for MHP reception");
+    return;
+  }
+  //strncat(strMH_FileAbs, ".MHP", elcount(strMH_FileAbs));
+  CreateFileName(strMH_FileAbs, strMH_FileAbsNew);
+
+  if(MH_SetRxBuffer(gRxPort, isToBeAppended, strMH_FileAbsNew) == 0)
+  {
+    writeDbgLevel(0, "MOST HP: %NODE_NAME%: Streaming into file '%s'", strMH_FileAbsNew);
+  }
+  else
+  {
+    writeDbgLevel(0, " MOST HP: %NODE_NAME%: Couldn't open file '%s' for output", strMH_FileAbsNew);
+  }
+}
+
+MH_IndRxBufferFinished(dword handle, long filledSize, long reason)
+{
+  // This function is called whenever the receive buffer is full or when
+  // a High Protocol packet is completely transmitted. Additionally it is 
+  // called when the connection is closed to provide the remaining 
+  // application data. 
+ 
+  // Display in the received image in a picture box
+  char strMH_FileAbs[200];
+  char strMH_FileAbsNew[250];
+  char strMH_FileName[250];
+  
+  sysGetVariableString(sysvar::HU::ImageFile, strMH_FileAbs, elCount(strMH_FileAbs));
+  
+  CreateFileName(strMH_FileAbs, strMH_FileAbsNew);
+  ExtractFileName(strMH_FileAbsNew, strMH_FileName);
+  
+  sysSetVariableString("MHPImage", "MHPImageFilename",strMH_FileName);
+  
+  setPictureBoxImage("MHPImage","Picture Box", strMH_FileAbsNew);
+
+  // since a file buffer is used in this demo, only the complete
+  // transmission of the packet data can be the reason for triggering.
+  writeDbgLevel(3, "MOST HP: %NODE_NAME%: Reception of packet with %d bytes finished", filledSize);
+  
+}
+
+MH_ReportErrorsToWrite(long res)
+{
+  switch (res)
+  {
+    case 0:  /* writeDbgLevel(0, "MOST HP: %NODE_NAME%: Result (%d): OK", res); */ break;
+    case 1:  writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Number of Send retries exceeded", res);          break;
+    case 2:  writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Number of Trans retries exceeded", res);         break;
+    case 3:  writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Number of End retries exceeded", res);           break;
+    case 4:  writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Number of Ready retries exceeded", res);         break;
+    case 5:  writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Number of Frame Retries exceeded", res);         break;
+    case 6:  writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Number of Receive retries execeeded", res);      break;
+    case 10: writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Receive buffer could not be provided", res);     break;
+    case 11: writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Connection rejected via higher priority", res);  break;
+    case 13: writeDbgLevel(0, "MOST HP: %NODE_NAME%: Result (%d): Transmission terminated by receiver", res);     break;
+    case 14: /* writeDbgLevel(0, "MOST HP: %NODE_NAME%: Result (%d): Transmission terminated by sender", res); */   break;
+    case 15: writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Transmission killed by sender", res);            break;
+    case 16: writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Parameter out of range", res);                   break;
+    default: writeDbgLevel(0, "MOST HP: %NODE_NAME%: Error (%d): Unknown error", res);                            break;
+  }
+}
+
+on sysvar HU::Button_ImageGet
+{
+  mostAMSMessage Navigation.Image.Get msg;
+  char filepath[400];
+
+  if(!@this)
+    return;
+
+  if(gAppPhase != kAppOn)
+    return;
+
+  if(gInstId_Nav == -1)
+    return;
+
+  // Request image from Navigation FBlock to be transferred using MOST High
+  sysGetVariableString(sysvar::HU::ImageFile, filepath, elCount(filepath));
+
+  // send request over AMS
+  msg.InstanceId = gInstId_Nav;
+  mostParamSetString(msg, "Filename", filepath);
+  output(msg);
+
+  // Note:
+  // The status message (image) will be received over 
+  // MOST High (see callback function MH_IndRxBufferFinished())
+}
+
+on start
+{
+  char strMH_FileAbs[400];
+  char strMH_FileName[400];
+
+  // init file for MHP transmission
+
+  // get absolute file path from relative file (relative to configuration file)
+  if(-1 == getAbsFilePath("MHP_VEC_Car.jpg", strMH_FileAbs, elcount(strMH_FileAbs)))
+  {
+    writeDbgLevel(3, "MOST HP: %NODE_NAME%: Unable to get absolute path of image file.");
+    return;
+  }
+  sysSetVariableString(sysvar::HU::ImageFile, strMH_FileAbs);
+  sysSetVariableString("MHPImage", "MHPImageFilename", "VEC_Car_red.jpg");
+}
+
+void ButtonLeft(byte button)
+{
+  mostAmsMessage AudioDiskPlayer.ActiveDisk.Set msgADP;
+  mostAmsMessage AmFmTuner.ATPI.Set msgAFT;
+
+  if(gAppPhase != kAppOn) 
+    return;
+
+  if(gCurrentAudioSource == kSourceIdDiscPlayer)
+  {
+    // load disc
+    msgADP.MagazinPos = button;
+    msgADP.InstanceID = gInstId_ADP;
+    output(msgADP);
+  }
+  else if(gCurrentAudioSource == kSourceIdTuner)
+  {
+    // set station
+    msgAFT.ProgramIndex = button;
+    msgAFT.InstanceID = gInstId_AFT;
+    output(msgAFT);
+  }
+}
+
+MH_IndRequestConnection (dword dsoDevice, dword funcBlockId, dword instId, dword fktId, dword opTypeId,
+dword priority, dword frameSize)
+{
+  // this function is called whenever the node receives a 
+  // High Protocol connection request.
+
+  // Accept only connection requests that come from function
+  // Navigation.XX.Image.Status
+  if((funcBlockId == kFB_Nav) &&
+     (fktId       == kFct_Nav_Image) &&
+     (opTypeId    == 0xC))
+  {  
+    MH_AcceptConnection(gRxPort); // accepted request by assigning a port to it
+    writeDbgLevel(0, "MOST HP: %NODE_NAME%: Accepted connection request from Navigation.%X.Image.Status in device 0x%X with priority of %d; Frame size is %d", 
+                  instId, dsoDevice, priority, frameSize);
+  }
+}
+
+CreateFileName (char in[], char out[])
+{
+  long rc = -1;
+  long dotPos = -1;
+  char ext[200];
+  // search for the last dot
+  while(1)
+  {
+    rc = strstr_off(in, rc + 1, ".");
+    if(rc >= 0)
+      dotPos = rc;
+    else
+      break;
+  }
+  if(dotPos >= 0)
+  {
+    substr_cpy(ext, in, dotPos, -1, elcount(ext));
+    substr_cpy(out, in, 0, dotPos, elcount(out));
+    strncat(out, "_MHP", elcount(out));
+    strncat(out, ext, elcount(out));
+  }
+  else
+  {
+    strncpy(out, in, elcount(out));
+    strncat(out, "_MHP", elcount(out));
+  }
+}
+
+ExtractFileName (char in[], char out[])
+{
+  long rc = -1;
+  long slashPos = -1;
+  // search for the last dot
+  while(1)
+  {
+    rc = strstr_off(in, rc + 1, "\\");
+    if(rc >= 0)
+      slashPos = rc;
+    else
+      break;
+  }
+  if(slashPos >= 0)
+  {
+    substr_cpy(out, in, slashPos+1, -1, elcount(in));
+  }
+  else
+  {
+    strncpy(out, in, elcount(out));
+  }
+}
+
+
+
+on sysvar sysvar::TV::PlayMode
+{
+  return;
+  
+  if (3!=@this)
+    @sysvar::TV::PlayMode=3;
+}

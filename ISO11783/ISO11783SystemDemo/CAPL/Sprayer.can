@@ -1,0 +1,971 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "ISO11783DiagnosticServices.cin"
+}
+
+/*
+ * Sprayer Implement                               Version 2.6  
+ *
+ * Copyright 2018, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 
+ * 2.6 Extend ISO11783 Diagnostics Services (ISO11783-12)
+ * 2.5 Add ISO11783 Diagnostics Services (ISO11783-12)
+ * 2.4 Use Object Pool API, use new database with modified message names
+ * 2.3 Search for file Sprayer.xml in the main directory and directory 'sprayer'
+ *     Updated process data support
+ * 2.2 Changed auxiliary function IDs
+ *     Handle Auxiliary Input Status correctly
+ * 2.1 Changed DDIs
+ *     Changed gDbgLevel from kDbgInfo to kDbgWarning
+ * 2.0 Added Process Data support 
+ *     Added multi VT support
+ * 1.0 Created 
+ */
+variables
+{
+  // Sprayer constants
+  const int    kTankCapacity      = 1200;       // Max tank valume in [l]
+  const double kMaxSectionOutput  = 50.0;       // Max output [l/min]
+  const double kVolToWeightRatio  = 1.0;
+  const int    kSystemTime        = 200;        // System time [ms]
+  const double kSystemTimeSec     = kSystemTime / 1000.0; // System time [sec]
+  const int    kSectionCount      = 5;
+  const int    kSectionWidth      = 3000;       // Section width in [mm]
+  const int    kDeviceWidth       = kSectionWidth * kSectionCount; // Device width in [mm]
+
+  // Global sprayer variables
+  // Simulation variables
+  int     gTaskActive                    = 0;  // Indicates, if the Task Controller controls the Implement
+  double  gGroundBasedSpeed              = 0.0;// ground based speed received from tractor ECU [m/s]
+  double  gPTOShaftSpeed                 = 0.0;// shaft speed [rpm]
+  double  gTankVolume                    = kTankCapacity; // Tank volumen [l]
+  double  gVolumeCount                   = 0;  // Output volume count
+  double  gOutputFlowRate[kSectionCount];      // Output [ml/min]
+  double  gOutputFlowRateSum;                  // Sum of output [ml/min]
+  double  gOutputPerArea[kSectionCount];       // Output [kg/ha]
+  int     gSprayerOn                     = 0;
+  int     gAutomaticMode                 = 0;
+  int     gAlarmActive                   = 0;
+  msTimer SystemTimer;
+
+  // Constants
+  const int kNullAddr   = 0xfe;                // Null address
+  const int kSuccess    = 0;                   // Nodelayer function returns 0 on success
+
+  const int kInitialized         = 0;          // State: Initialized
+  const int kClaiming            = 1;          // State: claiming
+  const int kActive              = 2;          // State: Active
+  const int kStopped             = 3;          // State: Stopped
+  const int kSuspended           = 4;          // State: kSuspended
+
+  // General
+  char gECULabel[32]        = "Sprayer";       // Label for write window
+
+  // Communication
+  char  gECUBus[20]         = "default";
+  dword gECUHandle;                            // ECU handle
+  char  gECUName[8];                           // Device name of this ECU
+
+  // RX paramater group buffer
+  pg GBSD_TECU RX_GBSD;
+  pg RPTO_TECU RX_RearPTO;
+  pg FPTO_TECU RX_FrontPTO;
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel         = kDbgWarning; // Set debug level for output to write window
+  
+  //number of clicks received over aux function
+  int gClicksToIncreaseOutput = 0;
+  int gClicksToDecreaseOutput = 0;
+  int gClicksToIncreaseWidth = 0;
+  int gClicksToDecreaseWidth = 0;
+}
+on key 's'
+{
+  Iso11783IL_OPSave("Sprayer.iopx");
+}
+
+
+on preStart
+{
+  setWriteDbgLevel( gDbgLevel );
+
+  // set Diagnostic Services parameters
+  strncpy(gIdsEcuidParam.EcuPartNumber,       "V-Spr09-01"                            ,100) ;
+  strncpy(gIdsEcuidParam.EcuSerialNumber,     "PND0909251"                            ,100) ;
+  strncpy(gIdsEcuidParam.EcuLocation,         "ImplementBus"                          ,100) ;
+  strncpy(gIdsEcuidParam.EcuType,             "Sprayer"                               ,100) ;
+  strncpy(gIdsEcuidParam.EcuManufacturerName, "Vector Informatik GmbH www.vector.com" ,100) ;
+  strncpy(gIdsEcuidParam.EcuHardwareID,       "11"                                    ,100) ;
+  
+
+  gIdsSoftParam.SoftwareIdentFields = 3 ;
+  strncpy(gIdsSoftParam.SoftwareIdent[0], "Sprayer V2.6"                            ,100) ;
+  strncpy(gIdsSoftParam.SoftwareIdent[1], "ISO11783-Diag-Serv V1.0"                 ,100) ;
+  strncpy(gIdsSoftParam.SoftwareIdent[2], "REV-A-CAPL 2018-09-21"                   ,100) ;
+
+  gIdsIccParam.CertificationYear = 9 ;
+  gIdsIccParam.CertificationLaboratoryID = 1861 ;
+
+  gIdsDpParam.J1939_73 = 1 ;
+
+  strncpy(gIdsVehicleIdentificationParam.VehicleIdentificationNumber , "012 104-6", 200) ;
+  
+  strncpy(gIdsProductIdentificationParam.ProductIdentificationCode,  "012 104-6"      ,100) ;
+  strncpy(gIdsProductIdentificationParam.ProductIdentificationBrand, "Vector Sprayer" ,100) ;
+  strncpy(gIdsProductIdentificationParam.ProductIdentificationModel, "Sprayer_v2.6"   ,100) ; 
+}
+
+on start
+{
+  // more than 10.0 Volt on PWR wire enables the ECU
+  if ((@sysvar::ISO11783Bus::TECU::ECU_PWR > 10.0) && (@sysvar::ISO11783Bus::Sprayer::ILEnable > 0)) {
+    ecuStartUp();
+  }
+
+  gClicksToIncreaseOutput = 0;
+  gClicksToDecreaseOutput = 0;
+  gClicksToIncreaseWidth = 0;
+  gClicksToDecreaseWidth = 0;
+}
+
+/*
+ *  Connect/unconnect the implement to the implement bus
+ */
+on SysVar sysvar::ISO11783Bus::Sprayer::ILEnable
+{
+  switch(@this) 
+  {
+    case 0:
+      ecuShutDown();
+      break;
+  
+    case 1:
+      ecuStartUp();
+      break;
+  }
+}
+
+/*
+ * Call this function to connect the node to the bus
+ */
+void ecuStartUp()
+{
+  InitSprayer();
+}
+
+void InitSprayer()
+{
+  Iso11783IL_PDDSetValue(17/*PD::ContentAsVolume_Act*/, 1, kTankCapacity   );
+
+  @sysvar::ISO11783Bus::Sprayer::PDD::SprayerDevice::Sprayer::Setpoints::SetpointAppRate = 10.0;
+
+  gGroundBasedSpeed = 0;
+  gPTOShaftSpeed    = 0;
+}
+
+/*
+ * Call this function to disconnect the node from the bus
+ */
+void ecuShutDown()
+{
+  cancelTimer( SystemTimer );
+  @sysvar::ISO11783Bus::Sprayer::BitmapIndex = 0;
+}
+
+/*
+ * System timer
+ */
+on timer SystemTimer
+{
+  int    i, sprayerBmp, vtUpdate;
+  float  h;
+
+  // calculate
+  if ((gTankVolume > 0) && (gPTOShaftSpeed > 100.0) && (gSprayerOn)) {
+    // Calculate output for each sprayer section
+    gOutputFlowRateSum = 0;
+    sprayerBmp         = 0;
+    for( i = 0; i < kSectionCount; i++ ) {
+      gOutputFlowRate[i]  = ((kSectionWidth / 1000.0) * gGroundBasedSpeed) * (gOutputPerArea[i] * kVolToWeightRatio) / 1000.0;
+      gOutputFlowRate[i] *= 60; // convert from ml/sec to ml/min
+      if (gOutputFlowRate[i] > kMaxSectionOutput) {
+        gOutputFlowRate[i] = kMaxSectionOutput;
+      }
+      if (gOutputFlowRate[i] > 0) {
+        sprayerBmp++;
+      }
+      gOutputFlowRateSum += gOutputFlowRate[i];
+    }
+
+    // Calculate tank volume
+    h            = (kSystemTimeSec * gOutputFlowRateSum / 60.0);
+    gTankVolume -= h;
+    if (gTankVolume < 0) {
+      gTankVolume = 0;
+
+      Iso11783IL_OPChangeActiveMask( 200 );
+    }
+
+    // decrease volume counter
+    gVolumeCount += h;
+    Iso11783IL_PDDSetValue(17/*PD::ContentAsVolume_Act*/, 1, gVolumeCount );
+  }
+  else {
+    // tank is empty, set flow rate of each sprayer section to 0
+    for( i = 0; i < kSectionCount; i++ ) {
+      gOutputFlowRate[i] = 0;
+    }
+    gOutputFlowRateSum = 0;
+  }
+
+  // update environment variables
+  @sysvar::ISO11783Bus::Sprayer::PDD::SprayerDevice::Sprayer::Section1::ActualAppRate = gOutputFlowRate[0] ;
+  @sysvar::ISO11783Bus::Sprayer::PDD::SprayerDevice::Sprayer::Section2::ActualAppRate = gOutputFlowRate[1] ;
+  @sysvar::ISO11783Bus::Sprayer::PDD::SprayerDevice::Sprayer::Section3::ActualAppRate = gOutputFlowRate[2] ;
+  @sysvar::ISO11783Bus::Sprayer::PDD::SprayerDevice::Sprayer::Section4::ActualAppRate = gOutputFlowRate[3] ;
+  @sysvar::ISO11783Bus::Sprayer::PDD::SprayerDevice::Sprayer::Section5::ActualAppRate = gOutputFlowRate[4] ;
+  @sysvar::ISO11783Bus::Sprayer::PDD::SprayerDevice::Tank::VolumeCount = gTankVolume;
+
+	// update sprayer bitmap 
+	if (gOutputFlowRateSum > 0.0) 
+  {
+    switch(sprayerBmp) 
+    {
+      case 1: 
+        @sysvar::ISO11783Bus::Sprayer::BitmapIndex =  1; 
+        break;
+  
+      case 2:
+      case 3: 
+        @sysvar::ISO11783Bus::Sprayer::BitmapIndex =  2; 
+        break;
+      
+      case 4:
+      case 5: 
+        @sysvar::ISO11783Bus::Sprayer::BitmapIndex =  3; 
+        break;
+    }
+	}
+	else 
+  {
+    @sysvar::ISO11783Bus::Sprayer::BitmapIndex =  0;
+	}
+  
+  // update VT data
+  vtUpdate++;
+  if (vtUpdate > 10) {
+    vtUpdateVariables();
+    vtUpdate = 0;
+  }
+
+  // calculate ECU current
+  if (Iso11783IL_GetState() != 0) //Initialized
+  {
+    @sysvar::ISO11783Bus::TECU::ECU_PWRCurrent = @sysvar::ISO11783Bus::TECU::ECU_PWR / 2.0;
+    setTimer( SystemTimer, kSystemTime );
+  }
+  else {
+    @sysvar::ISO11783Bus::TECU::ECU_PWRCurrent = 0.0;
+  }
+}
+
+/*
+ * sysvar ECU_PWR
+ */
+on sysVar sysvar::ISO11783Bus::TECU::ECU_PWR
+{
+  double ecuPWR, ecuCurrent;
+  ecuPWR = @this;
+
+  if (@sysvar::ISO11783Bus::Sprayer::ILEnable == 1) 
+  {
+    if ((@sysvar::ISO11783Bus::Sprayer::ILState != 2/*Active*/) && (ecuPWR > 10.0)) 
+    {
+      ecuStartUp();
+    }
+    else if (ecuPWR < 8.0)
+    {
+      ecuShutDown();
+    }
+  }
+}
+
+void UpdateSetpointAppRate(double newSetpointAprate)
+{
+  Iso11783IL_PDDSetValue(6/*PD::AppRateMassPerArea_Set*/, 3, newSetpointAprate);
+  Iso11783IL_PDDSetValue(6/*PD::AppRateMassPerArea_Set*/, 4, newSetpointAprate);
+  Iso11783IL_PDDSetValue(6/*PD::AppRateMassPerArea_Set*/, 5, newSetpointAprate);
+  Iso11783IL_PDDSetValue(6/*PD::AppRateMassPerArea_Set*/, 6, newSetpointAprate);
+  Iso11783IL_PDDSetValue(6/*PD::AppRateMassPerArea_Set*/, 7, newSetpointAprate);
+  gOutputPerArea[0] = newSetpointAprate;
+  gOutputPerArea[1] = newSetpointAprate;
+  gOutputPerArea[2] = newSetpointAprate;
+  gOutputPerArea[3] = newSetpointAprate;
+  gOutputPerArea[4] = newSetpointAprate;
+}
+
+on SysVar sysvar::ISO11783Bus::Sprayer::PDD::SprayerDevice::Sprayer::Setpoints::SetpointAppRate
+{
+  gOutputPerArea[0] = @this;
+  gOutputPerArea[1] = @this;
+  gOutputPerArea[2] = @this;
+  gOutputPerArea[3] = @this;
+  gOutputPerArea[4] = @this;
+}
+
+/*
+ * The object pool contains two data masks. One for
+ * manual control and one for Task Controller control.
+ * This functión shows the correct mask.
+ */
+void vtUpdateMode()
+{
+  int lastMode = -1;
+
+  if (Iso11783IL_OPGetState() == 5) {
+    if (gAlarmActive == 0) {
+      if ((Iso11783IL_GetState() == kActive) && (lastMode != gAutomaticMode)) {
+        Iso11783IL_OPChangeActiveMask( (gAutomaticMode) ? 1000 : 100 );
+        lastMode = gAutomaticMode;
+      }
+    }
+
+    if (gSprayerOn == 1) {
+      Iso11783IL_OPChangeSoftKeyMask( 100, 4000 );
+    }
+    else {
+      Iso11783IL_OPChangeSoftKeyMask( 100, 150 );
+    }
+  }
+}
+
+/*
+ * A critical condition occured. Set sprayer to fail safe mode.
+ * Everything is deactivated.
+ */
+void ecuFailSafe()
+{
+  LONG value;
+
+  gTaskActive = 0;
+  value       = 0;
+
+  Iso11783IL_PDDSetValue(0x200/*PD::ApplicationRatePerArea*/, 2, value   );
+  Iso11783IL_PDDSetValue(0x200/*PD::ApplicationRatePerArea*/, 3, value   );
+  Iso11783IL_PDDSetValue(0x200/*PD::ApplicationRatePerArea*/, 4, value   );
+  Iso11783IL_PDDSetValue(0x200/*PD::ApplicationRatePerArea*/, 5, value   );
+  Iso11783IL_PDDSetValue(0x200/*PD::ApplicationRatePerArea*/, 6, value   );
+  Iso11783IL_PDDSetValue(0x200/*PD::ApplicationRatePerArea*/, 7, value   );
+  gOutputPerArea[0] = value;
+  gOutputPerArea[1] = value;
+  gOutputPerArea[2] = value;
+  gOutputPerArea[3] = value;
+  gOutputPerArea[4] = value;
+}
+
+/*
+ * Copies the data of an array to a parameter group.
+ */
+void utilCopyDataToPG( pg * _pg, long source, long destination, char data[], long length )
+{
+  int i;
+
+  _pg.DLC = length;
+  _pg.SA  = source;
+  if (_pg.PF < 0xf0) {
+    _pg.DA = destination;
+  }
+
+  for( i = 0; i < length; i++ ) {
+    _pg.byte(i) = data[i];
+  }
+}
+
+/*
+ * GroundBasedSpeedAndDistance is received.
+ */
+void onGroundBasedSpeedAndDistance(pg GBSD_TECU rxPG)
+{
+  gGroundBasedSpeed = rxPG.GroundBasedImplementedSpeed.phys;
+}
+
+/*
+ * This function is called, if the language command is received.
+ */
+void onLanguageCommand()
+{
+}
+
+//
+//  PrimaryOrRearPTOOutShaft is received.
+//
+void onPrimaryOrRearPTOOutShaft(pg RPTO_TECU rxPG)
+{
+  gPTOShaftSpeed = rxPG.RearPTOOutputShaftSpeed.phys;
+}
+
+/*
+ * This function updates all variable object of
+ * the object pool.
+ */
+void vtUpdateVariables()
+{
+  int i, sprayWidth, state, lineWidth;
+  long lineArt;
+  
+  state = Iso11783IL_GetState();
+
+
+  if (Iso11783IL_GetState() == kActive) {
+    // send tank volume
+    Iso11783IL_OPSetNumericValue(10, gTankVolume );
+
+    // send app rate
+    i = Iso11783IL_OPSetNumericValue(12, gOutputPerArea[2] );
+
+    // send output rate sum
+    @sysvar::ISO11783Bus::Sprayer::OP::OBJ00011_numberVariable::value = gOutputFlowRateSum;
+    //Iso11783IL_OPSetNumericValue(11, gOutputFlowRateSum );
+
+    // show or hide booms
+    sprayWidth = 0;
+    for( i = 0; i < 5; i++ ) 
+    {
+      Iso11783IL_OPShowObject( 3000 + i, (gOutputFlowRate[i] > 0) ? 1 : 0 );
+      sprayWidth += (gOutputPerArea[i] > 0) ? 1 : 0;
+
+      // send app rate for boom
+      Iso11783IL_OPSetNumericValue(21005+i, gOutputPerArea[i] );
+
+      // send flow rate for boom
+      Iso11783IL_OPSetNumericValue(21000+i, gOutputFlowRate[i] );
+    }
+    //set corresponding line width for boom picture
+    if(gOutputFlowRate[2] <= 10)
+    {
+      lineWidth = 1;
+      lineArt = 0xAAAA;
+    }
+    else if(gOutputFlowRate[2] < 14)
+    {
+      lineWidth = 2;
+      lineArt = 0xAAAA;
+    }
+    else
+    {
+      lineWidth = 2;
+      lineArt = 0xEEEE;
+    }
+    Iso11783IL_OPSetAttribute(112, 2, lineWidth);
+    Iso11783IL_OPChangeLineAttribute(70, 0, lineWidth, lineArt);
+    
+
+    // send spray width
+    switch(sprayWidth) {
+      case 0: 
+      case 1: Iso11783IL_OPSetNumericValue(13, 0 ); break;
+      case 2:
+      case 3: Iso11783IL_OPSetNumericValue(13, 1 ); break;
+      case 4:
+      case 5: Iso11783IL_OPSetNumericValue(13, 2 ); break;
+    }
+  }
+}
+
+/*
+ * The Task Controller has activated/deactivated a task
+ *
+ * state     - 0 = Uninitialized
+ *             1 = Initialized
+ *             2 = StartUp Delay
+ *             3 = Wait for Status
+ *             4 = Query Info
+ *             5 = Object Pool Transfer
+ *             6 = Activate Pool
+ *             7 = Operational
+ *             8 = Task Active
+ */
+void Iso11783IL_PDDOnStateChanged( DWORD state )
+{
+  switch(state) 
+  {
+    case 8: // Task Active
+      gVolumeCount = 0;
+      gTaskActive  = 1;
+      Iso11783IL_PDDSetValue(17/*PD::ContentAsVolume_Act*/, 1, gVolumeCount );
+
+      vtUpdateMode();
+      ActivateDefaultLogging();
+
+      // show alarm if speed of rear PTO is 0
+      if (gPTOShaftSpeed == 0) 
+        Iso11783IL_OPChangeActiveMask( 2000 );
+      
+      break;
+    default:
+      gAutomaticMode = 0;
+      gSprayerOn     = 0;
+      gTaskActive    = 0;
+
+      vtUpdateMode();
+  }
+}
+
+/*
+ * A 'Set Value'-command is received and the process variable has been changed.
+ *
+ * idn       - Process Data Identification
+ * elNum     - Element Number
+ * value     - The new value
+ */
+void Iso11783IL_PDDOnDataChanged( DWORD ddi, DWORD elNum, double value )
+{
+  switch( ddi ) {
+    case 0x0006:
+      switch(elNum) {
+        case 2:
+          Iso11783IL_PDDSetValue(0x0006/*PD::AppRateMassPerArea_Set*/, 3, value );
+          Iso11783IL_PDDSetValue(0x0006/*PD::AppRateMassPerArea_Set*/, 4, value );
+          Iso11783IL_PDDSetValue(0x0006/*PD::AppRateMassPerArea_Set*/, 5, value );
+          Iso11783IL_PDDSetValue(0x0006/*PD::AppRateMassPerArea_Set*/, 6, value );
+          Iso11783IL_PDDSetValue(0x0006/*PD::AppRateMassPerArea_Set*/, 7, value );
+          gOutputPerArea[0] = value;
+          gOutputPerArea[1] = value;
+          gOutputPerArea[2] = value;
+          gOutputPerArea[3] = value;
+          gOutputPerArea[4] = value;
+          gSprayerOn        = (value > 0) ? 1 : 0;
+          gAutomaticMode    = 1;
+          vtUpdateMode();
+          break;
+        case 3:
+          gOutputPerArea[0] = value;
+          gSprayerOn        = (value > 0) ? 1 : 0;
+          gAutomaticMode    = 1;
+          vtUpdateMode();
+          break;
+        case 4:
+          gOutputPerArea[1] = value;
+          gSprayerOn        = (value > 0) ? 1 : 0;
+          gAutomaticMode    = 1;
+          vtUpdateMode();
+          break;
+        case 5:
+          gOutputPerArea[2] = value;
+          gSprayerOn        = (value > 0) ? 1 : 0;
+          gAutomaticMode    = 1;
+          vtUpdateMode();
+          break;
+        case 6:
+          gOutputPerArea[3] = value;
+          gSprayerOn        = (value > 0) ? 1 : 0;
+          gAutomaticMode    = 1;
+          vtUpdateMode();
+          break;
+        case 7:
+          gOutputPerArea[4] = value;
+          gSprayerOn        = (value > 0) ? 1 : 0;
+          gAutomaticMode    = 1;
+          vtUpdateMode();
+          break;
+      }
+      break;
+    case 0x0047: // Volume count
+       switch(elNum) {
+        case 1:
+          gVolumeCount = value;
+          break;
+      }
+      break;
+  }
+}
+
+/*
+ * The default logging data is requested. Set the default logging
+ * trigger in this callback function.
+ *
+ */
+void Iso11783IL_PDDOnDefaultLogRequest(  )
+{
+  ActivateDefaultLogging();
+}
+
+void ActivateDefaultLogging()
+{
+  //every second
+  Iso11783IL_PDDSetLogTrigger ( 4, 0x0025, 2, 1000 );
+  Iso11783IL_PDDSetLogTrigger ( 4, 0x0025, 3, 1000 );
+  Iso11783IL_PDDSetLogTrigger ( 4, 0x0025, 4, 1000 );
+  Iso11783IL_PDDSetLogTrigger ( 4, 0x0025, 5, 1000 );
+  Iso11783IL_PDDSetLogTrigger ( 4, 0x0025, 6, 1000 );
+  Iso11783IL_PDDSetLogTrigger ( 4, 0x0025, 7, 1000 );
+  
+}
+
+/*
+ * The Task Controller has activated/deactivated a task
+ *
+ * error     - Error code
+ * param     - Additinal error paramer, depends on error code
+ */
+void Iso11783IL_PDDOnError( LONG error, DWORD param )
+{
+  switch (error) {
+    case -601: // Lost Task Controller
+      ecuFailSafe();
+      break;
+  }
+}
+
+void Iso11783IL_OnChangedState( LONG state )
+{
+  if(state == 2) // Active 
+  {
+    setTimer( SystemTimer, 200 );
+    // refill the tank
+    gTankVolume  = kTankCapacity;
+  }
+}
+
+///////////////////////////////////////////////////
+long Iso11783IL_OnTxPrepare(pg * txPG )
+{
+  switch(txPG.pgn)
+  {
+    case 0xFDC5: idsPrepareECUID((pg ECUID)txPG);                      break;
+    case 0xFEDA: idsPrepareSOFT((pg SOFT) txPG);                       break;
+    case 0xFD42: idsPrepareICC((pg ICC) txPG);                         break;
+    case 0xFD32: idsPrepareDP((pg DP)txPG);                            break;
+    case 0xFEEC: idsPrepareVI((pg VI)txPG);                            break;
+    case 0xFC8D: idsPreparePII((pg PII)txPG);                          break;// Product Identification
+    case 0xFE0F: PrepareLC((pg LC)txPG);                               break;// Language command
+    
+    default:                                                        break;
+  }
+  return 1;
+}
+
+///////////////////////////////////////////////////
+PrepareLC(pg LC langCmd)
+{
+  langCmd.AreaUnitCmd      = 0;  // metric
+  langCmd.DateFormatCmd    = 0;  // ddmmyyyy
+  langCmd.DecimalSymbolCmd = 0;  // comma
+  langCmd.DistanceUnitCmd  = 0;  // metric
+  langCmd.LanguageCodeCmd  = 01; // english
+  langCmd.MassUnitCmd      = 0;  // metric
+  langCmd.TimeFormatCmd    = 0;  // 24 hour
+  langCmd.VolumeUnitCmd    = 0;  // metric
+}
+
+
+
+//Callack to inform about errors
+void Iso11783IL_OnError( LONG errorCode, LONG param )
+{
+  write ("Node <%s> (address %i) causes error (code=%u, param=%u", gECULabel, Iso11783IL_GetAddress(), errorCode, param );
+}
+
+LONG Iso11783IL_OnRequest( LONG rqPGN, LONG sourceAddr )
+{
+  switch( rqPGN ) 
+  {
+  case 0xFECC: //DM3 => Clear Previous
+    idsDtcDeactivatePrevious() ;
+    return 2; // send NACK
+  }
+  return 1;
+}
+
+//LONG Iso11783IL_OnRxMessage( pg * rxPG )
+on pg *
+{
+  if(this.dir != Rx)
+    return;
+  if(this.sa != 240)
+    return;
+  switch(this.pgn) 
+  {
+    case 0xFE49:    onGroundBasedSpeedAndDistance ((pg GBSD_TECU) this);   break;  // GroundBasedSpeedAndDistance
+    case 0xFE43:    onPrimaryOrRearPTOOutShaft    ((pg RPTO_TECU) this );  break;  // PrimaryOrRearPTOOutShaft
+  }
+}
+
+on sysvar sysvar::ISO11783Bus::AutoPlay
+{
+  gAutomaticMode = @this;
+  vtUpdateMode();
+}
+
+
+on sysvar sysvar::ISO11783Bus::Sprayer::EnableSpray
+{
+  if (@this == 1) 
+  {
+    if (gPTOShaftSpeed > 0) 
+    {
+      // On
+      gSprayerOn     = 1;
+      gAutomaticMode = 0;
+      vtUpdateMode();
+    }
+    else 
+    {
+      // show alarm if speed of rear PTO is 0
+      Iso11783IL_OPChangeActiveMask( 2000 );
+      @this = 0;
+    }
+  }
+  else 
+  {
+    // Off
+   gSprayerOn     = 0;
+   gAutomaticMode = 0;
+   vtUpdateMode();
+  }
+}
+
+void Iso11783IL_OPOnAuxiliaryInput( DWORD objectID, DWORD value1, DWORD value2 )
+{
+  int i;
+  int skippedClicks;
+
+  switch(objectID) 
+  {
+    // Increase spracer track width
+    case 28000:
+      skippedClicks = value2 - gClicksToIncreaseWidth;
+      gClicksToIncreaseWidth = value2;
+	    if (skippedClicks > 0) 
+      {
+        if(skippedClicks == 1)
+        {
+          if ((gOutputPerArea[1] == 0) || (gOutputPerArea[3] == 0)) 
+          {
+            gOutputPerArea[1] = gOutputPerArea[2];
+            gOutputPerArea[3] = gOutputPerArea[2];
+          }
+          else if ((gOutputPerArea[0] == 0) || (gOutputPerArea[4] == 0)) 
+          {
+            gOutputPerArea[0] = gOutputPerArea[2];
+            gOutputPerArea[4] = gOutputPerArea[2];
+          }
+        }
+        else //more than one klicks skipped
+        {
+            gOutputPerArea[0] = gOutputPerArea[2];
+            gOutputPerArea[1] = gOutputPerArea[2];
+            gOutputPerArea[3] = gOutputPerArea[2];
+            gOutputPerArea[4] = gOutputPerArea[2];
+        }
+      }
+      break;
+    //
+    // Decrease spracer track width
+    //
+    case 28001:
+      skippedClicks = value2 - gClicksToDecreaseWidth;
+      gClicksToDecreaseWidth = value2;
+	    if (skippedClicks > 0) 
+      {
+        if(skippedClicks == 1)
+        {
+          if ((gOutputPerArea[0] > 0) || (gOutputPerArea[4] > 0)) 
+          {
+            gOutputPerArea[0] = 0;
+            gOutputPerArea[4] = 0;
+          }
+          else if ((gOutputPerArea[1] > 0) || (gOutputPerArea[3] > 0)) 
+          {
+            gOutputPerArea[1] = 0;
+            gOutputPerArea[3] = 0;
+          }
+        }
+        else //more than one klicks skipped
+        {
+          gOutputPerArea[0] = 0;
+          gOutputPerArea[1] = 0;
+          gOutputPerArea[3] = 0;
+          gOutputPerArea[4] = 0;
+        }
+		  }
+      break;
+    //
+    // Increase sprayer output
+    //
+    case 28002:
+      skippedClicks = value2 - gClicksToIncreaseOutput;
+      gClicksToIncreaseOutput = value2;
+	    if (skippedClicks > 0) 
+      {
+        for( i = 0; i < 5; i++ ) 
+        {
+          gOutputPerArea[i] += skippedClicks;
+        }
+		  }
+      break;
+    //
+    // Decrease sprayer output
+    //
+    case 28003:
+      skippedClicks = value2 - gClicksToDecreaseOutput;
+      gClicksToDecreaseOutput = value2;
+	    if (skippedClicks > 0) 
+      {
+        for( i = 0; i < 5; i++ ) 
+        {
+          if (gOutputPerArea[i] > skippedClicks) 
+          {
+            gOutputPerArea[i] -= skippedClicks;
+          }
+          else
+          {
+            gOutputPerArea[i] -= 0;
+          }
+        }
+		  }
+      break;
+
+    //
+    // Set sprayer track width
+    //
+    case 28004:
+      if (value1 > 0.6) 
+      {
+        gOutputPerArea[0] = gOutputPerArea[3];
+        gOutputPerArea[4] = gOutputPerArea[3];
+        gOutputPerArea[1] = gOutputPerArea[3];
+        gOutputPerArea[3] = gOutputPerArea[3];
+      }
+      else if (value1 > 0.3) {
+        gOutputPerArea[0] = 0;
+        gOutputPerArea[4] = 0;
+        gOutputPerArea[1] = gOutputPerArea[3];
+        gOutputPerArea[3] = gOutputPerArea[3];
+      }
+      else {
+        gOutputPerArea[0] = 0;
+        gOutputPerArea[4] = 0;
+        gOutputPerArea[1] = 0;
+        gOutputPerArea[3] = 0;
+      }
+      break;
+    //
+    // Set output
+    //
+    case 28005:
+      for( i = 0; i < 5; i++ ) {
+        gOutputPerArea[i] = kMaxSectionOutput / 100.0 * value1;
+      }
+      break;
+  }
+}
+
+void Iso11783IL_OPOnKeyActivation( DWORD objectID, DWORD parentID, DWORD keyCode, DWORD activation )
+{
+  if (activation > 0) {
+    switch(keyCode) {
+      //
+      // ACK
+      //
+      case 0: 
+        Iso11783IL_OPChangeActiveMask( 100 );
+        vtUpdateMode();
+        break;
+      //
+      // On
+      //
+      case 1:
+        @sysvar::ISO11783Bus::Sprayer::EnableSpray = 1;
+        break;
+      //
+      // Off
+      //
+      case 2:
+       @sysvar::ISO11783Bus::Sprayer::EnableSpray = 0;
+       break;
+      //
+      // Increase sprayer output
+      //
+      case 3:
+        if ((gOutputPerArea[1] == 0) || (gOutputPerArea[3] == 0)) 
+        {
+          gOutputPerArea[1] = gOutputPerArea[2];
+          gOutputPerArea[3] = gOutputPerArea[2];
+        }
+        else if ((gOutputPerArea[0] == 0) || (gOutputPerArea[4] == 0)) 
+        {
+          gOutputPerArea[0] = gOutputPerArea[2];
+          gOutputPerArea[4] = gOutputPerArea[2];
+        }
+        break;
+      //
+      // Decrease sprayer output
+      //
+      case 4:
+        if ((gOutputPerArea[0] > 0) || (gOutputPerArea[4] > 0)) 
+        {
+          gOutputPerArea[0] = 0;
+          gOutputPerArea[4] = 0;
+        }
+        else if ((gOutputPerArea[1] > 0) || (gOutputPerArea[3] > 0)) 
+        {
+          gOutputPerArea[1] = 0;
+          gOutputPerArea[3] = 0;
+        }
+        break;
+    }
+  }
+}
+
+/*
+User input on Virtual Terminal
+*/
+void Iso11783IL_OPOnValueChange( DWORD objectID )
+{
+  long val;
+
+  switch(objectID) 
+  {
+    case 12: // application rate (number variable object) 
+      val = Iso11783IL_OPGetNumericValue(12 );
+      @sysvar::ISO11783Bus::Sprayer::PDD::SprayerDevice::Sprayer::Setpoints::SetpointAppRate = val;
+	    break;
+    
+    case 13: // sprayer width (number variable object)
+      val = Iso11783IL_OPGetNumericValue(13 );
+      if (val == 2) 
+      {
+        gOutputPerArea[0] = gOutputPerArea[2];
+        gOutputPerArea[4] = gOutputPerArea[2];
+        gOutputPerArea[1] = gOutputPerArea[2];
+        gOutputPerArea[3] = gOutputPerArea[2];
+      }
+      else if (val == 1) 
+      {
+        gOutputPerArea[0] = 0;
+        gOutputPerArea[4] = 0;
+        gOutputPerArea[1] = gOutputPerArea[2];
+        gOutputPerArea[3] = gOutputPerArea[2];
+      }
+      else 
+      {
+        gOutputPerArea[0] = 0;
+        gOutputPerArea[4] = 0;
+        gOutputPerArea[1] = 0;
+        gOutputPerArea[3] = 0;
+      }
+	    break;
+  }
+}
+

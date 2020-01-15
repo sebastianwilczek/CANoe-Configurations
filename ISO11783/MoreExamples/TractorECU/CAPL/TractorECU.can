@@ -1,0 +1,1360 @@
+/*@!Encoding:1252*/
+includes
+{
+#include "ISO11783DiagnosticServices.cin"
+}
+
+/*
+ * Tractor ECU                                          Version 2.7
+ *
+ * Copyright 2002-2007, Vector Informatik GmbH - All right reserved
+ *
+ * This is a simple implementation of a class 1 and 2  tractor ECU.
+ *
+ * History:
+ * 2.7   (amr) Add ISO11783 Diagnostics Services (ISO11783-12)
+ * 2.6   (Jr)  Modified message names
+ * 2.5   (Gw)  Send PG WheelBasedSpeedAndDistance if tractor ECU is online
+ *       (Jr)  Remove process data support
+ * 2.4   (Jr)  Changed gDbgLevel from kDbgInfo to kDbgWarning
+ * 2.3   (Jr)  Added process data support (only maintenance message)
+ * 2.2   (Jr)  ECU sends now EEC1 (EngineSpeed)
+ * 2.1.1 (Jr)  Send WheelBasedSpeed during power maintain 
+ */
+variables
+{
+  // some constants
+  const BYTE   kNullAddr        = 0xfe;
+  const BYTE   kGlobalAddr      = 0xff;
+ 
+  // simulation constants
+  const int    kQuiet           = 1;   // 1 = suppress output to write window
+  const int    kSystemTime      = 100; // Cylce time for system timer in [ms]
+  const double kSystemTimeSec   = kSystemTime / 1000.0; // system timer in [sec]
+
+  int          kTractorClass    = 2; // Tractor implement interface classifiaction { 1, 2 }
+  int          kTractorClassF   = 1; // Front mounted implement support, 1 = enable
+  int          kTractorClassN   = 1; // Navigation system support, 1 = enable
+
+  // Physical constants of the tractor
+  const double kMaxTractorSpeed = 15.3; // Max. tractor speed [m/s]
+  const double kMaxEngineSpeed  = 2200; // Max. engine speed [rpm]
+  const double kTractorMass     = 4000; // Tractor mass [kg]
+  const double kTractorSlip     = 0.95; // Tractor wheel slip [%]
+  const double kRollingFriction =1000.0;// Rolling friction [N]
+  const double kPTOShaftRatio   = 0.7;  // Ration between engine speed and PTO shaft speed
+        double kGearSpeed[6]    = { 0.0, 0.1, 0.25, 0.45, 0.75, 1.0 }; // tractor speed, [%] of max tractor speed
+  const int    kNumberOfValves  = 4;    // Number of auxiliary valves
+
+  // Time and date
+  const int    kTimeHour        = 8;   // System time hour for DateAndTime PG
+  const int    kTimeMinute      = 0;   // System time miunte for DateAndTime PG
+  const int    kDateYear        = 2002;// Year for DateAndTime PG
+  const int    kDateMonth       = 4;   // Month for DateAndTime PG
+  const int    kDateDay         = 30;  // Day for DateAndTime PG
+
+  // ECU 
+  int  TECUState  = 0;           // 0=Offline, 1=Online 2=ShutingDown
+  long TECUHandle = 0;           // ecu handle for tractor ecu
+  long TECUAddress= 0xfe;        // global address of tractor ecu
+  char TECUName[8];              // global name of this ecu */
+  char gECULabel[32] = "TECU";   // label for output to write window
+
+  // Timer
+  msTimer SystemTimer;          // Timer for cyclic PGs with 100ms repetition
+  msTimer TimerShutDown;       // shut down timer
+  msTimer TimerTurnLight;      // timer for turn light
+  msTimer TimerLight;          // timer for light command
+  msTimer TimerSystem;         // System timer for calculating engine values
+  msTimer TimerValves;         // Timer for update valve values
+
+  BYTE   gMaintainPWR     = 0;
+  BYTE   gMaintainECU_PWR = 0;
+  int    gGearMode        = 0;       // Gear mode 0=Neutral 1=Drive
+
+  double gGroundBasedDistance = 0.0; // Ground based distance [m]
+  double gWheelBasedDistance  = 0.0; // Wheel based distance [m]
+
+  // Auxiliary valve values
+  int    gValveState[16];
+  int    gValveSafeMode[16];
+  double gValveRetractFlow[16];
+  double gValveExtendFlow[16];
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel         = kDbgWarning; // Set debug level for output to write window
+}
+
+on start
+{
+  putValue( EvVecTECU_ECUAddress, 0xfe );
+  putValue( EvVecTECU_Gear, 0 );
+  putValue( EvVecTECU_Accelerator, 0.2 );
+
+  setTimer( TimerSystem, kSystemTime );
+
+  if (@ISOBUS::sysvarECU_PWR > 10.0) 
+  {
+    putValue( EvVecTECU_KeySwitch, 1 );
+  }
+}
+
+/*
+  This function transmits the cyclic PGs and controls the
+	speed and hitch position.
+*/
+on timer SystemTimer
+{
+  double tractorSetSpeed, tractorSpeed;
+  int i;
+
+  if (TECUState == 1) {
+    // increment/decrement rear hitch position, if button is pressed
+    if (getValue( EvVecTECU_RearHitchUpSwitch ) == 1) {
+      if (getValue( EvVecTECU_RearHitchPosition ) > 90) {
+         putValue( EvVecTECU_RearHitchPosition, 100 );
+       }
+       else {
+         putValue( EvVecTECU_RearHitchPosition, getValue( EvVecTECU_RearHitchPosition ) + 10 );
+      }
+      UpdatePanel();
+    }
+    else if (getValue( EvVecTECU_RearHitchDownSwitch ) == 1) {
+      if (getValue( EvVecTECU_RearHitchPosition ) < 10) {
+        putValue( EvVecTECU_RearHitchPosition, 0 );
+      }
+      else {
+        putValue( EvVecTECU_RearHitchPosition, getValue( EvVecTECU_RearHitchPosition ) - 10 );
+      }
+      UpdatePanel();
+    }
+    if (kTractorClassF == 1) {
+      // increment/decrement front hitch position, if button is pressed
+      if (getValue( EvVecTECU_FrontHitchUpSwitch ) == 1) {
+        if (getValue( EvVecTECU_FrontHitchPosition ) > 90) {
+          putValue( EvVecTECU_FrontHitchPosition, 100 );
+        }
+        else {
+          putValue( EvVecTECU_FrontHitchPosition, getValue( EvVecTECU_FrontHitchPosition ) + 10 );
+        }
+        UpdatePanel();
+      }
+      else if (getValue( EvVecTECU_FrontHitchDownSwitch ) == 1) {
+        if (getValue( EvVecTECU_FrontHitchPosition ) < 10) {
+          putValue( EvVecTECU_FrontHitchPosition, 0 );
+        }
+        else {
+          putValue( EvVecTECU_FrontHitchPosition, getValue( EvVecTECU_FrontHitchPosition ) - 10 );
+        }
+        UpdatePanel();
+      }
+    }
+
+    if (Iso11783GetEcuState(TECUHandle) == 2) {
+      // transmit cyclic PGs
+      if (getValue( EvVecTECU_RearPTOShaftEngagement ) == 1) {
+        // send RearPTOOutputShaft pg only, if it is engaged
+        TransmitRearPTOOutShaft();
+      }
+      TransmitPrimaryOrRearHitchStatus();
+      TransmitGroundBasedSpeedAndDistance();
+      TransmitEEC1();
+
+      // send PGs of tractor classification 2
+      if (kTractorClass >= 2) {
+        for( i = 0; i < kNumberOfValves; i++ ) {
+          TransmitValveEstimatedFlow(i);
+  //        TransmitValveMeasuredFlow(i);
+        }
+      }
+
+      // send PGs of tractor classification F
+      if (kTractorClassF == 1) {
+        TransmitFrontHitchStatus();
+    	  if (getValue( EvVecTECU_FrontPTOShaftEngagemen ) == 1) {
+   	  	  // send FrontPTOOutputShaft pg only, if it is engaged
+          TransmitFrontPTOOutShaft();
+        }
+      }
+    }
+
+    if (TECUState == 1) {
+      TransmitWheelBasedSpeedAndDistance();
+    }
+  }
+
+  setTimer( SystemTimer, kSystemTime );
+}
+
+/*
+  Create an ECU instance and go online.
+*/
+void EcuBootup()
+{
+  DWORD result;
+
+  // init address of this node
+  TECUAddress = TractorECU.NmStationAddress; /* get ecu address */
+
+  // init device name
+  Iso11783MakeName( TECUName, 
+                    TractorECU.NmJ1939AAC,
+                    TractorECU.NmJ1939IndustryGroup,
+                    TractorECU.NmJ1939SystemInstance,
+                    TractorECU.NmJ1939System,
+                    TractorECU.NmJ1939Function,
+                    TractorECU.NmJ1939FunctionInstance,
+                    TractorECU.NmJ1939ECUInstance,
+                    TractorECU.NmJ1939ManufacturerCode,
+                    TractorECU.NmJ1939IdentityNumber                  );
+
+  // get handle for ecu
+  if (TECUHandle == 0) {
+    TECUHandle = Iso11783CreateECU("default",TECUName);
+  }
+  if (!TECUHandle) {
+    writeDbgLevel( kDbgInfo, "<%s> Iso11783CreateECU for Ecu failed.", gECULabel );
+    stop();
+  }
+  // ecu(s) going online
+  result = Iso11783ECUGoOnline( TECUHandle, TECUAddress ) ;
+  if (result) {
+	  writeDbgLevel( kDbgInfo, "<%s> TECU: Iso11783ECUGoOnline failed, result=%d handle=0x%x", gECULabel, result, TECUHandle );
+  }
+}
+
+/*
+  This function is called after a successful address claiming.
+*/
+void OnGoOnline(long address)
+{
+  if (address == TECUAddress)
+  {
+    TECUState = 1; /* ecu is online */
+    putValue( EvVecTECU_ECUAddress, TECUAddress );
+    putValue( EvVecTECU_Online, 1 );
+
+    setTimer( SystemTimer, 100 );
+
+    TransmitWheelBasedSpeedAndDistance();
+    TransmitLanguageCommand();
+
+    idsInit(TECUHandle) ;
+  }
+}
+
+void TransmitWheelBasedSpeedAndDistance()
+{
+  pg WBSD wbsd;
+
+  wbsd.KeySwitchState          = GetValue( EvVecTECU_KeySwitch );
+  wbsd.MaxTimeOfTractorPower   = 0xff;
+  wbsd.WheelBasedMachineSpeed.phys = GetValue( EvVecTECU_TractorSpeed ) / 3.6;
+
+  if (kTractorClass >= 2) {
+    wbsd.WheelBasedMachineDirection     = wbsd.WheelBasedMachineDirection::Forward;
+    wbsd.WheelBasedMachineDistance.phys = gWheelBasedDistance;
+  }
+  else {
+    wbsd.WheelBasedMachineDirection     = 0x03;
+    wbsd.WheelBasedMachineDistance      = 0xffffffff;
+  }
+
+  TransmitPG( wbsd );
+}
+
+void TransmitPrimaryOrRearHitchStatus()
+{
+  pg RHS rhs;
+
+	rhs.RearHitchInWorkIndication = (GetValue( EvVecTECU_RearHitchPosition ) < 20) ? 1 : 0;
+	rhs.RearHitchPosition.phys    = GetValue( EvVecTECU_RearHitchPosition );
+	rhs.RearNominalPowerLinkForce = 0xffff;
+
+  if (kTractorClass >= 2) {
+    rhs.RearDraft.phys = GetValue(EvISOBUS_RearHitchDraft1) + GetValue(EvISOBUS_RearHitchDraft2) + 
+                         GetValue(EvISOBUS_RearHitchDraft3) + GetValue(EvISOBUS_RearHitchDraft4) +
+                         GetValue(EvISOBUS_RearPTOTorque5);
+  }
+  else {
+    rhs.RearDraft = 0xffff;
+  }
+
+	TransmitPG( rhs );
+}
+
+void TransmitRearPTOOutShaft()
+{
+  pg RPTO rpto;
+
+  rpto.RearPTOEconomyMode              = 0x03;
+  rpto.RearPTOEngagement               = GetValue( EvVecTECU_RearPTOShaftEngagement );
+  rpto.RearPTOMode                     = 0x03;
+	if (GetValue( EvVecTECU_RearPTOShaftEngagement ) == 1) {
+    rpto.RearPTOOutputShaftSpeed.phys  = GetValue( EvVecTECU_RearPTOShaftSpeed );
+  }
+	else {
+    rpto.RearPTOOutputShaftSpeed.phys  = 0;
+  }
+  rpto.RearPTOOutputShaftSpeedSetPoint = 0xffff;
+
+	TransmitPG( rpto );
+}
+
+/*
+  Maintain power PG is received.
+*/
+void RxIndMaintainPower(long ecuhdl, long source, long dest, long length, pg MP mtPwr)
+{
+  if (mtPwr.MaintainActuatorPower == 1) {
+    gMaintainPWR     = 1;
+	}
+  if (mtPwr.MaintainECUPower == 1) {
+    gMaintainECU_PWR = 1;
+  }
+}
+
+//
+// Sends a parameter group.
+//
+// !!! This function works only with PGs which DLC <= 8 !!!
+//
+TransmitPG( pg *_pg )
+{
+  int i;
+  char txBuffer[9];
+  int dst;
+  dword _pgn;
+
+  // copy data to buffer
+  for( i = 0; i< _pg.dlc; i++ ) {
+    txBuffer[i] = _pg.byte(i);
+  }
+
+  if (_pg.PF < 240) {
+    dst = _pg.DA;
+  }
+  else {
+    dst = 0xff;
+  }
+  _pgn     = _pg.PGN | (_pg.DP ? 0x10000 : 0x00000);
+
+  Iso11783TxReqPG( TECUHandle, _pgn, dst, _pg.PRIO, _pg.dlc, txBuffer ); 
+}
+
+on envVar EvVecTECU_KeySwitch
+{
+  if (getValue( this ) == 1) {
+	writeDbgLevel( kDbgInfo, "<%s> Key switch on", gECULabel );
+    PowerStartUp();
+  }
+  else if (TECUState == 1) {
+    writeDbgLevel( kDbgInfo, "<%s> TECU: Key switch on", gECULabel );
+    PowerPreShutDown();
+  }
+}
+
+/*
+  This function is called, if the key switch is disabled and no implement
+	maintain PWR or ECU_PWR.
+*/
+PowerShutDown()
+{
+  if (TECUHandle) {
+    idsInit(0);
+    cancelTimer( SystemTimer );
+    cancelTimer( TimerTurnLight );
+    cancelTimer( TimerLight );
+    if (kTractorClass >= 2) {
+      cancelTimer( TimerValves );
+    }
+
+    @ISOBUS::sysvarECU_PWR = 0;
+    @ISOBUS::sysvarPWR = 0;
+    putValue( EvVecTECU_ECU_PWRBitmap, 0 );
+    putValue( EvVecTECU_PWRBitmap, 0 );
+    putValue( EvVecTECU_LeftTurnLightsSwitch, 0 );
+    putValue( EvVecTECU_RightTurnLightsSwitch, 0 );
+    putValue( EvVecTECU_LeftTurnLights, 0 );
+    putValue( EvVecTECU_RightTurnLights, 0 );
+    putValue( EvVecTECU_StopLight, 0 );
+    putValue( EvVecTECU_MarkerLight, 0 );
+    putValue( EvVecTECU_RearWorkLight, 0 );
+    putValue( EvVecTECU_Online, 0 );
+    putValue( EvVecTECU_ECUAddress, kNullAddr );
+
+    // destroy ECU
+    Iso11783DestroyECU( TECUHandle );
+    TECUHandle = 0;
+    TECUState  = 0;
+
+    writeDbgLevel( kDbgInfo, "<%s> power shut down", gECULabel );
+  }
+}
+
+/*
+  This timer is set, if the key switch is switched off. The implement can
+	retrigger this timer with the maintain power PG.
+*/
+on timer TimerShutDown
+{
+  if ((gMaintainPWR == 0) && (gMaintainECU_PWR == 0)) {
+    PowerShutDown();
+  }
+  else if (gMaintainPWR == 0) 
+  {
+    @ISOBUS::sysvarPWR = 0;
+    putValue( EvVecTECU_PWRBitmap, 0 );
+    setTimer( TimerShutDown, 2000 );
+  }
+  else if (gMaintainECU_PWR == 0) {
+    @ISOBUS::sysvarECU_PWR = 0;
+    putValue( EvVecTECU_ECU_PWRBitmap, 0 );
+    setTimer( TimerShutDown, 2000 );
+   }
+
+  gMaintainPWR     = 0;
+  gMaintainECU_PWR = 0;
+}
+
+on key 'k'
+{
+  switch(TECUState) {
+	  case 0:
+		  putValue( EvVecTECU_KeySwitch, 1 );
+			break;
+    case 1:
+		  putValue( EvVecTECU_KeySwitch, 0 );
+			break;
+	}
+}
+
+/*
+  This function is called, if the key switch is enabled.
+*/
+PowerStartUp()
+{
+  if (TECUState == 0) {
+    EcuBootup();
+
+    putValue( EvVecTECU_EngineRunning, 1 );
+    putValue( EvVecTECU_ECU_PWRBitmap, 1 );
+    putValue( EvVecTECU_PWRBitmap, 1 );
+
+    setTimer( TimerTurnLight, 500 ); 
+    setTimer( TimerLight, 1000 );
+    if (kTractorClass >= 2) {
+      setTimer( TimerValves, 500 );
+    }
+
+    writeDbgLevel( kDbgInfo, "<%s> TECU: power start up", gECULabel );
+  }
+}
+
+on envVar EvVecTECU_RearPTOShaftEngagement
+{
+  if (getValue(this) == 0) {
+    putValue( EvVecTECU_RearOutputShaftBitmap, 0 );
+    TransmitRearPTOOutShaft();
+  }
+}
+
+/*
+  This timer let the turn lights flash and it animates the rear
+	output shaft.
+*/
+on timer TimerTurnLight
+{
+  BYTE toogle = 0;
+  BYTE leftLight;
+  BYTE rightLight;
+  int  rearShaftAnimation = 1;
+  int  frontShaftAnimation = 1;
+
+  toogle = (toogle) ? 0 : 1;
+
+  leftLight  = getValue( EvVecTECU_LeftTurnLights );
+  rightLight = getValue( EvVecTECU_RightTurnLights );
+
+  // let the left turn light flash
+  if (getValue( EvVecTECU_LeftTurnLightsSwitch ) == 1) {
+    putValue( EvVecTECU_LeftTurnLights, toogle );
+  }
+  else {
+    putValue( EvVecTECU_LeftTurnLights, 0 );
+  }
+
+  // let the right turn light flash
+  if (getValue( EvVecTECU_RightTurnLightsSwitch ) == 1) {
+    putValue( EvVecTECU_RightTurnLights, toogle );
+  }
+  else {
+    putValue( EvVecTECU_RightTurnLights, 0 );
+  }
+
+  if ((leftLight != getValue( EvVecTECU_LeftTurnLights )) || (rightLight != getValue( EvVecTECU_RightTurnLights ))) {
+    TransmitLightningCommand();
+  }
+
+  // animate the rear output shaft
+  if (getValue( EvVecTECU_RearPTOShaftEngagement ) == 1) {
+    rearShaftAnimation++;
+    if (rearShaftAnimation > 3) {
+      rearShaftAnimation = 1;
+    }
+    putValue( EvVecTECU_RearOutputShaftBitmap, rearShaftAnimation );
+  }
+
+  // animate the front output shaft
+  if (getValue( EvVecTECU_FrontPTOShaftEngagemen ) == 1) {
+    frontShaftAnimation++;
+    if (frontShaftAnimation > 3) {
+      frontShaftAnimation = 1;
+    }
+    putValue( EvVecTECU_FrontOutputShaftBitmap, frontShaftAnimation );
+  }
+
+  setTimer( TimerTurnLight, 500 );
+}
+
+on stopMeasurement
+{
+  PowerShutDown();
+}
+
+void TransmitLightningCommand()
+{
+  pg LCMD lcmd;
+  int workLight, stopLight, markerLight;
+
+  workLight   = getValue( EvVecTECU_RearWorkLight );
+  stopLight   = getValue( EvVecTECU_StopLight );
+  markerLight = getValue( EvVecTECU_MarkerLight );
+	
+  lcmd.DWORD(0) = lcmd.DWORD(1) = 0xffffffff;
+
+  lcmd.LeftStopLightCmd            = stopLight;
+  lcmd.RightStopLightCmd           = stopLight;
+  lcmd.LeftTurnSignalLightCmd      = getValue( EvVecTECU_LeftTurnLights );
+  lcmd.RightTurnSignalLightCmd     = getValue( EvVecTECU_RightTurnLights );
+  lcmd.TractorMarkerLightCmd       = markerLight;
+  lcmd.ImplementMarkerLightCmd     = markerLight;
+  lcmd.ImplementRearWorkLightCmd   = workLight;
+
+  if (kTractorClass >= 2) {
+    lcmd.CentreStopLightCmd              = stopLight;
+    lcmd.ImplementLeftFacingWorkLightCmd = workLight;
+    lcmd.TractorRearHighWorkLightCmd     = workLight;
+    lcmd.TractorRearLowWorkLightCmd      = workLight;
+    lcmd.ImplementRightFacingWorkLightCmd= workLight;
+    lcmd.TractorFrontHighWorkLightCmd    = workLight;
+    lcmd.TractorFrontLowWorkLightCmd     = workLight;
+    lcmd.TractorSideLowWorkLightCmd      = workLight;
+    lcmd.TractorUndersideWorkLightCmd    = workLight;
+    lcmd.AlternateHeadLightCmd           = 0x03;
+    lcmd.BackUpLightAndAlarmHornCmd      = 0x03;
+    lcmd.DaytimeRunningLightCmd          = 0x03;
+    lcmd.LowBeamHeadLightCmd             = 0x03;
+    lcmd.HighBeamHeadLightCmd            = 0x03;
+    lcmd.ImplementLeftForwardLightCmd    = 0x03;
+    lcmd.ImplementRightForwardLightCmd   = 0x03;
+    lcmd.ImplementOEMOption1LightCmd     = 0x03;
+    lcmd.ImplementOEMOption2LightCmd     = 0x03;
+    lcmd.LightingDataRequestCmd          = 0x03;
+    lcmd.TractorFrontFogLightCmd                = 0x03;
+    lcmd.RearFogLightCmd                 = 0x03;
+    lcmd.RotatingBeaconLightCmd          = 0x03;
+    lcmd.TractorClearanceLightCmd        = 0x03;
+    lcmd.ImplementClearanceLightCmd      = 0x03;
+  }
+
+  TransmitPG( lcmd );
+
+  if (TECUHandle != 0) {
+    cancelTimer( TimerLight );
+    setTimer( TimerLight, 1000 );
+  }
+}
+
+on envVar EvVecTECU_StopLight
+{
+  TransmitLightningCommand();
+}
+
+on envVar EvVecTECU_MarkerLight
+{
+  TransmitLightningCommand();
+}
+
+on envVar EvVecTECU_RearWorkLight
+{
+  TransmitLightningCommand();
+}
+
+on envVar EvVecTECU_RearHitchUpSwitch
+{
+  int hitchPos;
+  if (getValue( EvVecTECU_RearHitchUpSwitch ) == 1) {
+    hitchPos = getValue(EvVecTECU_RearHitchPosition);
+    if (hitchPos > 90) {
+  	  putValue( EvVecTECU_RearHitchPosition, 100 );
+    }
+    else {
+      putValue( EvVecTECU_RearHitchPosition, hitchPos + 10 );
+    }
+    UpdatePanel();
+  }
+}
+
+on envVar EvVecTECU_RearHitchDownSwitch
+{
+  int hitchPos;
+  if (getValue( EvVecTECU_RearHitchDownSwitch ) == 1) {
+    hitchPos = getValue(EvVecTECU_RearHitchPosition);
+    if (hitchPos < 10) {
+      putValue( EvVecTECU_RearHitchPosition, 0 );
+    }
+    else {
+      putValue( EvVecTECU_RearHitchPosition, hitchPos - 10 );
+    }
+    UpdatePanel();
+  }
+}
+
+TransmitLanguageCommand ()
+{
+  pg LC langCmd;
+
+  langCmd.AreaUnitCmd      = 0;  // metric
+  langCmd.DateFormatCmd    = 0;  // ddmmyyyy
+  langCmd.DecimalSymbolCmd = 0;  // comma
+  langCmd.DistanceUnitCmd  = 0;  // metric
+  langCmd.LanguageCodeCmd  = 01; // english
+  langCmd.MassUnitCmd      = 0;  // metric
+  langCmd.TimeFormatCmd    = 0;  // 24 hour
+  langCmd.VolumeUnitCmd    = 0;  // metric
+
+	TransmitPG( langCmd );
+}
+
+on envVar EvVecTECU_BrakeSwitch
+{
+  putValue( EvVecTECU_StopLight, getValue( this ) );
+}
+
+UpdatePanel()
+{
+  int hitchPos;
+
+  hitchPos = getValue(EvVecTECU_RearHitchPosition);
+ 
+  // set rear hitch bitmap
+  if (hitchPos < 30) {
+    putValue( EvVecTECU_RearHitchBitmap, 0 );
+  }
+  else if (hitchPos > 70) {
+    putValue( EvVecTECU_RearHitchBitmap, 2 );
+  }
+  else {
+    putValue( EvVecTECU_RearHitchBitmap, 1 );
+  }
+ 
+  // set front hitch bitmap
+  hitchPos = getValue(EvVecTECU_FrontHitchPosition);
+  if (hitchPos < 30) {
+    putValue( EvVecTECU_FrontHitchBitmap, 0 );
+  }
+  else if (hitchPos > 70) {
+    putValue( EvVecTECU_FrontHitchBitmap, 2 );
+  }
+  else {
+    putValue( EvVecTECU_FrontHitchBitmap, 1 );
+  }
+}
+
+on timer TimerSystem
+{
+  int    gear;
+  double engineSpeed, tractorSpeed, speedSetPoint;
+  double wheelBasedSpeed, groundBasedSpeed;
+
+  gear         = getValue( EvVecTECU_Gear );
+  tractorSpeed = getValue( EvVecTECU_TractorSpeed ) / 3.6;
+
+  if ((gear < 0) || (gear > 5)) runError(1001,0);
+
+  if (GetValue(EvVecTECU_EngineRunning) == 1) {
+    speedSetPoint = kMaxTractorSpeed * getValue( EvVecTECU_Accelerator );
+  }
+  else {
+    speedSetPoint = 0.0;
+  }
+
+  // calc engine speed
+  tractorSpeed = CalcNewTractorSpeed( tractorSpeed, gear, speedSetPoint );
+  engineSpeed  = CalcEngineSpeed( tractorSpeed, gear, speedSetPoint );
+  if (engineSpeed < 0.0) {
+    engineSpeed = 0.0;
+  }
+
+  // calc speed
+  wheelBasedSpeed  = tractorSpeed;
+  groundBasedSpeed = tractorSpeed * kTractorSlip;
+
+  // calc distance
+  gGroundBasedDistance += wheelBasedSpeed * kSystemTimeSec;
+  gWheelBasedDistance  += groundBasedSpeed * kSystemTimeSec;
+
+  // calc gear
+  if (gGearMode == 1) {
+    gear = CalcGear( tractorSpeed );
+    putValue( EvVecTECU_Gear, gear );
+  }
+  else if (gear != 0) {
+    putValue( EvVecTECU_Gear, 0 );
+  }
+
+  // update environment variables
+  putValue( EvVecTECU_EngineSpeed, engineSpeed );
+  putValue( EvVecTECU_TractorSpeed, tractorSpeed * 3.6 );
+  putValue( EvVecTECU_RearPTOShaftSpeed, engineSpeed * kPTOShaftRatio );
+  putValue( EvVecTECU_FrontPTOShaftSpeed, engineSpeed * kPTOShaftRatio );
+
+  // calc electric power and voltage on ECU_PWR and PWR
+  CalcElectricPower();
+
+  setTimer( TimerSystem, kSystemTime );
+}
+
+/*
+  Calculate the new tractor speed in [m/s].
+*/
+double CalcNewTractorSpeed( double tractorSpeed, int gear, double speedSetPoint )
+{
+  double kGearForce[6] = { 0.0, 8000.0, 6000.0, 3500.0, 2800.0, 1800.0 }; // forward force [N]
+  double accelarationForce, forwardForce, breakForce;    // forces [N]
+
+  // calculate forces
+  if (tractorSpeed < speedSetPoint) {
+    forwardForce  = kGearForce[gear];
+  }
+  else {
+    // if speed set point is reached, stop acceleration
+    forwardForce = 0.0;
+  }
+  if (getValue( EvVecTECU_BrakeSwitch ) == 1) {
+    breakForce = 50000.0;
+  }
+  else if ((tractorSpeed > speedSetPoint) || (gear == 0)) {
+    breakForce = 5000.0;
+  }
+  else {
+    breakForce = 0.0;
+  }
+
+  accelarationForce = forwardForce - kRollingFriction - breakForce;
+
+  tractorSpeed += ((accelarationForce / kTractorMass) * kSystemTimeSec);
+  if (tractorSpeed < 0.0) {
+    tractorSpeed = 0.0;
+  }
+
+  return tractorSpeed;
+}
+
+PowerPreShutDown()
+{
+  if (TECUState == 1) {
+    putValue( EvVecTECU_TractorSpeed, 0 );
+    putValue( EvVecTECU_EngineRunning, 0 );
+    putValue( EvVecTECU_RearPTOShaftEngagement, 0 );
+
+    TECUState = 2;
+    TransmitWheelBasedSpeedAndDistance();
+    setTimer( TimerShutDown, 500 );
+  }
+}
+
+on envVar EvVecTECU_GearModeNeutralSwitch
+{
+  gGearMode = 0;
+}
+
+on envVar EvVecTECU_GearModeDriveSwitch
+{
+  gGearMode = 1;
+}
+
+/*
+  Calculate engine speed in [rpm]. If gear > 0, engine speed depends on
+  tractor speed. If gear == 0 the engine speed is set by speedSetPoint
+  slider.
+*/
+double CalcEngineSpeed( double tractorSpeed, int gear, double speedSetPoint )
+{
+  double ratio;
+
+  if ((gear < 0) || (gear > 5)) runError(1001,0);
+
+  if (gear > 0) {
+    ratio = kMaxEngineSpeed / (kMaxTractorSpeed * kGearSpeed[gear]);
+    return tractorSpeed * ratio;
+  }
+  else {
+    return kMaxEngineSpeed * (speedSetPoint / kMaxTractorSpeed);
+  }
+}
+
+/*
+  We only calculate the electic power which is take off from
+  the PWR enc ECU_PWR lines. Return value is electic power in [kW].
+*/
+double CalcElectricPower()
+{
+  double currentPWR, currentECU_PWR;
+  double volt;
+
+  currentPWR     = getValue(EvISOBUS_PWRCurrent1) + getValue(EvISOBUS_PWRCurrent2) + 
+                   getValue(EvISOBUS_PWRCurrent3) + getValue(EvISOBUS_PWRCurrent4) + 
+                   getValue(EvISOBUS_PWRCurrent5) + getValue(EvISOBUS_PWRCurrent6);
+  currentECU_PWR = getValue(EvISOBUS_ECU_PWRCurrent1) + getValue(EvISOBUS_ECU_PWRCurrent2) +
+                   getValue(EvISOBUS_ECU_PWRCurrent3) + getValue(EvISOBUS_ECU_PWRCurrent4) + 
+                   getValue(EvISOBUS_ECU_PWRCurrent5) + getValue(EvISOBUS_ECU_PWRCurrent6);
+
+  // u = U0 - Ri * I
+  volt = 12.8 - ((currentPWR + currentECU_PWR) * 0.133);
+
+  if (getValue( EvVecTECU_PWRBitmap ) == 1) 
+  {
+    @ISOBUS::sysvarPWR = volt;
+  }
+  else 
+  {
+    @ISOBUS::sysvarPWR = 0;
+  }
+
+  if (getValue( EvVecTECU_ECU_PWRBitmap ) == 1) 
+  {
+    @ISOBUS::sysvarECU_PWR = volt;
+  }
+  else 
+  {
+    @ISOBUS::sysvarECU_PWR = 0;
+  }
+
+  return volt * (currentPWR + currentECU_PWR) / 1000;
+}
+
+void TransmitTimeAndDate()
+{
+  pg TD td;
+  DWORD currentTime;
+  DWORD seconds, minutes, hours;
+
+  currentTime = timeNow() / 100000;
+  seconds = currentTime % 60;
+  minutes = (currentTime / 60 + kTimeMinute) % 60;
+  hours   = (currentTime / 360 + kTimeHour);
+
+	td.Day.phys     = kDateDay;
+  td.Month.phys   = kDateMonth;
+  td.Year.phys    = kDateYear;
+  td.Hours.phys   = hours;
+  td.Minutes.phys = minutes;
+  td.Seconds.phys = seconds;
+  td.LocalHourOffset.phys   = 0;
+  td.LocalMinuteOffset.phys = 0;
+
+  TransmitPG( td );
+}
+
+on timer TimerLight
+{
+  TransmitLightningCommand();
+}
+
+TransmitValveEstimatedFlow( int valveIndex )
+{
+  int  i;
+  char txBuffer[9];
+  int  dst;
+  pg   AV00EF av00ef;
+
+  av00ef.DWORD(0) = av00ef.DWORD(1) = 0xffffffff;
+
+  av00ef.Valve0ValveState                     = gValveState[valveIndex];
+  av00ef.Valve0FailSafeMode                   = gValveSafeMode[valveIndex];
+  av00ef.Valve0RetractPortEstimatedFlow.phys  = gValveRetractFlow[valveIndex] * 100;
+  av00ef.Valve0ExtendedPortEstimatedFlow.phys = gValveExtendFlow[valveIndex]  * 100;
+
+  // copy data to buffer
+  for( i = 0; i< av00ef.dlc; i++ ) {
+    txBuffer[i] = av00ef.byte(i);
+  }
+
+  Iso11783TxReqPG( TECUHandle, 0xfe10 + valveIndex, 0xff, av00ef.PRIO, av00ef.dlc, txBuffer ); 
+}
+
+TransmitValveMeasuredFlow( int valveIndex )
+{
+  int  i;
+  char txBuffer[9];
+	int  dst;
+  pg   AV00MF av00mf;
+
+  av00mf.DWORD(0) = av00mf.DWORD(1) = 0xffffffff;
+
+  av00mf.Valve0ExtendedPortMeasuredFlow.phys = 0;
+  av00mf.Valve0ExtendedPortPressure.phys     = 0;
+  av00mf.Valve0RetractPortMeasuredFlow.phys  = 0;
+  av00mf.Valve0RetractPortPressure.phys      = 0;
+  av00mf.Valve0ReturnPortPressure.phys       = 0;
+
+  // copy data to buffer
+  for( i = 0; i< av00mf.dlc; i++ ) {
+    txBuffer[i] = av00mf.byte(i);
+  }
+
+  Iso11783TxReqPG( TECUHandle, 0xfe20 + valveIndex, 0xff, av00mf.PRIO, av00mf.dlc, txBuffer ); 
+}
+
+void TransmitFrontHitchStatus()
+{
+  pg FHS fhs;
+
+  fhs.FrontHitchInWorkIndication = (GetValue( EvVecTECU_FrontHitchPosition ) < 20) ? 1 : 0;
+  fhs.FrontHitchPosition.phys    = GetValue( EvVecTECU_FrontHitchPosition );
+  fhs.FrontNominalLowerLinkForce = 0xffff;
+
+  fhs.FrontDraft.phys = GetValue(EvISOBUS_FrontHitchDraft1) + GetValue(EvISOBUS_FrontHitchDraft2) + 
+                        GetValue(EvISOBUS_FrontHitchDraft3) + GetValue(EvISOBUS_FrontHitchDraft4) + 
+                        GetValue(EvISOBUS_FrontHitchDraft5) + GetValue(EvISOBUS_FrontHitchDraft6);
+
+  TransmitPG( fhs );
+}
+
+void TransmitFrontPTOOutShaft()
+{
+  pg FPTO fpto;
+
+  fpto.FrontPTOMode                    = 0x03;
+  fpto.FrontPTOEconomyMode             = 0x03;
+  fpto.FrontPTOEngagement              = GetValue( EvVecTECU_FrontPTOShaftEngagemen );
+	if (GetValue( EvVecTECU_FrontPTOShaftEngagemen ) == 1) {
+    fpto.FrontPTOOutShaftSpeed.phys    = GetValue( EvVecTECU_FrontPTOShaftSpeed );
+  }
+	else {
+    fpto.FrontPTOOutShaftSpeed.phys    = 0;
+  }
+  fpto.FrontPTOOutShaftSpeedSetPoint = 0xffff;
+
+	TransmitPG( fpto );
+}
+
+on envVar EvVecTECU_FrontPTOShaftEngagemen
+{
+  if (getValue(this) == 0) {
+    putValue( EvVecTECU_FrontOutputShaftBitmap, 0 );
+    TransmitFrontPTOOutShaft();
+  }
+}
+
+/*
+  Received HitchAndPTOCommand
+*/
+void RxIndHitchAndPTOCommand(long ecuhdl, long source, long dest, long length, pg HPTOC rxPG )
+{
+  // set rear hitch position
+  if (kTractorClass >= 3) {
+    if (rxPG.RearHitchPositionCmd != 0xff) {
+      putValue( EvVecTECU_RearHitchPosition, rxPG.RearHitchPositionCmd.phys );
+    }
+
+    if (rxPG.RearPTOEngagementCmd < 0x02) {
+      putValue( EvVecTECU_RearPTOShaftEngagement, rxPG.RearPTOEngagementCmd );
+    }
+  }
+
+  // set front hitch position
+  if (kTractorClassF == 1) {
+    if (rxPG.FrontHitchPositionCmd != 0xff) {
+      putValue( EvVecTECU_FrontHitchPosition, rxPG.FrontHitchPositionCmd.phys );
+      UpdatePanel();
+    }
+
+    if (rxPG.FrontPTOEngagementCmd < 0x02) {
+      putValue( EvVecTECU_FrontPTOShaftEngagemen, rxPG.FrontPTOEngagementCmd );
+    }
+  }
+}
+
+/*
+  Calculate current gear depending on the tractor speed [m/s].
+*/
+int CalcGear( double tractorSpeed )
+{
+  int gear = 0;
+
+  if (tractorSpeed < (kGearSpeed[1] * kMaxTractorSpeed)) {
+    gear = 1;
+  }
+  else if (tractorSpeed < (kGearSpeed[2] * kMaxTractorSpeed)) {
+    gear = 2;
+  }
+  else if (tractorSpeed < (kGearSpeed[3] * kMaxTractorSpeed)) {
+    gear = 3;
+  }
+  else if (tractorSpeed < (kGearSpeed[4] * kMaxTractorSpeed)) {
+    gear = 4;
+  }
+  else {
+    gear = 5;
+  }
+
+  return gear;
+}
+
+on preStart
+{
+  int i = 0;
+  setWriteDbgLevel( gDbgLevel );
+
+  for( i = 0; i < elCount(gValveState); i++ ) {
+    gValveState[i]       = AV00EF.Valve0ValveState::Blocked;
+    gValveSafeMode[i]    = AV00EF.Valve0FailSafeMode::Block;
+    gValveRetractFlow[i] = 0;
+    gValveExtendFlow[i]  = 0;
+  }
+
+  // set Diagnostic Services parameters
+  strncpy(gIdsEcuidParam.EcuPartNumber,       "V-TECU09-01"                           ,100) ;
+  strncpy(gIdsEcuidParam.EcuSerialNumber,     "PON0909251"                            ,100) ;
+  strncpy(gIdsEcuidParam.EcuLocation,         "POWERTRAIN"                            ,100) ;
+  strncpy(gIdsEcuidParam.EcuType,             "TECU"                                  ,100) ;
+  strncpy(gIdsEcuidParam.EcuManufacturerName, "Vector Informatik GmbH www.vector.com" ,100) ;
+
+  gIdsSoftParam.SoftwareIdentFields = 3 ;
+  strncpy(gIdsSoftParam.SoftwareIdent[0], "TECU V2.7"                               ,100) ;
+  strncpy(gIdsSoftParam.SoftwareIdent[1], "ISO11783-Diag-Serv V1.0"                 ,100) ;
+  strncpy(gIdsSoftParam.SoftwareIdent[2], "REV-A-CAPL 2006-10-05"                   ,100) ;
+
+  gIdsIccParam.TestProtocolPublicationYear = 14;
+  gIdsIccParam.TestProtocolRevision        = 2;
+  gIdsIccParam.CertificateLaboratoryType   = 0;
+  gIdsIccParam.CertificationLaboratoryID   = 1861;
+
+  gIdsDpParam.J1939_73 = 1 ;
+}
+
+on timer TimerValves
+{
+  int i;
+  int valveCount;
+
+  for( i = 0; i < kNumberOfValves; i++ ) {
+    gValveState[i]       = Iso11783GetEnvInt( "EvVecTECU_ValveState", i+1 );
+    gValveSafeMode[i]    = Iso11783GetEnvInt( "EvVecTECU_ValveSafeMode", i+1 );
+    gValveRetractFlow[i] = Iso11783GetEnvDbl( "EvVecTECU_ValveRetractFlow", i+1 );
+    gValveExtendFlow[i]  = Iso11783GetEnvDbl( "EvVecTECU_ValveExtendFlow", i+1 );
+  }
+  setTimer( TimerValves, 500 );
+}
+
+TransmitTractorFacilityResp()
+{
+  pg TFR tfr;
+
+  tfr.SpeedInfo_EngineSpeed          = 1;
+  tfr.SpeedInfo_GroundBasedSpeed     = 1;
+  tfr.SpeedInfo_WheelBasedSpeed      = 1;
+  tfr.PowerMgt_MaintainPower         = 1;
+  tfr.PowerMgt_MaxTimeTractorPower   = 0;
+  tfr.PowerMgt_KeySwitch             = 1;
+
+  tfr.LanguageCmdStorageInTractorECU = 0;
+  tfr.Lighting_MinimalSet            = 1;
+  tfr.PTOInfo_RearShaftEngagement    = 1;
+  tfr.PTOInfo_RearShaftSpeed         = 1;
+  tfr.HitchInfo_RearInWork           = 1;
+  tfr.HitchInfo_RearPosition         = 1;
+
+  tfr.EstimatedOrMeasuredAuxValveState = 1;
+  tfr.Light_FullImplLightingMessageSet = 0;
+  tfr.AddHitchParameter_RearDraft      = (kTractorClass > 1) ? 1 : 0;
+  tfr.SpeedAndDist_WheelBasedDirection = (kTractorClass > 1) ? 1 : 0;
+  tfr.SpeedAndDist_WheelBasedDistance  = (kTractorClass > 1) ? 1 : 0;
+  tfr.SpeedAndDist_GndBasedDirection   = (kTractorClass > 1) ? 1 : 0;
+  tfr.SpeedAndDist_GndBasedDistance    = (kTractorClass > 1) ? 1 : 0;
+  tfr.TimeDate                         = 1;
+
+  tfr.AuxiliaryValveCmd           = 0;
+  tfr.PTOCmd_RearPTOEngagementCmd = 0;
+  tfr.PTOCmd_RearPTOSpeedCmd      = 0;
+  tfr.HitchCmd_RearHitchPosition  = 0;
+
+  tfr.NavigPseudorangeNoiseStatistic = (kTractorClassN) ? 1 : 0;
+  tfr.NavigSystemPositionData        = (kTractorClassN) ? 1 : 0;
+  tfr.NavigSystemHighOutputPosition  = (kTractorClassN) ? 1 : 0;
+
+  tfr.PTOCmd_FrontPTOEngagementCmd   = 0;
+  tfr.PTOCmd_FrontPTOSpeedCmd        = 0;
+  tfr.HitchCmd_FrontHitchPosition    = (kTractorClassN) ? 1 : 0;
+  tfr.AddHitchParameter__FrontDraft  = 0;
+  tfr.PTOInfo_FrontShaftEngagement   = (kTractorClassN) ? 1 : 0;
+  tfr.PTOInfo_FrontShaftSpeed        = (kTractorClassN) ? 1 : 0;
+  tfr.HitchInfo_FrontInWork          = (kTractorClassN) ? 1 : 0;
+  tfr.HitchInfo_FrontPosition        = (kTractorClassN) ? 1 : 0;
+
+  TransmitPG( tfr );
+}
+
+//
+// The ECU lost its address. It tries to find a new address in the range
+// of 128..238. 
+//
+EcuLostAddress()
+{
+  dword result;
+
+  idsInit(0);
+  cancelTimer( SystemTimer );
+
+  putValue( EvVecTECU_Online, 0 );
+  putValue( EvVecTECU_ECUAddress, kNullAddr );
+
+  // calculate new address
+  if ((TECUAddress < 128) || (TECUAddress > 238)) {
+    TECUAddress = 128;
+  }
+  else {
+    TECUAddress++;
+	if (TECUAddress > 238) {
+	  return;
+	}
+  }
+
+  // ecu(s) going online
+  result = Iso11783ECUGoOnline( TECUHandle, TECUAddress ) ;
+  if (result) {
+    writeDbgLevel( kDbgInfo, "<%s> Iso11783ECUGoOnline failed, result=%d handle=0x%x", gECULabel, result, TECUHandle );
+  }
+}
+
+void TransmitGroundBasedSpeedAndDistance()
+{
+  pg GBSD gbsd;
+
+  gbsd.GroundBasedMachineSpeed.phys = GetValue( EvVecTECU_TractorSpeed ) / 3.6;
+
+  if (kTractorClass >= 2) {
+    gbsd.GroundBasedMachineDirection     = gbsd.GroundBasedMachineDirection::Forward;
+    gbsd.GroundBasedMachineDistance.phys = gGroundBasedDistance;
+  }
+  else {
+    gbsd.GroundBasedMachineDirection     = 0x03;
+    gbsd.GroundBasedMachineDistance.phys = 0xffffffff;
+  }
+
+  TransmitPG( gbsd );
+}
+
+/*
+ * Transmit engine information
+ */
+void TransmitEEC1()
+{
+  pg EEC1 eec1;
+
+  eec1.dword(0) = eec1.dword(4) = 0xffffffff;
+  eec1.EngSpeed.phys  = GetValue( EvVecTECU_EngineSpeed );
+
+
+  TransmitPG( eec1 );
+}
+
+/* CALLBACK function */
+DWORD Iso11783AppAddrClaimed(long ecuhdl)
+{
+  if (ecuhdl == TECUHandle) {
+    OnGoOnline(Iso11783GetNodeAddr(ecuhdl));
+  }
+  return 0;
+}
+
+//
+// A commanded address PG was received.
+//
+DWORD Iso11783AppCmdAddrIndication(long ecuHdl, long length)
+{
+  return 0;
+}
+
+/* CALLBACK function */
+DWORD Iso11783AppErrorIndication(long ecuhdl, long errorClass, long errorNumber, long addCode)
+{
+  char strErrClass[32];
+  char strErrInfo[64];
+
+  switch(errorClass) {
+    case 1: snprintf( strErrClass, elCount(strErrClass), "TimeOut" ); break;
+    case 2: snprintf( strErrClass, elCount(strErrClass), "AddressClaiming" ); break;
+    case 3: snprintf( strErrClass, elCount(strErrClass), "CAN Error" ); break;
+    case 4: snprintf( strErrClass, elCount(strErrClass), "System Error" ); break;
+	case 5: snprintf( strErrClass, elCount(strErrClass), "Transport Protocol Error Error" ); break;
+  }
+
+  switch( errorNumber ) {
+    case 0x1: snprintf( strErrInfo, elCount(strErrInfo), "cts error" ); break;
+    case 0x2: snprintf( strErrInfo, elCount(strErrInfo), "peer to peer data timeout" ); break;
+    case 0x3: snprintf( strErrInfo, elCount(strErrInfo), "BAM data timeout" ); break;
+    case 0x4: snprintf( strErrInfo, elCount(strErrInfo), "acknowledge timeout" ); break;
+	case 0x10: //snprintf( strErrInfo, elCount(strErrInfo), "lost address claiming or received address claim with higher priority" ); break;
+	  EcuLostAddress();
+	  return 0;
+    case 0x15: snprintf( strErrInfo, elCount(strErrInfo), "init error: node name detected two times" ); break;
+    case 0x17: snprintf( strErrInfo, elCount(strErrInfo), "init error: node address detected two times" ); break;
+    case 0x30: snprintf( strErrInfo, elCount(strErrInfo), "exeption while choosing protokoll BAM or CMDT" ); break;
+    case 0x40: snprintf( strErrInfo, elCount(strErrInfo), "internal data buffer full" ); break;
+    case 0x60: snprintf( strErrInfo, elCount(strErrInfo), "user sends system pg " ); break;
+    case 0x71: snprintf( strErrInfo, elCount(strErrInfo), "transmission abort by receiver" ); break;
+    case 0x72: snprintf( strErrInfo, elCount(strErrInfo), "transmission abort by sender" ); break;
+  }
+
+  writeDbgLevel( kDbgInfo, "<%s> ERROR(0x%x) %s, %s", gECULabel, errorNumber, strErrClass, strErrInfo );
+
+  return 0;
+}
+
+//
+// A node has changed its address or claimed an address successfully
+//
+DWORD Iso11783AppNmtIndication( LONG busHandle, LONG address, LONG state )
+{
+  return 0;
+}
+
+/* CALLBACK function */
+DWORD Iso11783AppRequestIndication (long ecuhdl, long source, long dest, long page, long ReqPgn)
+{
+  pg ACKM acknPg;
+  int broadcastFlag;
+  int notAckFlag;
+  int loop;
+  long mpgn;
+  char buffer[8];
+  broadcastFlag=0;
+  notAckFlag=1;
+
+  // check if requested pg is specific or global
+  if (dest == 0xFF)
+  {
+    broadcastFlag=1;
+    dest = Iso11783GetNodeAddr(ecuhdl);
+  }
+  else
+    broadcastFlag=0;
+
+  if (ecuhdl == TECUHandle)
+  {
+    if (idsHandleRq(ReqPgn, source))
+      notAckFlag = 0 ;
+    else
+    {
+      switch(ReqPgn)
+      {
+      case 0xFE0F:  // Language command
+        TransmitLanguageCommand();
+        notAckFlag=0;
+        break;
+      case 0xFEE6:  // Time and date
+        if (kTractorClass >= 2) {
+          TransmitTimeAndDate();
+          notAckFlag=0;
+        }
+        break;
+      case 0xfe09:  // Tractor facility response message
+        TransmitTractorFacilityResp();
+        notAckFlag=0;
+        break;	    
+      default:
+        // check if notack must be sent
+        if (broadcastFlag)
+          notAckFlag=0;
+        break;
+      }
+    }
+  }
+
+  if ((notAckFlag) && (!broadcastFlag))
+  {
+    // set reserved byte to 0xFF
+    for (loop=0;loop < 8; loop++)
+    {
+      acknPg.byte(loop) = 0xFF;
+    }
+
+    acknPg.ControlByte=1;      // not ack
+    acknPg.ParameterGroupNumber=ReqPgn; // pgn of requested pg
+    acknPg.AddressNegativeAcknowledgement = source;
+
+    for (loop=0;loop < 8; loop++)
+    {
+      buffer[loop] = acknPg.byte(loop);
+    }
+    mpgn = ((acknPg.PF <<8) | 0xFF);
+
+    Iso11783TxReqPG(ecuhdl, mpgn, 0xFF,6,8,buffer);
+  }
+  return 0;
+}
+
+/* CALLBACK function */
+DWORD Iso11783AppRxIndication (long ecuhdl, long source, long dest, long length, long RxPG)
+{
+  char buffer[1785];
+  int loop;
+  pg 0x00 dummy = {dlc=1785};
+
+  dummy.dlc = length;
+
+  // get ecu address
+  dest = Iso11783GetNodeAddr(ecuhdl);
+
+  Iso11783GetRxData(length, buffer);
+
+  // copy received data to pg
+  dummy.SA = source;
+  for (loop=0;loop < length; loop++)
+  {
+    dummy.byte(loop) = buffer[loop];
+  }
+
+  if (ecuhdl == TECUHandle)
+  {
+    // check for bus 
+    switch(RxPG)
+    {
+    case 0xFE47:   // MaintainPower
+      RxIndMaintainPower (ecuhdl, source, dest, length, (pg MP)dummy);
+      break;
+    case 0xFE42:   // HitchAndPTOCommand
+      RxIndHitchAndPTOCommand (ecuhdl, source, dest, length, (pg HPTOC)dummy);
+      break;
+    }
+  }
+
+  return 0;
+}
+
+/* CALLBACK function */
+DWORD Iso11783AppTxIndication (long ecuhdl,long TxPgn, long src, long dest)
+{
+  return 0;
+}
+

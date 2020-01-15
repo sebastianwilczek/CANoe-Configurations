@@ -1,0 +1,379 @@
+/*@@var:*/
+/*
+ * TXTSend - Text Sender Tester                    Version 1.0
+ *
+ * Copyright 2006, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Pr) Created 
+ */
+variables
+{
+  // Constants
+  const int  kAppChannel  = 1;      // Application channel this node is connected to
+
+  const int  kNullAddr    = 0xfe;   // Null address
+  const int  kGlobalAddr  = 0xff;   // Global address
+  const int  kSuccess     = 0;      // Nodelayer function returns 0 on success
+
+  const int  kInitialized = 0;       
+  const int  kOnline      = 1;       
+  const int  kOffline     = 2;       
+
+  const int  kMaxText     = 256;
+
+  // Language support
+  const int  kEnglish     = 0;
+  const int  kSpanish     = 1;
+  const int  kFrench      = 2;
+  const int  kGerman      = 3;
+  const int  kItalian     = 4;
+
+  // Text message acknowledge types
+  const int  kOnDisplay   = 4;
+  const int  kOnKey       = 2;
+  const int  kOnNetMsg    = 1;
+
+  const int  kMaxMIDs     = 20;            // Max. number of MIDs concurrently on the bus
+
+  char  gNodeName[32]     = "TXTSend";     // Name of the node, is used for output to write window
+
+  // Communication variables
+  BYTE  gECU_MID          = kNullAddr;     // Address of this ECU
+  BYTE  gECUState         = kInitialized;  // Communication state of the ECU
+  
+  BYTE  gDispCols;
+  BYTE  gDispRows;
+  BYTE  gDispBeeperSupp;
+  BYTE  gDispAcknowlKeySupp;
+  int   gDispLanguage;
+
+  char  gTxt[kMaxText];
+  int   gTxtOffset;
+  int   gNumMsg;
+
+  J1587Param TextMessageToDisplay TX_Display;
+  
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel = kDbgWarning; // Set debug level for output to write window
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  setWriteDbgLevel( gDbgLevel );
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  if (getValue( EvTXTSend_Enable ) == 1) {
+    TXTSendInit();
+    TXTSendStartUp();
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:TXTSendChangeState(byte):*///function
+/*
+ * Change the state of the ECU
+ */
+void TXTSendChangeState( BYTE newState )
+{
+  if (newState == kInitialized) {
+    // stop everything immediately
+    gECUState = kInitialized;
+    return;
+  }
+
+  switch( gECUState ) {
+    case kInitialized:
+    case kOffline:
+      if (newState == kOnline) {
+        EnterOnline();
+        gECUState = newState;
+      }
+      break;
+    case kOnline:
+      if (newState == kOffline) {
+        EnterOffline();
+        gECUState = newState;
+      }
+      break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:TXTSendInit():*///function
+/*
+ * Initialize the EMS
+ */
+void TXTSendInit()
+{
+  gECU_MID = TXTSend.NmStationAddress;
+
+  TX_Display.MsgChannel = kAppChannel;
+  TX_Display.J1587_MID  = kNullAddr;
+  
+  DisableControls();
+}
+/*@@end*/
+
+/*@@caplFunc:TXTSendShutDown():*///function
+/*
+ * Shut down EMS
+ *
+ * Send cannot claim address and stop sending messages
+ */
+void TXTSendShutDown()
+{
+  TXTSendChangeState( kOffline );
+  DisableControls();
+}
+/*@@end*/
+
+/*@@caplFunc:TXTSendStartUp():*///function
+/*
+ * Start up EMS
+ */
+void TXTSendStartUp()
+{
+  putValue( EvTXTSend_Enable, 1 );
+  putValue( EvTXTSend_Beeper, 0 );
+  putValue( EvTXTSend_Text, "\0");
+ 
+  TXTSendChangeState( kOnline );
+}
+/*@@end*/
+
+/*@@caplFunc:EnterOffline():*///function
+/*
+ * Enter offline state
+ */
+void EnterOffline()
+{
+  // send address claiming PG with NULL address
+  putValue( EvTXTSend_MID, kNullAddr );
+
+  writeDbgLevel( kDbgInfo, "<%s> offline", gNodeName );
+}
+/*@@end*/
+
+/*@@caplFunc:EnterOnline():*///function
+/*
+ * Enter online state
+ */
+void EnterOnline()
+{
+  // set source addresses of TX messages
+  TX_Display.J1587_MID = gECU_MID;
+  TX_Display.J1587_ReceiverMID = 127;
+
+  putValue( EvTXTSend_MID, gECU_MID );
+
+  writeDbgLevel( kDbgInfo, "<%s> online with address %d", gNodeName, gECU_MID );
+}
+/*@@end*/
+
+/*@@envVar:EvTXTSend_Send:*/
+on envVar EvTXTSend_Send
+{
+  int length;
+
+  if (getValue(this) == 1 && (gDispRows * gDispCols) > 0) {
+    TX_Display.AbortMessage                     = 0;
+    TX_Display.LanguageSelection                = 0;
+    TX_Display.PredefinedMessage                = 0;
+    TX_Display.MessageDisplayTime               = getValue(EvTXTSend_Time);
+    TX_Display.MessagePriority                  = 7;
+    TX_Display.SendAcknowldgUponDisplayOfMsg    = 0;
+    TX_Display.SendOperatorAckOfReceiptOfMsg    = getValue(EvTXTSend_Acknowledge);
+    TX_Display.SendReceivedAckForEachNetworkMsg = 1;
+    TX_Display.SoundBeeperOnDisplay             = getValue(EvTXTSend_Beeper);
+
+    length = getValueSize(EvTXTSend_Text);
+    if (length <= kMaxText ) {
+      DisableControls();
+      getValue(EvTXTSend_Text, gTxt);
+      gTxtOffset = 0;
+      gNumMsg = min(GetNumMsg(), gDispRows);
+      gNumMsg = gNumMsg == 0 ? 1 : gNumMsg;
+
+      SendNextTxtMsg(1);
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:DisableControls():*///function
+void DisableControls()
+{
+  enableControl("\0", "EnvVar:EvTXTSend_Acknowledge", 0);
+  enableControl("\0", "EnvVar:EvTXTSend_Beeper", 0);
+  enableControl("\0", "EnvVar:EvTXTSend_Send", 0);
+  enableControl("\0", "EnvVar:EvTXTSend_Time", 0);
+  enableControl("\0", "EnvVar:EvTXTSend_Text", 0);
+}
+/*@@end*/
+
+/*@@caplFunc:EnableControls():*///function
+void EnableControls()
+{
+  enableControl("\0", "EnvVar:EvTXTSend_Acknowledge", 1);
+  enableControl("\0", "EnvVar:EvTXTSend_Beeper", 1);
+  enableControl("\0", "EnvVar:EvTXTSend_Send", 1);
+  enableControl("\0", "EnvVar:EvTXTSend_Time", 1);
+  enableControl("\0", "EnvVar:EvTXTSend_Text", 1);
+}
+/*@@end*/
+
+/*@@caplFunc:GetNumMsg():*///function
+int GetNumMsg()
+{
+  char text[kMaxText];
+
+  getValue(EvTXTSend_Text, text);
+
+  if (strlen(text) % gDispCols != 0) {
+    return strlen(text) / gDispCols + 1;
+  }
+  else {
+    return strlen(text) / gDispCols;
+  }
+}
+/*@@end*/
+
+/*@@j1587Param:J17081.J1587::TextMessageDisplayType (0xE3):*/
+on J1587Param TextMessageDisplayType
+{
+  gDispAcknowlKeySupp = this.AcknowledgmentKey ;
+  gDispBeeperSupp = this.Beeper_Sound;
+  gDispLanguage = this.LanguageSelection;
+  gDispCols = this.NumberOfColumnsInTheDisplay;
+  gDispRows = this.NumberOfRowsInTheDisplay;
+
+  UpdateDisplayInfo();
+}
+/*@@end*/
+
+/*@@caplFunc:UpdateDisplayInfo():*///function
+void UpdateDisplayInfo()
+{
+  char str[20], str2[20];
+  str[0] = 0;
+
+  EnableControls();
+
+  putValue(EvTXTSend_DispAcknowlKeySupport, gDispAcknowlKeySupp);
+  enableControl("\0", "EnvVar:EvTXTSend_Acknowledge", gDispAcknowlKeySupp);
+
+  putValue(EvTXTSend_DispBeeperSupport, gDispBeeperSupp);
+  enableControl("\0", "EnvVar:EvTXTSend_Beeper", gDispBeeperSupp);
+
+  enableControl("\0", "EnvVar:EvTXTSend_Send", 1);
+  enableControl("\0", "EnvVar:EvTXTSend_Time", 1);
+  enableControl("\0", "EnvVar:EvTXTSend_Text", 1);
+
+  switch(gDispLanguage) {
+    case kEnglish:
+      strncpy(str, "English", elCount(str));
+      break;
+    case kSpanish:
+      strncpy(str, "Spanish", elCount(str));
+      break;
+    case kFrench:
+      strncpy(str, "French", elCount(str));
+      break;
+    case kGerman:
+      strncpy(str, "German", elCount(str));
+      break;
+    case kItalian:
+      strncpy(str, "Italian", elCount(str));
+      break;
+  }
+
+  putValue(EvTXTSend_DispLanguage, str);
+  
+  ltoa(gDispRows, str, 10);
+  ltoa(gDispCols, str2, 10);
+
+  strncat(str, " x ", elCount(str));
+  strncat(str, str2, elCount(str));
+  
+  putValue(EvTXTSend_DispSize, str);
+}
+/*@@end*/
+
+/*@@envVar:EvTXTSend_Enable:*/
+on envVar EvTXTSend_Enable
+{
+  if (getValue( this )) {
+    TXTSendInit();
+    TXTSendStartUp();
+  }
+  else {
+    TXTSendShutDown();
+  }
+}
+/*@@end*/
+
+/*@@j1587Param:J17081.J1587::TextMessageAcknowledged (0xE1):*/
+on J1587Param TextMessageAcknowledged
+{
+  BYTE row;
+  if (this.MID == gECU_MID && this.ReceiveNetworkMsgFromSender == 1) {
+    row = this.MessageRowLineNumber;
+    if (row < gNumMsg && row < gDispRows) {
+      SendNextTxtMsg(row + 1);
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:SendNextTxtMsg(int):*///function
+void SendNextTxtMsg(int row)
+{
+  int j, length;
+
+  if (row <= gDispRows) {
+    TX_Display.DisplayCompleteMessage = (row == gNumMsg) ? 1 : 0;
+    TX_Display.MessageRowLineNumber   = row;
+    TX_Display.MessageColumnNumber    = 1;
+    
+    length = strlen(gTxt);
+
+    for (j = 0; j < length-gTxtOffset && j < gDispCols; j++) {
+      TX_Display.byte(4+j) = gTxt[j+gTxtOffset];
+    }
+    gTxtOffset += j;
+
+    TX_Display.DLC = 4+j;
+    output(TX_Display);
+
+    if (TX_Display.DisplayCompleteMessage) {
+      EnableControls();
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:min(int,int):*///function
+int min(int a, int b)
+{
+  if (a <= b) {
+    return a;
+  }
+  else {
+    return b;
+  }
+}
+/*@@end*/
+

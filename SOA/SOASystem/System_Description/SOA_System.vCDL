@@ -1,0 +1,190 @@
+version 1.0;
+
+namespace Participants
+{
+  participant Backend
+  {
+    Services::Navigation.Backend
+  }
+
+  participant Dashboard
+  {
+    Services::Passenger_Information.Dashboard
+  }
+
+  participant LIDAR_Front
+  {
+    Services::Object_Recognition.LIDAR_Front
+  }
+  
+  participant LIDAR_Rear
+  {
+    Services::Object_Recognition.LIDAR_Rear
+  }
+
+  participant Drive_Master
+  {
+    Services::Navigation.Drive_Master,
+    Services::Object_Recognition.Drive_Master,
+    Services::Passenger_Information.Drive_Master
+  }
+
+  participant Console
+  {
+    Services::Mirror.Console
+  }
+
+  participant Mirror_Driver
+  {
+    Services::Mirror.Mirror_Driver
+  }
+
+  participant Mirror_Passenger
+  {
+    Services::Mirror.Mirror_Passenger
+  }
+}
+
+namespace Services
+{
+  using ::DataTypes;
+  
+  [delay=200us]
+  service Passenger_Information : Passenger_Information_Interface
+  {
+    binding Abstract;
+    
+    consumer Drive_Master;
+    provider Dashboard;
+  }
+  
+  [delay=200us]
+  service Navigation : Navigation_Interface
+  {
+    binding Abstract;
+    
+    consumer Drive_Master;
+    provider Backend;
+  }
+  
+  [delay=200us, subscribedEvents=Object]
+  service Object_Recognition : Object_Recognition_Interface
+  {
+    binding Abstract;
+    
+    consumer Drive_Master;
+    provider LIDAR_Front, LIDAR_Rear;
+  }
+  
+  [delay=200us]
+  service Mirror : Mirror_Interface
+  {
+    binding Abstract;
+    
+    consumer Console;
+    provider Mirror_Driver, Mirror_Passenger;
+  }
+}
+
+[byteOrder="intel"]
+namespace DataTypes
+{
+  interface Passenger_Information_Interface
+  {
+    field Collision_Info  Collision_Info_Front { set; }
+    field Collision_Info  Collision_Info_Rear  { set; }
+    field Navigation_Info Navigation_Info      { set; }
+    field UInt32          Velocity_Info        { set; }
+  }
+  
+  interface Object_Recognition_Interface
+  {
+    event Object_Struct Object;
+  }
+
+  interface Navigation_Interface
+  {
+    method Get_Navigation_Info_prototype Get_Navigation_Info;
+  }
+  
+  interface Mirror_Interface
+  {
+    method AdjustMirror_prototype AdjustMirror;
+  }
+
+  typedef AdjustMirror_prototype = VariableString(in MirrorParametersStruct MirrorParameters);
+
+  typedef Get_Navigation_Info_prototype = void(in  String destination,
+                                               in  Double longitude,
+                                               in  Double latitude,
+                                               out Navigation_Info navigation_info);
+  
+  struct MirrorParametersStruct
+  {
+    UInt8  Mirror_Folded;
+    UInt32 Direction;
+    UInt8  Heat_OnOff;
+  }
+  
+  struct Object_Struct
+  {
+    Object_Classification_Enum Classification;
+    UInt32                     Distance;
+  }
+  
+  struct Navigation_Info
+  {
+    String     Destination;
+    UInt32     Distance;
+    UInt32     Time;
+    POI_vector POIs;
+  }
+  
+  struct POI
+  {
+    Category_Enum Category;
+    String Message;
+    UInt32 Distance;
+  }
+  
+  struct Collision_Info
+  {
+    UInt32 Warn_Level;
+    UInt32 Distance;
+    UInt32 Lamp;
+    String Message;
+  }
+  
+  enum Object_Classification_Enum : uint32
+  {
+    NO_OBJECT = 0,
+    VEHICLE = 1,
+    OBSTACLE = 2,
+    PEDESTRIAN = 3
+  }
+  
+  enum Category_Enum : uint32
+  {
+    UNDEFINED = 0,
+    WARN = 1,
+    INFO = 2
+  }
+  
+  typedef POI_vector = list<POI,3>;
+  
+  [encoding="ISO88591"]
+  typedef String = string;
+  
+  [encoding="UTF-8"]
+  typedef VariableString = string;
+  
+  typedef Boolen = int8;
+  typedef Int8 = int8;
+  typedef Int16 = int16;
+  typedef Int32 = int32;
+  typedef UInt16 = uint16;
+  typedef UInt32 = uint32;
+  typedef UInt8 = uint8;
+  typedef Float = float;
+  typedef Double = double;
+}

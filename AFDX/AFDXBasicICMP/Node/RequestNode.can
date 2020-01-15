@@ -1,0 +1,149 @@
+/*@!Encoding:1252*/
+// -------------------------------------------------------------------------
+// Module: RequestNode.can
+// Interfaces: -
+// -------------------------------------------------------------------------
+// example request node for ICMP requests, can send out correct and
+// incorrect ICMP requests.
+// Checks the incoming payload with original sended
+// -------------------------------------------------------------------------
+// Copyright (c) Vector Informatik GmbH. All rights reserved.
+// -------------------------------------------------------------------------
+includes
+{
+  #include "AFDX/utils.cin"  
+}
+
+variables
+{
+  a664Frame *fr;
+  int  result = 0;
+}
+
+/************************************************************************************************** 
+  Description   : Send out ICMP-frame
+**************************************************************************************************/
+on sysvar ICMPDemo::OutputICMPMessage
+{
+  // only send frame out when button is pressed, not when released
+  if (@this == 1)
+  {
+    fr.msgChannel = 1;
+    result = a664InitICMP (fr, PING_REQ, @ICMPDemo::PayloadSize, IOM_APP1);
+    if (result != 0) {
+      writeEx (-3,2, "a664InitICMP failed: %d", result);
+    } 
+    else 
+    {
+      GenerateICMPPayoad (fr);
+      // set the ICMP-checksum (2) for the ICMP-frame
+      a664SetChecksum (fr, 2);
+      
+      // Virtual Link configuration for ICMP-frame
+      // RxFlags = 3: Integrity Checking ON (bit 0), Redundancy Management ON (bit 1)
+      // TxFlags = 7: Line Select AB (bit 0,1), IP fragmentation allowed ON (bit 3)
+      result = A664VLConfig (fr, 3, 7, IOM_APP1.ICMP_inVLbag, IOM_APP1.ICMP_inVLmaxFrame, IOM_APP1.ICMP_inVLskewmax);
+      writeEx (-3,0, "VL:%d vs %d", fr.EthVlId, IOM_APP1.ICMP_inVLid);
+      if (result != 0) writeEx (-3,2, "A664VLConfig failed: %d", result);  
+      
+      result = a664TriggerFrame (fr, 1);
+      if (result != 0) writeEx (-3,2, "a664TriggerFrame failed: %d", result);  
+    }
+  }
+}
+
+/************************************************************************************************** 
+  Description   : Send out ICMP-frame with wrong Virtual Link settings
+**************************************************************************************************/
+on sysvar ICMPDemo::OutputICMPWrongVL
+{
+  // only send frame out when button is pressed, not when released
+  if (@this == 1)
+  {
+    fr.msgChannel = 1;
+    writeEx (-3,0, "VL:%d vs %d", fr.EthVlId, IOM_APP1.ICMP_inVLid);
+    result = a664InitICMP (fr, PING_REQ, @ICMPDemo::PayloadSize, IOM_APP1);
+    if (result != 0) {
+      writeEx (-3,2, "a664InitICMP failed: %d", result);
+    } 
+    else 
+    {
+      // Virtual Link configuration for ICMP-frame
+      // RxFlags = 3: Integrity Checking ON (bit 0), Redundancy Management ON (bit 1)
+      // TxFlags = 7: Line Select AB (bit 0,1), IP fragmentation allowed ON (bit 3)
+      // invalidates the VL Config
+      fr.EthVlId += 1;
+      result = A664VLConfig (fr, 3, 7, IOM_APP1.ICMP_inVLbag, IOM_APP1.ICMP_inVLmaxFrame, IOM_APP1.ICMP_inVLskewmax);
+      if (result != 0) writeEx (-3,2, "A664VLConfig failed: %d", result);  
+      result = a664TriggerFrame(fr, 1);
+      if (result != 0) writeEx (-3,2, "a664TriggerFrame failed: %d", result);  
+    }
+  }
+}
+
+/************************************************************************************************** 
+  Description   : CAPL handler for ICMP frames
+**************************************************************************************************/
+on a664Frame msgChannel1.ICMP
+{
+  int result;
+  // filter out tx messages
+  if (this.DIR == tx)
+  {
+    return;
+  }
+  
+  // check the frame for echo response (ICMP type 0, code 0
+  result = a664IsICMP (this, IOM_APP1);
+  if (result != 0x0)
+  {
+    return;
+  }
+  CheckICMPPayload (this, fr);
+}
+
+/************************************************************************************************** 
+  Description   : Generates the payload for ICMP-payload. First 8 bytes are the current simulation 
+                  time, further payload is filled with random data
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : [in] myFrame                  - input a664 frame
+**************************************************************************************************/
+void GenerateICMPPayoad (a664Frame* myFrame)
+{
+  int64 currentTime;
+  int i;
+  
+  currentTime = timeNowInt64();
+  
+  for (i = 0; i < 8; ++i)
+  {
+    myFrame.AfdxPayload[i] = currentTime >> (8* (7-i));
+  }
+  for (i = 8; i < @ICMPDemo::PayloadSize-1; ++i)
+  {
+    myFrame.AfdxPayload[i] = random (255);
+  }
+}
+
+/************************************************************************************************** 
+  Description   : Compares the a664 payload for correctness and set systemvariables
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : [in] checkFrame                  - received a664 frame
+  Parameter     : [in] originalFrame               - sent and stored a664 frame
+**************************************************************************************************/
+void CheckICMPPayload(a664Frame* checkFrame, a664Frame* originalFrame)
+{
+  int64 currentTime;
+  int64 originalFrameTime;
+  int i;
+  currentTime = timeNowInt64();
+  originalFrameTime = 0;
+  
+  for( i = 0; i < 8; ++i)
+  {
+    originalFrameTime += ((int64)checkFrame.AfdxPayload[i] << (8 * (7-i)));
+  }
+  
+  @ICMPDemo::PayloadCheck = memcmp(checkFrame.AfdxPayload, originalFrame.AfdxPayload, @ICMPDemo::PayloadSize-1);
+  @ICMPDemo::RoundTripTimeMS = ((float)(currentTime - originalFrameTime)) / 1000000;
+}

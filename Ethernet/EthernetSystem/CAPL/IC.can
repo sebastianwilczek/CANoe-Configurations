@@ -1,0 +1,130 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "include\PDU-NM-ASR_Eth.cin"
+}
+
+variables
+{
+  
+}
+
+void UdpNm_NetworkModeInd()
+{
+  IC_SetControlVisible( 1 );
+}
+
+void UdpNm_BusSleepModeInd()
+{
+  IC_SetControlVisible( 0 );
+}
+
+void IC_SetControlVisible( long visible )
+{
+  setControlVisibility( "Instrument Cluster", "TotalDistanceControl"    , visible );
+  setControlVisibility( "Instrument Cluster", "MeterControl"            , visible );
+  setControlVisibility( "Instrument Cluster", "RemainingCapacityControl", visible );
+  setControlVisibility( "Instrument Cluster", "NoPassingSignControl"    , visible );
+  setControlVisibility( "Instrument Cluster", "SpeedLimitSignControl"   , visible );
+  setControlVisibility( "Instrument Cluster", "WarnSignControl"         , visible );
+  setControlVisibility( "Instrument Cluster", "LaneAssistControl"       , visible );
+}
+
+on signal VehicleTotalDistance
+{
+  @sysvar::InstrumentCluster::Distance = this / 1000.0;
+}
+
+on serviceSignal TrafficSignInfo::SpeedLimit
+{
+  switch(this)
+  {
+    case 30:
+      @sysvar::InstrumentCluster::SpeedLimitSignImage = 1;
+      break;
+    case 50:
+      @sysvar::InstrumentCluster::SpeedLimitSignImage = 2;
+      break;
+    case 60:
+      @sysvar::InstrumentCluster::SpeedLimitSignImage = 3;
+      break;
+    case 70:
+      @sysvar::InstrumentCluster::SpeedLimitSignImage = 4;
+      break;
+    case 80:
+      @sysvar::InstrumentCluster::SpeedLimitSignImage = 5;
+      break;
+    case 100:
+      @sysvar::InstrumentCluster::SpeedLimitSignImage = 6;
+      break;
+    default:
+      @sysvar::InstrumentCluster::SpeedLimitSignImage = 0;
+      break;
+  }
+}
+
+on serviceSignal TrafficSignInfo::RoadWork
+{
+  @sysvar::InstrumentCluster::WarnSignImage = this > 0 ? 12 : 0;
+}
+
+on serviceSignal TrafficSignInfo::Hazard
+{
+  @sysvar::InstrumentCluster::WarnSignImage = this > 0 ? 10 : 0;
+}
+
+on serviceSignal TrafficSignInfo::NoPassingZone
+{
+  @sysvar::InstrumentCluster::NoPassingZoneSignImage = this > 0 ? 8 : 0;
+}
+
+on serviceSignal LaneInfo::LaneReliabilityLeft
+{
+  UpdateAssistentWarning();
+}
+
+on serviceSignal LaneInfo::LaneReliabilityRight
+{
+  UpdateAssistentWarning();
+}
+
+on serviceSignal LaneInfo::CollisionWarning
+{
+  UpdateAssistentWarning();
+}
+
+on serviceSignal LaneInfo::LaneDeparture
+{
+  if (this > 0)
+  {
+    @sysvar::InstrumentCluster::SteeringWheelVibration = 1;
+  }
+  else
+  {
+    @sysvar::InstrumentCluster::SteeringWheelVibration = 0;
+  }
+}
+
+void UpdateAssistentWarning()
+{
+  if ($LaneInfo::CollisionWarning == 1)
+  {
+    @sysvar::InstrumentCluster::AssistantWarningImage = 1;
+  }
+  else if (($LaneInfo::LaneReliabilityLeft > 80) && ($LaneInfo::LaneReliabilityRight > 80))
+  {
+    @sysvar::InstrumentCluster::AssistantWarningImage = 4;
+  }
+  else if ($LaneInfo::LaneReliabilityLeft > 80)
+  {
+    @sysvar::InstrumentCluster::AssistantWarningImage = 2;
+  }
+  else if ($LaneInfo::LaneReliabilityRight > 80)
+  {
+    @sysvar::InstrumentCluster::AssistantWarningImage = 3;
+  }
+  else
+  {
+    @sysvar::InstrumentCluster::AssistantWarningImage = 0;
+  }
+}

@@ -1,0 +1,343 @@
+/*@!Encoding:1252*/
+variables
+{
+  char  gLINBusName[80] = "LIN1"; // name of the used LIN channel
+  
+  byte    gIsSleeping;  // Indicates current mode (Sleep/Awake)
+  mstimer gtmWakeup;    // Timer to restart checks after wakeup and Master initialization
+
+  // Handles for Checks requiring global access
+  long ghScheduleCheck; // "Schedule violation" check
+  long ghNodeDeadCheck; // "Node Dead" check
+}
+
+void MainTest()
+{
+  dword dwBusContextLIN; // handle for bus context of used LIN channel 
+
+  // Initialize the DTF functionality.
+  // Dependent to the development progress of the test,
+  // DTF should be initialized with "user" or "developer".
+  // The setting "user" is very silent and reports only severe problems.
+  // The setting "developer" is more verbose and reports useful information
+
+  ChkConfig_Init("user");
+
+  // Specify channel to be monitored by this test module
+  dwBusContextLIN = getBusNameContext(gLINBusName);
+  SetBusContext(dwBusContextLIN);
+
+  // /////////////////////////////////////////////////////////////////// 
+  // Add report title information
+  TestModuleTitle ("CANoe.LIN Test Service Library Demo");
+
+  // Initialize global variables
+  gIsSleeping = 0; 
+
+  // Start the checks
+  LinObserver();
+}
+
+testcase LinObserver ()
+{
+  long chkHandle;
+
+  // /////////////////////////////////////////////////////////////////// 
+  ghNodeDeadCheck = ChkStart_NodeDead(LIN_TSLDemo::Motor1, // Node to supervise
+                                      500,                 // Maximum allowed quiet interval                                
+                                      "TestCheckCallback");// CAPL Callback function of the check
+  TestAddCondition(ghNodeDeadCheck);
+
+  // /////////////////////////////////////////////////////////////////// 
+  chkHandle = ChkStart_MsgSignalValueRangeViolation(Motor1State_Cycl::Motor1Temp, // Signal to supervise
+                                                    30,   // Minimum allowed signal value
+                                                    90,  // Maximum allowed signal value
+                                                    "TestCheckCallback"); // CAPL Callback function of the check
+  TestAddCondition(chkHandle);
+
+  // ///////////////////////////////////////////////////////////////////  
+  chkHandle = ChkStart_LINRespToleranceViolation(LIN_TSLDemo::Motor1, // Node to supervise
+                                                 20.0, // Maximum allowed response tolerance [in %]
+                                                 "TestCheckCallback"); // CAPL Callback function of the check
+  TestAddCondition(chkHandle);
+
+  // /////////////////////////////////////////////////////////////////// 
+  chkHandle = ChkStart_LINRespErrorSignal(LIN_TSLDemo::Motor1, // Node to supervise
+                                          "TestCheckCallback"); // CAPL Callback function of the check
+  TestAddCondition(chkHandle);
+
+  // /////////////////////////////////////////////////////////////////// 
+  chkHandle = ChkStart_LINMasterInitTimeViolation(100,  // Minimum allowed Master init. time [in ms]
+                                                  150, // Maximum allowed Master init. time [in ms]
+                                                  "TestCheckCallback"); // CAPL Callback function of the check
+  TestAddCondition(chkHandle);
+
+  // /////////////////////////////////////////////////////////////////// 
+  // Switch to ns precision. This changes units of time values used by the Checks below
+  ChkConfig_SetPrecision(9); 
+  {
+    // /////////////////////////////////////////////////////////////////// 
+    chkHandle = ChkStart_LINSyncBreakTimingViolation(13.9,  // Minimum allowed sync break length [in bit times]
+                                                     19.1, // Maximum allowed sync break length [in bit times]
+                                                     "TestCheckCallback"); // CAPL Callback function of the check
+    TestAddCondition(chkHandle);
+
+    // /////////////////////////////////////////////////////////////////// 
+    chkHandle = ChkStart_LINSyncDelTimingViolation(1.9,  // Minimum allowed sync delimiter length [in bit times]
+                                                   6.3, // Maximum allowed sync delimiter length [in bit times]
+                                                   "TestCheckCallback"); // CAPL Callback function of the check
+    TestAddCondition(chkHandle);
+  }
+  ChkConfig_SetPrecision(3); // switch to ms precision (default)
+
+  // /////////////////////////////////////////////////////////////////// 
+  // Switch to ns precision. This changes units of time values used by the Checks below
+  ChkConfig_SetPrecision(6);
+  {
+    // /////////////////////////////////////////////////////////////////// 
+    chkHandle = ChkStart_LINHeaderToleranceViolation(25, // Maximum allowed header tolerance [in %]
+                                                     "TestCheckCallback"); // CAPL Callback function of the check
+    TestAddCondition(chkHandle);
+
+    // /////////////////////////////////////////////////////////////////// 
+    ghScheduleCheck = ChkStart_LINSchedTableViolation(2, // Index of schedule table to supervise 
+                                                      "TestCheckCallback"); // CAPL Callback function of the check
+    TestAddCondition(ghScheduleCheck);
+
+    // /////////////////////////////////////////////////////////////////// 
+    chkHandle = ChkStart_LINWakeupReqLengthViolation(700,   // Minimum allowed Wakeup signal length
+                                                     2000, // Maximum allowed Wakeup signal length
+                                                     "TestCheckCallback"); // CAPL Callback function of the check
+    TestAddCondition(chkHandle);
+  }
+  ChkConfig_SetPrecision(3); // switch to ms precision
+
+  // /////////////////////////////////////////////////////////////////// 
+  // Check number of LIN wakeup signals and the time between them
+  chkHandle = ChkStart_LINWakeupRetryViolation(150,  // Max. timeout between two consecutive retransmissions 
+                                               1500, // Min. timeout after each three retransmissions
+                                               14,   // Allowed tolerance for timeout values [in %]
+                                               3,   // Max. number of retransmissions 
+                                               "TestCheckCallback"); // CAPL Callback function of the check
+  TestAddCondition(chkHandle);
+
+
+  // /////////////////////////////////////////////////////////////////// 
+  // Check the values of P2_min and ST_min for all LIN Slaves defined in LDF
+  chkHandle = ChkStart_LINDiagDelayTimesViolation("TestCheckCallback"); // CAPL Callback function of the check); 
+  TestAddCondition(chkHandle);
+
+  // /////////////////////////////////////////////////////////////////// 
+  // Check the format of LIN reconfiguration requests
+  chkHandle = ChkStart_LINReconfRequestFormatViolation("TestCheckCallback"); // CAPL Callback function of the check
+  TestAddCondition(chkHandle);
+
+  // /////////////////////////////////////////////////////////////////// 
+  // Wait until the measurement end, otherwise Test Module will finish its execution and 
+  // all Checks will be destroyed
+  TestWaitForMeasurementEnd(0); 
+}
+
+on sysvar LIN::Master_SendSleepCmd
+{
+  if (0 == gIsSleeping)
+  {
+    // stop Schedule checks on Sleep command, otherwise they immediately fire
+    ChkControl_Stop(ghScheduleCheck);
+    ChkControl_Stop(ghNodeDeadCheck);
+
+    // Update the indicator flag here. The actual Sleep Cmd is sent by Master
+    gIsSleeping = 1;
+  }
+
+}
+
+on linWakeupFrame
+{
+  if (1 == gIsSleeping)
+  {
+    // Start timer of X ms before restarting the checks
+    // Where X is the time configured for Master initialization
+    setTimer(gtmWakeup, @LIN::Master_InitTime); 
+
+    // Update the indicator flag here. 
+    gIsSleeping = 0;
+  }
+}
+
+on timer gtmWakeup
+{
+  // start Schedule checks on Wakeup command
+  ChkControl_Start(ghScheduleCheck);
+  ChkControl_Start(ghNodeDeadCheck);
+}
+
+void TestCheckCallback(TestCheck check)
+{
+  char parameterValue[1024];
+  char outputString[1024];
+  
+  // Log only the first event to avoid flooding of the write window
+  if(check.QueryNumEvents() > 1) return;  
+   
+  // Check which test function has fired
+  if(!GetTestCheckParameter(check, "Type of check", parameterValue, elCount(parameterValue))) return;
+  
+  // Build check-specific write message
+  strncpy(outputString, "Test condition failed (Check/", elCount(outputString));
+  strncat(outputString, parameterValue, elCount(outputString));
+  strncat(outputString, "): ", elCount(outputString));
+    
+  if(strncmp("NodeDead", parameterValue, strlen(parameterValue)) == 0)
+  {
+    GetTestCheckParameter(check, "Node", parameterValue, elCount(parameterValue));
+    strncat(outputString, "Node \"", elCount(outputString));
+    strncat(outputString, parameterValue, elCount(outputString));
+    strncat(outputString, "\" seems to be dead", elCount(outputString));
+  }
+  else if(strncmp("SignalValue", parameterValue, strlen(parameterValue)) == 0)
+  {
+    strncat(outputString, "Signal outside of allowed range, condition: ", elCount(outputString));
+    GetTestCheckParameter(check, "MinValue", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+    strncat(outputString, " <= value <= ", elCount(outputString));
+    GetTestCheckParameter(check, "MaxValue", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));    
+  }
+  else if(strncmp("LIN_Response_tolerance", parameterValue, strlen(parameterValue)) == 0)
+  {
+    strncat(outputString, "LIN Response transmission time violated. Maximum allowed tolerance: ", elCount(outputString));
+    GetTestCheckParameter(check, "Tolerance", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+    strncat(outputString, "%", elCount(outputString));
+  }
+  else if(strncmp("LIN_Response_error_signal", parameterValue, strlen(parameterValue)) == 0)
+  {
+    strncat(outputString, "Response error signal fired for node \"", elCount(outputString));
+    GetTestCheckParameter(check, "Node", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+    strncat(outputString, "\"", elCount(outputString));
+  }
+  else if(strncmp("LIN_MasterInit", parameterValue, strlen(parameterValue)) == 0)
+  {
+    strncat(outputString, "Maximum initialization time for LIN Master violated. Condition: ", elCount(outputString));
+    GetTestCheckParameter(check, "MinTime", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+    strncat(outputString, " <= Init time <= ", elCount(outputString));
+    GetTestCheckParameter(check, "MaxTime", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+  }
+  else if(strncmp("LIN_SynchBreak", parameterValue, strlen(parameterValue)) == 0)
+  {
+    strncat(outputString, "Synch break length violated. Condition: ", elCount(outputString));
+    GetTestCheckParameter(check, "MinLength", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+    strncat(outputString, " <= Break length <= ", elCount(outputString));
+    GetTestCheckParameter(check, "MaxLength", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+  }
+  else if(strncmp("LIN_SynchBreakDelimiter", parameterValue, strlen(parameterValue)) == 0)
+  {
+    strncat(outputString, "Synch delimiter length violated. Condition: ", elCount(outputString));
+    GetTestCheckParameter(check, "MinLength", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+    strncat(outputString, " <= Delimiter length <= ", elCount(outputString));
+    GetTestCheckParameter(check, "MaxLength", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+  }
+  else if(strncmp("LIN_Header_tolerance", parameterValue, strlen(parameterValue)) == 0)
+  {
+    strncat(outputString, "LIN Header transmission time violated. Maximum allowed tolerance: ", elCount(outputString));
+    GetTestCheckParameter(check, "Tolerance", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+    strncat(outputString, "%", elCount(outputString));
+  }
+  else if(strncmp("LIN_Schedule_Table", parameterValue, strlen(parameterValue)) == 0)
+  {
+    strncat(outputString, "LIN Schedule Table violated. Probably no schedule table is active! Index of supervised table: ", elCount(outputString));
+    GetTestCheckParameter(check, "TableIndex", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+    strncat(outputString, ", maximum allowed jitter: ", elCount(outputString));
+    GetTestCheckParameter(check, "Jitter", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+  }
+  else if(strncmp("LIN_WakeupLength", parameterValue, strlen(parameterValue)) == 0)
+  {
+    strncat(outputString, "LIN Wake-up request length has been violated. Condition: ", elCount(outputString));
+    GetTestCheckParameter(check, "MinLength", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+    strncat(outputString, " <= Wake-up request length <= ", elCount(outputString));
+    GetTestCheckParameter(check, "MaxLength", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+  }
+  else if(strncmp("LIN_WakeupRetry", parameterValue, strlen(parameterValue)) == 0)
+  {
+    strncat(outputString, "Either the number of LIN wake-up signals or the time between them has been violated. ", elCount(outputString));
+    strncat(outputString, "Timeout between two consecutive retransmissions: ", elCount(outputString));
+    GetTestCheckParameter(check, "TimeoutAfterWakeup", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+    strncat(outputString, ", maximum allowed number of retransmissions: ", elCount(outputString));
+    GetTestCheckParameter(check, "MaxRetries", parameterValue, elCount(parameterValue));   
+    strncat(outputString, parameterValue, elCount(outputString));
+  }
+  else
+  {
+    check.QueryEventStatus(outputString, elCount(outputString));
+  }
+  
+  write(outputString);
+}
+
+int GetTestCheckParameter(TestCheck check, char parameterName[], char parameterValue[], long sizeOfBuffer)
+{
+  char eventStatus[1024];
+  char tempParameterName[1024];
+  long position[2];
+  
+  // reset the output value
+  strncpy(parameterValue, "", sizeOfBuffer);
+  
+  // Query the status of the current event
+  if(check.QueryEventStatus(eventStatus, elCount(eventStatus)) < 0) return 0;
+  
+  // Extract only the part of the status within the brackets
+  position[0] = strstr(eventStatus, "(");
+  position[1] = strstr(eventStatus, ")");
+  
+  if(position[0] < 0 || position[1] < 0 || position[1] - position[0] - 1 <= 0) return 0;
+  substr_cpy(eventStatus, eventStatus, position[0] + 1, position[1] - position[0] - 1, elCount(eventStatus));  
+  
+  // Concat the full parameter name to find in the status string
+  strncpy(tempParameterName, parameterName, elCount(tempParameterName));
+  strncat(tempParameterName, "=", elCount(tempParameterName));
+  
+  // Find the position of the parameter in the status string
+  position[0] = strstr(eventStatus, tempParameterName);  
+  if(position[0] < 0) return 0;
+  
+  // Check if there are more parameters following separated by a comma
+  position[1] = strstr_off(eventStatus, position[0], ", ");   
+
+  // Extract the parameter value from the status string
+  if(position[1] > 0)
+  {
+    // There is at least one parameter following after the searched one
+    substr_cpy(parameterValue,
+               eventStatus,
+               position[0] + strlen(tempParameterName),
+               position[1] - position[0] - strlen(tempParameterName),
+               sizeOfBuffer);
+  }
+  else
+  {
+    // The searched parameter is the last one in the list
+    substr_cpy(parameterValue,
+               eventStatus,
+               position[0] + strlen(tempParameterName),
+               -1,
+               sizeOfBuffer);
+  }
+  
+  return 1;
+}
+

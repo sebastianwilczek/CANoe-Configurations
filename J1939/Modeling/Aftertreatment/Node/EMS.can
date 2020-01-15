@@ -1,0 +1,1448 @@
+/*@@var:*/
+variables
+{
+/*$$CANERATORVARBEGIN*/
+
+  // generated at 2010-11-16 by CANerator version 3.7.8,
+
+  /* constants and variables for ECU state */
+  const int kStECUInit=0;
+  const int kStECUOnline=1;
+  const int kStECUOperational=2;
+
+  /* error codes */
+  const DWORD kErrorCOMPartnerOffline = 10;
+  const DWORD kErrorTxSendBufferFull  = 0x050002;
+  /*****************************************************************/
+  // all variables for bus default
+
+  int Ecu0State=kStECUInit;     /* 0=Offline, 1=Online, 2=Operational */
+
+  // name of bus
+  char BusName[100];
+
+  // msTimer for bootup
+  msTimer TimerEcuBootup0;
+  msTimer TimerWaitForReq0;
+  msTimer TimerRetryEcuBootup0;
+  // msTimer for cyclic PGs
+  msTimer TimerEcu0PGNF00F;    /* ecu address 0,   PGN F00F */
+  msTimer TimerEcu0PGNFEEE;    /* ecu address 0,   PGN FEEE */
+  msTimer TimerEcu0PGNFEF5;    /* ecu address 0,   PGN FEF5 */
+  msTimer TimerEcu0To61PGNEF3D;    /* ecu address 0 to 61,   PGN EF3D */
+  msTimer TimerEcu0PGNF004;    /* ecu address 0,   PGN F004 */
+
+  // cycle time variables for cyclic PGs
+  int gCycleTime0PGNF00F=50;
+  int gCycleTime0PGNFEEE=1000;
+  int gCycleTime0PGNFEF5=1000;
+  int gCycleTime0To61PGNEF3D=100;
+  int gCycleTime0PGNF004=100;
+
+  // timer to check cyclic if ECU is allowed to go online
+  msTimer TimWaitForBootmaster0;  /* timer to wait for bootmaster */
+
+  // flags for bootmaster mechanism
+  int gAllowClaimAddressEcu0=1;
+
+  // handle to identify ecus
+  long Ecu0Handle=0;     /* ecu handle for ecu nr 0 */
+
+  // global addresses for all ecus of this node
+  long Ecu0Address=-1;      /* global address of this ecu */
+
+  // handles to the ecu addresses of all ecus
+  long Receiver0Address=0;
+  long Receiver61Address=61;
+
+  // variable to change the mask in UpdateReceiverAddresses function
+  long gMask0=0x1FF; // full NAME mask
+  long gMask61=0x1FF; // full NAME mask
+
+  // global addresses for all ecus of this network
+  char Ecu0Name[8];      /* global name of this ecu */
+  char Ecu61Name[8];     /* global name of this ecu */
+
+  int gFreeAddrFoundFlag0=0;
+  char gWSMemberName[8];
+/*$$CANERATORVAREND*/
+
+  /* Constants                                                                       */
+  const float kMaxEngineSpeed          = 2800.0; /* Max. engine speed [rpm]          */
+  const float kIdleEngineSpeed         = 500.0;  /* Idle engine speed [rpm]          */
+  const float kMaxTorque               = 2000.0; /* Max. engine torque [Nm]          */
+  const float kMaxUreaQuantity         = 6000.0; /* Max. Urea quantity [g/h]         */
+  const float kInitAmbientTemperature  = 20.0;   /* Init Ambient temperature [°C]    */
+  const float kInitBarometricPressure  = 101.5;  /* Init Barometric pressure [kPa]   */
+  const float kInitNOxSensor           = 200;      /* Init NOx Sensor [ppm]            */
+
+  /* Global                                                                          */
+  float gPedalPosition         = 0.0;    /* Accelerator pedal position in [%]        */
+  float gActualSpeed           = 0.0;    /* Actual engine speed in [rpm]             */
+  float gActualTorque          = 0.0;    /* Actual engine torque [Nm]                */
+  float gActualCoolantTemp     = 0.0;    /* Coolant Temperature in [°C]              */
+  float gActualOilTemp         = 0.0;    /* Oil Temperature in [°C]                  */
+  float gRequestedUreaQuantity = 0.0;    /* Requested Urea Quantity in [g/h]         */
+
+  /* Timers                                                                          */
+  const int   kSystemTime      = 100;                  /* System time in [ms]        */
+  const float kSystemTimeSec   = kSystemTime / 1000.0; /* System time in [sec]       */
+  msTimer     SystemTimer;                             /* System timer               */
+
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  setTimer(SystemTimer, kSystemTime);
+
+/*$$CANERATORSTARTBEGIN*/
+  // make names for all ECUs
+  J1939MakeName(Ecu0Name,1,1,0,0,0,0,0,1861,2);
+  J1939MakeName(Ecu61Name,1,1,0,0,44,0,0,1861,1);
+
+  strncpy(BusName,"default",100);
+  // delay sending Address Claim in mode 1
+  setTimer(TimerEcuBootup0,10);
+
+/*$$CANERATORSTARTEND*/
+}
+/*@@end*/
+
+/*@@timer:TimerEcuBootup0:*/
+/*$$CANERATORBEGIN*/
+on timer TimerEcuBootup0
+{
+  long timeOfReq = 0;
+  timeOfReq = J1939TableTime(BusName);
+  if ((timeOfReq < (timeNow()-1250000)) || (timeOfReq == 0))
+  {
+    J1939UpdateTable(BusName);
+    setTimer(TimerWaitForReq0,1250);
+  }
+  else
+  {
+    timeOfReq = (1250-(((timeNow()-timeOfReq)/100)));
+    if (timeOfReq < 0)
+      timeOfReq=0;
+    setTimer(TimerWaitForReq0,timeOfReq);
+  }
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@timer:TimerRetryEcuBootup0:*/
+/*$$CANERATORBEGIN*/
+on timer TimerRetryEcuBootup0
+{
+  RetryEcu0GoOnline();
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@timer:TimerEcu0PGNF00F:*/
+/*$$CANERATORBEGIN*/
+on timer TimerEcu0PGNF00F
+{
+  /* try to transmit PGN */
+  if(TransmitEcu0PGNF00F() == kErrorTxSendBufferFull)
+  {
+    /* error handling: send buffer is full (try to send PGN in next cycle) */
+    setTimer(TimerEcu0PGNF00F, gCycleTime0PGNF00F);
+  }
+}
+
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@timer:TimerEcu0PGNFEEE:*/
+/*$$CANERATORBEGIN*/
+on timer TimerEcu0PGNFEEE
+{
+  /* try to transmit PGN */
+  if(TransmitEcu0PGNFEEE() == kErrorTxSendBufferFull)
+  {
+    /* error handling: send buffer is full (try to send PGN in next cycle) */
+    setTimer(TimerEcu0PGNFEEE, gCycleTime0PGNFEEE);
+  }
+}
+
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@timer:TimerEcu0PGNFEF5:*/
+/*$$CANERATORBEGIN*/
+on timer TimerEcu0PGNFEF5
+{
+  /* try to transmit PGN */
+  if(TransmitEcu0PGNFEF5() == kErrorTxSendBufferFull)
+  {
+    /* error handling: send buffer is full (try to send PGN in next cycle) */
+    setTimer(TimerEcu0PGNFEF5, gCycleTime0PGNFEF5);
+  }
+}
+
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@timer:TimerEcu0To61PGNEF3D:*/
+/*$$CANERATORBEGIN*/
+on timer TimerEcu0To61PGNEF3D
+{
+  /* try to transmit PGN */
+  switch(TransmitEcu0To61PGNEF3D())
+  {
+    /* error handling: send buffer is full (try to send PGN in next cycle) */
+    case kErrorTxSendBufferFull:
+    {
+      setTimer(TimerEcu0To61PGNEF3D, gCycleTime0To61PGNEF3D);
+      break;
+    }
+    /* error handling: receiver is offline (try to send PGN in 100ms) */
+    case kErrorCOMPartnerOffline:
+    {
+      setTimer(TimerEcu0To61PGNEF3D, 100);
+      break;
+    }
+  }
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@timer:TimerEcu0PGNF004:*/
+/*$$CANERATORBEGIN*/
+on timer TimerEcu0PGNF004
+{
+  /* try to transmit PGN */
+  if(TransmitEcu0PGNF004() == kErrorTxSendBufferFull)
+  {
+    /* error handling: send buffer is full (try to send PGN in next cycle) */
+    setTimer(TimerEcu0PGNF004, gCycleTime0PGNF004);
+  }
+}
+
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@timer:TimerWaitForReq0:*/
+/*$$CANERATORBEGIN*/
+on timer TimerWaitForReq0
+{
+  EcuBootup(0);
+}
+
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@timer:TimWaitForBootmaster0:*/
+/*$$CANERATORBEGIN*/
+on timer TimWaitForBootmaster0
+{
+  EcuBootup(0);
+}
+
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:EcuBootup(int):*/
+/*$$CANERATORBEGIN*/
+/*-------------------------------------------------------------------------------------
+  The function creates a handle for an ECU and starts the Address Claiming procedure.
+-------------------------------------------------------------------------------------*/
+void EcuBootup(int ecuNumb)
+{
+  if (ecuNumb == 0)
+  {
+    if (gAllowClaimAddressEcu0 == 1)
+    {
+      if (Ecu0Handle)
+      {
+        if (J1939DestroyECU(Ecu0Handle) == 0)
+        {
+          Ecu0Handle=0;
+          setTimer(TimerEcuBootup0,100);
+          return;
+        }
+      }
+      InitEcu0();      /* init name and address of ecu0 */
+
+      // general init function
+      Init();          /* use this function to make your own initialisation */
+
+      // get handle for ecu
+      if (Ecu0Handle == 0)
+        Ecu0Handle = J1939CreateECU(BusName,Ecu0Name);
+      if (!Ecu0Handle) {
+        write("J1939CreateECU for Ecu failed. Maybe busname or ecu name is not correct.");
+        stop();
+      }
+      else
+      {
+        // ecu goes online
+        if (gFreeAddrFoundFlag0)
+        {
+          J1939ECUGoOnline(Ecu0Handle, Ecu0Address);
+        }
+        else
+        {
+          J1939ECUGoOffline(Ecu0Handle);
+        }
+      }
+
+    }
+  }
+
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:InitEcu0():*/
+/*$$CANERATORBEGIN*/
+/*-------------------------------------
+  Function initializes data of "EMS".
+-------------------------------------*/
+void InitEcu0()
+{
+  long nameId;
+  word nameManufacturer;
+  byte ecuInstance;
+  byte ecuFuncInstance;
+  byte ecuFunc;
+  byte system;
+  byte systemInstance;
+  byte industryGroup;
+  byte arbitrary;
+  char name[8];
+
+  // set ecu offline
+  Ecu0State = kStECUInit;
+
+  // init address of this node
+  Ecu0Address = Aftertreatment::EMS.NmStationAddress; /* get ecu address */
+  // check if this address is already used by another ECU
+  if( J1939GetName(BusName,Ecu0Address,name) == 0)
+  {
+    Ecu0Address = 128;
+
+    // check for next free address
+    gFreeAddrFoundFlag0=1;
+    while ( J1939GetName(BusName,Ecu0Address,name) == 0)
+    {
+      Ecu0Address++;
+      if (Ecu0Address >= 253)
+      {
+        gFreeAddrFoundFlag0=0;
+        break;
+      }
+    }
+  }
+  else
+  {
+    gFreeAddrFoundFlag0=1;
+  }
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:Init():*/
+/*$$CANERATORUSERBEGIN*/
+/*------------------------------------------
+  User dependent Init function:
+  Insert your own initialization code here.
+------------------------------------------*/
+void Init()
+{
+
+}
+/*$$CANERATORUSEREND*/
+/*@@end*/
+
+/*@@caplFunc:J1939AppAddrClaimed(long):*///callback
+/*$$CANERATORBEGIN*/
+/*-------------------------------------------------------------------------
+  -- Callback function --
+
+  Callback function is called if a node has claimed address successfully.
+-------------------------------------------------------------------------*/
+DWORD J1939AppAddrClaimed(long ecuhdl)
+{
+/*$$USERAREA_J1939APPADDRCLAIMEDBEGIN*/
+// insert your application code here
+/*$$USERAREA_J1939APPADDRCLAIMEDEND*/
+
+  if(ecuhdl == Ecu0Handle)
+  {
+    Ecu0State = kStECUOperational;
+    Ecu0Address = J1939GetNodeAddr(ecuhdl);
+    GoOnline(Ecu0Address);
+  }
+  return 0;
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:GoOnline(long):*/
+/*$$CANERATORBEGIN*/
+/*-----------------------------------------------------------------------
+  Function starts the transmission of the cyclic PGs if node is online.
+-----------------------------------------------------------------------*/
+void GoOnline(long address)
+{
+  // pgs to get repetition cycle type from CANdb
+  pg Aftertreatment::EEC1_EMS eEC1_EMS;
+  pg Aftertreatment::PROA_1_EMS pROA_1_EMS;
+  pg Aftertreatment::AMB_EMS aMB_EMS;
+  pg Aftertreatment::ET1_EMS eT1_EMS;
+  pg Aftertreatment::ATO1_EMS aTO1_EMS;
+
+/*$$USERAREA_GOBEGIN*/
+// insert your application code here
+/*$$USERAREA_GOEND*/
+
+  UpdateReceiverAddresses();
+
+  if (address == Ecu0Address)
+  {
+    if (Ecu0State == kStECUOperational)
+    {
+      cancelTimer(TimerEcu0PGNF00F);
+      setTimer(TimerEcu0PGNF00F,gCycleTime0PGNF00F);
+      cancelTimer(TimerEcu0PGNFEEE);
+      setTimer(TimerEcu0PGNFEEE,gCycleTime0PGNFEEE);
+      cancelTimer(TimerEcu0PGNFEF5);
+      setTimer(TimerEcu0PGNFEF5,gCycleTime0PGNFEF5);
+      cancelTimer(TimerEcu0To61PGNEF3D);
+      setTimer(TimerEcu0To61PGNEF3D,gCycleTime0To61PGNEF3D);
+      cancelTimer(TimerEcu0PGNF004);
+      setTimer(TimerEcu0PGNF004,gCycleTime0PGNF004);
+    }
+    return;
+  }
+
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:TransmitEcu0PGNF00F():*/
+/*$$CANERATORBEGIN*/
+/*-------------------------------------------------
+  "EMS" (0x0) sends global PG "ATO1_EMS" (0xF00F)
+-------------------------------------------------*/
+DWORD TransmitEcu0PGNF00F()
+{
+  pg Aftertreatment::ATO1_EMS aTO1_EMS;
+  int loop;
+  char buffer[8];
+  DWORD TxPgn;
+  DWORD retVal = 0;
+  byte pduf, pdus;
+
+  pduf = aTO1_EMS.PF;
+  pdus = aTO1_EMS.DA;
+  TxPgn = ((pduf << 8) | pdus);
+
+  if ((aTO1_EMS.Characteristic & 0x00000001) == 1)
+  {
+    TxPgn |= 0x00010000;
+  }
+
+  // get the data of this PG
+  GetEcu0PGNF00FData(aTO1_EMS);
+
+  for (loop=0;loop < (aTO1_EMS.dlc); loop++)
+  {
+    buffer[loop] = aTO1_EMS.byte(loop);
+  }
+
+  retVal = J1939TxReqPG(Ecu0Handle, TxPgn, 0xFF, 6, aTO1_EMS.dlc, buffer);
+
+  /* return error code (0 = no error) */
+  return retVal;
+}
+
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:TransmitEcu0PGNFEEE():*/
+/*$$CANERATORBEGIN*/
+/*------------------------------------------------
+  "EMS" (0x0) sends global PG "ET1_EMS" (0xFEEE)
+------------------------------------------------*/
+DWORD TransmitEcu0PGNFEEE()
+{
+  pg Aftertreatment::ET1_EMS eT1_EMS;
+  int loop;
+  char buffer[8];
+  DWORD TxPgn;
+  DWORD retVal = 0;
+  byte pduf, pdus;
+
+  pduf = eT1_EMS.PF;
+  pdus = eT1_EMS.DA;
+  TxPgn = ((pduf << 8) | pdus);
+
+  if ((eT1_EMS.Characteristic & 0x00000001) == 1)
+  {
+    TxPgn |= 0x00010000;
+  }
+
+  // get the data of this PG
+  GetEcu0PGNFEEEData(eT1_EMS);
+
+  for (loop=0;loop < (eT1_EMS.dlc); loop++)
+  {
+    buffer[loop] = eT1_EMS.byte(loop);
+  }
+
+  retVal = J1939TxReqPG(Ecu0Handle, TxPgn, 0xFF, 6, eT1_EMS.dlc, buffer);
+
+  /* return error code (0 = no error) */
+  return retVal;
+}
+
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:TransmitEcu0PGNFEF5():*/
+/*$$CANERATORBEGIN*/
+/*------------------------------------------------
+  "EMS" (0x0) sends global PG "AMB_EMS" (0xFEF5)
+------------------------------------------------*/
+DWORD TransmitEcu0PGNFEF5()
+{
+  pg Aftertreatment::AMB_EMS aMB_EMS;
+  int loop;
+  char buffer[8];
+  DWORD TxPgn;
+  DWORD retVal = 0;
+  byte pduf, pdus;
+
+  pduf = aMB_EMS.PF;
+  pdus = aMB_EMS.DA;
+  TxPgn = ((pduf << 8) | pdus);
+
+  if ((aMB_EMS.Characteristic & 0x00000001) == 1)
+  {
+    TxPgn |= 0x00010000;
+  }
+
+  // get the data of this PG
+  GetEcu0PGNFEF5Data(aMB_EMS);
+
+  for (loop=0;loop < (aMB_EMS.dlc); loop++)
+  {
+    buffer[loop] = aMB_EMS.byte(loop);
+  }
+
+  retVal = J1939TxReqPG(Ecu0Handle, TxPgn, 0xFF, 6, aMB_EMS.dlc, buffer);
+
+  /* return error code (0 = no error) */
+  return retVal;
+}
+
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:TransmitEcu0To61PGNEF3D():*/
+/*$$CANERATORBEGIN*/
+/*-----------------------------------------------------
+  "EMS" (0x0) sends specific PG "PROA_1_EMS" (0xEF3D)
+  to receiver "EAS" (0x3D)
+-----------------------------------------------------*/
+DWORD TransmitEcu0To61PGNEF3D()
+{
+  pg Aftertreatment::PROA_1_EMS pROA_1_EMS;
+  int loop;
+  char buffer[8];
+  DWORD TxPgn;
+  DWORD retVal = 0;
+  byte pduf, pdus;
+  int numbOfDest=0;
+
+  pduf = pROA_1_EMS.PF;
+  pdus = 0;
+  TxPgn = ((pduf << 8) | pdus);
+
+  if ((pROA_1_EMS.Characteristic & 0x00000001) == 1)
+  {
+    TxPgn |= 0x00010000;
+  }
+
+  pROA_1_EMS.DA = Receiver61Address;
+
+  GetEcu0To61PGNEF3DData(pROA_1_EMS);
+
+  for (loop=0;loop < (pROA_1_EMS.dlc); loop++)
+  {
+    buffer[loop] = pROA_1_EMS.byte(loop);
+  }
+
+  /* check if receiver is online */
+  if (pROA_1_EMS.DA != 0xFE)
+  {
+    retVal = J1939TxReqPG(Ecu0Handle, TxPgn, pROA_1_EMS.DA, 3, pROA_1_EMS.dlc, buffer);
+  }
+  else
+  {
+    retVal = kErrorCOMPartnerOffline;
+  }
+
+  /* return error code (0 = no error) */
+  return retVal;
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:TransmitEcu0PGNF004():*/
+/*$$CANERATORBEGIN*/
+/*-------------------------------------------------
+  "EMS" (0x0) sends global PG "EEC1_EMS" (0xF004)
+-------------------------------------------------*/
+DWORD TransmitEcu0PGNF004()
+{
+  pg Aftertreatment::EEC1_EMS eEC1_EMS;
+  int loop;
+  char buffer[8];
+  DWORD TxPgn;
+  DWORD retVal = 0;
+  byte pduf, pdus;
+
+  pduf = eEC1_EMS.PF;
+  pdus = eEC1_EMS.DA;
+  TxPgn = ((pduf << 8) | pdus);
+
+  if ((eEC1_EMS.Characteristic & 0x00000001) == 1)
+  {
+    TxPgn |= 0x00010000;
+  }
+
+  // get the data of this PG
+  GetEcu0PGNF004Data(eEC1_EMS);
+
+  for (loop=0;loop < (eEC1_EMS.dlc); loop++)
+  {
+    buffer[loop] = eEC1_EMS.byte(loop);
+  }
+
+  retVal = J1939TxReqPG(Ecu0Handle, TxPgn, 0xFF, 3, eEC1_EMS.dlc, buffer);
+
+  /* return error code (0 = no error) */
+  return retVal;
+}
+
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:TransmitEcu0To255PGNEEFF():*/
+/*$$CANERATORBEGIN*/
+/*--------------------------------------------------
+  "EMS" (0x0) sends specific PG "ACL_EMS" (0xEEFF)
+  to destination addres 0xFF
+--------------------------------------------------*/
+DWORD TransmitEcu0To255PGNEEFF()
+{
+  pg Aftertreatment::ACL_EMS aCL_EMS;
+  int loop;
+  char buffer[8];
+  DWORD TxPgn;
+  DWORD retVal = 0;
+  byte pduf, pdus;
+  int numbOfDest=0;
+
+  pduf = aCL_EMS.PF;
+  pdus = 0;
+  TxPgn = ((pduf << 8) | pdus);
+
+  if ((aCL_EMS.Characteristic & 0x00000001) == 1)
+  {
+    TxPgn |= 0x00010000;
+  }
+
+  aCL_EMS.DA = 0xFF;
+  GetEcu0To255PGNEEFFData(aCL_EMS);
+
+  for (loop=0;loop < (aCL_EMS.dlc); loop++)
+  {
+    buffer[loop] = aCL_EMS.byte(loop);
+  }
+
+  /* check if receiver is online */
+  if (aCL_EMS.DA == 0xFE)
+  {
+    retVal = kErrorCOMPartnerOffline;
+  }else{
+    Ecu0State = kStECUOperational;
+    GoOnline(Ecu0Address);
+  }
+
+  /* return error code (0 = no error) */
+  return retVal;
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:GetEcu0To255PGNEEFFData(pg418316032x):*/
+/*$$CANERATORUSERBEGIN*/
+/*-------------------------------------------------------
+  Assign values to the signals of PG "ACL_EMS" (0xEEFF)
+  Note: We are working on the reference of the PG
+-------------------------------------------------------*/
+void GetEcu0To255PGNEEFFData(pg Aftertreatment::ACL_EMS aCL_EMS)
+{
+  int i=0;
+  for (i=0;i<aCL_EMS.dlc;i++)
+  {
+    aCL_EMS.byte(i) = 0xFF;
+  }
+  /* the signals of PG "ACL_EMS" */
+
+  // aCL_EMS.ArbitraryAddressCapable = 0;  // signal type = SPECIFIC or unknown in CANdb
+  // aCL_EMS.IndustryGroup = 0;  // signal type = SPECIFIC or unknown in CANdb
+  // aCL_EMS.VehicleSystemInstance = 0;  // signal type = SPECIFIC or unknown in CANdb
+  // aCL_EMS.VehicleSystem = 0;  // signal type = SPECIFIC or unknown in CANdb
+  // aCL_EMS.Function = 0;  // signal type = SPECIFIC or unknown in CANdb
+  // aCL_EMS.FunctionInstance = 0;  // signal type = SPECIFIC or unknown in CANdb
+  // aCL_EMS.ECUInstance = 0;  // signal type = SPECIFIC or unknown in CANdb
+  // aCL_EMS.ManufacturerCode = 0;  // signal type = SPECIFIC or unknown in CANdb
+  // aCL_EMS.IdentityNumber = 0;  // signal type = SPECIFIC or unknown in CANdb
+}
+/*$$CANERATORUSEREND*/
+/*@@end*/
+
+/*@@caplFunc:GetEcu0PGNF00FData(pg418385664x):*/
+/*$$CANERATORUSERBEGIN*/
+/*--------------------------------------------------------
+  Assign values to the signals of PG "ATO1_EMS" (0xF00F)
+  Note: We are working on the reference of the PG
+--------------------------------------------------------*/
+void GetEcu0PGNF00FData(pg Aftertreatment::ATO1_EMS aTO1_EMS)
+{
+  int i=0;
+  for (i=0;i<aTO1_EMS.dlc;i++)
+  {
+    aTO1_EMS.byte(i) = 0xFF;
+  }
+  /* signals for PG "ATO1_EMS" */
+  aTO1_EMS.AftrTrtmntOtltOxygnSnsrPrlmnryFM = 0xFF;
+  aTO1_EMS.AftrTrtmntOtltNOxSnsrPrlmnryFMI = 0xFF;
+  aTO1_EMS.AftrTrtmntOtltGsSnsorHeaterCtrl = 0x3;
+  aTO1_EMS.AftrTrtmntOtltGsSnsrHtrPrlmnryFM = 0xFF;
+  aTO1_EMS.AftrTrtmntOtltWdRngO2RdngStable = 0x3;
+  aTO1_EMS.AftrTrtmntOtletNOxReadingStable = 0x3;
+  aTO1_EMS.AftrTrtmntOutletGasSensorAtTemp = 0x3;
+  aTO1_EMS.AftrTrtmntOtltGsSnsrPwerInRange = 0x3;
+  aTO1_EMS.AfterTreatmentOutletO2 = 0xFFFF;
+  aTO1_EMS.AfterTreatmentOutletNOx.phys = kInitNOxSensor;
+}
+/*$$CANERATORUSEREND*/
+/*@@end*/
+
+/*@@caplFunc:GetEcu0PGNFEEEData(pg419360256x):*/
+/*$$CANERATORUSERBEGIN*/
+/*-------------------------------------------------------
+  Assign values to the signals of PG "ET1_EMS" (0xFEEE)
+  Note: We are working on the reference of the PG
+-------------------------------------------------------*/
+void GetEcu0PGNFEEEData(pg Aftertreatment::ET1_EMS eT1_EMS)
+{
+  int i=0;
+  for (i=0;i<eT1_EMS.dlc;i++)
+  {
+    eT1_EMS.byte(i) = 0xFF;
+  }
+  /* signals for PG "ET1_EMS" */
+  eT1_EMS.EngIntercoolerThermostatOpening = 0xFF;
+  eT1_EMS.EngIntercoolerTemp = 0xFF;
+  eT1_EMS.EngTurboOilTemp = 0xFFFF;
+  eT1_EMS.EngOilTemp1.phys = gActualOilTemp;
+  eT1_EMS.EngFuelTemp = 0xFF;
+  eT1_EMS.EngCoolantTemp.phys = gActualCoolantTemp;
+}
+/*$$CANERATORUSEREND*/
+/*@@end*/
+
+/*@@caplFunc:GetEcu0PGNFEF5Data(pg419362048x):*/
+/*$$CANERATORUSERBEGIN*/
+/*-------------------------------------------------------
+  Assign values to the signals of PG "AMB_EMS" (0xFEF5)
+  Note: We are working on the reference of the PG
+-------------------------------------------------------*/
+void GetEcu0PGNFEF5Data(pg Aftertreatment::AMB_EMS aMB_EMS)
+{
+  int i=0;
+  for (i=0;i<aMB_EMS.dlc;i++)
+  {
+    aMB_EMS.byte(i) = 0xFF;
+  }
+  /* signals for PG "AMB_EMS" */
+  aMB_EMS.RoadSurfaceTemp = 0xFFFF;
+  aMB_EMS.EngAirInletTemp = 0xFF;
+  aMB_EMS.AmbientAirTemp.phys = kInitAmbientTemperature;
+  aMB_EMS.CabInteriorTemp = 0xFFFF;
+  aMB_EMS.BarometricPress.phys = kInitBarometricPressure;
+}
+/*$$CANERATORUSEREND*/
+/*@@end*/
+
+/*@@caplFunc:GetEcu0To61PGNEF3DData(pg217005312x):*/
+/*$$CANERATORUSERBEGIN*/
+/*----------------------------------------------------------
+  Assign values to the signals of PG "PROA_1_EMS" (0xEF3D)
+  Note: We are working on the reference of the PG
+----------------------------------------------------------*/
+void GetEcu0To61PGNEF3DData(pg Aftertreatment::PROA_1_EMS pROA_1_EMS)
+{
+  int i=0;
+  for (i=0;i<pROA_1_EMS.dlc;i++)
+  {
+    pROA_1_EMS.byte(i) = 0xFF;
+  }
+  /* signals for PG "PROA_1_EMS" */
+  pROA_1_EMS.RequestedUreaQuantity.phys = gRequestedUreaQuantity; // signal type = SPECIFIC or unknown in CANdb
+}
+/*$$CANERATORUSEREND*/
+/*@@end*/
+
+/*@@caplFunc:GetEcu0PGNF004Data(pg217056256x):*/
+/*$$CANERATORUSERBEGIN*/
+/*--------------------------------------------------------
+  Assign values to the signals of PG "EEC1_EMS" (0xF004)
+  Note: We are working on the reference of the PG
+--------------------------------------------------------*/
+void GetEcu0PGNF004Data(pg Aftertreatment::EEC1_EMS eEC1_EMS)
+{
+  int i=0;
+  for (i=0;i<eEC1_EMS.dlc;i++)
+  {
+    eEC1_EMS.byte(i) = 0xFF;
+  }
+  /* signals for PG "EEC1_EMS" */
+  eEC1_EMS.EngDemandPercentTorque = 0xFF;
+  eEC1_EMS.EngStarterMode = 0x3;
+  eEC1_EMS.SrcAddrssOfCtrllngDvcForEngCtrl = 0xFF;
+  eEC1_EMS.EngSpeed.phys = gActualSpeed;
+  eEC1_EMS.ActualEngPercentTorque.phys = (gActualTorque / kMaxTorque) * 100;
+  eEC1_EMS.DriversDemandEngPercentTorque = 0xFF;
+  eEC1_EMS.EngTorqueMode = 0x3;
+}
+/*$$CANERATORUSEREND*/
+/*@@end*/
+
+/*@@caplFunc:J1939AppTxIndication(long,long,long,long):*///callback
+/*$$CANERATORBEGIN*/
+/*-----------------------------------------------------------
+  -- Callback function --
+
+  Callback function is called if a PG is sent successfully.
+-----------------------------------------------------------*/
+DWORD J1939AppTxIndication (long ecuhdl,long TxPgn, long src, long dest)
+{
+  char buffer[8];
+  //PGs for default
+
+/*$$USERAREA_J1939TXINDIBEGIN*/
+// insert your application code here
+/*$$USERAREA_J1939TXINDIEND*/
+
+  if (TxPgn == 0xF00F)    // ATO1_EMS
+  {
+    if (ecuhdl == Ecu0Handle)
+    {
+      cancelTimer(TimerEcu0PGNF00F);
+      setTimer(TimerEcu0PGNF00F,gCycleTime0PGNF00F);
+    }
+  }
+  if (TxPgn == 0xFEEE)    // ET1_EMS
+  {
+    if (ecuhdl == Ecu0Handle)
+    {
+      cancelTimer(TimerEcu0PGNFEEE);
+      setTimer(TimerEcu0PGNFEEE,gCycleTime0PGNFEEE);
+    }
+  }
+  if (TxPgn == 0xFEF5)    // AMB_EMS
+  {
+    if (ecuhdl == Ecu0Handle)
+    {
+      cancelTimer(TimerEcu0PGNFEF5);
+      setTimer(TimerEcu0PGNFEF5,gCycleTime0PGNFEF5);
+    }
+  }
+  if (TxPgn == 0xef00)    // PROA_1_EMS
+  {
+    if (ecuhdl == Ecu0Handle)
+    {
+      if (dest == Receiver61Address)
+      {
+        cancelTimer(TimerEcu0To61PGNEF3D);
+        setTimer(TimerEcu0To61PGNEF3D,gCycleTime0To61PGNEF3D);
+      }
+    }
+  }
+  if (TxPgn == 0xF004)    // EEC1_EMS
+  {
+    if (ecuhdl == Ecu0Handle)
+    {
+      cancelTimer(TimerEcu0PGNF004);
+      setTimer(TimerEcu0PGNF004,gCycleTime0PGNF004);
+    }
+  }
+  return 0;
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:J1939AppRxIndication(long,long,long,long,long):*///callback
+/*$$CANERATORBEGIN*/
+/*--------------------------------------------------
+  -- Callback function --
+
+  Callback function is called if a PG is received.
+--------------------------------------------------*/
+DWORD J1939AppRxIndication (long ecuhdl, long source, long dest, long length, long RxPG)
+{
+  char buffer[1785];
+  int loop;
+  pg 0x00 dummy = {dlc=1785,dp=0};
+
+/*$$USERAREA_J1939RXINDIBEGIN*/
+// insert your application code here
+/*$$USERAREA_J1939RXINDIEND*/
+
+  dummy.dlc = length;            // set dlc
+  dummy.pgn = RxPG;              // set PGN
+  if (RxPG & 0x10000)
+  {
+    dummy.Characteristic = 0x1;  // set DP=1
+  }
+  else
+  {
+    dummy.Characteristic = 0x0;  // set DP=0
+  }
+
+  J1939GetRxData(length, buffer);
+
+  // copy received data to pg
+  for (loop=0;loop < length; loop++)
+  {
+    dummy.byte(loop) = buffer[loop];
+  }
+
+  // update the addresses of the receivers
+  if (RxPG == 0xEE00)
+  {
+  }
+
+  return 0;
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:J1939AppRequestIndication(long,long,long,long,long):*///callback
+/*$$CANERATORBEGIN*/
+/*----------------------------------------------------------
+  -- Callback function --
+
+  Callback function is called if a request PG is received.
+----------------------------------------------------------*/
+DWORD J1939AppRequestIndication (long ecuhdl, long source, long dest, long page, long ReqPgn)
+{
+  pg  0xE800x acknPg;
+  int broadcastFlag;
+  int notAckFlag;
+  int loop;
+  long mpgn;
+  int responseAddr;
+  char buffer[8];
+  broadcastFlag=0;
+  notAckFlag=1;
+
+/*$$USERAREA_J1939REQINDIBEGIN*/
+// insert your application code here
+/*$$USERAREA_J1939REQINDIEND*/
+
+  // check if requested pg is specific or global
+  if (dest == 0xFF)
+  {
+    responseAddr=0xFF;
+    broadcastFlag=1;
+  }
+  else
+  {
+    responseAddr=source;
+    broadcastFlag=0;
+  }
+
+    if (ReqPgn == 0xEE00)
+    {
+      if (ecuhdl == Ecu0Handle)
+      {
+        if (dest == 0xFF)
+        {
+          TransmitEcu0To255PGNEEFF();
+          notAckFlag=0;
+        }
+      }
+    }
+    if (ReqPgn == 0xF00F)
+    {
+      if (ecuhdl == Ecu0Handle)
+      {
+        TransmitEcu0PGNF00F();
+        notAckFlag=0;
+      }
+    }
+    if (ReqPgn == 0xFEEE)
+    {
+      if (ecuhdl == Ecu0Handle)
+      {
+        TransmitEcu0PGNFEEE();
+        notAckFlag=0;
+      }
+    }
+    if (ReqPgn == 0xFEF5)
+    {
+      if (ecuhdl == Ecu0Handle)
+      {
+        TransmitEcu0PGNFEF5();
+        notAckFlag=0;
+      }
+    }
+    if (ReqPgn == 0xEF00)
+    {
+      if (ecuhdl == Ecu0Handle)
+      {
+        if (source == Receiver61Address)
+        {
+          TransmitEcu0To61PGNEF3D();
+          notAckFlag=0;
+        }
+      }
+    }
+    if (ReqPgn == 0xF004)
+    {
+      if (ecuhdl == Ecu0Handle)
+      {
+        TransmitEcu0PGNF004();
+        notAckFlag=0;
+      }
+    }
+
+  if ((notAckFlag) && (!broadcastFlag))
+  {
+    // set reserved byte to 0xFF
+    for (loop=0;loop < 8; loop++)
+    {
+      acknPg.byte(loop) = 0xFF;
+    }
+
+    acknPg.byte(0)=1;       // not ack
+    acknPg.byte(5)=ReqPgn & 0xFF;
+    acknPg.byte(6)=(ReqPgn & 0xFF00)>>8;
+    acknPg.byte(7)=(ReqPgn & 0xFF0000)>>16;
+
+    for (loop=0;loop < 8; loop++)
+    {
+      buffer[loop] = acknPg.byte(loop);
+    }
+    mpgn = ((acknPg.PF <<8) | 0xFF);
+
+    J1939TxReqPG(ecuhdl, mpgn, 0xFF,6,8,buffer);
+  }
+  return 0;
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:J1939AppErrorIndication(long,long,long,long):*///callback
+/*$$CANERATORUSERBEGIN*/
+/*-------------------------------------------------------------
+  -- Callback function --
+
+  Callback function is called if nodelayer detected an error.
+-------------------------------------------------------------*/
+DWORD J1939AppErrorIndication(long ecuhdl, long errorClass, long errorNumber, long addCode)
+{
+  write ("ERROR: The CALLBACK function J1939AppErrorIndication received an error....");
+  write ("       (caused by node with address %i)",J1939GetNodeAddr(ecuhdl));
+  
+  if (errorClass==0)   // API error
+  {
+    write("       API error: ");
+    write("       Program will be stopped!");
+    stop(); // remove this line if evaluating errors below
+    switch(errorNumber)
+    {
+      case 0x1: // Is not allowed to call this function from a callback
+      {
+        write("       -> Is not allowed to call this function from a callback");
+        break;
+      }
+      case 0x2: // Invalid Handle
+      {
+        write("       -> Invalid Handle");
+        break;
+      }
+      case 0x4: // Invalid Parameter
+      {
+        write("       -> Invalid Parameter");
+        break;
+      }
+      case 0x5: // Request cannot be sent
+      {
+        write("       -> Request cannot be sent");
+        break;
+      }
+      case 0x6: // Unknown Environment Variable
+      {
+        write("       -> Unknown Environment Variable");
+        break;
+      }
+      case 0x7: // Wrong Environment Variable Type
+      {
+        write("       -> Wrong Environment Variable Type");
+        break;
+      }
+      case 0x8: // Parameter exceeds range
+      {
+        write("       -> Parameter exceeds range");
+        break;
+      }
+      case 0x80: // Internal Error
+      {
+        write("       -> Internal Error");
+        break;
+      }
+      case 0x100: // General Error
+      {
+        write("       -> General Error");
+        break;
+      }
+      case 0x201: // Unknown bus name
+      {
+        write("       -> Unknown bus name");
+        break;
+      }
+      case 0x202: // ECU is offline
+      {
+        write("       -> ECU is offline");
+        break;
+      }
+      case 0x203: // Invalid address
+      {
+        write("       -> Invalid address");
+        break;
+      }
+      default:
+      {
+        write("       -> An error occured, but the error is not handeled in the AppErrorIndication function");
+        break;
+      }
+    }
+  }
+  else if (errorClass==1)   // timeout errors
+  {
+    write("       Timeout error: ");
+    write("       Program will be stopped!");
+    stop(); // remove this line if evaluating errors below
+    switch(errorNumber)
+    {
+      case 0x1: // CTS error - There was no CTS for an RTS
+      {
+        write("       -> CTS error - There was no CTS for an RTS");
+        break;
+      }
+      case 0x2: // peer to peer data timeout
+      {
+        write("       -> 	Data received after a timeout for a peer-to-peer connection");
+        break;
+      }
+      case 0x3: // BAM data timeout
+      {
+        write("       -> Data received in the timeout during a BAM");
+        break;
+      }
+      case 0x4: // An EndOfMessage Acknowledge is missing or was received too late
+      {
+        write("       -> An EndOfMessage Acknowledge is missing or was received too late");
+        break;
+      }
+      default:
+      {
+        write("       -> An error occured, but the error is not handeled in the AppErrorIndication function");
+        break;
+      }
+    }
+  }
+  else if (errorClass==2) // address claiming errors
+  {
+    write("       Address claiming error: ");
+    switch(errorNumber)
+    {
+      case 0x10: // node detected higher prior node
+      {
+        SetRetryTimer(ecuhdl);
+        break;
+      }
+      case 0x15: // Initialization error: ECU name was assigned twice
+      {
+        write("       -> Initialization error: ECU name was assigned twice");
+        break;
+      }
+      case 0x17: // Initialization error: ECU address was assigned twice
+      {
+        write("       -> Initialization error: ECU address was assigned twice");
+        break;
+      }
+      default:
+      {
+        write("       -> An error occured, but the error is not handeled in the AppErrorIndication function");
+        break;
+      }
+    }
+  }
+  else if (errorClass==3) // CAN transmission error
+  {
+    // not supported in nodelayer version 3.x
+  }
+  else if (errorClass==4) // system errors
+  {
+    write("       System error: ");
+    switch(errorNumber)
+    {
+      case 0x30: // 	Exception during protocol selection of BAM or CMDT
+      {
+        write("       -> 	Exception during protocol selection of BAM or CMDT");
+        break;
+      }
+      case 0x40: // 	Internal data buffer occupied
+      {
+        write("       -> Internal data buffer occupied");
+        break;
+      }
+      case 0x60: // User is sending a System PG via the CAPL interface 
+      {
+        write("       -> User is sending a System PG via the CAPL interface");
+        break;
+      }
+      default:
+      {
+        write("       -> An error occured, but the error is not handeled in the AppErrorIndication function");
+        break;
+      }
+    }
+  }
+  else if (errorClass==5) // errors at transport protocol
+  {
+    write("       Error at transport protocol: ");
+    switch(errorNumber)
+    {
+      case 0x71: // A transfer with the transfer protocol was interrupted by the receiver (addCode receives the PGN)
+      {
+        // addCode contains pgn
+        write("       -> A transfer with the transfer protocol was interrupted by the receiver (addCode receives the PGN)");
+        break;
+      }
+      case 0x72: // A transfer with the transfer protocol was interrupted by the sender (addCode receives the PGN)
+      {
+        // addCode contains pgn
+        write("       -> A transfer with the transfer protocol was interrupted by the sender (addCode receives the PGN)");
+        break;
+      }
+      default:
+      {
+        write("       -> An error occured, but the error is not handeled in the AppErrorIndication function");
+        break;
+      }
+    }
+  }
+
+  return 0;
+}
+/*$$CANERATORUSEREND*/
+/*@@end*/
+
+/*@@caplFunc:J1939AppNmtIndication(long,long,long):*///callback
+/*$$CANERATORUSERBEGIN*/
+/*---------------------------------------------------------------------------
+  -- Callback function --
+
+  Callback function is called if nodelayer detected an Address Claiming PG.
+---------------------------------------------------------------------------*/
+DWORD J1939AppNmtIndication(LONG busHandle, LONG address, LONG state)
+{
+  char deviceName[8];
+  J1939GetRxData( 8, deviceName );
+
+  UpdateReceiverAddresses();
+
+  switch(state)
+  {
+    case 0: // ECU begins claiming
+
+      break;
+    case 2: // ECU successfully claimed an address
+      
+      // update the flags for the members of a Working Set
+      AllowClaimAddress(deviceName);
+      break;
+    case 3: // ECU lost its address
+
+      break;
+  }
+  return 0;
+}
+/*$$CANERATORUSEREND*/
+/*@@end*/
+
+/*@@caplFunc:J1939AppCmdAddrIndication(long,long):*///callback
+/*$$CANERATORBEGIN*/
+/*--------------------------------------------------------------------
+  -- Callback function --
+
+  Callback function is called if a commanded address PG is received.
+--------------------------------------------------------------------*/
+DWORD J1939AppCmdAddrIndication(long ecuhdl,long length)
+{
+  char buffer[9];
+
+  // get new address
+  J1939GetRxData(9, buffer);
+
+/*$$USERAREA_J1939APPCMDADDRINDICATIONBEGIN*/
+// insert your application code here
+/*$$USERAREA_J1939APPCMDADDRINDICATIONIEND*/
+
+  if (((BYTE)buffer[7]) & 0x80)
+  {
+    // go online with new address
+    J1939ECUGoOnline(ecuhdl, buffer[8]);
+
+    if (ecuhdl == Ecu0Handle)
+      Ecu0Address = buffer[8];
+  }
+
+  return 0;
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:RetryEcu0GoOnline():*/
+/*$$CANERATORBEGIN*/
+/*--------------------------------------------------------------------
+  Function retries to go online with a address of the address range.
+--------------------------------------------------------------------*/
+void RetryEcu0GoOnline()
+{
+  int freeAddressFlag=1;
+  char name[8];
+  freeAddressFlag=1;
+  Ecu0Address = 128;
+  // check for next free address
+  while ( J1939GetName(BusName,Ecu0Address,name) == 0)
+  {
+    Ecu0Address++;
+    if (Ecu0Address >= 253)
+    {
+      freeAddressFlag = 0;
+      break;
+    }
+  }
+  if (freeAddressFlag)
+  {
+    J1939ECUGoOnline(Ecu0Handle, Ecu0Address);
+  }
+  else
+  {
+    J1939ECUGoOffline(Ecu0Handle);
+  }
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:SetRetryTimer(long):*/
+/*$$CANERATORBEGIN*/
+/*----------------------------------
+  Function starts an update timer.
+----------------------------------*/
+void SetRetryTimer(long ecuHdl)
+{
+  if (ecuHdl == Ecu0Handle)
+  {
+    J1939UpdateTable(BusName);
+    setTimer(TimerRetryEcuBootup0,1250);
+  }
+
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:UpdateReceiverAddresses():*/
+/*$$CANERATORBEGIN*/
+/*-----------------------------------------------------------------------------------------------
+  The variables "Receiver<EcuHandle>Address" contain the actual network addresses of the nodes.
+  Call this function to update the values of the variables.
+-----------------------------------------------------------------------------------------------*/
+void UpdateReceiverAddresses()
+{
+  Receiver0Address = J1939GetAddress(BusName,gMask0,Ecu0Name);
+  Receiver61Address = J1939GetAddress(BusName,gMask61,Ecu61Name);
+
+/*$$USERAREA_AftertreatmentUPDATERECADDRBEGIN*/
+  // insert your application code here
+/*$$USERAREA_AftertreatmentUPDATERECADDREND*/
+
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@caplFunc:AllowClaimAddress(char[]):*/
+/*$$CANERATORBEGIN*/
+/*------------------------------------------
+  Function checks in case of a Working Set
+  if the node is allowed to go online.
+------------------------------------------*/
+void AllowClaimAddress(char ecuName[])
+{
+  long address;
+  int i;
+  int isBootMaster;
+  int ecuFoundFlag;
+  
+/*$$USERAREA_AftertreatmentALLOWADCBEGIN*/
+  // insert your application code here
+/*$$USERAREA_AftertreatmentALLOWADCEND*/
+
+}
+/*$$CANERATOREND*/
+/*@@end*/
+
+/*@@timer:SystemTimer:*/
+on timer SystemTimer
+{
+  
+  gPedalPosition     = getValue (envEMSAccelerator);
+  gActualSpeed       = kIdleEngineSpeed + (kMaxEngineSpeed - kIdleEngineSpeed) * (gPedalPosition / 100.0);
+  gActualTorque      = kMaxTorque * (gPedalPosition / 100.0);
+  gRequestedUreaQuantity = kMaxUreaQuantity * (gPedalPosition / 100.0);
+  gActualCoolantTemp = utilRange( gActualCoolantTemp + (gActualSpeed - kIdleEngineSpeed) * 0.0001, 20, 90 );
+  gActualOilTemp     = utilRange( gActualOilTemp + (gActualSpeed - kIdleEngineSpeed * 6/5) * 0.00005, 20, 120 );
+   
+  setTimer(SystemTimer, kSystemTime); 
+}
+/*@@end*/
+
+/*@@caplFunc:utilRange(float,float,float):*///function
+/*
+ * Clip the value to the range of min and max
+ */
+float utilRange( float value, float min, float max )
+{
+  if (value < min) return min;
+  if (value > max) return max;
+
+  return value;
+}
+/*@@end*/
+

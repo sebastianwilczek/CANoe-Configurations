@@ -1,0 +1,77 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "Avb.cin"
+  #include "Talker.cin"    
+}
+
+variables
+{
+  dword gTalkerHandle;
+}
+
+on start
+{
+  // Register callbacks for methods requests  
+  if (SomeIpRegisterCallback(SomeIpGetProvidedObjectHandle("Start"), "OnStartRequest") > 0)
+  {
+    write("Error: Start, SomeIpRegisterCallback fails, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;   
+  }
+  
+  if (SomeIpRegisterCallback(SomeIpGetProvidedObjectHandle("Stop"), "OnStopRequest") > 0)
+  {
+    write("Error: Stop, SomeIpRegisterCallback fails, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;   
+  }
+}
+
+void OnAvbConnect(dword talkerHandle, dword result)
+{
+  long ret;
+  
+  if (result != kAvbOK)
+  {
+    WriteErrorAndStop(result, "OnAvbConnect");
+    return;
+  }
+
+  Talker_Read(talkerHandle, gBuffer[0]);
+  Talker_Read(talkerHandle, gBuffer[1]);
+}
+
+void OnStartRequest(dword methodHandle, dword messageHandle, dword responseMessageHandle)
+{  
+  dword ret;
+  
+  byte destinationAddress[6] = { 0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x01 };
+  
+  @sysvar::TV::PlayMode = 1;
+  
+  ret = Talker_Start(
+    destinationAddress, 
+    "Panels\\BMP\\video1-racing.wav",
+    gTalkerHandle,
+    "OnAvbConnect"
+  );
+  
+  if (StopIfError(ret, "Talker_Start") != 0)
+  {
+    return;
+  }
+  
+  if (ret != kAvbIoPending)
+  {
+    Talker_Read(gTalkerHandle, gBuffer[0]);
+    Talker_Read(gTalkerHandle, gBuffer[1]);
+  }    
+}
+
+void OnStopRequest(dword methodHandle, dword messageHandle, dword responseMessageHandle)
+{  
+  @sysvar::TV::PlayMode = 0;
+  
+  Talker_Stop(gTalkerHandle);    
+}

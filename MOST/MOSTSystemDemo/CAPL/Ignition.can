@@ -1,0 +1,94 @@
+/*@@var:*/
+variables
+{
+  // Ignition 
+  message IgnitionKeyStatus msgIgnitionKeyStatus;
+  msTimer tIgnition;
+  msTimer tKl15;
+
+  int gEngineStatus = 0;
+   
+  msTimer tStartAutomatic;
+  int gStartAutomaticStatus = 1;
+  int gStartAutomaticCounter = 0; 
+
+  const int kIgnitionKeyStatusCycle = 1000; // in ms
+}
+/*@@end*/
+
+/*@@sysvarChange:IgnitionKey:*/
+on sysvar IgnitionKey
+{
+  msgIgnitionKeyStatus.Ignition = @sysvar::IgnitionKey;
+
+  switch(@this)
+  {
+    case 0:
+              
+    break; 
+    case 1:
+      if(gEngineStatus == 1)
+        msgIgnitionKeyStatus.EngineIsRunning = 0x00;
+      CancelTimer(tIgnition);
+      SetTimer(tIgnition,200);
+      gEngineStatus = 0;
+    break; 
+    case 2:
+
+    break; 
+    case 3:
+      CancelTimer(tKl15);
+      SetTimer(tKl15,500);
+      gEngineStatus = 1 ;
+      msgIgnitionKeyStatus.EngineIsRunning = 0x01;
+    break; 
+  }
+}
+/*@@end*/
+
+/*@@timer:tIgnition:*/
+on timer tIgnition
+{
+  output(msgIgnitionKeyStatus);
+  if(@sysvar::IgnitionKey == 0 ) 
+  {  
+    cancelTimer(tIgnition);
+  }  
+  else 
+  {
+    setTimer(tIgnition,kIgnitionKeyStatusCycle);
+  }
+}
+/*@@end*/
+
+/*@@timer:tKl15:*/
+on timer tKl15
+{
+  @sysvar::IgnitionKey = 2;
+}
+/*@@end*/
+
+/*@@timer:tStartAutomatic:*/
+on timer tStartAutomatic
+{
+  gStartAutomaticCounter = gStartAutomaticCounter + 1 ;
+  @sysvar::IgnitionKey = gStartAutomaticCounter;
+
+  if(@sysvar::IgnitionKey == 3) 
+  {
+    CancelTimer(tStartAutomatic); 
+    SetTimer(tKl15,500);
+  }
+  if(@sysvar::IgnitionKey < 3) 
+    setTimer(tStartAutomatic,500);
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  if(gStartAutomaticStatus) 
+    setTimer(tStartAutomatic,500); 
+}
+/*@@end*/
+

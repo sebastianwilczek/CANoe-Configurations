@@ -1,0 +1,864 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "..\ShareableFolders\CaplLibrary\Tc8TestLib\BasicFunctionsTestLib.cin"
+  #include "..\ShareableFolders\CaplLibrary\StubFunctionLib\IcmpStubFunctions.cin"
+}
+
+variables
+{
+  byte gLastReceivedPackageHeader[1024];
+  byte gLastReceivedPackagePayload[8];
+  long gLastReceivedPackageHeaderLength; 
+  
+  byte gLastSentPackageHeader[1024];
+  byte gLastSentPackagePayload[8];
+  long gLastSentPackageHeaderLength; 
+}
+
+
+
+/**
+ * This function should be called in the preparation of the test fixture
+ */
+export InitTestFixture()
+ {
+  Internal_InitTestFixture(kIcmpv4, "OnEthPacketIcmp");
+ }
+
+/**
+ * This function should be called in the preparation of each test case
+ */
+export InitTestCase(char testCaseName[], int testCaseNumber, enum Bool stubFunctionRequired)
+ {
+  Internal_InitTestCase(testCaseName, kIcmpv4, "ICMPv4", testCaseNumber, stubFunctionRequired);
+ }
+
+/**
+ * This function should be called in the completion of the test fixture
+ */
+export EndTestFixture()
+ {
+   Internal_EndTestFixture();
+ }
+
+/**
+ * This function should be called in the completion of each testcase
+ */
+export EndTestCase()
+ {
+  Internal_EndTestCase();
+ }
+
+
+/**
+ * This function is called when an ethernet packet is received.
+ * If it is sent from the DuT (checked via ShouldIncomingPacketBeProcessed),
+ * and observing of packets is active, the incoming packet will
+ * be processed
+ */
+void OnEthPacketIcmp(long channel, long dir,long packetHandle)
+{
+  enum Bool match;
+  if(ShouldIncomingPacketBeProcessed(channel, dir, packetHandle) == kFalse)
+  {
+    return;
+  }
+  if(AnswerArpRequestForHost1(packetHandle) == kTrue)
+  {
+    return;
+  }
+  match = CompareParameters(packetHandle, channel, kFalse);
+  if(match == kTrue)
+  {
+    //Extract IP header and first 8 bytes of payload
+    //This will be needed for constructing ICMP messages,
+    //where these data shall be attached to the message
+    gLastReceivedPackageHeaderLength = EthGetTokenData(packetHandle,"ipv4","header",elcount(gLastReceivedPackageHeader),gLastReceivedPackageHeader);
+    EthGetTokenData(packetHandle,"ipv4","data",8,gLastReceivedPackagePayload);
+    EthernetPacketReceived(channel);
+  }
+}
+
+
+/**
+ * Send an ICMP parameter problem
+ * @param destMac The destination MAC address
+ * @param srcMac The source MAC address
+ * @param destIpAddress The destination IP address
+ * @param srcIpAddress The source IP address
+ * @param pointer The ICMP pointer
+ * @param timestampOptionLength Length of the IP Option timestamp
+ * @param timestampOptionPointer The pointer of the IP Option timestamp
+ * @param timestampOptionTimestamp The timestamp of the IP Option timestamp. If any of these is Wildcard, no Timestamp option is added
+ * @param sendingType For a default message, use kCompleteMessage. Use the other enum values for manipulation of the message
+ */
+export testfunction SendIcmpParameterProblem(
+  char destMac[],
+  char srcMac[],
+  char destIpAddress[],
+  char srcIpAddress[],
+  char pointer[],
+  char timestampOptionLength[],
+  char timestampOptionPointer[],
+  char timestampOptionTimestamp[],
+  enum SendingType sendingType
+  )
+{
+  long p,result;
+  byte timestampData[6];
+  byte buffer[28];
+  
+  SetBusContext(getBusNameContext("Ethernet_1"));
+
+  p = EthInitPacket("icmpv4","parameterProblem");
+
+  result = EthSetTokenInt64(p, "eth",   "destination", ConvertMacAddressStringToInt64(destMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d",result);
+  result = EthSetTokenInt64(p, "eth",   "source", ConvertMacAddressStringToInt64(srcMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src %d",result);
+  result = EthSetTokenInt64(p, "ipv4",  "destination", ConvertIpAddressStringToInt64(destIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest %d",result);
+  result = EthSetTokenInt64(p, "ipv4",  "source", ConvertIpAddressStringToInt64(srcIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src %d",result);
+  result = EthSetTokenInt64(p, "icmpv4","pointer",atol(pointer));
+  if(result != 0) write("Error @ EthSetTokenInt64 icmp pointer %d",result);
+  
+  //Timestamp option
+  if(!IsWildcard(timestampOptionLength) && !IsWildcard(timestampOptionPointer) && !IsWildcard(timestampOptionTimestamp))
+  {
+   result = EthAddToken(p, "ipv4", "option68");
+   if (result != 0) write("Error @ EthAddToken %d", result);
+  
+   result = EthSetTokenInt64(p, "ipv4", "option68.length", atol(timestampOptionLength));
+   if (result != 0) write("Error @ EthSetToken length %d", result);
+  
+   timestampData.Byte(0) = (byte) atol(timestampOptionPointer);
+   timestampData.Byte(1) = 0; // 0: Timestamp contains only Time fields
+   timestampData.Dword(2) = (dword) atol(timestampOptionTimestamp);
+   result = EthSetTokenData(p, "ipv4", "option68.data", 6, timestampData);
+   if (result != 0) write("Error @ EthSetTokenData timestamp option %d", result);
+  }
+  
+  //Add last Internet header and 8 bytes of original datagram
+  memcpy(buffer, gLastReceivedPackageHeader, gLastReceivedPackageHeaderLength);
+  memcpy_off(buffer, gLastReceivedPackageHeaderLength, gLastReceivedPackagePayload, 0, 8);
+  result = EthResizeToken(p,"icmpv4","data",(gLastReceivedPackageHeaderLength+8)*8);
+  if(result !=0) write("Error @EthResizeToken icmp payload %d", result);
+  result = EthSetTokenData(p, "icmpv4", "data", gLastReceivedPackageHeaderLength+8, buffer);
+  if(result !=0) write("Error @EthSetTokenData icmp payload %d", result);
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+
+  result = EthOutputPacket(p);
+  if(result != 0) write("Error @ EthOutputPacket %d",result);
+  
+  EthReleasePacket(p);
+  if(result != 0) write("Error @ EthReleasePacket %d",result);
+}
+
+
+/**
+ * Send an ICMP Echo request
+ * @param destMac The destination MAC address
+ * @param srcMac The source MAC address
+ * @param destIpAddress The destination IP address
+ * @param srcIpAddress The source IP address
+ * @param identifier The identifier of the ICMP echo request message
+ * @param sequence The sequence number of the ICMP echo request message
+ * @param data The data of the ICMP echo request message
+ * @param timestampOptionLength The length of the timestamp option (wildcard if no timestamp option should be added)
+ * @param timestampOptionPointer The pointer of the timestamp option (wildcard if no timestamp option should be added)
+ * @param timestampOptionTimestamp The timestamp of the timestamp option (wildcard if no timestamp option should be added)
+ * @param amountOfTimestampOptions The amount of timestamp options that should be added
+ * @param sendingType: kComplete for a unmanipulated message, other value for special manipulations
+ */
+
+export testfunction SendIcmpEchoRequest(
+  char destMac[],
+  char srcMac[],
+  char destIpAddress[],
+  char srcIpAddress[],
+  char identifier[],
+  char sequence[],
+  byte data[],
+  char timestampOptionLength[],
+  char timestampOptionPointer[],
+  char timestampOptionTimestamp[],
+  int amountOfTimestampOptions,
+  enum SendingType sendingType
+  )
+{
+  long p, result, oldLength;
+  byte timestampData[12];
+  byte buffer[28];
+  int i;
+  char tempstr[128];
+  
+  SetBusContext(getBusNameContext("Ethernet_1"));
+
+  p = EthInitPacket("icmpv4","echo");
+
+  result = EthSetTokenInt64(p, "eth",   "destination", ConvertMacAddressStringToInt64(destMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d", result);
+  result = EthSetTokenInt64(p, "eth",   "source", ConvertMacAddressStringToInt64(srcMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src %d", result);
+  result = EthSetTokenInt64(p, "ipv4",  "destination", ConvertIpAddressStringToInt64(destIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest %d", result);
+  result = EthSetTokenInt64(p, "ipv4",  "source", ConvertIpAddressStringToInt64(srcIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src %d", result);
+  if(!IsWildCard(identifier))
+  {
+   result = EthSetTokenInt64(p, "icmpv4","identifier",atol(identifier));
+   if(result != 0) write("Error @ EthSetTokenInt64 identifier");
+  }
+  if(!IsWildCard(sequence))
+  {
+   result = EthSetTokenInt64(p, "icmpv4","sequence",atol(sequence));
+   if(result != 0) write("Error @ EthSetTokenInt64 icmp sequence");
+  }
+  
+  result = EthResizeToken(p, "icmpv4", "data", elcount(data)*8);
+  if(result != 0) write("Error @ EthResizeToken %d",result);
+  result = EthSetTokenData(p, "icmpv4", "data", elcount(data), data);
+  if(result != 0) write("Error @ EthSetTokenData %d",result);
+  
+  //Timestamp option
+  if(!IsWildcard(timestampOptionLength) && !IsWildcard(timestampOptionPointer) && !IsWildcard(timestampOptionTimestamp))
+  {
+   for(i = 0; i < amountOfTimestampOptions; i++)
+    {
+      //adding two timestamps via EthAddToken fails
+      //(CANoe claims that the tokens "option68_2.length" and "option68_2.data" do not exist)
+      //Hence we do it manually
+      oldLength = EthGetTokenLengthBit(p, "ipv4", "header");
+      result = EthGetLastError();
+      if(result != 0) write("Error @ EthGetTokenLengthBit %d", result);
+      result = EthResizeToken(p, "ipv4", "header", oldLength + atol(timestampOptionLength)*8);
+      if(result != 0) write("Error @ EthResizeToken %d", result);
+      timestampData.Byte(0) = 68;
+      timestampData.Byte(1) = (byte) atol(timestampOptionLength);
+      timestampData.Byte(2) = (byte) atol(timestampOptionPointer);
+      timestampData.Byte(3) = 0; // 0: Timestamp contains only Time fields
+      timestampData.Dword(4) = (dword) atol(timestampOptionTimestamp);
+      result = EthSetTokenData(p, "ipv4", "header", oldLength/8, atol(timestampOptionLength), timestampData);
+      if (result != 0) write("Error @ EthSetTokenData timestamp option %d", result);
+    }
+  }
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  //Special manipulations of the message
+ //Send only first or second half of package, if requested
+ if(sendingType == kFirstHalf)
+ {
+  FragmentIpPacketParts(p, 1, 2, 0, "*");
+ }
+ if(sendingType == kSecondHalf)
+ {
+  FragmentIpPacketParts(p, 2, 2, 0, "*");
+ }
+ // Make checksum invald, if requested
+ if(sendingType == kInvalidChecksum)
+ {
+  MakeChecksumInvalid(p,"icmpv4");
+ }
+
+  //Save the header and the payload in order to be able to process it further
+  gLastSentPackageHeaderLength = EthGetTokenData(p,"ipv4","header",elcount(gLastSentPackageHeader),gLastSentPackageHeader);
+  EthGetTokenData(p,"ipv4","data",8,gLastSentPackagePayload);
+  write("gLastSentPackageHeaderLength=%d",gLastSentPackageHeaderLength);
+
+  result = EthOutputPacket(p);
+  if(result != 0) write("Error @ EthOutputPacket %d",result);
+  
+  result = EthReleasePacket(p);
+  if(result != 0) write("Error @ EthReleasePacket %d",result);
+}
+
+/**
+ * Send an ICMP Timestamp request
+ * @param destMac The destination MAC address
+ * @param srcMac The source MAC address
+ * @param destIpAddress The destination IP address
+ * @param srcIpAddress The source IP address
+ * @param identifier The identifier of the ICMP timestamp request message
+ * @param sequence The sequence number of the ICMP timestamp request message
+ * @param originateTimestamp The originate timestamp of the ICMP timestamp request message
+ * @param receiveTimestamp The originate timestamp of the ICMP timestamp request message
+ */
+export testfunction SendIcmpTimestamp(
+  char destMac[],
+  char srcMac[],
+  char destIpAddress[],
+  char srcIpAddress[],
+  char identifier[],
+  char sequence[],
+  char originateTimestamp[],
+  char receiveTimestamp[]
+  )
+{
+  long p,result;
+  
+  SetBusContext(getBusNameContext("Ethernet_1"));
+
+  p = EthInitPacket("icmpv4","timestamp");
+
+  result = EthSetTokenInt64(p, "eth",   "destination", ConvertMacAddressStringToInt64(destMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d", result);
+  result = EthSetTokenInt64(p, "eth",   "source", ConvertMacAddressStringToInt64(srcMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src %d", result);
+  result = EthSetTokenInt64(p, "ipv4",  "destination", ConvertIpAddressStringToInt64(destIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest %d", result);
+  result = EthSetTokenInt64(p, "ipv4",  "source", ConvertIpAddressStringToInt64(srcIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src %d", result);
+  
+  if(!IsWildcard(identifier))
+  {
+   result = EthSetTokenInt64(p, "icmpv4",  "identifier", atol(identifier));
+   if(result != 0) write("Error @ EthSetTokenInt64 identifier %d", result);
+  }
+  
+  if(!IsWildcard(sequence))
+  {
+   result = EthSetTokenInt64(p, "icmpv4",  "sequence", atol(sequence));
+   if(result != 0) write("Error @ EthSetTokenInt64 sequence %d", result);
+  }
+  
+  if(!IsWildcard(originateTimestamp))
+  {
+  result = EthSetTokenInt64(p, "icmpv4",  "timestampOriginate", atol(originateTimestamp));
+  if(result != 0) write("Error @ EthSetTokenInt64 originate timestamp %d", result);
+  }
+  
+  if(!IsWildcard(receiveTimestamp))
+  {
+  result = EthSetTokenInt64(p, "icmpv4",  "timestampReceive", atol(receiveTimestamp));
+  if(result != 0) write("Error @ EthSetTokenInt64 receive timestamp %d", result);
+  }
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthOutputPacket(p);
+  if(result != 0) write("Error @ EthOutputPacket %d",result);
+  
+  EthReleasePacket(p);
+  if(result != 0) write("Error @ EthReleasePacket %d",result);
+}
+
+/**
+ * Send an ICMP information request
+ * @param destMac The destination MAC address
+ * @param srcMac The source MAC address
+ * @param destIpAddress The destination IP address
+ * @param srcIpAddress The source IP address
+ * @param identifier The identifier of the ICMP information request message
+ * @param sequence The sequence number of the ICMP information request message
+ */
+export testfunction SendIcmpInformationRequest(
+  char destMac[],
+  char srcMac[],
+  char destIpAddress[],
+  char srcIpAddress[],
+  char identifier[],
+  char sequence[]
+  )
+{
+  long p,result;
+  
+  SetBusContext(getBusNameContext("Ethernet_1"));
+
+  p = EthInitPacket("icmpv4","informationRequest");
+
+  result = EthSetTokenInt64(p, "eth",   "destination", ConvertMacAddressStringToInt64(destMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d", result);
+  result = EthSetTokenInt64(p, "eth",   "source", ConvertMacAddressStringToInt64(srcMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src %d", result);
+  result = EthSetTokenInt64(p, "ipv4",  "destination", ConvertIpAddressStringToInt64(destIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest %d", result);
+  result = EthSetTokenInt64(p, "ipv4",  "source", ConvertIpAddressStringToInt64(srcIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src %d", result);
+  
+  if(!IsWildcard(identifier))
+  {
+   result = EthSetTokenInt64(p, "icmpv4",  "identifier", atol(identifier));
+   if(result != 0) write("Error @ EthSetTokenInt64 identifier %d", result);
+  }
+  
+  if(!IsWildcard(sequence))
+  {
+   result = EthSetTokenInt64(p, "icmpv4",  "sequence", atol(sequence));
+   if(result != 0) write("Error @ EthSetTokenInt64 sequence %d", result);
+  }
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthOutputPacket(p);
+  if(result != 0) write("Error @ EthOutputPacket %d",result);
+  
+  EthReleasePacket(p);
+  if(result != 0) write("Error @ EthReleasePacket %d",result);
+}
+
+/**
+ * Send an IP message with an unsupported protocol. The value of the protocol is taken from the parameter table
+ * @param destMac The destination MAC address
+ * @param srcMac The source MAC address
+ * @param destIpAddress The destination IP address
+ * @param srcIpAddress The source IP address
+ */
+export testfunction SendIpMessageWithUnsupportedProtocol(
+  char destMac[],
+  char srcMac[],
+  char destIpAddress[],
+  char srcIpAddress[]
+  )
+{
+  long p,result;
+  
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+
+  p = EthInitPacket("ipv4");
+
+  result = EthSetTokenInt64(p, "eth",   "destination", ConvertMacAddressStringToInt64(destMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d", result);
+  result = EthSetTokenInt64(p, "eth",   "source", ConvertMacAddressStringToInt64(srcMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src %d", result);
+  result = EthSetTokenInt64(p, "ipv4",  "destination", ConvertIpAddressStringToInt64(destIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest %d", result);
+  result = EthSetTokenInt64(p, "ipv4",  "source", ConvertIpAddressStringToInt64(srcIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src %d", result);
+  
+  result = EthSetTokenInt64(p, "ipv4",  "protocol", syspar::UnsupportedProtocol);
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 protocol %d", result);
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthOutputPacket(p);
+  if(result != 0) write("Error @ EthOutputPacket %d",result);
+  
+  EthReleasePacket(p);
+  if(result != 0) write("Error @ EthReleasePacket %d",result);
+}
+
+/**
+ * Send an IP message with an unsupported type. The value of the type is taken from the parameter table
+ * @param destMac The destination MAC address
+ * @param srcMac The source MAC address
+ * @param destIpAddress The destination IP address
+ * @param srcIpAddress The source IP address
+ */
+export testfunction SendInvalidIcmpTypeMessage(
+  char destMac[],
+  char srcMac[],
+  char destIpAddress[],
+  char srcIpAddress[]
+  )
+{
+  long p,result;
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+
+  p = EthInitPacket("icmpv4");
+
+  result = EthSetTokenInt64(p, "eth",   "destination", ConvertMacAddressStringToInt64(destMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest");
+  result = EthSetTokenInt64(p, "eth",   "source", ConvertMacAddressStringToInt64(srcMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src");
+  result = EthSetTokenInt64(p, "ipv4",  "destination", ConvertIpAddressStringToInt64(destIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest");
+  result = EthSetTokenInt64(p, "ipv4",  "source", ConvertIpAddressStringToInt64(srcIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src");
+  
+  result = EthSetTokenInt64(p, "icmpv4", "type",syspar::InvalidIcmpType);
+  if(result != 0) write("Error @ EthSetTokenInt64 icmpv4 type");
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+
+  result = EthOutputPacket(p);
+  if(result != 0) write("Error @ EthOutputPacket %d",result);
+  
+  EthReleasePacket(p);
+  if(result != 0) write("Error @ EthReleasePacket %d",result);
+}
+
+/**
+ * Send an UDP message
+ * @param destMac The destination MAC address
+ * @param srcMac The source MAC address
+ * @param destIpAddress The destination IP address
+ * @param srcIpAddress The source IP address
+ * @param destPort The destination port
+ */
+export testfunction SendUdpMessage(char destMac[],char srcMac[],char destIpAddress[],char srcIpAddress[],char destPort[],char srcPort[])
+{
+ long p,result;
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+
+  p = EthInitPacket("udp");
+
+  result = EthSetTokenInt64(p, "eth",   "destination", ConvertMacAddressStringToInt64(destMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest");
+  
+  result = EthSetTokenInt64(p, "eth",   "source", ConvertMacAddressStringToInt64(srcMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src");
+  
+  result = EthSetTokenInt64(p, "ipv4",  "destination", ConvertIpAddressStringToInt64(destIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest");
+  
+  result = EthSetTokenInt64(p, "ipv4",  "source", ConvertIpAddressStringToInt64(srcIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src");
+  
+  result = EthSetTokenInt64(p, "udp", "destination", atol(destPort));
+  if(result != 0) write("Error @ EthSetTokenInt64 udp destport");
+  
+  result = EthSetTokenInt64(p, "udp", "source", atol(srcPort));
+  if(result != 0) write("Error @ EthSetTokenInt64 udp srcport");
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+
+  result = EthOutputPacket(p);
+  if(result != 0) write("Error @ EthOutputPacket %d",result);
+  
+  EthReleasePacket(p);
+  if(result != 0) write("Error @ EthReleasePacket %d",result); 
+}
+
+
+
+
+/**
+ * Waits for an incoming ICMP echo request.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+export testfunction WaitForIcmpEchoRequest(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	destIp[],
+  char	srcIp[])
+{
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmp("8");                          /* Echo Request Type */
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForIcmpEchoRequest", "DUT sent an ICMPv4 echo request.");
+  else
+    testStepFail("WaitForIcmpEchoRequest", "DUT didn't send an ICMPv4 echo request.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an incoming ICMP echo reply. Params which are marked with a wildcard are not checked
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param identifier The identifier of the icmp echo reply
+ * @param sequence The sequence number of the icmp echo reply
+ * @param data The data of the icmp echo reply
+ * @param dataLength the length of the data of the icmp echo reply. Wildcard if data should not be checked
+ */
+export testfunction WaitForIcmpEchoReply(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	destIp[],
+  char	srcIp[],
+  char  identifier[],
+  char  sequence[],
+  byte  data[],
+  char   dataLength[])
+{
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmpEchoReply(identifier,sequence,data,dataLength);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForIcmpEchoRequest", "DUT sent an ICMPv4 echo request.");
+  else
+    testStepFail("WaitForIcmpEchoRequest", "DUT didn't send an ICMPv4 echo request.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an incoming ICMP parameter problem. Params which are marked with a wildcard are not checked
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param pointer The pointer of the ICMP parameter problem message
+ */
+export testfunction WaitForIcmpParameterProblem(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	destIp[],
+  char	srcIp[],
+  char  pointer[])
+{
+  PrepareWaitForEthernet(destMac, srcMac); 
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmpParameterProblem(pointer);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForIcmpParameterProblem", "DUT sent an ICMPv4 parameter problem.");
+  else
+    testStepFail("WaitForIcmpParameterProblem", "DUT didn't send an ICMPv4 parameter problem.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an incoming ICMP parameter problem where the datafield is set to the header
+ * and the first 8 bytes of the last sent message. Params which are marked with a wildcard are not checked
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+export testfunction WaitForIcmpParameterProblemWithDatafieldSetToLastSentMessage(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	destIp[],
+  char	srcIp[]
+  )
+{
+  byte buffer[1024];
+  
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmpParameterProblem(syspar::Wildcard);
+  
+  memcpy(buffer, gLastSentPackageHeader, gLastSentPackageHeaderLength);
+  memcpy_off(buffer, gLastSentPackageHeaderLength, gLastSentPackagePayload, 0, 8);
+  InternalAddExpectedDataParameter("icmpv4", "data", buffer, gLastSentPackageHeaderLength + 8);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForIcmpParameterProblem", "DUT sent an ICMPv4 parameter problem.");
+  else
+    testStepFail("WaitForIcmpParameterProblem", "DUT didn't send an ICMPv4 parameter problem.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an incoming ICMP destination unreachable problem. Params which are marked with a wildcard are not checked
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param pointer The code of the ICMP destination unreachable message
+ */
+export testfunction WaitForIcmpDestinationUnreachable(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	destIp[],
+  char	srcIp[],
+  char  code[])
+{ 
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmpDestinationUnreachable(code);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForIcmpDestinationUnreachable", "DUT sent an ICMPv4 destination unreachable.");
+  else
+    testStepFail("WaitForIcmpDestinationUnreachable", "DUT didn't send an ICMPv4 destination unreachable.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an incoming ICMP time exceeded. Params which are marked with a wildcard are not checked
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param code The pointer of the ICMP time exceeded message
+ */
+export testfunction WaitForIcmpTimeExceeded(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	destIp[],
+  char	srcIp[],
+  char  code[])
+{ 
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmpTimeExceeded(code);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForIcmpTimeExceeded", "DUT sent an ICMPv4 time exceeded.");
+  else
+    testStepFail("WaitForIcmpTimeExceeded", "DUT didn't send an ICMPv4 time exceeded.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an incoming ICMP timestamp reply. Params which are marked with a wildcard are not checked
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param identifier The identifier of the ICMP timestamp reply message
+ * @param sequence The sequence of the ICMP timestamp reply message
+ * @param timestampOriginate The originate timestamp of the ICMP timestamp reply message
+ * @param timestampOriginateCheckType The checktype of the originate timestamp of the ICMP timestamp reply message
+ * @param timestampReceive The receive timestamp of the ICMP timestamp reply message
+ * @param timestampReceiveCheckType The checktype of the receive timestamp of the ICMP timestamp reply message
+ * @param timestampTransmit The transmit timestamp of the ICMP timestamp reply message
+ * @param timestampTransmitCheckType The checktype of the transmit timestamp of the ICMP timestamp reply message
+ */
+export testfunction WaitForIcmpTimestampReply(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	destIp[],
+  char	srcIp[],
+  char  identifier[],
+  char  sequence[],
+  char  timestampOriginate[],
+  enum  CheckType timestampOriginateCheckType,
+  char  timestampReceive[],
+  enum  CheckType timeStampReceiveCheckType,
+  char  timestampTransmit[],
+  enum  CheckType timestampTransmitCheckType)
+{
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmpTimestamp(identifier, sequence, timestampOriginate, timestampOriginateCheckType, timestampReceive, timeStampReceiveCheckType, timestampTransmit, timestampTransmitCheckType);
+
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForIcmpTimeExceeded", "DUT sent an ICMPv4 time exceeded.");
+  else
+    testStepFail("WaitForIcmpTimeExceeded", "DUT didn't send an ICMPv4 time exceeded.");
+  InternalClearAllParameters();
+}
+
+
+/**
+ * Waits a specific amount of time for an unexpected ICMP message
+ * @param timeout The amount of time in milliseconds to wait
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param icmpType The type of the imcp message. Wildcard if no icmp message of any type is expected
+ */
+export testfunction WaitForUnexpectedIcmpMessage(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[],
+  char icmpType[])
+{
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmp(icmpType); 
+
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+
+  if (WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+    testStepPass("WaitForUnexpectedIcmpMessage", "DUT didn't send an ICMP message.");
+  else
+    testStepFail("WaitForUnexpectedIcmpMessage", "DUT sent an ICMP message.");
+  InternalClearAllParameters();
+}

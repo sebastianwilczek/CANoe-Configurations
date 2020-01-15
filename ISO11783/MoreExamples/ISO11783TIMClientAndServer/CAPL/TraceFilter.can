@@ -1,0 +1,214 @@
+/*@!Encoding:1252*/
+
+///////////////////////////////////////
+// v. 2.0
+///////////////////////////////////////
+includes
+{
+}
+
+variables
+{
+  // TIM parmeter group numbers
+  dword cPGN_TIM12  = 0x2300;
+  dword cPGN_TIM21  = 0x2400;
+  dword cPGN_AUTH12 = 0x7000;
+  dword cPGN_AUTH21 = 0x6F00;
+  
+  dword  sTIMLastServerStatus;                // Stores the content of the last TIM server status message
+  int   sExpectedServerHeartbeat;             // Heartbeat counter value which is expected in the next TIM server status message
+  
+  byte  sTIMLastClientStatus[256];                 // Stores the content of the last TIM client status message
+  int   sExpectedClientHeartbeat[256];             // Heartbeat counter value which is expected in the next TIM client status message
+  
+  qword sLastAUTHServerStatus[256];                // Stores the content of the last server authentication status messages
+  qword sLastAUTHClientStatus[256];                // Stores the content of the last client authentication status messages
+    
+  const byte cNumOfFunctions = 0x47;          // Number of possible TIM functions
+  qword sTIMFunctionStatus[cNumOfFunctions];  // Stores the content of the last TIM functions status messages. It works as long as every single function can only be used by one client. 
+  qword sTIMFunctionRequest[cNumOfFunctions]; // Stores the content of the last TIM function Request messages. It works as long as every single function can only be used by one client.
+
+}
+
+on preStart
+{
+  qword number;
+  
+  sTIMLastServerStatus = 0xFFFFFFFF;
+  sExpectedServerHeartbeat = -1;
+
+  for (number=0; number<256; ++number)
+  {
+    sTIMLastClientStatus[number] = 0xFF;
+    sExpectedClientHeartbeat[number] = -1;
+    
+    sLastAUTHServerStatus[number] = 0xFFFFFFFFFFFFFFFFLL;
+    sLastAUTHClientStatus[number] = 0xFFFFFFFFFFFFFFFFLL;
+  }
+  
+  for (number=0; number<cNumOfFunctions; ++number)
+  {
+    sTIMFunctionStatus[number]  = 0xFFFFFFFFFFFFFFFFLL;
+    sTIMFunctionRequest[number] = 0xFFFFFFFFFFFFFFFFLL;
+  }
+}
+
+on pg *
+{
+  byte firstByte, source, dest;
+  firstByte = this.byte(0);
+  source = this.sa;
+  dest = this.da;
+  
+  // don't forward messages on CAN 2 
+  if (this.can != 1) return;
+
+  if (this.pgn == cPGN_TIM12)
+  {
+    switch(firstByte)
+    {
+      case 0xFA: // TIM Server Status
+        if (@TraceFilter::svFilterServerStatus)
+        {
+          if (this.dword(2) == sTIMLastServerStatus && this.byte(1) == sExpectedServerHeartbeat)// no changes => don't forward
+          {
+            //Adjust the expected server heartbeat
+            if(this.byte(1) < 0xFA)
+            {
+              sExpectedServerHeartbeat = this.byte(1) + 1;
+            }
+            else if(this.byte(1) == 0xFA)
+            {
+              sExpectedServerHeartbeat = 0;
+            }
+            return; // don't forward this message
+          }
+          else //something is changed => forward
+          {
+            sTIMLastServerStatus = this.dword(2); //Adjust the new value
+            //Adjust the expected server heartbeat
+            if(this.byte(1) < 0xFA)
+            {
+              sExpectedServerHeartbeat = this.byte(1) + 1;
+            }
+            else if(this.byte(1) == 0xFA)
+            {
+              sExpectedServerHeartbeat = 0;
+            }
+          }
+        }
+        break;
+      default:
+        if (@TraceFilter::svFilterFctAssignmentStatus)
+        {
+          if(firstByte >= 0 && firstByte <= 0x46) // TIM Server Function Status
+          {
+            if((sTIMFunctionStatus[firstByte] | 0x00FF000000000F00ll ) == (this.qword(0) | 0x00FF000000000F00ll )) //Mask the reflected request counter
+            {
+              return;
+            }
+            else
+            {
+              sTIMFunctionStatus[firstByte] = this.qword(0);
+            }
+          }
+        }
+        break;
+    }
+  }
+  
+  if (this.pgn == cPGN_TIM21)
+  {
+    switch(firstByte)
+    {
+      case 0xF9: // TIM Client Status
+        if (@TraceFilter::svFilterClientStatus)
+        {
+          if (this.byte(2) == sTIMLastClientStatus[source]  && this.byte(1) == sExpectedClientHeartbeat[source])// no changes => don't forward
+          {
+            // Adjust the expected server heartbeat
+            if(this.byte(1) < 0xFA)
+            {
+              sExpectedClientHeartbeat[source] = this.byte(1) + 1;
+            }
+            else if(this.byte(1) == 0xFA)
+            {
+              sExpectedClientHeartbeat[source] = 0;
+            }
+            return; // don't forward this message
+          }
+          else // something is changed => forward
+          {
+            sTIMLastClientStatus[source] = this.byte(2); // Adjust the new value
+            
+            // Adjust the expected server heartbeat
+            if(this.byte(1) < 0xFA)
+            {
+              sExpectedClientHeartbeat[source] = this.byte(1) + 1;
+            }
+            else if(this.byte(1) == 0xFA)
+            {
+              sExpectedClientHeartbeat[source] = 0;
+            }
+          }
+        }
+        break;
+      default:
+        if (@TraceFilter::svFilterFctRequest)
+        {
+          if(firstByte >= 0 && firstByte <= 0x46) // TIM Function Request
+          {
+            if((sTIMFunctionRequest[firstByte] | 0x0000000000000F00ll ) == (this.qword(0) | 0x0000000000000F00ll )) //Mask the request counter
+            {
+              return;
+            }
+            else
+            {
+              sTIMFunctionRequest[firstByte] = this.qword(0);
+            }
+          }
+        }
+        break;          
+    }
+  }
+  
+  if(this.pgn == cPGN_AUTH12)
+  {
+    switch(firstByte)
+    {
+      case 0xF9: // Server Authentication Status
+      {
+        if(@TraceFilter::svFilterAUTHServerStatus)
+        {
+          if(this.qword(0) == sLastAUTHServerStatus[dest])
+          {
+            return;
+          }
+        }
+        sLastAUTHServerStatus[dest] = this.qword(0);
+      }
+      break;
+    }
+  }
+  
+  if(this.pgn == cPGN_AUTH21)
+  {
+    switch(firstByte)
+    {
+      case 0xFA: // Client Authentication Status
+      {
+        if(@TraceFilter::svFilterAUTHClientStatus)
+        {
+          if(this.qword(0) == sLastAUTHClientStatus[source])
+          {
+            return;
+          }
+        }
+        sLastAUTHClientStatus[source] = this.qword(0);
+      }
+      break;
+    }
+  }
+  
+  output(this);
+}

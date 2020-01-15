@@ -1,0 +1,621 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+//
+// UDP socket handling and socket information management
+//
+
+variables
+{
+  const word kUDP_MAX_SOCKET_NUM = 20;
+  const int  kINVALID_UDP_SOCKET_INDEX = -1;
+  const dword kINVALID_SOCKET = (~0);
+  const long kWSA_INIVALID_PARAMETER = 87;
+  const long kSOCKET_ERROR = -1;
+  const word kIP_OPTION_MAX_SIZE = 40;
+  
+    enum Address_Type
+  {
+    ADDR_INVALID = 0,
+    ADDR_IPV4 = 1,
+    ADDR_IPV6 = 2
+  };
+  
+  struct _UDP_Recv_Fwd
+  {
+    byte bEnable;   // flag if forwarding is enable
+    word wMaxFwd;     // Maximum length of payload to be forwarded per event
+    word wMaxLen;     // Maximum count of bytes to receive over all 
+    word wDropCount;  //##### counting is not implemented yet #####
+    word wFwdCount;   // forward count bytes of over all
+  };
+  
+  struct _IP_Timestamp_Info
+  {
+    byte bOptionEnable;
+    word wOptionSize; //total size of header and data size
+    byte bOptionData[kIP_OPTION_MAX_SIZE];
+  };
+
+  struct _UDP_Socket_Info
+  {
+    dword dwHandle;               //Socket Handle
+    struct _UDP_Recv_Fwd fwdInfo; //Information regarding receive and forward
+    struct _IP_Timestamp_Info timInfo; //time stamp option data
+    byte bICMP_Fwd_Enable; // @@@ will be removed
+  };
+
+  
+  struct _UDP_Socket_Info gUDPSocketInfo[kUDP_MAX_SOCKET_NUM];
+
+}
+
+/// <SocketInfo>
+enum Address_Type getUDPSocketAddrType(word wIdx)
+{
+  long lRet;
+  
+  if(wIdx < 0 || elCount(gUDPSocketInfo) <= wIdx)
+  {
+    return ADDR_INVALID;
+  }
+  
+  lRet = IpGetSocketAddressFamily(gUDPSocketInfo[wIdx].dwHandle);
+  
+  switch(lRet)
+  {
+    case AF_INET:
+      return ADDR_IPV4;
+      break;
+    case AF_INET6:
+      return ADDR_IPV6;
+      break;
+    default:
+      break;
+  }
+  
+  return ADDR_INVALID;
+}
+
+/// <SocketInfo>
+//initialize UDP socket handle array
+void initUDPSocketArray(void)
+{
+  word i;
+  for(i = 0; i < kUDP_MAX_SOCKET_NUM; i++)
+  {
+    initUDPSocketInfo(i);
+  }
+}
+/// <SocketInfo>
+//initialize UDP socket handle array
+void initUDPSocketInfo(word wIdx)
+{
+  int i;
+  
+  if(wIdx < kUDP_MAX_SOCKET_NUM)
+  {
+    gUDPSocketInfo[wIdx].dwHandle = kINVALID_SOCKET;
+    gUDPSocketInfo[wIdx].fwdInfo.bEnable = kFalse;
+    gUDPSocketInfo[wIdx].fwdInfo.wDropCount = 0;
+    gUDPSocketInfo[wIdx].fwdInfo.wMaxFwd = 0;
+    gUDPSocketInfo[wIdx].fwdInfo.wMaxLen = 0;
+    gUDPSocketInfo[wIdx].fwdInfo.wFwdCount = 0;
+    gUDPSocketInfo[wIdx].timInfo.bOptionEnable = kFalse;
+    gUDPSocketInfo[wIdx].timInfo.wOptionSize = 0;
+    gUDPSocketInfo[wIdx].bICMP_Fwd_Enable = kFalse;
+    for(i = 0; i < kIP_OPTION_MAX_SIZE; i++)
+    {
+      gUDPSocketInfo[wIdx].timInfo.bOptionData[i] = 0;
+    }
+  }
+  else
+  {
+    outputErrorMsg("initUDPSocketInfo() index is out of bound ");
+  }
+}
+
+/// <SocketInfo>
+//get avialable UDP socket index from UDP socket handle array
+int getUDPSocketId(void)
+{
+  word i;
+  for(i = 0; i < kUDP_MAX_SOCKET_NUM; i++)
+  {
+    if(gUDPSocketInfo[i].dwHandle == kINVALID_SOCKET)
+    {
+      return i;
+    }
+  }
+  // no free 
+  return kINVALID_UDP_SOCKET_INDEX;
+}
+
+/// <SocketInfo>
+// this function is called the socket is opened
+int saveUDPSocketHandle(word wIdx, dword dwHandle)
+{  
+  if(wIdx < kUDP_MAX_SOCKET_NUM)
+  {
+    if(gUDPSocketInfo[wIdx].dwHandle == kINVALID_SOCKET)
+    {
+      gUDPSocketInfo[wIdx].dwHandle = dwHandle;
+      gUDPSocketInfo[wIdx].fwdInfo.bEnable = kFalse;
+      gUDPSocketInfo[wIdx].fwdInfo.wMaxFwd = 0;
+      gUDPSocketInfo[wIdx].fwdInfo.wMaxLen = 0;
+      gUDPSocketInfo[wIdx].fwdInfo.wDropCount = 0;
+      gUDPSocketInfo[wIdx].fwdInfo.wFwdCount = 0;
+      return kTrue;
+    }
+  }
+  return kFalse;
+}
+
+/// <SocketInfo>
+void resetUDPSocketHandle(word wIdx)
+{
+  if(wIdx < kUDP_MAX_SOCKET_NUM)
+  {
+    if(gUDPSocketInfo[wIdx].dwHandle != kINVALID_SOCKET)
+    {
+      initUDPSocketInfo(wIdx);
+    }
+  }
+}
+
+/// <SocketInfo>
+//
+// get socket handele from socket ID(index)
+//
+dword getUDPSocketHandle(word wIdx)
+{
+  if(wIdx < kUDP_MAX_SOCKET_NUM)
+  {
+    if(gUDPSocketInfo[wIdx].dwHandle != kINVALID_SOCKET)
+    {
+      return gUDPSocketInfo[wIdx].dwHandle;
+    }
+  }
+  return kINVALID_SOCKET;
+}
+
+/// <SocketInfo>
+// 
+// set CONFIGURE_SOCKET timestamp option information
+//
+int setSocketTimeStampInfo(word wIdx, byte bData[], word wSize)
+{
+  word pos;
+  
+  if(wIdx < kUDP_MAX_SOCKET_NUM)
+  {
+    if(gUDPSocketInfo[wIdx].dwHandle != kINVALID_SOCKET)
+    {
+      gUDPSocketInfo[wIdx].timInfo.bOptionEnable = kTrue;
+      gUDPSocketInfo[wIdx].timInfo.wOptionSize   = wSize;
+      memcpy(gUDPSocketInfo[wIdx].timInfo.bOptionData, bData, wSize);
+      return kTrue;
+    }
+  }
+  return kFalse;
+}
+
+/// <SocketInfo>
+// 
+// set RECEIVE_AND_FORWARD information and reset drop counter
+//
+int setUDPSocketInfoRecvFwd(word wIdx, byte bEnable, word wMaxFwd, word wMaxLen)
+{  
+  if(wIdx < kUDP_MAX_SOCKET_NUM)
+  {
+    if(gUDPSocketInfo[wIdx].dwHandle != kINVALID_SOCKET)
+    {
+      gUDPSocketInfo[wIdx].fwdInfo.bEnable = bEnable; 
+      gUDPSocketInfo[wIdx].fwdInfo.wMaxFwd = wMaxFwd; 
+      gUDPSocketInfo[wIdx].fwdInfo.wMaxLen = wMaxLen;
+      gUDPSocketInfo[wIdx].fwdInfo.wDropCount = 0;
+      gUDPSocketInfo[wIdx].fwdInfo.wFwdCount = 0;
+      return kTrue;
+    }
+  }
+  return kFalse;
+}
+
+/// <SocketInfo>
+// get drop count info
+word getUDPSocketInfoDropCnt(word wIdx)
+{  
+  if(wIdx < kUDP_MAX_SOCKET_NUM)
+  {
+    if(gUDPSocketInfo[wIdx].dwHandle != kINVALID_SOCKET)
+    {
+      return gUDPSocketInfo[wIdx].fwdInfo.wDropCount;
+    }
+  }
+  return 0;
+}
+
+/// <SocketInfo>
+// get drop count info
+void resetUDPSocketInfoDropCnt(word wIdx)
+{  
+  if(wIdx < kUDP_MAX_SOCKET_NUM)
+  {
+    if(gUDPSocketInfo[wIdx].dwHandle != kINVALID_SOCKET)
+    {
+      gUDPSocketInfo[wIdx].fwdInfo.wDropCount = 0;
+    }
+  }
+}
+
+
+/// <SocketInfo>
+// 
+// serach socket ID(index) from socket handle
+//
+long getUDPSocketIndexFromHandle(int& wSocktIdx, dword dwSocketHandle)
+{
+  word i;
+  //sequential search
+  for(i = 0; i < kUDP_MAX_SOCKET_NUM ; i++)
+  {
+    if(gUDPSocketInfo[i].dwHandle == dwSocketHandle)
+    {
+      wSocktIdx = i;
+      return kTrue;
+    }
+  }
+  wSocktIdx = kINVALID_UDP_SOCKET_INDEX;
+  return kFalse;
+}
+
+/// <SocketInfo>
+//
+// check if recv and forward is enabled
+//
+byte isUDPSocketRecvFwdEnabled(word wSocketIdx)
+{
+  if(wSocketIdx < kUDP_MAX_SOCKET_NUM)
+  {
+      return gUDPSocketInfo[wSocketIdx].fwdInfo.bEnable;
+  }
+  return kFalse;
+}
+
+/// <SocketInfo>
+//
+// check if recv and forward is enabled
+//
+byte isUDPSocketRecvFwdICMPEnabled(word wSocketIdx)
+{
+  if(wSocketIdx < kUDP_MAX_SOCKET_NUM)
+  {
+      return gUDPSocketInfo[wSocketIdx].bICMP_Fwd_Enable;
+  }
+  return kFalse;
+}
+
+/// <SocketInfo>
+//
+// check if recv and forward is enabled
+//
+dword getUDPSocketRecvFwdICMPEnabledSocket()
+{
+  int iIdx;
+  
+  for(iIdx = 0; iIdx < kUDP_MAX_SOCKET_NUM; iIdx++)
+  {
+    if(gUDPSocketInfo[iIdx].bICMP_Fwd_Enable == kTrue)
+    {
+      return gUDPSocketInfo[iIdx].dwHandle;
+    }
+  }
+  return kINVALID_SOCKET;
+}
+
+/// <SocketInfo>
+//
+// add drop count to UDP socket info 
+//
+void addUDPSocketInfoDropCount(word wSocketIdx, word wLen)
+{
+  if(wSocketIdx < kUDP_MAX_SOCKET_NUM)
+  {
+      gUDPSocketInfo[wSocketIdx].fwdInfo.wDropCount += wLen;
+  }  
+}
+
+/// <SocketInfo>
+//
+// add forward count to UDP socket info 
+//
+void addUDPSocketInfoFwdCount(word wSocketIdx, word wLen)
+{
+  if(wSocketIdx < kUDP_MAX_SOCKET_NUM)
+  {
+      gUDPSocketInfo[wSocketIdx].fwdInfo.wFwdCount += wLen;
+  }  
+}
+
+/// <SocketInfo>
+//
+// get forward count from UDP socket info 
+//
+word getUDPSocketInfoFwdCount(word wSocketIdx)
+{
+  if(wSocketIdx < kUDP_MAX_SOCKET_NUM)
+  {
+      return gUDPSocketInfo[wSocketIdx].fwdInfo.wFwdCount;
+  }
+  return 0;
+}
+
+/// <SocketInfo>
+//
+// get max forward from UDP socket info 
+//
+word getUDPSocketInfoMaxFwd(word wSocketIdx)
+{
+  if(wSocketIdx < kUDP_MAX_SOCKET_NUM)
+  {
+      return gUDPSocketInfo[wSocketIdx].fwdInfo.wMaxFwd;
+  }
+  return 0;
+}
+
+/// <SocketInfo>
+//
+// get max forward from UDP socket info 
+//
+word getUDPSocketInfoMaxLen(word wSocketIdx)
+{
+  if(wSocketIdx < kUDP_MAX_SOCKET_NUM)
+  {
+      return gUDPSocketInfo[wSocketIdx].fwdInfo.wMaxLen;
+  }
+  return 0;
+}
+
+/// <SocketInfo>
+void closeUDPSocketArray()
+{
+  int i;
+  
+  for(i = 0; i < kUDP_MAX_SOCKET_NUM; i++)
+  {
+    if(gUDPSocketInfo[i].dwHandle != kINVALID_SOCKET)
+    {
+        udpClose(gUDPSocketInfo[i].dwHandle);
+    }
+  }
+  initUDPSocketArray();
+}
+
+/// <SocketInfo>
+// check if time stamp option is enabled
+long isUDPSocketTimestampInfoEnable(word wSocketIdx)
+{
+  if(wSocketIdx < kUDP_MAX_SOCKET_NUM)
+  {
+      if(gUDPSocketInfo[wSocketIdx].timInfo.bOptionEnable == kTrue)
+      {
+        return kTrue;
+      }
+  }
+  return kFalse;
+}
+
+/// <SocketInfo>
+// get timestamp option length
+word getUDPSocketTimeInfoLen(word wSocketIdx)
+{
+  if(wSocketIdx < kUDP_MAX_SOCKET_NUM)
+  {
+      return gUDPSocketInfo[wSocketIdx].timInfo.wOptionSize;
+  }
+  return 0;  
+}
+
+/// <SocketInfo>
+void copyTimestampOptionData(ethernetPacket * packet, word wSocketIdx, word offset)
+{
+  word pos;
+  if(wSocketIdx < kUDP_MAX_SOCKET_NUM)
+  {
+      if(gUDPSocketInfo[wSocketIdx].timInfo.bOptionEnable == kTrue)
+      {
+        for(pos = 0 ; pos < gUDPSocketInfo[wSocketIdx].timInfo.wOptionSize; pos++)
+        {
+          packet.byte(offset+pos) = gUDPSocketInfo[wSocketIdx].timInfo.bOptionData[pos];
+        }
+      }
+  }
+}
+
+
+
+
+/// <SocketOptions>
+// configure socket option TTL/Hoplimit
+long configureSocketTTL_HopLimit(dword dwSocketHandle, byte bSetting, enum Address_Type addrType)
+{
+  long lResult;
+  long lConfig;
+
+  lConfig = (long)bSetting;
+  
+  //Set socket options
+  if(addrType == (enum Address_Type)ADDR_IPV4)
+  {
+    lResult = IpSetSocketOption(dwSocketHandle, "IPPROTO_IP", "IP_TTL", lConfig);
+    if(@sysvar::TC8_DUT_Config::VerbosityTestability  > TABIT_LV_DEBUG)
+    {
+      if(lResult != 0)
+      {
+        outputSocketErrorInfo(dwSocketHandle);
+        outputErrorMsg("configureSocketTTL_HopLimit() IpSetSocketOption NG");
+      }
+    }
+  }
+  else if(addrType == (enum Address_Type)ADDR_IPV6)
+  {
+    lResult = IpSetSocketOption(dwSocketHandle, "IPPROTO_IPV6", "IPV6_UNICAST_HOPS", lConfig);    
+    lResult = IpSetSocketOption(dwSocketHandle, "IPPROTO_IPV6", "IPV6_MULTICAST_HOPS", lConfig);    
+  }
+  else
+  {
+    outputErrorMsg("configureSocketTTL_HopLimit() address Type NG");
+    lResult = -1;
+  }
+  return lResult;
+}
+
+/// <SocketOptions>
+// configure socket option Traffic Class(IPv6), DSCP is not supported yet(IPv4)
+long configureSocketPriority(dword dwSocketHandle, byte bSetting, enum Address_Type addrType)
+{
+  long lResult;
+  long lConfig;
+
+  lConfig = (long)bSetting;
+  
+  //Set socket options
+  if(addrType == (enum Address_Type)ADDR_IPV4)
+  {
+    outputErrorMsg("configureSocketPriority()  DSCP option is not supported yet");
+    lResult = -1;
+  }
+  else if(addrType == (enum Address_Type)ADDR_IPV6)
+  {
+    lResult = IpSetSocketOption(dwSocketHandle, "IPPROTO_IPV6", "IPV6_TCLASS", lConfig);    
+  }
+  else
+  {
+    outputErrorMsg("configureSocketPriority() address Type NG");
+    lResult = -1;
+  }
+  return lResult;
+}
+
+/// <SocketOptions>
+// configure socket option DF, Don't Fragment
+long configureSocketDontFragment(dword dwSocketHandle, byte bSetting, enum Address_Type addrType)
+{
+  long lResult;
+  long lConfig;
+
+  lConfig = (long)bSetting;
+  
+  //Set socket options
+  if(addrType == (enum Address_Type)ADDR_IPV4)
+  {
+    // ##### This is only for UDP socket #####
+    lResult = IpSetSocketOption(dwSocketHandle, "IPPROTO_IP", "IP_DONTFRAGMENT", lConfig);
+  }
+  else if(addrType == (enum Address_Type)ADDR_IPV6)
+  {
+    lResult = IpSetSocketOption(dwSocketHandle, "IPPROTO_IPV6", "IPV6_DONTFRAG", lConfig);    
+  }
+  else
+  {
+    outputErrorMsg("configureSocketDontFragment() address Type NG");
+    lResult = -1;
+  }
+  return lResult;
+}
+
+/// <SocketOptions>
+// configure socket option DF, Don't Fragment
+long configureSocketReceiveBufMax(dword dwSocketHandle)
+{
+  const long kMAX_UDP_RECEIVE_LEN = 65535;
+
+  return IpSetSocketOption(dwSocketHandle, "SOL_SOCKET", "SO_RCVBUF", kMAX_UDP_RECEIVE_LEN);  
+}
+
+
+/// <SocketOptions>
+// configure socket option TOS
+long configureSocketTypeOfService(dword dwSocketHandle, byte bSetting, enum Address_Type addrType)
+{
+  long lResult;
+  long lConfig;
+
+  lConfig = (long)bSetting;
+  
+  //Set socket options
+  if(addrType == (enum Address_Type)ADDR_IPV4)
+  {
+    // ##### This is only for IPv4 #####
+    lResult = IpSetSocketOption(dwSocketHandle, "IPPROTO_IP", "IP_TOS", lConfig);
+  }
+  else if(addrType == (enum Address_Type)ADDR_IPV6)
+  {
+    outputErrorMsg("configureSocketTypeOfService()  TOS is not supported by IPv6");    
+    lResult = -1;
+  }
+  else
+  {
+    outputErrorMsg("configureSocketDontFragment() address Type NG");
+    lResult = -1;
+  }
+  return lResult;
+}
+
+/// <SocketOptions>
+//
+// configure socket option timestamp. 
+// CANoe TCP/IP stack doens't have the socket options for IP timestamp option.
+// So, just save timestamp option for it. 
+//
+long configureSocketTimestampOption(word dwSocketID, enum Address_Type addrType, byte bData[], word wSize)
+{
+  long lResult;
+  long lConfig;
+  
+  //Set socket options
+  if(addrType == (enum Address_Type)ADDR_IPV4)
+  {
+    SetSocketTimeStampInfo(dwSocketID, bData, wSize);
+  }
+  else if(addrType == (enum Address_Type)ADDR_IPV6)
+  {   
+    outputErrorMsg("configureSocketTimestampOption() address Type NG, IPv6 doesn't support timestamp option");
+  }
+  else
+  {
+    outputErrorMsg("configureSocketTimestampOption() address Type NG");
+    lResult = -1;
+  }
+  return lResult;
+}
+
+/// <Debug>
+void outputSocketErrorInfo(dword dwSocket)
+{
+  char errMsg[255];                // error message buffer.
+
+  IpGetLastSocketErrorAsString( dwSocket, errMsg, elcount(errMsg) );
+  writeLineEx(1, 3, "<%BASE_FILE_NAME%> [portUDP.cin] IpGetLastSocketErrorAsString: %s", errMsg);
+}

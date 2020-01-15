@@ -1,0 +1,490 @@
+/*@!Encoding:1252*/
+includes
+{
+}
+
+/**************************************************************************************************
+ Description: This file is a library of common utilities used to implement a LIN sequence
+ -------------------------------------------------------------------------------------------------
+      C O P Y R I G H T 
+ ------------------------------------------------------------------------------------------------- 
+  Copyright (c) 2018 by Vector Informatik GmbH. All rights reserved. 
+  
+  This software is copyright protected and proprietary to Vector Informatik GmbH. 
+  Vector Informatik GmbH grants to you only those rights as set out in the license conditions. 
+  All other rights remain with Vector Informatik GmbH. 
+  
+  REMOVAL OF THESE COMMENTS IS A VIOLATION OF THE COPYRIGHT AGREEMENT. 
+ *************************************************************************************************/
+variables
+{
+  byte  Util_BitStream[2097152];                // Buffer for bit sequence
+  dword Util_PositionInBitStream;             // Current position (index) inside of bit sequence
+  byte  Util_FrameIdBitStreamResponse;        // Frame identifier for which response has been set via bit stream
+  const dword Util_MaxVariableBits = 200;     // Maximum number of supported bits in variable bit streams (bit streams with deviating bit lengths)
+  int64 Util_VarBitStreamBitLengths[Util_MaxVariableBits]; // Buffer for bit lengths in variable bit streams [in ns]
+
+   int Util_UseExternalBusload = 0; //Flag indicating whether an external bus load is used to influence the bus resistance 
+                                   //for some J2602 test cases. In that case, the master resistor should be deactivated.
+  
+   linFrame 0x3C Util_MasterReq;  // MasterReq frame
+    int64 Util_SyncBreakCalibrationFactor; // Calibration factor for sync break (on XLe hardware)
+  int64 Util_SyncDelCalibrationFactor;   // Calibration factor for sync delimiter (on XLe hardware)
+  // ############## Enumerations ###############################################
+
+                                    
+  enum _Bool 
+  { 
+     _False = 0,  // Boolean value False
+     _True = 1    // Boolean value True
+  };  
+  
+  
+  
+}
+
+/************************************************************************************************** 
+  Description   : This function queries used LIN hardware
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : None
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : True if used LIN hardware is from XLe family, otherwise False
+**************************************************************************************************/
+enum _Bool Util_IsXLeHardware()
+{
+  if (linGetHWTransmitAccuracy() >= 64000000)
+  {
+    // 64 MHz
+    return _True;
+  }
+  return _False;
+}
+
+
+
+dword Util_BitStream_AddDominantBits (dword bitsNum)
+{
+  dword i;
+
+  for (i = bitsNum; i > 0;) // set dominant bits
+  {
+    if (i >= 8 && (Util_PositionInBitStream % 8) == 0)
+    {
+      Util_BitStream[Util_PositionInBitStream >> 3] = 0;  // set whole byte value
+      i -= 8;
+      Util_PositionInBitStream += 8;
+    }
+    else
+    {
+      Util_BitStream[Util_PositionInBitStream >> 3] &= ~(1 << (Util_PositionInBitStream & 0x7)); // set single bit
+      --i;
+      ++Util_PositionInBitStream;
+    }
+  }
+  return bitsNum;
+}
+
+/************************************************************************************************** 
+  Description   : This function adds a byte value to a global bit stream
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : byteValue: Byte value to be added
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : Number of newly added bits
+**************************************************************************************************/
+dword Util_BitStream_AddLinByte (byte byteValue)
+{
+  dword i;
+
+  Util_BitStream[Util_PositionInBitStream >> 3] &= ~(1 << (Util_PositionInBitStream & 0x7)); // set dominant start bit
+  ++Util_PositionInBitStream;
+  for (i = 0; i < 8; ++i)
+  {
+    if ((byteValue & (1 << i)) == 0) // dominant bits
+    {
+      Util_BitStream[Util_PositionInBitStream >> 3] &= ~(1 << (Util_PositionInBitStream & 0x7));
+    }
+    ++Util_PositionInBitStream;
+  }
+  ++Util_PositionInBitStream; // set recessive stop bit
+
+  return 10;
+}
+
+dword Util_BitStream_AddLinByte (byte byteValue, int count, int64 bitLengths[])
+{
+  dword i;
+  int currBitInfo;
+  
+  Util_BitStream[Util_PositionInBitStream >> 3] &= ~(1 << (Util_PositionInBitStream & 0x7)); // set dominant start bit
+  Util_VarBitStreamBitLengths[Util_PositionInBitStream] = bitLengths[0];
+  ++Util_PositionInBitStream;
+  
+  for (i = 0; i < 8; ++i)
+  {
+    if ((byteValue & (1 << i)) == 0) // dominant bits
+    {
+      Util_BitStream[Util_PositionInBitStream >> 3] &= ~(1 << (Util_PositionInBitStream & 0x7));
+    }
+    Util_VarBitStreamBitLengths[Util_PositionInBitStream] = bitLengths[i+1];
+    ++Util_PositionInBitStream;
+  }
+  
+  Util_VarBitStreamBitLengths[Util_PositionInBitStream] = bitLengths[9];
+  ++Util_PositionInBitStream; // set recessive stop bit
+
+  return 10;
+}
+
+
+
+/************************************************************************************************** 
+  Description   : This function adds a byte value to a global bit stream
+                  and inverts stop bit of the just added byte
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : byteValue: Byte value to be added
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : Number of newly added bits
+**************************************************************************************************/
+dword Util_BitStream_AddLinByteWithInvertedStopBit (byte byteValue)
+{
+  dword retValue;
+
+  retValue = Util_BitStream_AddLinByte(byteValue);
+
+  Util_BitStream[(Util_PositionInBitStream-1) >> 3] &= ~(1 << ((Util_PositionInBitStream-1) & 0x7)); // set single dominant bit
+
+  return retValue;
+}
+
+/************************************************************************************************** 
+  Description   : This function adds a sequence of recessive bits to a global bit stream
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : bitsNum: Number of recessive bits to be added
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : Number of newly added bits
+**************************************************************************************************/
+dword Util_BitStream_AddRecessiveBits (dword bitsNum)
+{
+  Util_PositionInBitStream += bitsNum; 
+
+  return bitsNum;
+}
+
+/************************************************************************************************** 
+  Description   : This function initializes a global bit stream to recessive bits
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : None
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : None
+**************************************************************************************************/
+void Util_BitStream_Initialize()
+{
+  dword i;
+
+  Util_PositionInBitStream = 0;
+  for (i = 0; i < elcount(Util_BitStream); ++i) 
+  {
+    Util_BitStream[i] = 0xff;
+  }
+  for (i = 0; i < Util_MaxVariableBits; ++i) 
+  {
+    Util_VarBitStreamBitLengths[i] = 0;
+  }
+}
+
+/************************************************************************************************** 
+  Description   : This function transmits a sequence of previously defined bits
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : frameId: Frame idenitifier on which the response has to be transmitted
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : None
+**************************************************************************************************/
+void Util_BitStream_SetResponse(byte frameId)
+{
+  linSetRespBitStream(frameId, Util_BitStream, Util_PositionInBitStream, 1, 1);
+  Util_FrameIdBitStreamResponse = frameId;
+}
+
+/************************************************************************************************** 
+  Description   : This function transmits a sequence of previously defined bits
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : None
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : None
+**************************************************************************************************/
+void Util_BitStream_Transmit()
+{
+  Util_BitStream_Transmit(_True);
+}
+
+/************************************************************************************************** 
+  Description   : This function transmits a sequence of previously defined bits 
+                  without timeout prevention
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : activateTimeoutPrevention: state of timeout prevention
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : None
+**************************************************************************************************/
+void Util_BitStream_Transmit(enum _Bool activateTimeoutPrevention)
+{
+  linSendBitStream(Util_BitStream, Util_PositionInBitStream, activateTimeoutPrevention);
+}
+
+/************************************************************************************************** 
+  Description   : This function transmits an arbitrary (also not valid) LIN header (of max. 200 bits)
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : breakLength: length of break low phase in bits
+                  delimiterLength: length of break high phase in bits
+                  syncByte; sync byte value
+                  interbyte: interbyte length in bits
+                  pidByte: PID value
+                  concludingTimeout: timeout after header transmission
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : None
+**************************************************************************************************/
+void Util_SendHeader(long baudrate, int breakLength, int delimiterLength, byte syncByte, int interbyte, byte pidByte, long concludingTimeout)
+{
+  Util_BitStream_Initialize();
+
+  Util_BitStream_AddHeader(breakLength, delimiterLength, syncByte, interbyte, pidByte);
+
+  if (Util_IsXLeHardware() == _True)
+  {
+    Util_BitStream_SetBaudrate( baudrate );
+    Util_BitStream_AddCalibrationFactors(breakLength-1, breakLength+delimiterLength-1);
+    Util_BitStream_VariableTransmit(_False);
+  }
+  else
+  {
+    Util_BitStream_Transmit();
+  }
+}
+
+
+/************************************************************************************************** 
+  Description   : This function transmits a sequence of previously defined bits with predefined
+                  bit lengths
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : roundBitrateUp: Flag indicating if baudrate value can be rounded up
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : None
+**************************************************************************************************/
+void Util_BitStream_VariableTransmit(enum _Bool roundBitrateUp)
+{
+  dword roundBitLengthUp;
+
+  if (roundBitrateUp == _True)
+    roundBitLengthUp = 0;
+  else 
+    roundBitLengthUp = 1;
+
+  linSendVariableBitStream(Util_BitStream, Util_VarBitStreamBitLengths, Util_PositionInBitStream, roundBitLengthUp);
+}
+
+/************************************************************************************************** 
+  Description   : This function adds header byte values to a global bit stream
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : breakLength: length of break low phase in bits
+                  delimiterLength: length of break high phase in bits
+                  syncByte: sync byte value
+                  interbyte: interbyte length in bits
+                  pidByte: PID value
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : Number of newly added bits
+**************************************************************************************************/
+dword Util_BitStream_AddHeader (int breakLength, int delimiterLength, byte syncByte, int interbyte, byte pidByte)
+{
+  Util_BitStream_AddDominantBits(breakLength); // sync break
+
+  Util_BitStream_AddRecessiveBits(delimiterLength); // recessive bits of sync delimiter
+
+  Util_BitStream_AddLinByte(syncByte); // sync byte field
+
+  Util_BitStream_AddRecessiveBits(interbyte); // recessive bits of interbyte space
+
+  Util_BitStream_AddLinByte(pidByte); //PID byte field
+
+  return breakLength + delimiterLength + interbyte + 20;
+}
+
+/************************************************************************************************** 
+  Description   : This function sets bit lengths for previously defined bit sequence according
+                  to the required bit rate 
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : bitrate: required bit rate in bit/sec
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : None
+**************************************************************************************************/
+void Util_BitStream_SetBaudrate(long bitrate)
+{
+  dword ind;
+  int64 oneBitLengthNs;
+
+  if (bitrate > 0)
+  {
+    if (Util_PositionInBitStream < Util_MaxVariableBits)
+    {
+      oneBitLengthNs = 1000000000/bitrate;
+      
+      for (ind=0; ind < Util_PositionInBitStream; ++ind)
+      {
+        Util_VarBitStreamBitLengths[ind] = oneBitLengthNs;
+      }  
+    }
+  }
+}
+
+/************************************************************************************************** 
+  Description   : This function sets bit length for a certain bit
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : bitIndex: index of the bit
+                : bitLengthNs: length of the bit [in ns]
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : None
+**************************************************************************************************/
+void Util_BitStream_SetBitLength(dword bitIndex, int64 bitLengthNs)
+{
+  if (bitIndex < Util_MaxVariableBits)
+  {
+    Util_VarBitStreamBitLengths[bitIndex] = bitLengthNs;
+  }
+}
+
+/************************************************************************************************** 
+  Description   : This function sets bit lengths for previously defined bit sequence according
+                  to the required bit rate
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : bitrate: required bit rate in bit/sec
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : None
+**************************************************************************************************/
+void Util_BitStream_SetHighPrecisionBaudrate(double bitrate, enum _Bool roundUpBitrate)
+{
+  dword ind;
+  int64 shortBitNS, longBitNS, bitLengthsNS[8];
+  double factor;
+  dword accuracy, factorFor8Bits, remainder, sum;
+
+  if (bitrate > 0.0 && Util_PositionInBitStream < Util_MaxVariableBits)
+  {
+    // compute the hardware specific factor for 8 bits at the requested baudrate (number of ticks for 8 bits)
+    accuracy = linGetHWTransmitAccuracy();
+    factor = accuracy * 8 / bitrate;
+    if (roundUpBitrate)
+    {
+      factorFor8Bits = _floor(factor);
+    }
+    else
+    {
+      factorFor8Bits = _ceil(factor);
+    }
+    
+    // the bit time will jitter by one tick
+    shortBitNS = _floor(factorFor8Bits / 8.0) * 1e9 / accuracy;
+    longBitNS  = _ceil(factorFor8Bits / 8.0)  * 1e9 / accuracy;
+    
+    // the error in 1/8th bits per short bit time
+    remainder = factorFor8Bits % 8;
+    
+    sum = 0;
+    for (ind = 0; ind < 8; ++ind)
+    {
+      sum += remainder;
+      bitLengthsNS[ind] = sum >= 8 ? longBitNS : shortBitNS; // use one long bit per remainder overflow
+      sum %= 8;
+    }
+    
+    for (ind=0; ind < Util_PositionInBitStream; ++ind)
+    {
+      Util_VarBitStreamBitLengths[ind] = bitLengthsNS[ind % 8];
+    }
+  }
+}
+
+/************************************************************************************************** 
+  Description   : This function adds calibration factors to the last sync break and sync
+                  delimiter bits. These calibration factors compensate for asymmetries between
+                  falling and rising edges.
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : breakBitIndex: index of the last sync-break bit
+                  delimiterBitIndex: index of the last delimiter bit
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : None
+**************************************************************************************************/
+void Util_BitStream_AddCalibrationFactors(dword breakBitIndex, dword delimiterBitIndex)
+{
+  if (Util_IsXLeHardware() == _True)
+  {
+    if (breakBitIndex < Util_MaxVariableBits && delimiterBitIndex < Util_MaxVariableBits)
+    {
+      Util_VarBitStreamBitLengths[breakBitIndex] += Util_SyncBreakCalibrationFactor;  
+      Util_VarBitStreamBitLengths[delimiterBitIndex] += Util_SyncDelCalibrationFactor;  
+    }
+  }
+}
+
+/************************************************************************************************** 
+  Description   : This function returns the bit length for a certain bit
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : bitIndex: index of the bit
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : length of the bit [in ns]
+**************************************************************************************************/
+int64 Util_BitStream_GetBitLength(dword bitIndex)
+{
+  if (bitIndex < Util_MaxVariableBits)
+  {
+    return Util_VarBitStreamBitLengths[bitIndex];
+  }
+  return 0;
+}
+
+/************************************************************************************************** 
+  Description   : This function adds header byte values to a global bit stream
+  ------------------------------------------------------------------------------------------------ 
+  Parameter     : breakLengthNs: length of break low phase in ns
+                  delimiterLengthNs: length of break high phase in ns
+                  syncByte; sync byte value
+                  interbyteLengthNs: interbyte between Sync byte and PID byte in ns
+                  pidByte: PID value
+  ------------------------------------------------------------------------------------------------ 
+  Return code   : Number of newly added bits
+**************************************************************************************************/
+dword Util_BitStream_AddHeaderWithAbsoluteTiming(int64 breakLengthNs, int64 delimiterLengthNs, byte syncByte, int64 interbyteLengthNs, byte pidByte)
+{
+ int index; 
+ int64 oneBitTimeNominal;
+
+  oneBitTimeNominal = linBits2Time_ns(1);
+
+  // sync break is 1 bit, but the bit length is the whole sync break length
+  Util_VarBitStreamBitLengths[Util_PositionInBitStream] = breakLengthNs;
+  Util_BitStream_AddDominantBits(1); 
+
+  // sync delimiter is 1 bit, but the bit length is the whole sync delimiter length
+  Util_VarBitStreamBitLengths[Util_PositionInBitStream] = delimiterLengthNs;
+  Util_BitStream_AddRecessiveBits(1); 
+
+  // sync byte field
+  for (index=Util_PositionInBitStream; index < Util_PositionInBitStream+10; ++index)
+  {
+    Util_VarBitStreamBitLengths[index] = oneBitTimeNominal;
+  }
+  Util_BitStream_AddLinByte(syncByte); 
+
+  if (interbyteLengthNs > 0)
+  {
+    // interbyte is 1 bit, but the bit length is the whole interbyte length
+    Util_VarBitStreamBitLengths[Util_PositionInBitStream] = interbyteLengthNs;
+    Util_BitStream_AddRecessiveBits(1); 
+  }
+
+  //PID byte field
+  for (index=Util_PositionInBitStream; index < Util_PositionInBitStream+10; ++index)
+  {
+    Util_VarBitStreamBitLengths[index] = oneBitTimeNominal;
+  }
+  Util_BitStream_AddLinByte(pidByte); //PID byte field
+
+  return 1 + 1 + (interbyteLengthNs > 0 ? 1 : 0) + 20;
+}

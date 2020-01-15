@@ -1,0 +1,195 @@
+/*@!Encoding:1252*/
+
+includes
+{
+  #include "Includes\ProprietaryProtocol.cin"
+}
+
+variables
+{
+  //
+  // Constants
+  //
+  
+  const word  kUdpSourcePort      = 40001;
+  const word  kUdpDestinationPort = 40002;
+  const dword kTxDelayMs          = 20;
+  const dword kBroadcastIP        = 0xFFFFFFFF;
+  
+  //
+  // Variables
+  //
+  
+  UdpSocket gSocket;
+  msTimer   gUpdateTimer;
+  msTimer   gTxTimer;
+  byte      gTxBuffer[1500];
+  dword     gTxBufferLength;
+  byte      gIsMeasuredDataScheduled;
+  byte      gIsSensorStatusScheduled;
+}
+
+on start
+{
+  @sysvarMember::ProprietarySensor::TxMessages::SensorStatus.UpdateCycleTimeMs = 2000;
+  gUpdateTimer.set( @sysvarMember::ProprietarySensor::TxMessages::SensorStatus.UpdateCycleTimeMs );
+  
+  // open a socket and bind it to the IP address of the TCP/IP Stack and UDP port 40000
+  gSocket = UdpSocket::Open( 0, kUdpSourcePort );
+}
+
+on timer gUpdateTimer
+{
+  ScheduleMeasuredData();
+  ScheduleSensorStatus();
+  
+  this.set( @sysvarMember::ProprietarySensor::TxMessages::SensorStatus.UpdateCycleTimeMs );
+}
+
+on timer gTxTimer
+{
+  OutputPacket();
+}
+
+on sysvar sysvarMember::ProprietarySensor::TxMessages::MeasuredData.ValueA
+{
+  ScheduleMeasuredData();
+}
+
+on sysvar sysvarMember::ProprietarySensor::TxMessages::MeasuredData.ValueB
+{
+  ScheduleMeasuredData();
+}
+
+on sysvar sysvarMember::ProprietarySensor::TxMessages::MeasuredData.ValueC
+{
+  ScheduleMeasuredData();
+}
+
+on sysvar sysvarMember::ProprietarySensor::TxMessages::MeasuredData.ValueD
+{
+  ScheduleMeasuredData();
+}
+
+on sysvar sysvarMember::ProprietarySensor::TxMessages::SensorStatus.EnvironmentTemperature
+{
+  ScheduleSensorStatus();
+}
+
+on sysvar sysvarMember::ProprietarySensor::TxMessages::SensorStatus.UpdateCycleTimeMs
+{
+  ScheduleSensorStatus();
+}
+
+/// <Output>
+void OutputPacket()
+{
+  if (gIsMeasuredDataScheduled)
+  {
+    gIsMeasuredDataScheduled = 0;
+    EnqueueMeasuredData();
+  }
+
+  if (gIsSensorStatusScheduled)
+  {
+    gIsSensorStatusScheduled = 0;
+    EnqueueSensorStatus();
+  }
+  
+  if (gTxBufferLength > 0)
+  {
+    gSocket.SendTo( kBroadcastIP, kUdpDestinationPort, gTxBuffer, gTxBufferLength );
+    gTxBufferLength = 0;
+  }
+}
+
+void ScheduleMeasuredData()
+{
+  if (gIsMeasuredDataScheduled == 0)
+  {
+    gIsMeasuredDataScheduled = 1;
+    
+    if (!isTimerActive(gTxTimer))
+    {
+      gTxTimer.set( kTxDelayMs );
+    }
+  }
+}
+
+void ScheduleSensorStatus()
+{
+  if (gIsSensorStatusScheduled == 0)
+  {
+    gIsSensorStatusScheduled = 1;
+    
+    if (!isTimerActive(gTxTimer))
+    {
+      gTxTimer.set( kTxDelayMs );
+    }
+  }
+}
+
+void EnqueueMeasuredData()
+{
+  dword sequenceCounter = 0;
+  byte measuredData[4*5];
+  long measuredDataLength;
+  
+  if (sysGetVariableData( sysvar::ProprietarySensor::TxMessages::MeasuredData, measuredData, measuredDataLength ) == 0)
+  {
+    struct MessageHeader header;
+    
+    sequenceCounter         += 1;
+    @sysvarMember::ProprietarySensor::TxMessages::MeasuredData.SequenceCounter = sequenceCounter;
+    
+    // append message header to TX buffer
+    header.messageId     = 100;
+    header.messageLength = measuredDataLength;
+    header.messageCrc    = CalcCrc( measuredData, measuredDataLength );
+    
+    memcpy_h2n( gTxBuffer, gTxBufferLength, header );
+    gTxBufferLength += __size_of(struct MessageHeader);
+    
+    // append message data to TX buffer
+    memcpy_off( gTxBuffer, gTxBufferLength, measuredData, 0, measuredDataLength );
+    gTxBufferLength += measuredDataLength;
+  }
+}
+
+void EnqueueSensorStatus()
+{
+  byte  sensorStatus[4*2];
+  long  sensorStatusLength;
+  
+  if (sysGetVariableData( sysvar::ProprietarySensor::TxMessages::SensorStatus, sensorStatus, sensorStatusLength ) == 0)
+  {
+    struct MessageHeader header;
+    
+    // append message header to TX buffer
+    header.messageId     = 101;
+    header.messageLength = sensorStatusLength;
+    header.messageCrc    = CalcCrc( sensorStatus, sensorStatusLength );
+    
+    memcpy_h2n( gTxBuffer, gTxBufferLength, header );
+    gTxBufferLength += __size_of(struct MessageHeader);;
+    
+    // append message data to TX buffer
+    memcpy_off( gTxBuffer, gTxBufferLength, sensorStatus, 0, sensorStatusLength );
+    gTxBufferLength += sensorStatusLength;
+  }
+}
+
+// Create a simple checksum by add the bytes of the array.
+dword CalcCrc( byte data[], dword dataLength )
+{
+  dword i;
+  dword crc;
+  
+  crc = 0;
+  for( i = 0; i < dataLength; i++ )
+  {
+    crc += data[i];
+  }
+  
+  return crc;
+}

@@ -1,0 +1,3715 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "RT_vars.cin"
+  #include "msgbuf.cin"
+  #include "RT_msgbuf_funcs.cin"
+  #include "RT_debug.cin"
+}
+
+variables
+{
+  dword gTCID = 0x000000;       // test case id.Tablenumber, row number. set during CT_BEGIN
+  char gsTCID[20] = "";         // test case id as string. set during CT_BEGIN.
+  const byte CT_OUT_TAB = 4;    // output tab within the write when using CT_Out based functions.
+
+  enum eSeverity                // write output severity. usefull for writeEx function calls.
+  {
+    SVR_SUCCESS = 0,
+    SVR_INFO = 1,
+    SVR_WARNING = 2,
+    SVR_ERROR = 3
+  };
+
+  enum eNoWaitFlag
+  {
+    WF_WAIT = 0,
+    WF_NOWAIT = 1
+  };
+  
+  // data for the BAM tracker.
+  struct BAM_TrackInfo
+  {
+    int64 startTime;        // BAM starting time
+    byte totalPackages;     // number of total data packages
+    int64 lastPackageTime;  // time of last BAM related package
+    byte running;           // BAM running indication flag
+    byte wasTimeout;        // timeout indication indication flag
+    dword PGNumber;         // PG number that is beeing transported with BAM
+  };
+
+  // data for the TP tracker.
+  struct TP_TrackInfo
+  {
+    int64 startTime;        // TP starting time
+    byte totalPackages;     // number of total data packages
+    byte maxPackages;       // number of max data packages
+    int64 lastPackageTime;  // time of last BAM related package
+    byte running;           // TP running indication flag
+    byte wasTimeout;        // timeout indication indication flag
+    dword PGNumber;         // PG number that is beeing transported with TP
+  };
+
+  // ac tracker...
+  struct AC_TrackInfo
+  {
+    qword devName;
+    byte sa;
+    byte da;
+    int64 time_ns;
+  };
+  
+  enum eVerdict
+  {
+    VERDICT_NA = -1,
+    VERDICT_FAIL = 0,
+    VERDICT_PASS = 1,
+    VERDICT_INCONCLUSIVE = 2
+  };
+  
+  enum eDlgResult
+  {
+    DLG_TIMEOUT = 0,
+    DLG_OK = 1,
+    DLG_YES = 1,
+    DLG_NO = 2,
+    DLG_CANCEL = 2,
+    DLG_IGNORE = -1
+  };
+  
+  char gLineLong[255] = "--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------";
+  char gLineShort[255] = "----------------------------------------------------------------------------------------";                         
+  
+  enum eVerdict gVerdict = VERDICT_NA; // global (last) verdict.
+  byte gFuncPath = 0; // global (last) funcPath.
+  
+  byte gNoVerdicts = 0;  // do report verdicts
+  byte gNoReporting = 0; // do no reporting at all. Can be used to silently call other testcases witin a testcase.
+  
+  byte gTestStepOpen = 0; // indicate if a teststep was started with Begin and needs end.
+  
+  byte gGenerator_RandomCANFrames_Active = 0;
+  long gGenerator_RandomCANFames_MsFreq = 250;
+  mstimer gTimer_RandomCANFrameGenerator;
+  
+  byte gGenerator_SendPG_Active = 0;
+  long gGenerator_SendPG_MsFreq = 500;
+  byte gGenerator_SendPG_SA = 0xAB;
+  byte gGenerator_SendPG_DA = 0xAC;
+  dword gGenerator_SendPG_PGN = 0x100;
+  msTimer gTimer_SendPGGenerator;  
+    
+  struct BAM_TrackInfo gTracker_BAM[long]; // key is the source of the BAM. value is the BAM-Track Info.
+  struct TP_TrackInfo gTracker_TP[long];   // key is the DA-SA combination (word) of the TP. value is the TP-Track Info.
+  struct AC_TrackInfo gTracker_AC[long];   // key is the devName of the AC.
+  
+  byte gReactor_ReactWithAbortOnDT_Active   = 0; // react with abort message on every TP-DT.
+  byte gReactor_ReactWithAbortOnDT_DA       = 0; // react with abort message to destination. -1 (0xff) for global.
+  byte gReactor_ReactWithEOMOnDT_Active     = 0; // react with EOM message on every TP-DT.
+  
+  pg J1939::J1939_CT_RT::TPCMxx gReactor_ReactWithEOMOnDT_pgEOM;     // the EOM pg to use for sending when gReactor_ReactWithEOMOnDT_Active
+  pg * gPgLastRequest = {DLC=gc_J1939_PG_DLC_MAX};
+  
+  pg J1939::J1939_CT_RT::AC gPgLastAC;      // latest occured AC
+  dword gAutoUserAnswerInfo[long];          // auto user dlg answer info. (wait,answer) list. Auto resets in CT_END().
+}
+
+// ==============================================================================================================
+// pg message buffering... 
+on pg *
+{
+  CT_OnPG_Callback(this);
+}
+void CT_OnPG_Callback(pg * p)
+{
+  // only track messages on the channel of the test-unit.
+  if (p.msgChannel == @CT::CFG::TOOL::Channel)
+  {
+    MsgBuf_OnPG_Callback(p);
+    CT_Track_BAM(p);
+    CT_Track_TP(p);
+    CT_Track_AC(p);
+    CT_ReactOnPG(p);
+  }
+}
+// ==============================================================================================================
+// on this timer generate a random standard CAN-Frame message and output it...
+on timer gTimer_RandomCANFrameGenerator
+{
+  message* m;
+  m.dlc = 8;
+  m.id = random(0x7FF); // random 11 bit identifiers...
+  m.qword(0) = (((qword)random(0xFFFFFFFF)) << 32) | random(0xFFFFFFFF);
+  output(m);
+  if (gGenerator_RandomCANFrames_Active) 
+  {
+    setTimer( gTimer_RandomCANFrameGenerator, gGenerator_RandomCANFames_MsFreq + random(2*gGenerator_RandomCANFames_MsFreq) );
+  }
+}
+
+// ==============================================================================================================
+// starts sending pg's from foreign SA.
+on timer gTimer_SendPGGenerator
+{
+  CT_SendMessage(gGenerator_SendPG_PGN, gGenerator_SendPG_SA, gGenerator_SendPG_DA);
+  if (gGenerator_SendPG_Active) 
+  {
+    setTimer( gTimer_SendPGGenerator, gGenerator_SendPG_MsFreq );
+  }
+}
+
+// ==============================================================================================================
+// Auto User Answer
+// returns -1 if not active.
+long CT_CheckAutoAnswer(long& result)
+{
+  long s;
+  char text[255];
+  
+  result = -1;
+  s = gAutoUserAnswerInfo.size();
+  if (s>=2)
+  {
+    for (long i:gAutoUserAnswerInfo)
+    {
+      if (gAutoUserAnswerInfo[i+1] != DLG_IGNORE)
+      {
+        snprintf(text, elcount(text), "Waiting %dms...", gAutoUserAnswerInfo[i]);
+        CT_INFO(1, "AUTO", text);
+        CT_WAIT(gAutoUserAnswerInfo[i]);
+        
+        snprintf(text, elcount(text), "Answer = '%d'", gAutoUserAnswerInfo[i+1]);
+        CT_INFO(1, "AUTO", text);
+        result = gAutoUserAnswerInfo[i+1];
+      }
+        
+      gAutoUserAnswerInfo.remove(i+1);
+      gAutoUserAnswerInfo.remove(i);
+      break;
+    }
+  }
+  return result;
+}
+
+// ==============================================================================================================
+// CT-CALLBACK used as Tester Action Callback for validating on AC signal that the AC came from DUT
+// SA AND NAME HAS TO FIT
+int CT_CB_Validate_Last_AC_Came_From_DUT()
+{
+  return (gPgLastAC.sa == gDUT_Addr) && (gPgLastAC.qword(0) == gDUT_DevName);
+}
+// ==============================================================================================================
+// CT-CALLBACK used as Tester Action Callback for validating on AC signal that the AC came from DUT
+// SA OR NAME HAS TO FIT
+int CT_CB_Validate_Last_AC_Came_From_DUT_SA_OR_NAME()
+{
+  return (gPgLastAC.sa == gDUT_Addr) || (gPgLastAC.qword(0) == gDUT_DevName);
+}
+
+// ==============================================================================================================
+// Dialog with given text, that awaits up to given timeout time for an AC sent from the DUT's address.
+// returns (Same values as TFS function TestValidateTesterAction - See Online-Documentation)
+// 0: timeout
+// 1: OK - AC came from DUT (CT_CB_Validate_Last_AC_Came_From_DUT returned 1 on an AC Signal)
+// 2: User canceled
+// -1: General error.
+long CT_DLG_AwaitACFromDUT(char text[], dword timeout, enum eNoWaitFlag waitAfterAC)
+{
+  long result;
+  initJ1939PGData(gPgLastAC);
+  gPgLastAC.sa = gc_BC_ADDR;
+  @CT::TEST::TRIGGER::AC = 0;
+  
+  if (CT_CheckAutoAnswer(result)<0)
+  {
+    char infoText[1024];
+    snprintf(infoText,elcount(infoText),"Test waits for an AC message from address 0x%02X with NAME=0x%llX...", gDUT_Addr, gDUT_DevName);
+    CT_STEP("INFO: ", infoText);
+    result = TestValidateTesterAction(text, gc_CT_CAPTION, "CT_CB_Validate_Last_AC_Came_From_DUT", timeout, 0, sysvar::CT::TEST::TRIGGER::AC);
+  }
+  switch((byte)result)
+  {
+    case 0: CT_STEP("INFO: ","Dialog timeout."); break;
+    case 1: CT_STEP("INFO: ","Dialog detected AC."); break;
+    case 2: CT_STEP("INFO: ","User clicked 'cancel'"); break;
+  };
+  if ( (waitAfterAC == WF_WAIT) && (result == 1 )) CT_WAIT_AFTER_AC_WITH_INFO();
+  return result;
+}
+long CT_DLG_AwaitACFromDUT_SA_OR_NAME(char text[], dword timeout, enum eNoWaitFlag waitAfterAC)
+{
+  long result;
+  initJ1939PGData(gPgLastAC);
+  gPgLastAC.sa = gc_BC_ADDR;
+  @CT::TEST::TRIGGER::AC = 0;
+  
+  if (CT_CheckAutoAnswer(result)<0)
+  {
+    char infoText[1024];
+    snprintf(infoText,elcount(infoText),"Test waits for an AC message from address 0x%02X or with NAME=0x%llX...", gDUT_Addr, gDUT_DevName);
+    CT_STEP("INFO: ", infoText);
+    result = TestValidateTesterAction(text, gc_CT_CAPTION, "CT_CB_Validate_Last_AC_Came_From_DUT_SA_OR_NAME", timeout, 0, sysvar::CT::TEST::TRIGGER::AC);
+  }
+  switch((byte)result)
+  {
+    case 0: CT_STEP("INFO: ","Dialog timeout."); break;
+    case 1: CT_STEP("INFO: ","Dialog detected AC."); break;
+    case 2: CT_STEP("INFO: ","User clicked 'cancel'"); break;
+  };
+  if ( (waitAfterAC == WF_WAIT) && (result == 1 )) CT_WAIT_AFTER_AC_WITH_INFO();
+  return result;
+}
+
+// ==============================================================================================================
+// Ask tester a yes no question dialog box.
+// returns
+// 0: Timeout
+// 1: Tester clicked yes
+// 2: tester clicked no
+long CT_DLG_AskYesNo(char text[], dword timeout)
+{
+  long result;
+  if (CT_CheckAutoAnswer(result)<0)
+  {
+    result = testWaitForTesterConfirmation(text, timeout, gc_CT_CAPTION, "", "");
+  }
+  switch((byte)result)
+  {
+    case 0: CT_Info(1,"INFO: ","Dialog timeout."); break;
+    case 1: CT_Info(1,"INFO: ","User clicked 'Yes'"); break;
+    case 2: CT_Info(1,"INFO: ","User clicked 'No'"); break;
+  };
+  return result;
+}
+
+// ==============================================================================================================
+// track BAM protocol...
+void CT_Track_BAM(pg * p)
+{
+  char text[255];
+  byte ctrlByte;
+  dword xferPGN;
+  
+  if  (p.pgn == gc_PGN_TPCM)
+  {
+    ctrlByte = CT_GetTPCMCtrlByte(p);
+    if ( ctrlByte == gc_TPCM_CTRL_WORD_BAM)
+    {
+      xferPGN = CT_GetTPCMPgn(p);
+      gTracker_BAM[p.sa].totalPackages = CT_GetDataByte(3, p);
+      gTracker_BAM[p.sa].running = 1;
+      gTracker_BAM[p.sa].startTime = p.time_ns;
+      gTracker_BAM[p.sa].lastPackageTime = p.time_ns;
+      gTracker_BAM[p.sa].wasTimeout = 0;
+      gTracker_BAM[p.sa].PGNumber = xferPGN;
+      snprintf(text, elcount(text), "BAM START for PGN %d (0x%.05X) from node 0x%.2X DETECTED.",xferPGN, xferPGN, p.sa);
+      CT_Info(@CT::DEBUG::HELPER, "CT_Track_BAM", text);
+    }
+  }
+  if (p.pgn == gc_PGN_TPDT)
+  {
+    byte seqNr;
+    seqNr = CT_GetDataByte(0, p);
+    // dont update lastPackageTime until timeout-detection is done bellow...
+    // got last tp?
+    if ( seqNr == gTracker_BAM[p.sa].totalPackages)
+    {
+      xferPGN = gTracker_BAM[p.sa].PGNumber;
+      gTracker_BAM[p.sa].running = 0;
+      snprintf(text, elcount(text), "BAM END for PGN %d (0x%.05X) from node 0x%.2X DETECTED.", xferPGN, xferPGN, p.sa);
+      CT_Info(@CT::DEBUG::HELPER, "CT_Track_BAM", text);
+    }
+  }
+  
+  // detect timeout... ( before updating the tp.dt time )
+  // this is triggered on any pg and checks all running transports...
+  // for all known td-times calculate the dt to pg's time. On timeout mark bam as not running.
+  for (long s: gTracker_BAM)
+  {
+    if (gTracker_BAM[s].running && gTracker_BAM[s].lastPackageTime)
+    {
+      dword dt;
+      dt = CT_Ns2Ms(p.time_ns - gTracker_BAM[s].lastPackageTime);
+      //write("DEBUG BAM TIMEOUT: pg-time=%.6f, data_time[%x]=%.6f, dt=%d", CT_Ns2Sec(p.time_ns), s, CT_Ns2Sec(gTracker_BAM[s].lastPackageTime), dt);
+      if ( dt > gc_TP_BAM_MAX_RECEIVE_DT )
+      {
+        xferPGN = gTracker_BAM[s].PGNumber;
+        snprintf(text, elcount(text), "BAM timeout for PGN %d (0x%.05X) from node 0x%.2X DETECTED.", xferPGN, xferPGN, s);
+        CT_Info(@CT::DEBUG::HELPER, "CT_Track_BAM", text);
+        gTracker_BAM[s].running = 0;
+        gTracker_BAM[s].totalPackages = 0;
+        gTracker_BAM[s].wasTimeout = 1;
+      }
+    }
+  }
+  
+  // on tp.dt, update data time...
+  if (p.pgn == gc_PGN_TPDT)
+  {
+    gTracker_BAM[p.sa].lastPackageTime = p.time_ns;
+  }
+}
+
+// ==============================================================================================================
+// track TP protocol...
+// FIX to do: only react for RTS/CTS/EOM for the pgn to be transported, else "wrong" CTS/RTS/EOM are triggering!
+void CT_Track_TP(pg * p)
+{
+  char text[255];
+  byte ctrlByte;
+  word k, k_;
+  dword xferPGN;
+  
+  // key is representant of the connection starting from originator (RTS) to the partner.
+  // dependant on the message the key has to be calculated using sa/da in the right "direction" of this connection.
+  k = p.da << 8 | p.sa; // src->dst 
+  k_= p.sa << 8 | p.da; // dst->src
+  //write("k=%x, p.sa=%x, p.da=%x", k, p.sa, p.da);
+  
+  if  (p.pgn == gc_PGN_TPCM)
+  {
+    ctrlByte = CT_GetTPCMCtrlByte(p);
+    
+    if ( ctrlByte == gc_TPCM_CTRL_WORD_RTS)
+    {
+      xferPGN = CT_GetTPCMPgn(p);
+      gTracker_TP[k].totalPackages = CT_GetDataByte(3, p);
+      gTracker_TP[k].MaxPackages = CT_GetDataByte(4, p);
+      gTracker_TP[k].running = 1;
+      gTracker_TP[k].startTime = p.time_ns;
+      gTracker_TP[k].lastPackageTime = p.time_ns;
+      gTracker_TP[k].wasTimeout = 0;
+      gTracker_TP[k].PGNumber = xferPGN;
+      snprintf(text, elcount(text), "TP START for PGN %d (0x%.05X) from %X->%X DETECTED.", xferPGN, xferPGN, p.sa, p.da);
+      CT_Info(@CT::DEBUG::HELPER, "CT_Track_TP", text);
+    }
+    // dont update lastPackageTime until timeout-detection is done bellow...
+    if ( ctrlByte == gc_TPCM_CTRL_WORD_EOM )
+    {
+      xferPGN = gTracker_TP[k_].PGNumber;
+      snprintf(text, elcount(text), "TP END for PGN %d (0x%.05X) from %X->%X DETECTED.", xferPGN, xferPGN, p.da, p.sa);
+      //write(text);
+      CT_Info(@CT::DEBUG::HELPER, "CT_Track_TP", text);
+      gTracker_TP[k_].running = 0;
+    }
+    // check aborts
+    if (ctrlByte == gc_TPCM_CTRL_WORD_ABORT)
+    {
+      xferPGN = gTracker_TP[k_].PGNumber;
+      snprintf(text, elcount(text), "TP ABORT for PGN %d (0x%.05X) from %X->%X DETECTED.", xferPGN, xferPGN, p.sa, p.da);
+      //write(text);
+      CT_Info(@CT::DEBUG::HELPER, "CT_Track_TP", text);
+      gTracker_TP[k].running = 0;
+      gTracker_TP[k_].running = 0;
+    }
+  }
+  
+  
+  // detect timeout... ( before updating the tp.dt time )
+  // this is triggered on any pg and checks all running transports...
+  // for all known td-times calculate the dt to pg's time. On timeout mark tp as not running.
+  for (long x: gTracker_TP)
+  {
+    if (gTracker_TP[x].running && gTracker_TP[x].lastPackageTime)
+    {
+      dword dt;
+      byte dst;
+      byte src;
+      dt = CT_Ns2Ms(p.time_ns - gTracker_TP[x].lastPackageTime);
+      dst = (byte)(x    & 0xFFLL);
+      src = (byte)(x>>8 & 0xFFLL);
+      //write("DEBUG TP TIMEOUT CHECK: pg-time=%.6f, lastPackageTime[%x]=%.6f, dt=%d, running=%d", CT_Ns2Sec(p.time_ns), x, CT_Ns2Sec(gTracker_TP[x].lastPackageTime), dt, gTracker_TP[x].running);
+      if ( dt > gc_TP_MAX_RECEIVE_DT )
+      {
+        snprintf(text, elcount(text), "TP timeout for TP 0x%.2X -> 0x%.2X detected.", src, dst);
+        CT_Info(@CT::DEBUG::HELPER, "CT_Track_TP", text);
+        gTracker_TP[x].running = 0;
+        gTracker_TP[x].totalPackages = 0;
+        gTracker_TP[x].wasTimeout = 1;
+      }
+    }
+  }
+  
+  if (gTracker_TP[k_].running)
+  {
+    if ( (p.pgn == gc_PGN_TPCM) && (ctrlByte == gc_TPCM_CTRL_WORD_CTS) )
+    {
+      // update lastPackage time on CTS
+      gTracker_TP[k_].lastPackageTime = p.time_ns;
+      snprintf(text, elcount(text), "TP CTS %X->%X DETECTED.", p.da, p.sa);
+      //write(text);
+      CT_Info(@CT::DEBUG::HELPER, "CT_Track_TP", text);
+    }
+    
+    // on tp.dt, update lastPackageTime...
+    if (p.pgn == gc_PGN_TPDT)
+    {
+      gTracker_TP[k].lastPackageTime = p.time_ns;
+      snprintf(text, elcount(text), "TP DT %X->%X DETECTED.", p.sa, p.da);
+      //write(text);
+      CT_Info(@CT::DEBUG::HELPER, "CT_Track_TP", text);
+    }
+  }
+}
+
+// ==============================================================================================================
+// Track latest AC's.
+void CT_Track_AC(pg * p)
+{
+  long k;
+  if ( (p.pgn == gc_PGN_AC) && (p.dlc==gPgLastAC.dlc) )
+  {
+    gPgLastAC = p;
+    gPgLastAC.sa = p.sa;
+    gPgLastAC.da = p.da;
+    k=p.qword(0);
+    gTracker_AC[k].sa = p.sa;
+    gTracker_AC[k].da = p.da;
+    gTracker_AC[k].time_ns = p.time_ns;
+    gTracker_AC[k].devName = p.qword(0);
+    //write("CT_Track_AC: t=%.06f: Got AC from %x->%x at %.06f", CT_Ns2Sec(timeNowNS()),p.sa, p.da, CT_Ns2Sec(p.time_ns));
+    @CT::TEST::TRIGGER::AC = 1;
+  }
+}
+
+
+// ==============================================================================================================
+// react on detecting pg...
+CT_ReactOnPG(pg* p)
+{
+  dword packetedPgn = 0;
+  
+  // -------------------------------------
+  // react on DT with abort.
+  // -------------------------------------
+  if (gReactor_ReactWithAbortOnDT_Active)
+  {
+    // track the transported pgn when there is a TPCM RTS.
+    if (p.pgn == gc_PGN_TPCM)
+    {
+      packetedPgn = CT_GetTPCMPgn(p);
+      //write("got packeted pgn=%x", packetedPgn);
+    }
+    
+    // if there is a packeted pgn detected (tp started), react on any td with an abort.
+    if ( p.pgn == gc_PGN_TPDT)
+    {
+      //write("p.pgn=%x, packetedPgn=%x",p.pgn, packetedPgn);
+      // use the pg and change it to an abort as a reaction...
+      p.pgn = gc_PGN_TPCM;
+      p.da = gReactor_ReactWithAbortOnDT_DA;
+      p.sa = gTOOL_Addr;
+      p.byte(0) = gc_TPCM_CTRL_WORD_ABORT;
+      p.byte(4) = 0xFF;
+      p.byte(5) = (packetedPgn & 0x000000FF);
+      p.byte(6) = (packetedPgn & 0x0000FF00) >> 8;
+      p.byte(7) = (packetedPgn & 0x00FF0000) >> 16;
+      
+      //write("output abort");
+      
+      output(p);
+    }
+  }
+ 
+  // -------------------------------------
+  // React with EOM on DT...
+  // -------------------------------------
+  if (gReactor_ReactWithEOMOnDT_Active)
+  {
+    // track the transported pgn when there is a TPCM RTS.
+    if (p.pgn == gc_PGN_TPCM)
+    {
+      packetedPgn = CT_GetTPCMPgn(p);
+      //write("got packeted pgn=%x", packetedPgn);
+    }
+    
+    // if there is a packeted pgn detected (tp started), react on any td with configured EOM...
+    if ( p.pgn == gc_PGN_TPDT)
+    {
+      output(gReactor_ReactWithEOMOnDT_pgEOM);
+    }
+  }
+  
+}
+
+// ==============================================================================================================
+// check if system is runtime.
+byte CT_RT()
+{
+  long result;
+  result = 0;
+  sysGetVariableInt("UT::SYS","IsUnitTest",result);
+  return !result;
+}
+
+// ==============================================================================================================
+void CT_SetDutSupportsCA(byte flag)
+{
+  gDUT_CA = flag;
+  @CT::CFG::DUT::NoCA = !flag;
+}
+// ==============================================================================================================
+void CT_SetDutSupportsNM(byte flag)
+{
+  gDUT_NM = flag;
+  @CT::CFG::DUT::NoNM = !flag;
+}
+// ==============================================================================================================
+void CT_SetDutSupportsAddrViolationDM(byte flag)
+{
+  gDUT_AddrViolationDM = flag;
+  @CT::CFG::DUT::AddrViolation_DM = flag;
+}
+
+
+// ==============================================================================================================
+// Start milli second based generator
+void CT_START_RANDOM_CAN_FRAME_GENERATOR(dword msFreq)
+{
+  gGenerator_RandomCANFames_MsFreq = _max( msFreq, 2*gc_TIMEOUT_TR );
+  gGenerator_RandomCANFrames_Active = 1;
+  setTimer(gTimer_RandomCANFrameGenerator, msFreq);
+}
+// ==============================================================================================================
+// stop random can frame generator
+void CT_STOP_RANDOM_CAN_FRAME_GENERATOR()
+{
+  gGenerator_RandomCANFrames_Active = 0;
+}
+
+
+// ==============================================================================================================
+// start send from foreign sa generator.
+void CT_START_SEND_PG_GENERATOR(dword msFreq, byte sa, byte da, dword pgn)
+{
+  gGenerator_SendPG_MsFreq = msFreq;
+  gGenerator_SendPG_PGN = pgn;
+  gGenerator_SendPG_SA = sa;
+  gGenerator_SendPG_DA = da;
+  gGenerator_SendPG_Active = 1;
+  setTimer(gTimer_SendPGGenerator, msFreq);
+}
+// ==============================================================================================================
+// stop send from foreign sa generator.
+void CT_STOP_SEND_PG_GENERATOR()
+{
+  gGenerator_SendPG_Active = 0;
+}
+
+
+
+// ==============================================================================================================
+// begin a ct-testcase. start all testcases with this function and end it with CT_END.
+// returns the timestamp when starting the testcase.
+// in the background the CAN-Message buffer recording is started...
+int64 CT_BEGIN(dword tcID, char text[])
+{
+  char buf[4096];
+  dword to;
+  
+  gTCID = tcID;
+  CT_VERDICT(VERDICT_NA);
+  snprintf(gsTCID, elcount(gsTCID), "[TC 0x%.06X]", gTCID);
+
+  if (tcID>0)
+  {
+    testCaseDescription("BRIEFING\n");
+    testCaseDescription(gsTCID);
+    testCaseDescription(text);
+    testCaseDescription("\n");
+  }
+  
+  CT_Info(1, "__________________________________________________________________________________________________________________", "");
+  CT_Info(1, "                BRIEF", text);
+  snprintf(buf, elcount(buf), "%s %s", gsTCID, text);
+  MsgBuf_StartRecording();
+
+  CT_InitVars();
+  
+  if (CT_RT()) 
+  {
+    //@CT::TEST::LOG::TestCaseMarker = 1;
+    @CT::TEST::LOG::TestCaseMarker = tcID ? tcID : 1;
+    to = gc_RESP_TIMEOUT / 4;
+    if (to == 0) to = 250;
+    testWaitForTimeout(to); // after setting marker, wait a bit...
+  };
+  
+  CT_FUNC_PATH(0);
+  gTracker_BAM.clear();
+  gTracker_TP.clear();
+  CT_DISABLE_TESTNODE_IL();
+  return timeNowInt64();
+}
+
+// ==============================================================================================================
+// test case description after CT_BEGIN
+void CT_DESC(char text[])
+{
+  testCaseDescription("\n");
+  testCaseDescription("DESCRIPTION\n");
+  CT_WordWrap(text, 120, 1);
+  testCaseDescription(text);
+  testCaseDescription("\n");
+}
+
+// ==============================================================================================================
+// wait given time for a given sysvar to be a given value. (timeout in ms)
+// returns:
+// 1: ok
+// 0: timeout / sysvar has other value.
+byte CT_WAIT_FOR_SYSVAR_EQUALS(sysvarInt* var, dword value, dword timeout)
+{
+  long i;
+  for (i=0; i<timeout; i++)
+  {
+    if (sysGetVariableInt(var) == value)
+    {
+      return 1;
+    }
+    testWaitForTimeout(1);
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// wait during a BAM until it is done.
+// give BC address as source waits until any bam is done.
+void CT_WAIT_UNTIL_NO_BAM(byte src)
+{
+  dword i;
+  dword resolutionMs = 60;
+  dword maxMs = 30000; 
+  char text[255];
+  byte msgShown = 0;
+  byte bamSrc;
+  
+  byte debug = 0;
+  
+  i=0;
+  msgShown = 0;
+  bamSrc = src;
+  if (debug)
+  {
+    snprintf(text, elcount(text), "Start waiting for BAM gap using src=%x", src);
+    CT_Info(1,"DEBUG CT_WAIT_UNTIL_NO_BAM", text);
+  }
+  while(1)
+  {
+    if (src == gc_BC_ADDR)
+    {
+      byte r;
+      byte n=0; // 2 time waiting...
+      r=0;
+      
+      for (n=0; n<2; n++)
+      {
+        CT_WAIT(resolutionMs); // before checking tracker, wait a resolution time...
+        for(long s: gTracker_BAM) 
+        {
+          if (debug)
+          {
+            snprintf(text, elcount(text), "[n=%d/2], Iterate BAM-Tracker's running-flag %x => %d", n+1, (byte)s, gTracker_BAM[(byte)s].running);
+            CT_Info(1,"DEBUG CT_WAIT_UNTIL_NO_BAM",text);
+          }
+          if (gTracker_BAM[(byte)s].running)
+          {
+            CT_Info(1, "BAM Track", "Detected BAM running. Awaiting gap...");
+            bamSrc = (byte)s;
+            r = 1;
+            break;
+          }
+        }
+        if (r==1) break;
+        
+        if (debug)
+        {
+          snprintf(text, elcount(text), "[n=%d/2], bamSrc=%x, r=%d -> leaving on r=0.", n+1, bamSrc, r);
+          CT_Info(1,"DEBUG CT_WAIT_UNTIL_NO_BAM",text);
+        }
+        // check a second resolution time...
+      } // rof n
+      
+      if (r==0) break; // leave if no BAM running.
+    }
+    else
+    {
+      if (debug)
+      {
+        snprintf(text, elcount(text), "CT_WAIT_UNTIL_NO_BAM: gTracker_BAM[(long)src].running=%d", gTracker_BAM[(long)src].running);
+        CT_Info(1,"DEBUG CT_WAIT_UNTIL_NO_BAM", text);
+      }
+      
+      if (!gTracker_BAM[(long)src].running) break; // leave if BAM is not running
+    }
+    
+    if (debug)
+    {
+      snprintf(text, elcount(text), "CT_WAIT_UNTIL_NO_BAM: i(%d) >= maxMs(%d) => %d", i, maxMs, i>maxMs);
+      CT_Info(1,"DEBUG CT_WAIT_UNTIL_NO_BAM",text);
+    }
+    
+    if (i>=maxMs) break; // leave on waiting timeout.
+    snprintf(text, elcount(text), "BAM from source 0x%X is running... waiting max. %dms to find a gap with a resolution of dt=%d ms...", bamSrc, maxMs, resolutionMs);
+    if (!msgShown) CT_Info(1, "", text);
+    msgShown=1;
+    
+    if (debug)
+    {
+      snprintf(text, elcount(text), "CT_WAIT_UNTIL_NO_BAM: waiting resolutionMs (%d)", resolutionMs);
+      CT_Info(1,"DEBUG CT_WAIT_UNTIL_NO_BAM", text);
+    }
+    
+    CT_WAIT(resolutionMs);
+    i+=resolutionMs;
+  }
+  
+  if (msgShown)
+  {
+    snprintf(text, elcount(text), "BAM gap from source 0x%X found.", bamSrc);
+    CT_Info(1, "BAM Track", text);
+  }
+}
+
+// ==============================================================================================================
+// wait during a TP until it is done.
+// give BC address as source or dest waits until TP from any node is done.
+void CT_WAIT_UNTIL_NO_TP(byte src, byte dst)
+{
+  dword i;
+  dword resolutionMs = 60;
+  dword maxMs = 30000; 
+  char text[255];
+  byte msgShown = 0;
+  byte tpSrc;
+  byte tpDst;
+  word k;
+  
+  i=0;
+  msgShown = 0;
+  tpSrc = src;
+  tpDst = dst;
+  k = src<<8|dst;
+  
+  while(1)
+  {
+    if ( ( src == gc_BC_ADDR ) || ( dst == gc_BC_ADDR ) )
+    {
+      byte r;
+      r=0;
+      for(long s: gTracker_BAM) 
+      {
+        if (gTracker_BAM[s].running)
+        {
+          tpSrc = (byte)(s    & 0xFFLL);
+          tpDst = (byte)(s>>8 & 0xFFLL);
+          r = 1;
+        }
+      }
+      if (r==0) break; // leave if no TP running.
+    }
+    else
+    {
+      if (!gTracker_TP[k].running) break; // leave if TP is not running
+    }
+    
+    if (i>=maxMs) break; // leave on waiting timeout.
+    if (tpDst == 0)
+    {
+      snprintf(text, elcount(text), "TP from source 0x%X is running... waiting max. %dms to find a gap...", tpSrc, maxMs);
+    }
+    else
+    {
+      snprintf(text, elcount(text), "TP from source 0x%X -> destination 0x%X is running... waiting max. %dms to find a gap...", tpSrc, tpDst, maxMs);
+    }
+    
+    if (!msgShown) CT_Info(1, "", text);
+    msgShown=1;
+    CT_WAIT(resolutionMs);
+    i+=resolutionMs;
+  }
+  
+  if (msgShown)
+  {
+    if (tpDst == 0)
+    {
+      snprintf(text, elcount(text), "TP gap from source 0x%X found.", tpSrc);
+    }
+    else
+    {
+      snprintf(text, elcount(text), "TP gap from source 0x%X -> destination 0x%X found.", tpSrc, tpDst);
+    }
+    CT_Info(1, "", text);
+  }
+}
+
+
+// ==============================================================================================================
+// wait given time for a given sysvar NOT to be a given value. (timeout in ms)
+// returns:
+// 1: ok
+// 0: timeout / sysvar kept given value
+byte CT_WAIT_FOR_SYSVAR_NOT_EQUALS(sysvarInt* var, dword value, dword timeout)
+{
+  long i;
+  for (i=0; i<timeout; i++)
+  {
+    if (sysGetVariableInt(var) != value)
+    {
+      return 1;
+    }
+    testWaitForTimeout(1);
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// just a test-wait. Done to have a CT-Syntax.
+void CT_WAIT(dword time)
+{
+  testWaitForTimeout(time);
+}
+
+// ==============================================================================================================
+// just a test-wait interrupted by error frames on the bus.
+// return 0 on done waiting without error frames, else 1
+byte CT_WAIT_BREAK_ON_ERRORFRAMES(dword time)
+{
+  long i;
+  for (i=0; i<time/100; i++)
+  {
+    testWaitForTimeout(time/100);
+    if (gErrFrameBuf.size()>0) return 1;
+  }
+  return 0;
+}
+// ==============================================================================================================
+// just a test-wait. including an informational output to write and report.
+// return 0 on done waiting
+int CT_WAIT_WITH_INFO(dword time, char info[])
+{
+  char text[1024];
+  char text1[1024];
+  char text2[1024];
+  long i;
+  snprintf(text, elcount(text), "dt=%dms, %s", time, info);
+  snprintf(text1, elcount(text1), "%s... start.", text);
+  snprintf(text2, elcount(text2), "%s... done.", text);
+  CT_STEP("WAIT", text1);
+  CT_WAIT(time);
+  CT_STEP("WAIT", text2);
+  return 0;
+}
+// ==============================================================================================================
+// just a test-wait. including an informational output to write and interrupted by error frames.
+// return 0 on done waiting without error frames, else 1
+byte CT_WAIT_WITH_INFO_BREAK_ON_ERRORFRAMES(dword time, char info[])
+{
+  char text[1024];
+  char text1[1024];
+  char text2[1024];
+  long i;
+  byte result;
+  snprintf(text, elcount(text), "dt=%dms, %s", time, info);
+  snprintf(text1, elcount(text1), "%s... start.", text);
+  snprintf(text2, elcount(text2), "%s... done.", text);
+  CT_STEP("WAIT", text1);
+  result = CT_WAIT_BREAK_ON_ERRORFRAMES(time);
+  if (result==0) 
+  {
+    CT_STEP("WAIT", text2);
+  }
+  return result;
+}
+
+// ==============================================================================================================
+// helper to add strategy description with new number to the report. Call this AFTER CT_DESC and after CT_STRAT(1, "...");
+void CT_STRAT(char text[])
+{
+  CT_STRAT(0, text);
+}
+// ==============================================================================================================
+// add strategy block with given number to the report.
+// set init to != 0 to initialize counting with 1.
+// This is important and can not be skipped, due the counter is local-static.
+void CT_STRAT(byte init, char text[])
+{
+  byte nr=0;
+  char line[1024];
+  
+  if (!@CT::CFG::REPORT::PrintStrategy) return;
+  
+  if (init || (nr==0))
+  {
+    testCaseDescription("\nTEST-STRATEGY\n");
+    nr = 0;
+  }
+  snprintf(line, elcount(line), "%d) %s\n", ++nr, text);
+  testCaseDescription(line);
+}
+
+// ==============================================================================================================
+// helper to add preconditional description with new number to the report. Call this AFTER CT_DESC and best before the strategies.
+void CT_PRECOND(char text[])
+{
+  CT_PRECOND(0, text);
+}
+// ==============================================================================================================
+// add preconditional description block with given number to the report.
+// set init to != 0 to initialize the precondition block.
+// This is important and can not be skipped, due the counter is local-static.
+void CT_PRECOND(byte init, char text[])
+{
+  byte nr=0;
+  char line[1024];
+  
+  if (!@CT::CFG::REPORT::PrintPreconditions) return;
+  
+  if (init || (nr==0))
+  {
+    testCaseDescription("\nTEST-PRECONDITIONS\n");
+    nr = 0;
+  }
+  nr++;
+  snprintf(line, elcount(line), "- %s\n", text);
+  testCaseDescription(line);
+}
+
+// ==============================================================================================================
+// helper to add preconditional description with new number to the report.
+void CT_DOC_21(char text[])
+{
+  CT_DOC(21, 0, text);
+}
+void CT_DOC_21(byte init, char text[])
+{
+  CT_DOC(21, init, text);
+}
+void CT_DOC_81(char text[])
+{
+  CT_DOC(81, 0, text);
+}
+void CT_DOC_81(byte init, char text[])
+{
+  CT_DOC(81, init, text);
+}
+// ==============================================================================================================
+// add required document description block with given number to the report.
+// set init to != 0 to initialize the document block.
+// This is important and can not be skipped, due the counter is local-static.
+void CT_DOC(byte docNr, byte init, char text[])
+{
+  byte nr=0;
+  char line[1024];
+  
+  // on initialization additionally print the document header-line as testcase descritpion.
+  if (init || (nr==0))
+  {
+    snprintf(line, elcount(line), "\nREFERENCES: J1939-%d\n", docNr);
+    testCaseDescription(line);
+    nr = 0;
+  }
+  
+  // append the document reference information line into the testcase description.
+  nr++;
+  snprintf(line, elcount(line), "- %s\n", text);
+  testCaseDescription(line);
+}
+
+
+// ==============================================================================================================
+// simple test-step without verdict.
+int64 CT_STEP(char label[], char text[])
+{
+  if (@CT::DEBUG::TEST) write("CT_STEP");
+  CT_Info(1, label, text);
+  if (!gNoReporting) 
+  {
+    //if (gTestStepOpen) CT_STEP_END_PASS();
+    gTestStepOpen = 0;
+    testStep(label, text);
+  }
+  return timeNowInt64();
+}
+
+// ==============================================================================================================
+// Info for sub calls...
+void CT_Sub(char text[])
+{
+  char label[1024];
+  char line1[5]="===";
+  char line2[80]="===============================================================================";
+  snprintf(label, elcount(label), "SUB");
+  CT_Info(1, line1, line2);
+  CT_Info(1, label, text);
+  CT_Info(1, line1, line2);
+  
+  if (!gNoReporting) 
+  {
+    //if (gTestStepOpen) CT_STEP_END_PASS();
+    gTestStepOpen = 0;
+    
+    testStep(line1, line2);
+    testStep(label, text);
+    testStep(line1, line2);
+  }
+  
+}
+
+// ==============================================================================================================
+// when doing some steps in loops, then this can be used to note the "run" automatically incrementing.
+// initialize the looping with a negative loopNr to indicate starting from 1 and also set the max-steps.
+// during initialization no output is done - so your text is ignored in this step.
+int64 CT_LOOP(int loopNr, char text[])
+{
+  word maxRuns = 1;
+  word lNr = 0;
+  char lbl[255];
+  
+  if (loopNr < 0)
+  {
+    lNr = 0;
+    maxRuns = -loopNr;
+  }
+  else if (loopNr == 0)
+  {
+    lNr++;
+    if (lNr>1) 
+    {
+      CT_STEP("","--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------");
+      CT_STEP("","");
+    }
+    snprintf(lbl, elcount(lbl), "[L] %d/%d", lNr, maxRuns);
+    return CT_STEP(lbl, text);
+  }
+  return timeNowInt64();
+}
+
+// ==============================================================================================================
+// start a testcase loop - overload for init automatic numbering. out of loops without text...
+int64 CT_LOOP(int loopNr)
+{
+  return CT_LOOP(loopNr, "");
+}
+
+// ==============================================================================================================
+// testcase loop run - overload for automatic numbering. used after CT_LOOP(stepNr,text)
+int64 CT_LOOP(char text[])
+{
+  return CT_LOOP(0, text);
+}
+
+// ==============================================================================================================
+// start a testcase step
+// returns the timestamp when starting the step.
+int64 CT_STEP_BEGIN(char stepLabel[], char text[])
+{
+  if (@CT::DEBUG::TEST) write("CT_STEP_BEGIN");
+  // close test step if already open.
+  if (!gNoReporting) 
+  {
+    //if (gTestStepOpen) CT_STEP_END_PASS();
+    testStepPass(stepLabel, text);
+    gTestStepOpen = 1;
+  }
+  CT_Info(1, stepLabel, text);
+  return timeNowInt64();
+}
+
+// ==============================================================================================================
+// start a testcase step - overload for automatic numbering.
+// returns the timestamp when starting the step.
+// use a negative number of steps to start from step 1 onwards and also tell how many steps are following.
+// e.g. -10 means to start with step 1/10
+// when calling this method with stepNr 0, the steps will advance.
+int64 CT_STEP_BEGIN(int stepNr, char text[])
+{
+  word maxSteps = 1;
+  word sNr = 1;
+  char lbl[255];
+  
+  if (stepNr < 0)
+  {
+    sNr = 1;
+    maxSteps = -stepNr;
+    CT_FUNC_PATH(0);
+  }
+  else if (stepNr == 0)
+  {
+    sNr = _min(sNr+1, maxSteps);
+  }
+  else sNr = stepNr;
+  snprintf(lbl, elcount(lbl), "   [S] %d/%d", sNr, maxSteps);
+  return CT_STEP_BEGIN(lbl, text);
+}
+
+// ==============================================================================================================
+// give payload of an ACK/NACK (E800) msg and get it split up in ctrlbyte, pgn and dstAddr
+void CT_GET_ACK_INFO_EX(qword payload, byte& ctrlByte, dword& pgn, byte& dstAddr)
+{
+  ctrlByte  = ((byte)payload & 0xFF);
+  dstAddr = ( payload & 0x000000FF00000000LL ) >> 32;
+  pgn     = ( payload & 0xFFFFFF0000000000LL ) >> 40;
+  //write("ctrl=%x, dstAdr=%x, pgn=%x", ctrlByte, dstAddr, pgn);
+}
+
+// ==============================================================================================================
+// give payload of an ACK message as qword and get it split up in some usefull infos.
+void CT_GET_ACK_INFO(qword payload, byte& isNACK, dword& pgn, byte& dstAddr)
+{
+  byte ctrlByte;
+  CT_GET_ACK_INFO_EX(payload, ctrlByte, pgn, dstAddr);
+  isNACK = (ctrlByte == gc_ACK_CTRL_WORD_NACK);
+}
+
+// ==============================================================================================================
+// give payload of a NACK message as qword and get it split up in some usefull infos.
+void CT_GET_NACK_INFO(qword payload, byte& isACK, dword& pgn, byte& dstAddr)
+{
+  byte isNACK;
+  CT_GET_ACK_INFO(payload, isNACK, pgn, dstAddr);
+  isACK = !isNACK;
+}
+
+
+
+// ==============================================================================================================
+// start a testcase step - overload for automatic numbering. used after CT_STEP_BEGIN(stepNr,text)
+int64 CT_STEP_BEGIN(char text[])
+{
+  return CT_STEP_BEGIN(0,text); // auto advance.
+}
+
+// ==============================================================================================================
+// begin a sub-check. Automatically add a label indicate checking, and prepend "Checking" within the text.
+// end it with CT_END_STEP_x or CT_PASS or CT_FAIL or CT_INCONCLUSIVE
+int64 CT_STEP_BEGIN_CHECK(char text[])
+{
+  char t[1024];
+  snprintf(t, elcount(t), "Checking for %s", text);
+  return CT_STEP_BEGIN("CHK.", t);
+}
+
+// ==============================================================================================================
+// Check for error frames - complete test-step including verdict.
+// returns 0: fail
+//         1: pass
+// set stepNr to <=0 to auto inc step
+byte CT_STEP_CHECK_ERRORFRAMES(int stepNr, byte funcPathOk, byte funcPathFail)
+{
+  char reportText[1024];
+  snprintf(reportText, elcount(reportText), "Checking for error frames...");
+  if (stepNr>0)
+  {
+    CT_STEP_BEGIN(stepNr, reportText);
+  }
+  else
+  {
+    CT_STEP_BEGIN(reportText);
+  }
+  if (gErrFrameBuf.size()>0)
+  {
+    snprintf(reportText, elcount(reportText), "DUT produced %d error frames:", gErrFrameBuf.size());
+    for(long k:gErrFrameBuf)
+    {
+      snprintf(reportText, elcount(reportText), "%s\n#%.02d: @ %.06fs", reportText, k+1, (float)gErrFrameBuf[k].Time_ns/(float)1000000000);
+    }
+    CT_STEP_END_FAIL(funcPathFail, reportText);
+    return 0;
+  }
+  
+  CT_STEP_END_PASS(funcPathOk);
+  return 1;
+}
+
+// ==============================================================================================================
+// Show dialog to the tester to reset the DUT.
+// returns 0: fail
+//         1: pass
+byte CT_STEP_DLG_TESTER_SHALL_RESET_THE_DUT(int stepNr, byte dutAddr, qword devName, byte checkDevName, dword timeout, byte funcPathSuccess, byte funcPathTimeout, byte funcPathCancel, byte funcPathAddrFail, byte funcPathDevNameFail, enum eNoWaitFlag waitAfterAC, byte reboot)
+{
+  char errText[1024];
+  int64 stepTime;
+  if (reboot)
+  {
+    stepTime = CT_STEP_BEGIN(stepNr, "Await user to reboot the DUT...");
+  }
+  else
+  {
+    stepTime = CT_STEP_BEGIN(stepNr, "Await user to factory reset the DUT...");
+  }
+
+  switch(CT_DLG_TESTER_SHALL_RESET_THE_DUT(timeout, waitAfterAC, reboot))
+  {
+    case 0: /* timeout */
+      CT_STEP_END_FAIL(funcPathTimeout, "AC on bootup not detected within 5 minutes."); 
+      return 0; // leave on fail.
+    case 1: /* OK */ 
+      break;
+    case 2: /*user canceled*/
+      CT_STEP_END_FAIL(funcPathCancel, "User canceled.");
+      return 0; // leave on fail.
+  }
+
+  switch(CT_VALIDATE_LAST_SEEN_AC(dutAddr, checkDevName, devName, errText))
+  {
+    case 1: CT_STEP_END_FAIL(funcPathAddrFail, errText); return 0;
+    case 2: CT_STEP_END_FAIL(funcPathDevNameFail, errText); return 0;
+  }
+  
+  CT_STEP_END_PASS(funcPathSuccess);
+  return 1;
+}
+// ==============================================================================================================
+int CT_DLG_TESTER_SHALL_RESET_THE_DUT(dword timeout, enum eNoWaitFlag waitAfterAC, byte reboot)
+{
+  char text[1024];
+  char hintText[1024];
+  int result;
+  
+  // before showing reset dialog, wait a bit have previously things be done / timedout. e.g. CA->ACL->reboot->ACL...
+  CT_WAIT(gc_TIMEOUT_T3 + 100);
+  
+  if (reboot) 
+  {
+    CT_Info(1, "", "CT : Dialog showing, waiting for reboot the DUT");
+    snprintf(hintText, elcount(hintText), "Hint: Reboot means, the DUT's SA and NAME are not resetted but when device comes up or restarts, the values are like as before.");
+    snprintf(text, elcount(text), "Please [ REBOOT ] the DUT within the remaining time.\n\nThe dialog closes as soon as AC is detected within remaining time...\n\n\n\n%s", hintText);
+    result = CT_DLG_AwaitACFromDUT_SA_OR_NAME(text, timeout, waitAfterAC);
+  }
+  else
+  {
+    CT_Info(1, "", "CT : Dialog showing, waiting for reset the DUT to configured settings and restart it.");
+    snprintf(hintText, elcount(hintText), "Hint:\nReset means, the DUT's SA and NAME are resetted to the values you configured within the CT_Configurator.");
+    snprintf(text, elcount(text), "Please [ RESET ] the DUT to the configured settings and restart it within the remaining time.\n\nThe dialog closes as soon as ACL is detected within remaining time...\n\n\n\n%s", hintText);
+    result = CT_DLG_AwaitACFromDUT(text, timeout, waitAfterAC);
+  }
+  
+  
+  return result;
+}
+// ==============================================================================================================
+int CT_DLG_TESTER_SHALL_RESET_THE_DUT()
+{
+  return CT_DLG_TESTER_SHALL_RESET_THE_DUT(gc_DLG_WAITING_TIME_MS, WF_WAIT, 0);
+}
+// ==============================================================================================================
+int CT_DLG_TESTER_SHALL_REBOOT_THE_DUT()
+{
+  return CT_DLG_TESTER_SHALL_RESET_THE_DUT(gc_DLG_WAITING_TIME_MS, WF_WAIT, 1);
+}
+
+// ==============================================================================================================
+// Helper to validate last AC to fit given source address and payload.
+// returns 0: OK
+// returns 1: unexpected SA
+// returns 2: unexpected NAME
+byte CT_VALIDATE_AC(pg J1939::J1939_CT_RT::AC pgAC, byte expectedSA, byte checkDevName, qword expectedDevName, char errText[])
+{
+  if (!CT_VALIDATE_AC_SA(pgAC.time_ns, pgAC.sa, expectedSA, errText)) return 1;
+  if (checkDevName && !CT_VALIDATE_AC_DEVNAME(pgAC.time_ns, pgAC.qword(0), expectedDevName, errText)) return 2;
+  return 0;
+}
+byte CT_VALIDATE_LAST_SEEN_AC(byte expectedSA, byte checkDevName, qword expectedDevName, char errText[])
+{
+  return CT_VALIDATE_AC(gPgLastAC, expectedSA, checkDevName, expectedDevName, errText);
+}
+byte CT_VALIDATE_AC_SA(int64 ts, byte gotSA, byte expectedSA, char errText[])
+{
+  if (gotSA == gc_ANY_ADDR) return 1;
+  if (gotSA != expectedSA)
+  {
+    snprintf(errText, elcount(errText), "AC at t=%.06f from unexpected source address. (Got: %d (0x%.02X), Expected: %d (0x%.02X))", CT_Ns2Sec(ts), gotSA, gotSA, expectedSA, expectedSA);
+    return 0;
+  }
+  return 1;
+}
+byte CT_VALIDATE_AC_DEVNAME(int64 ts, qword gotDevName, qword expectedDevName, char errText[])
+{
+  if (gotDevName != expectedDevName)
+  {
+    if ( (ts==0) || (gotDevName==-1) || (expectedDevName == -1) )
+    {
+      snprintf(errText, elcount(errText), "No Address Claim informations or messages found.");
+    }
+    else
+    {
+      char sGot[255],sExp[255];
+      CT_HumanReadablePayload(sGot, gotDevName);
+      CT_HumanReadablePayload(sExp, expectedDevName);
+      CT_MarkDiffInHumanReadablePayload(sGot, sExp);
+
+      snprintf(errText, elcount(errText), "AC at t=%.06f unexpected NAME detected. (Got: %s, Expected: %s)", CT_Ns2Sec(ts), sGot, sExp);
+    }
+    
+    return 0;
+  }
+  return 1;
+}
+
+// ==============================================================================================================
+// Check for empty pgis as a precondition check
+// returns 1: pgis are empty, 0: pgis ok (no failure).
+byte CT_STEP_CHECK_PGIS_ARE_EMPTY(byte funcPath, struct gPGAttrs pgis[long])
+{
+  char reportText[255];
+  if (pgis.size()==0)
+  {
+    snprintf(reportText, elcount(reportText), "There are no pgis given.");
+    CT_STEP_PRECOND_ERROR(funcPath, reportText);
+    return 1;
+  }
+  return 0;
+}
+// ==============================================================================================================
+// Check for empty pgis as a precondition check
+// returns 1: pgis are empty, 0: pgis ok (no failure).
+byte CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(byte funcPath, struct gPGAttrs pgis[long])
+{
+  char reportText[255];
+  if (pgis.size()==0)
+  {
+    snprintf(reportText, elcount(reportText), "There are no pgis given.");
+    CT_STEP_PRECOND_INCONCLUSIVE(funcPath, reportText);
+    return 1;
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+void CT_STEP_PGI_CFG_ERROR(byte funcPath, struct gPGAttrs pgi, char notConfiguredToBeWhat[])
+{
+  char reportText[255];
+  snprintf(reportText, elcount(reportText), "PGN %d (0x%.02X) is not configured to be %s.", pgi.PGN, pgi.PGN, notConfiguredToBeWhat);
+  CT_STEP_PRECOND_ERROR(funcPath, reportText);
+}
+// ==============================================================================================================
+void CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(byte funcPath, struct gPGAttrs pgi, char notConfiguredToBeWhat[])
+{
+  char reportText[255];
+  snprintf(reportText, elcount(reportText), "PGN %d (0x%.02X) is not configured to be %s.", pgi.PGN, pgi.PGN, notConfiguredToBeWhat);
+  CT_STEP_PRECOND_INCONCLUSIVE(funcPath, reportText);
+}
+// ==============================================================================================================
+void CT_STEP_END_ERROR_DLC_NOT_GREATER_8_NO_TP_POSSIBLE(byte funcPath, byte detectedDLC)
+{
+  char reportText[255];
+  snprintf(reportText, elcount(reportText), "Detected response expected to have DLC>8, but it has a DLC of %d. (No TP can be used.)", detectedDLC);
+  CT_STEP_END_FAIL(funcPath, reportText);
+}
+
+// ==============================================================================================================
+byte CT_PRECOND_CHECK_CA_SUPPORT(byte funcPathOnFailure, byte inconclusive)
+{
+  if (!gDUT_CA)
+  {
+    CT_STEP_BEGIN_CHECK("DUT supports commanded address.");
+    
+    if (inconclusive)
+    {
+      CT_STEP_END_INCONCLUSIVE(funcPathOnFailure, "Commanded Address is configured not to be supported by the DUT.");
+    }
+    else
+    {
+      CT_STEP_END_FAIL(funcPathOnFailure, "Commanded Address is configured not to be supported by the DUT.");
+    }
+    
+    return 0;
+  }
+  return 1;
+}
+// ==============================================================================================================
+byte CT_PRECOND_CHECK_NM_SUPPORT(byte funcPathOnFailure, byte inconclusive)
+{
+  if (!gDUT_NM)
+  {
+    CT_STEP_BEGIN_CHECK("DUT supports NAME MANAGEMENT (NM).");
+    
+    if (inconclusive)
+    {
+      CT_STEP_END_INCONCLUSIVE(funcPathOnFailure, "NM is configured not to be supported by the DUT.");
+    }
+    else
+    {
+      CT_STEP_END_FAIL(funcPathOnFailure, "NM is configured not to be supported by the DUT.");
+    }
+    
+    return 0;
+  }
+  return 1;
+}
+// ==============================================================================================================
+byte CT_PRECOND_CHECK_ADDR_VIOLATION_DM_SUPPORT(byte funcPathOnFailure, byte inconclusive)
+{
+  if (!gDUT_AddrViolationDM)
+  {
+    CT_STEP_BEGIN_CHECK("DUT supports address violation over DM");
+    
+    if (inconclusive)
+    {
+      CT_STEP_END_INCONCLUSIVE(funcPathOnFailure, "Address violation over DM is configured not to be supported by the DUT.");
+    }
+    else
+    {
+      CT_STEP_END_FAIL(funcPathOnFailure, "Address violoation over DM is configured not to be supported by the DUT.");
+    }
+    
+    return 0;
+  }
+  return 1;
+}
+// ==============================================================================================================
+byte CT_PRECOND_CHECK_DUT_AAC_BIT(byte expectedAAC, qword devName, byte funcPathOnFailure, byte inconclusive)
+{
+  char text1[255];
+  char text2[255];
+  
+  struct DeviceName dn;
+  CT_CreateDevNameStruct(devName, dn);
+  
+  if (dn.aac != expectedAAC)
+  {
+    snprintf(text1, elcount(text1), "DUT's AAC is set to %d...", expectedAAC);
+    snprintf(text2, elcount(text2), "DUT's AAC is not fitting for the test. (Got: %d, Expected: %d, NAME 0x%llX with AAC bit set would be 0x%llX)", dn.aac, expectedAAC, devName, CT_DevName(dn, expectedAAC));
+    CT_STEP_BEGIN_CHECK(text1);
+    if (inconclusive)
+    {
+      CT_STEP_END_INCONCLUSIVE(funcPathOnFailure, text2);
+    }
+    else
+    {
+      CT_STEP_END_FAIL(funcPathOnFailure, text2);
+    }
+    
+    return 0;
+  }
+  return 1;
+}
+
+// ==============================================================================================================
+byte CT_Is_AAC_Set_To(byte expectedAAC, qword devName)
+{
+  struct DeviceName dn;
+  CT_CreateDevNameStruct(devName, dn);
+  return (dn.aac == expectedAAC);
+}
+
+
+// ==============================================================================================================
+void CT_STEP_PRECOND_ERROR(byte funcPath, char errText[])
+{
+  char reportText[1024];
+  CT_STEP_BEGIN(-1, "Precondition");
+  CT_STEP_END_FAIL(funcPath, errText);
+}
+
+// ==============================================================================================================
+void CT_STEP_PRECOND_INCONCLUSIVE(byte funcPath, char errText[])
+{
+  char reportText[1024];
+  CT_STEP_BEGIN(-1, "Precondition");
+  CT_STEP_END_INCONCLUSIVE(funcPath, errText);
+}
+
+// ==============================================================================================================
+// test step pass - do not use this directly. use the CT_STEP_END_... functions.
+void CT_PASS(char text[])
+{
+  char reportText[255];
+  CT_VERDICT(VERDICT_PASS);
+
+  if (@CT::DEBUG::TEST) write("... PASS");
+  if (!gNoReporting) 
+  {
+    if (strlen(text)>0) testStepPass(text); //else testStepPass();
+    gTestStepOpen = 0;
+  }
+}
+
+// ==============================================================================================================
+// test step pass - do not use this directly. use the CT_STEP_END_... functions.
+void CT_PASS()
+{
+  CT_PASS("");
+}
+
+// ==============================================================================================================
+// test step ends with state passed.
+void CT_STEP_END_PASS(byte funcPathNr)
+{
+  if (@CT::DEBUG::TEST) write("CT_STEP_END...");
+  CT_FUNC_PATH(funcPathNr);
+  CT_PASS();
+}
+
+// ==============================================================================================================
+// test step ends with state passed including some additional informational text.
+void CT_STEP_END_PASS(byte funcPathNr, char text[])
+{
+  if (@CT::DEBUG::TEST) write("CT_STEP_END...");
+  CT_FUNC_PATH(funcPathNr);
+  CT_PASS(text);
+}
+
+// ==============================================================================================================
+// test step ends with state failed.
+void CT_STEP_END_FAIL(byte funcPathNr, char text[])
+{
+  if (@CT::DEBUG::TEST) write("CT_STEP_END...");
+  CT_FUNC_PATH(funcPathNr);
+  CT_FAIL(text);
+}
+
+// ==============================================================================================================
+// test step ends with state failed including an additional errorcode.
+void CT_STEP_END_FAIL(byte funcPathNr, char text[], int errCode)
+{
+  if (@CT::DEBUG::TEST) write("CT_STEP_END...");
+  CT_FUNC_PATH(funcPathNr);
+  CT_FAIL(text, errCode);
+}
+
+// ==============================================================================================================
+// test step ends with state inconclusive.
+void CT_STEP_END_INCONCLUSIVE(byte funcPathNr)
+{
+  if (@CT::DEBUG::TEST) write("CT_STEP_END...");
+  CT_FUNC_PATH(funcPathNr);
+  CT_INCONCLUSIVE();
+}
+
+// ==============================================================================================================
+// test step ends with state inconclusive and additional informational text.
+void CT_STEP_END_INCONCLUSIVE(byte funcPathNr, char text[])
+{
+  if (@CT::DEBUG::TEST) write("CT_STEP_END...");
+  CT_FUNC_PATH(funcPathNr);
+  CT_INCONCLUSIVE(text);
+}
+
+// ==============================================================================================================
+// test step ends with state passed.
+void CT_STEP_END_PASS()
+{
+  CT_STEP_END_PASS(CT_FUNC_PATH());
+}
+
+// ==============================================================================================================
+// test step ends with state passed including some additional informational text.
+void CT_STEP_END_PASS(char text[])
+{
+  CT_STEP_END_PASS(CT_FUNC_PATH(), text);
+}
+
+// ==============================================================================================================
+// test step ends with state failed.
+void CT_STEP_END_FAIL(char text[])
+{
+  CT_STEP_END_FAIL(CT_FUNC_PATH(), text);
+}
+
+// ==============================================================================================================
+// test step ends with state failed including an additional errorcode.
+void CT_STEP_END_FAIL(char text[], int errCode)
+{
+  CT_STEP_END_FAIL(CT_FUNC_PATH(), text, errCode);
+}
+
+// ==============================================================================================================
+// test step ends with state inconclusive.
+void CT_STEP_END_INCONCLUSIVE()
+{
+  CT_STEP_END_INCONCLUSIVE(CT_FUNC_PATH());
+}
+
+// ==============================================================================================================
+// test step ends with state inconclusive and additional informational text.
+void CT_STEP_END_INCONCLUSIVE(char text[])
+{
+  CT_STEP_END_INCONCLUSIVE(CT_FUNC_PATH(), text);
+}
+
+// ==============================================================================================================
+// test step is inconclusive - do not use directly. instead use the CT_STEP_END_ functions.
+void CT_INCONCLUSIVE()
+{
+  CT_INCONCLUSIVE("");
+}
+
+// ==============================================================================================================
+// test step is inconclusive - do not use directly. instead use the CT_STEP_END_ functions.
+void CT_INCONCLUSIVE(char text[])
+{
+  CT_VERDICT( VERDICT_INCONCLUSIVE );
+  if (!gNoReporting)
+  {
+    if (!gNoVerdicts) 
+    {
+      if (@CT::DEBUG::TEST) write("... INCONCLUSIVE (seen as %d)", @CT::CFG::REPORT::InconclusiveAs);
+      switch (@CT::CFG::REPORT::InconclusiveAs)
+      {
+        case 2:
+        {
+          //testStepFail("\n");
+          if (strlen(text)>0) testStepFail(text);
+          gTestStepOpen = 0;
+          break;
+        }
+        case 1:
+        {
+          //testStepPass("\n");
+          if (strlen(text)>0) testStepPass(text);
+          gTestStepOpen = 0;
+          break;
+        }
+        case 0:
+        default:
+        {
+          //testStepInconclusive("\n");
+          if (strlen(text)>0) testStepInconclusive("INC", text);
+          gTestStepOpen = 0;
+        }
+      }
+      
+    }
+    else
+    {
+      // no verdicts from outside, but leaving then last started test step open will produce a warning.
+      //testStepPass(); 
+      gTestStepOpen = 0;
+      
+      // mark the inconclusive within report, but without verdict.
+      testStep("INC", text);
+    }
+  }
+  CT_Info(1, "Inconclusive", text);
+}
+
+// ==============================================================================================================
+// test step failed - do not use directly. instead use the CT_STEP_END_ functions.
+void CT_FAIL(char text[], int errCode)
+{
+  char buf[8192];
+  snprintf(buf, elcount(buf), "%s (%d)", text, errCode);
+  CT_FAIL(buf);
+}
+
+// ==============================================================================================================
+// test step failed - do not use directly. instead use the CT_STEP_END_ functions.
+void CT_FAIL(char text[])
+{
+  CT_WAIT(1); // do not continue too fast on error to get a better trace-lineup.
+  CT_VERDICT(VERDICT_FAIL);
+  if (@CT::DEBUG::TEST) write("... FAIL");
+  if (!gNoReporting)
+  {
+    if (!gNoVerdicts) 
+    {
+      //testStepFail();
+      gTestStepOpen = 0;
+      if (strlen(text)>0) testStepFail("ERR", text);
+    }
+    else
+    {
+      // no verdicts from outside, but leaving then last started test step open will produce a warning.
+      //testStepPass(); 
+      gTestStepOpen = 0;
+      
+      // mark the error within report, but without verdict.
+      if (strlen(text)>0) testStep("ERR", text);
+    }
+  }
+  
+  CT_Error(1, "ERROR", text);
+}
+
+// ==============================================================================================================
+// test case ends. END every testcase with it - also using CT_BEGIN before.
+// in the background the CAN-Message recording buffer is stopped here.
+void CT_END()
+{
+  if (CT_RT())
+  {
+    @CT::TEST::LOG::TestCaseMarker = 0;
+  }
+  MsgBuf_StopRecording();
+  MsgBuf_Clear();
+  CT_STOP_RANDOM_CAN_FRAME_GENERATOR();                 // deactivate can frame generator.
+  CT_STOP_SEND_PG_GENERATOR();                          // deactiveate send pg generator.
+  
+  gMsgBufEnabled = 1;                                   // in the case it was disabled, re enable after test end.
+  gReactor_ReactWithAbortOnDT_Active = 0;               // deactivate reactor
+  gReactor_ReactWithAbortOnDT_DA     = gc_BC_ADDR;      // deactivate reactor
+  gReactor_ReactWithEOMOnDT_Active   = 0;               // deactivate reactor
+  
+  gAutoUserAnswerInfo.clear();                          // auto user answer for next step refreshes...
+  
+  // reset the transport behaviour of the TOOL's IL...
+  TestILSetNodeProperty(TOOL, "Packets_Per_CTS", 255);
+  TestILSetNodeProperty(TOOL, "CTSLatency", 0);
+  TestILSetNodeProperty(TOOL, "TPDTLatency", 0);
+  TestILSetNodeProperty(TOOL, "EoMALatency", 0);  
+  
+  CT_DISABLE_TESTNODE_IL();
+  //CT_WAIT_UNTIL_NO_BAM(gc_BC_ADDR);
+  //CT_WAIT_UNTIL_NO_TP(gc_BC_ADDR, gc_BC_ADDR);
+  if (CT_VERDICT() == VERDICT_FAIL) 
+  {
+    CT_Info(1,"CT_END","Wait 2* T3 (2500ms) after detected an error.");
+    CT_WAIT(2*gc_TIMEOUT_T3); // do not continue too fast on failures to not have effects on following up testcases.
+  }
+}
+
+// ==============================================================================================================
+// basic output function to print something into the write.
+void CT_Out(byte active, enum eSeverity severity, char funcName[], char text[])
+{
+  char colon[3];
+  char sTcid[255];
+  char buf[8192];
+  
+  colon[0]=':';
+  colon[1]=' ';
+  snprintf(sTcid, elcount(sTcid), "%s | %10.6f | ", gsTCID, CT_Ns2Sec(timeNowInt64()));
+  
+  if (strlen(text)==0) sTcid[0]=0;
+  if (strlen(funcName)==0) colon[0]=0;
+  
+  if (active) 
+  {
+    snprintf(buf, elcount(buf), "\r\n%s%s%s%s", sTcid, funcName, colon, text);
+    // out to write...
+    writeEx(CT_OUT_TAB, severity, buf);
+
+    // out to trace...
+    str_replace_regex(buf, "[\\r\\n]*", ""); // removes endlines
+    str_replace_regex(buf, " \\|.*\\|", ""); // remove time values between pipe-symbols
+    writeEx(-3, severity, buf);
+  }
+}
+
+// ==============================================================================================================
+// basic output function to print something into the write.
+void CT_Out(byte active, enum eSeverity severity, char funcName[], char text[], int errCode)
+{
+  char buf[8192];
+  snprintf(buf, elcount(buf), "%s (%d)", text, errCode);
+  CT_Out(active, severity, funcName, buf);
+}
+
+// ==============================================================================================================
+// basic output function to print something into the write using successfull severity.
+void CT_Success(byte active, char funcName[], char info[])
+{
+  CT_Out(active, SVR_SUCCESS, funcName, info);
+}
+
+// ==============================================================================================================
+// output a chk-info to write.
+void CT_CHK_Info(char text[])
+{
+  CT_Info(1, "CHK.", text);
+}
+
+// ==============================================================================================================
+// basic output function to print something into the write-function using informational severity.
+void CT_Info(byte active, char funcName[], char info[])
+{
+  CT_Out(active, SVR_INFO, funcName, info);
+}
+// ==============================================================================================================
+// basic output function to print something into the write-function using informational severity.
+void CT_Info(byte active, char funcName[], char info[], int errCode)
+{
+  CT_Out(active, SVR_INFO, funcName, info, errCode);
+}
+
+// ==============================================================================================================
+// basic output function to print something into the write using warning severity.
+void CT_Warning(byte active, char funcName[], char warning[])
+{
+  CT_Out(active, SVR_WARNING, funcName, warning);
+}
+// ==============================================================================================================
+// basic output function to print something into the write using waring severity.
+void CT_Warning(byte active, char funcName[], char warning[], int errCode)
+{
+  CT_Out(active, SVR_WARNING, funcName, warning, errCode);
+}
+
+// ==============================================================================================================
+// basic output function to print something into the write using error severity.
+void CT_Error(byte active, char funcName[], char error[])
+{
+  CT_Out(active, SVR_ERROR, funcName, error);
+}
+// ==============================================================================================================
+// basic output function to print something into the write using error severity.
+void CT_Error(byte active, char funcName[], char error[], int errCode)
+{
+  CT_Out(active, SVR_ERROR, funcName, error, errCode);
+}
+// ==============================================================================================================
+// CTFP - compliance test function path.
+// it's the functions outcome path.
+// it has to be set within the testfunctions.
+// the value 0 can be used, but it is used during initialization within CT_BEGIN and mainly used
+// to detect an unimplemented outgoing function path.
+byte CT_FUNC_PATH(byte value)
+{
+  gFuncPath = value;
+  return value;
+}
+
+// ==============================================================================================================
+// just get the compliance test case function path.
+// its the functions outcome path.
+// it has to be set within the testfunctions.
+byte CT_FUNC_PATH()
+{
+  return gFuncPath;
+}
+// ==============================================================================================================
+// get last set verdict...
+enum eVerdict CT_VERDICT()
+{
+  return gVerdict;
+}
+
+// ==============================================================================================================
+// set verdict
+enum eVerdict CT_VERDICT(enum eVerdict v)
+{
+  gVerdict = v;
+  return v;
+}
+
+// ==============================================================================================================
+// Check last verdict passed.
+byte CT_IS_VERDICT_PASSED()
+{
+  return CT_VERDICT() == VERDICT_PASS;
+}
+// ==============================================================================================================
+// Check last verdict failed
+byte CT_IS_VERDICT_FAILED()
+{
+  return CT_VERDICT() == VERDICT_FAIL;
+}
+// ==============================================================================================================
+// Check last verdict inconclusive
+byte CT_IS_VERDICT_INCONCLUSIVE()
+{
+  return CT_VERDICT() == VERDICT_INCONCLUSIVE;
+}
+
+// ==============================================================================================================
+// get verdict as text.
+void CT_VERDICT_AS_TEXT(char result[], enum eVerdict v)
+{
+  switch(v)
+  {
+    case VERDICT_PASS: snprintf(result, elcount(result), "Passed"); break;
+    case VERDICT_FAIL: snprintf(result, elcount(result), "Failed"); break;
+    case VERDICT_INCONCLUSIVE: snprintf(result, elcount(result), "Inconclusive"); break;
+    
+    default:
+    case VERDICT_NA: snprintf(result, elcount(result), "N/A"); break;
+      
+  }
+}
+// ==============================================================================================================
+// get current (last) verdict as text.
+void CT_VERDICT_AS_TEXT(char result[])
+{
+  CT_VERDICT_AS_TEXT(result, gVerdict);
+}
+
+// ==============================================================================================================
+// print given pg into write.
+void CT_PrintPG(byte active, char funcName[], pg* pv)
+{
+  CT_Info(active, funcName, "====[ PG ]====");
+  if (active)
+  {
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\nid  : 0x%.08X", CT_GetId(pv));
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\ntime: %.6f", CT_Ns2Sec( pv.time_ns ));
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\npgn : 0x%.05X", pv.pgn);
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\ndir : %d", pv.dir);
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\nsrc : %d (0x%.02X)", pv.sa, pv.sa);
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\ndst : %d (0x%.02X)", pv.da, pv.da);
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\ndlc : %d", pv.dlc);
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\nprio: %d", pv.prio);
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\ndp  : %d", pv.dp );
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\nedp : %d", pv.edp );
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\nbyte(0) : 0x%X", pv.byte(0) );
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\nbyte(1) : 0x%X", pv.byte(1) );
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\nbyte(2) : 0x%X", pv.byte(2) );
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\nbyte(3) : 0x%X", pv.byte(3) );
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\nbyte(4) : 0x%X", pv.byte(4) );
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\nbyte(5) : 0x%X", pv.byte(5) );
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\nbyte(6) : 0x%X", pv.byte(6) );
+    writeEx(CT_OUT_TAB, SVR_INFO, "\r\nbyte(7) : 0x%X", pv.byte(7) );
+  }
+}
+
+// ==============================================================================================================
+// wait for any tpdt package from src to dst.
+// returns 1: ok
+// 0: timeout
+// ==============================================================================================================
+int CT_WaitForNextDT( pg J1939::J1939_CT_RT::TPDT pgResult, byte src, byte dst, dword timeout )
+{
+  if (testWaitForJ1939PG( gc_PGN_TPDT, src, dst, timeout) == 0) return 0;
+  testGetWaitJ1939PGData(pgResult);
+  return 1;
+}
+
+// ==============================================================================================================
+// give expected sequence range.
+// function checks if the following DT's are correct.
+// returns:
+// 0  : ok
+// n  : DT nr n timed out.
+// <0 : expected dt sequence number does not fit the given next packet number. abs(result) is the expected seqNr.
+// pgResult is filled referentially with the last inspected/seen dt.
+// all other DT's are filled as a converted Msg-buf array, due pg's can't be stored within arrays.
+// ==============================================================================================================
+int CT_WaitForDTs( pg J1939::J1939_CT_RT::TPDT pgResult, struct MsgBufEntry tpdtMsgs[long], byte src, byte dst, byte nextPkgNr, byte pkgCount )
+{
+  word i;
+  word timeout;
+  
+  tpdtMsgs.clear();
+  
+  timeout = gc_TIMEOUT_TR;
+  for (i=0; i<pkgCount; i++)
+  {
+    struct MsgBufEntry entry;
+    if (!CT_WaitForNextDT(pgResult, src, dst, timeout)) return i+nextPkgNr;
+    MsgBuf_Copy(tpdtMsgs[i], pgResult);
+    if (pgResult.SequenceNumber != (i+nextPkgNr)) return -(i+nextPkgNr);
+  }
+  return 0;
+}
+// without the resulting message buffer array of the dt messages.
+int CT_WaitForDTs( pg J1939::J1939_CT_RT::TPDT pgResult, byte src, byte dst, byte nextPkgNr, byte pkgCount )
+{
+  struct MsgBufEntry buf[long];
+  return CT_WaitForDTs( pgResult, buf, src, dst, nextPkgNr, pkgCount);
+}
+
+// ==============================================================================================================
+// give configured pgCTS and timeout.
+// function checks if the following DT's are correct.
+// returns:
+// 0  : ok
+// n  : DT nr n timed out.
+// <0 : expected td sequence number does not fit the pgCTS' next packet number. abs(result) is the expected seqNr.
+// pgResult is filled referentially with the last inspected/seen td.
+// ==============================================================================================================
+int CT_WaitForDTs( pg J1939::J1939_CT_RT::TPDT pgResult, struct MsgBufEntry tpdtMsgs[long], pg J1939::J1939_CT_RT::TPCMxx pgCTS )
+{
+  return CT_WaitForDTs( pgResult, tpdtMsgs, pgCTS.da, pgCTS.sa, pgCTS.NextPacketNumberToBeSent, pgCTS.NumberOfPacketsThatCanBeSent);
+}
+// without the resulting message buffer array of the dt messages.
+int CT_WaitForDTs( pg J1939::J1939_CT_RT::TPDT pgResult, pg J1939::J1939_CT_RT::TPCMxx pgCTS)
+{
+  struct MsgBufEntry buf[long];
+  return CT_WaitForDTs( pgResult, buf, pgCTS );
+}
+// without the resulting message buffer array of the dt messages, limited by given pkgCount
+int CT_WaitForDTs( pg J1939::J1939_CT_RT::TPDT pgResult, pg J1939::J1939_CT_RT::TPCMxx pgCTS, byte pkgCount)
+{
+  struct MsgBufEntry buf[long];
+  return CT_WaitForDTs( pgResult, buf, pgCTS.da, pgCTS.sa, pgCTS.NextPacketNumberToBeSent, pkgCount);
+}
+// without the resulting message buffer array of the dt messages, starting with next pkg nr, limited by given pkgCount
+int CT_WaitForDTs( pg J1939::J1939_CT_RT::TPDT pgResult, pg J1939::J1939_CT_RT::TPCMxx pgCTS, byte nextPkgNr, byte pkgCount)
+{
+  struct MsgBufEntry buf[long];
+  return CT_WaitForDTs( pgResult, buf, pgCTS.da, pgCTS.sa, nextPkgNr, pkgCount);
+}
+
+// ==============================================================================================================
+// await TPCM
+// resulting pg for TPCM is filled referentially in pgResult.
+// returns:
+// 0: ok
+// 1: timeout
+// ==============================================================================================================
+int CT_WaitForTPCM(pg J1939::J1939_CT_RT::TPCMxx pgResult, dword pgn, byte src, byte dst, byte controlByte, dword timeout)
+{
+  word i;
+  dword resultPGN;
+  dword sa,da;
+  int64 ts;
+  byte debug = 0;
+  
+  sa = src;
+  da = (dst == gc_ANY_ADDR) ? gc_INVALID_OR_IGNORE_ADDR : dst;
+  
+  ts = timeNowInt64();
+  //initJ1939PGData(pgResult);
+  if (debug) write("%.06f: WAIT TPCM with cb=0x%x, from 0x%x->0x%x pgn=0x%x, timeout = %d...",CT_Ns2Sec(ts),controlByte, sa, da, pgn, timeout);
+  for (i=0; i<timeout; i++)
+  {
+    //if (debug) write("wait %d", i);
+    // PROBLEM: THIS BLOATS THE REPORT WITH RESUME MESSAGES - HOW TO DISABLE THIS REPORTING ISSUE?
+    // IT HAS TO BE DONE WITHIN A LOOP, DUE ABORT IS A TPCM WITH SPECIFIC CONTROLBYTE (PAYLOAD)...
+    if (testWaitForJ1939PG( gc_PGN_TPCM, sa, da, 1 ) == 1) 
+    {
+      testGetWaitJ1939PGData(pgResult);
+      resultPGN = CT_GetTPCMPgn(pgResult);
+      if (debug) write("%.06f: GOT TPCM %x->%x, resultPGN = %x, pgn = %x, cb=%x, pgn equal:%d, pgn any:%d, pgn equal or any:%d", CT_Ns2Sec(pgResult.time_ns), pgResult.sa, pgResult.da, pgResult.PGNumber, pgn, pgResult.ControlByte, resultPGN==pgn, resultPGN==gc_PGN_ANY, ( (resultPGN==pgn) || (resultPGN == gc_PGN_ANY) ));
+      if ( ( (pgResult.ControlByte == controlByte) || (controlByte == 0) ) && ( (resultPGN==pgn) || (pgn == gc_PGN_ANY) ) )
+      {
+        if (debug) write("TPCM OK");
+        return 0;
+      }
+    }
+  }
+  if (debug) write("TPCM TIMEOUT!");
+  return 1;
+}
+
+// ==============================================================================================================
+// returns 0 ok
+// returns 1 timeout
+byte CT_AWAIT_ABORT( pg J1939::J1939_CT_RT::TPCMxx pgAbrtResult, dword pgn, byte src, byte dst, dword timeout )
+{
+  return CT_WaitForTPCM(pgAbrtResult, pgn, src, dst, gc_TPCM_CTRL_WORD_ABORT, timeout);  
+}
+// without referential pgAbrt result.
+byte CT_AWAIT_ABORT( dword pgn, byte src, byte dst, dword timeout )
+{
+  pg J1939::J1939_CT_RT::TPCMxx pgResult;
+  return CT_AWAIT_ABORT( pgResult, pgn, src, dst, timeout );
+}
+// without pgn...
+byte CT_AWAIT_ABORT( pg J1939::J1939_CT_RT::TPCMxx pgAbrtResult, byte src, byte dst, dword timeout )
+{
+  return CT_AWAIT_ABORT( pgAbrtResult, gc_PGN_ANY, src, dst, timeout );
+}
+
+// ==============================================================================================================
+// Await ACL as reponse within given timeout in ms.
+// returns 1: ok
+// returns 0: timeout.
+byte CT_AWAIT_AC(pg J1939::J1939_CT_RT::AC pgAC, byte src, qword expectedDevName, dword timeout, char errText[])
+{
+  int64 ts;
+  int64 origTimeout=0;
+  byte debug=0;
+  byte result;
+  ts = timeNowNS();
+  if (origTimeout == 0) origTimeout = timeout;
+  result = CT_AWAIT_PG_FROM(pgAC, src, gc_BC_ADDR, gc_PGN_AC, timeout, errText, gBroadcast);
+  if (result)
+  {
+    int64 te;
+    te = timeNowNS();
+    
+    if (debug) write("Found AC PG from somebody... checking NAME...");
+    // got something. check for expected devname...
+    if (expectedDevName == pgAC.qword(0)) 
+    {
+      if (debug) write("NAME fits.");
+      return 1;
+    }
+    
+    // devname does not fit expected one, continue waiting (recursively)
+    if (CT_Ns2Ms(te-ts)>0)
+    {
+      timeout-=CT_Ns2Ms(te-ts); // reduce timeout.
+      if (debug) write("Continue waiting remaining %dms...", timeout);
+      result = CT_AWAIT_AC(pgAC, src, expectedDevName, timeout, errText);
+      {
+        char origTimeoutString[25];
+        snprintf(origTimeoutString,elcount(origTimeoutString),"%dms",origTimeout);
+        str_replace_regex(errText, "[0-9]+.ms", origTimeoutString);
+      }
+      origTimeout = 0;
+      return result;
+    }
+    if (debug) write("Giving up waiting for AC...");
+    // after recursion the output text shows the remaining time of the last recursion not the
+    // original timeout time.
+    return 0;
+  }
+  return result;
+}
+byte CT_AWAIT_AC(pg J1939::J1939_CT_RT::AC pgAC, byte src, dword timeout, char errText[])
+{
+  byte result;
+  result = CT_AWAIT_PG_FROM(pgAC, src, gc_BC_ADDR, gc_PGN_AC, timeout, errText, gBroadcast);
+  if (!result)
+  {
+    snprintf(errText, elcount(errText), "AC Timeout. %s", errText);
+  }
+  return result;
+}
+// ==============================================================================================================
+void CT_WAIT_AFTER_AC_WITH_INFO()
+{
+  CT_WAIT_WITH_INFO(gc_TIMEOUT_AC, "after ACL before continuing...");
+}
+
+// ==============================================================================================================
+// await PG message from given sender address
+// returns 
+//         0: expected PG not detected
+//         1: ok
+byte CT_AWAIT_PG_FROM(pg* pgResult, byte senderAddress, byte receiverAddress, dword requestedPgn, word timeout, char errText[], enum gFlag_Cast cast)
+{
+  dword sa;
+  byte bcAllowed, ucAllowed;
+
+  byte debug = 0;
+  char saInfo[255];
+  char daInfo[255];
+  
+  ucAllowed = ( ((byte)cast & (byte)gUnicast)   == (byte)gUnicast);
+  bcAllowed = ( ((byte)cast & (byte)gBroadcast) == (byte)gBroadcast);
+  
+  sa = (senderAddress == gc_BC_ADDR) ? gc_INVALID_OR_IGNORE_ADDR : senderAddress;
+  
+  if (debug) write("%.06f AWAIT PG: for pgn %x from %x->%x (timeout=%d) cast=%d", CT_Ns2Sec(timeNowInt64()), requestedPgn, sa, receiverAddress, timeout, cast);    
+  if (bcAllowed) testJoinJ1939PGEvent(requestedPgn, sa, gc_BC_ADDR);
+  if (ucAllowed) testJoinJ1939PGEvent(requestedPgn, sa, receiverAddress);
+  if (testWaitForAnyJoinedEvent(timeout+1)>0)
+  {
+    testGetWaitJ1939PGData(pgResult);
+    return 1;
+  }
+  
+  snprintf(errText, elcount(errText), "PGN %d (0x%.05X) from @SA -> @DA not detected within %d ms.", requestedPgn, requestedPgn, timeout);  
+  if (sa == gc_INVALID_OR_IGNORE_ADDR)
+  {
+    str_replace(errText, "@SA", "any address");
+  }
+  if (receiverAddress == gc_BC_ADDR)
+  {
+    str_replace(errText, "@DA", "all");
+  }
+  snprintf(saInfo, elcount(saInfo), "%d (0x%.02X)", sa, sa);
+  snprintf(daInfo, elcount(daInfo), "%d (0x%.02X)", receiverAddress, receiverAddress);
+  str_replace(errText, "@DA", daInfo);
+  str_replace(errText, "@SA", saInfo);
+  
+  return 0;
+}
+
+
+// ==============================================================================================================
+// await rts after sending a request to a pgn with DLC>8
+// resulting pg for RTS is filled referentially in pgResult.
+// returns:
+// 0: ok
+// 1: timeout
+// ==============================================================================================================
+int CT_WaitForRTS(pg J1939::J1939_CT_RT::TPCMxx pgResult, dword pgn, byte src, byte dst)
+{
+  return CT_WaitForTPCM(pgResult, pgn, src, dst, gc_TPCM_CTRL_WORD_RTS, gc_RESP_TIMEOUT);
+}
+// ==============================================================================================================
+// await cts 
+// resulting pg for CTS is filled referentially in pgResult.
+// returns:
+// 0: ok
+// 1: timeout
+// ==============================================================================================================
+int CT_WaitForCTS(pg J1939::J1939_CT_RT::TPCMxx pgResult, dword pgn, byte src, byte dst, dword timeout)
+{
+  return CT_WaitForTPCM(pgResult, pgn, src, dst, gc_TPCM_CTRL_WORD_CTS, timeout);
+}
+// ==============================================================================================================
+// await eom after sending a request to a pgn with DLC>8
+// resulting pg for EOM is filled referentially in pgResult.
+// returns:
+// 0: ok
+// 1: timeout
+// ==============================================================================================================
+int CT_WaitForEOM(pg J1939::J1939_CT_RT::TPCMxx pgResult, dword pgn, byte src, byte dst)
+{
+  return CT_WaitForTPCM(pgResult, pgn, src, dst, gc_TPCM_CTRL_WORD_EOM, gc_RESP_TIMEOUT);
+}
+
+// ==============================================================================================================
+// send CTS and await until seen on bus.
+// returns 0 on ok 1 on timeout
+// ==============================================================================================================
+int CT_SendABORT(pg J1939::J1939_CT_RT::TPCMxx pgResult, dword pgn, byte src, byte dst, byte abortReason)
+{
+  initJ1939PGData(pgResult);
+  pgResult.sa = src;
+  pgResult.da = dst;
+  pgResult.ConnectionAbortReason = abortReason;
+  pgResult.PGNumber = pgn;
+  pgResult.ControlByte = gc_TPCM_CTRL_WORD_ABORT;
+  output(pgResult);
+  return CT_AWAIT_ABORT(pgResult, pgn, src, dst, gc_TIMEOUT_TR);
+}
+int CT_SendABORT(dword pgn, byte src, byte dst, byte abortReason)
+{
+  pg J1939::J1939_CT_RT::TPCMxx pgResult;
+  return CT_SendAbort(pgResult, pgn, src, dst, abortReason);
+}
+
+
+// ==============================================================================================================
+// send CTS and await until seen on bus.
+// returns 0 on ok 1 on timeout
+// ==============================================================================================================
+int CT_SendCTS(pg J1939::J1939_CT_RT::TPCMxx pgResult, dword pgn, byte src, byte dst, byte nextPkg, byte pkgCount)
+{
+  initJ1939PGData(pgResult);
+  pgResult.sa = src;
+  pgResult.da = dst;
+  // CTS hold support.
+  if (pkgCount==0) nextPkg=0xFF;
+  pgResult.NextPacketNumberToBeSent = nextPkg;
+  pgResult.NumberOfPacketsThatCanBeSent = pkgCount;
+  pgResult.PGNumber = pgn;
+  pgResult.ControlByte = gc_TPCM_CTRL_WORD_CTS;
+  return CT_SendCTS(pgResult);
+}
+// ==============================================================================================================
+// send RTS and await until seen on bus.
+// returns 0 on ok 1 on timeout
+// gSendRTS_Max_Number_Of_Packets defaults to 255.
+// BEFORE calling the function gSendRTS_Max_Number_Of_Packets can be set to change MaxNumberOfPackates (the devices buffer size)
+// AFTER calling the function gSendRTS_Max_Number_Of_Packets is automatically reset by the function to 255!
+// ==============================================================================================================
+int CT_SendRTS(pg J1939::J1939_CT_RT::TPCMxx pgResult, dword pgn, byte src, byte dst, word messageSize, byte totalNrOfPackets, byte rtsMaxPkgs, enum eNoWaitFlag noWait)
+{
+  byte n;
+  initJ1939PGData(pgResult);
+  pgResult.sa = src;
+  pgResult.da = dst;
+  pgResult.TotalMessageSize = messageSize;
+  pgResult.MaximumNumberOfPackets = rtsMaxPkgs;
+  pgResult.TotalNumberOfPackets = totalNrOfPackets;
+  
+  pgResult.PGNumber = pgn;
+  return CT_SendRTS(pgResult, noWait);
+}
+int CT_SendRTS(pg J1939::J1939_CT_RT::TPCMxx pgResult, dword pgn, byte src, byte dst, char messageSize, byte rtsMaxPkgs, enum eNoWaitFlag noWait)
+{
+  byte n;
+  CT_Calc_TP_TotalPacketCount(messageSize, n);
+  return CT_SendRTS(pgResult, pgn, src, dst, messageSize, n, rtsMaxPkgs, noWait);
+}
+int CT_SendRTS(pg J1939::J1939_CT_RT::TPCMxx pgResult, dword pgn, byte src, byte dst, word messageSize, byte rtsMaxPkgs)
+{
+  if (rtsMaxPkgs <=1)
+  {
+    rtsMaxPkgs = 255;
+  }
+  return CT_SendRTS(pgResult, pgn, src, dst, messageSize, rtsMaxPkgs, WF_WAIT);
+}
+int CT_SendRTS(dword pgn, byte src, byte dst, word messageSize, byte rtsMaxPkgs)
+{
+  pg J1939::J1939_CT_RT::TPCMxx pgRTS;
+  return CT_SendRTS(pgRTS, pgn, src, dst, messageSize, rtsMaxPkgs);
+}
+int CT_SendRTS(pg J1939::J1939_CT_RT::TPCMxx pgRTS, enum eNoWaitFlag noWait)
+{
+  pgRTS.ControlByte = gc_TPCM_CTRL_WORD_RTS;
+  //CT_Info(1, "CT_SendCTS", "Sending RTS...");
+  output(pgRTS);
+    
+  return noWait ? 0: CT_WaitForRTS( pgRTS, pgRTS.PGNumber, pgRTS.sa, pgRTS.da); 
+}
+int CT_SendRTS(pg J1939::J1939_CT_RT::TPCMxx pgRTS)
+{
+  return CT_SendRTS(pgRTS, WF_WAIT);
+}
+
+// ==============================================================================================================
+// send DT and await until seen on bus.
+// returns 1 on ok 0 on timeout
+// ==============================================================================================================
+int CT_SendDT(pg J1939::J1939_CT_RT::TPDT pgDT)
+{
+  output(pgDT);
+  return CT_WaitForNextDT(pgDT, pgDT.sa, pgDT.da, gc_TIMEOUT_TR);
+}
+
+// ==============================================================================================================
+// send CTS and await until seen on bus.
+// returns 0 on ok 1 on timeout
+// ==============================================================================================================
+int CT_SendCTS(dword pgn, byte src, byte dst, byte nextPkg, byte pkgCount)
+{
+  pg J1939::J1939_CT_RT::TPCMxx pgCTS;
+  return CT_SendCTS(pgCTS, pgn, src, dst, nextPkg, pkgCount);
+}
+// ==============================================================================================================
+// send CTS hold and await until seen on bus.
+// returns 0 on ok 1 on timeout
+// ==============================================================================================================
+int CT_SendCTSHold(pg J1939::J1939_CT_RT::TPCMxx pgCTS, dword pgn, byte src, byte dst)
+{
+  return CT_SendCTS(pgCTS, pgn, src, dst, 0xFF, 0);
+}
+
+// ==============================================================================================================
+// send CTS and await until seen on bus.
+// returns 0 on ok 1 on timeout
+// ==============================================================================================================
+int CT_SendCTS(pg J1939::J1939_CT_RT::TPCMxx pgCTS)
+{
+  pgCTS.ControlByte = gc_TPCM_CTRL_WORD_CTS;
+  //CT_Info(1, "CT_SendCTS", "Sending CTS...");
+  output(pgCTS);
+  return CT_WaitForCTS( pgCTS, pgCTS.PGNumber, pgCTS.sa, pgCTS.da, gc_RESP_TIMEOUT); 
+}
+
+// ==============================================================================================================
+// send EOM and await until seen on bus.
+// returns 0 on ok 1 on timeout
+// ==============================================================================================================
+int CT_SendEOM(pg J1939::J1939_CT_RT::TPCMxx pgResult, dword pgn, byte src, byte dst, word msgSize, byte pkgCount)
+{
+  initJ1939PGData(pgResult);
+  pgResult.sa = src;
+  pgResult.da = dst;
+  pgResult.TotalMessageSize = msgSize;
+  pgResult.TotalNumberOfPacketsEoMA = pkgCount;
+  pgResult.PGNumber = pgn;
+  pgResult.ControlByte = gc_TPCM_CTRL_WORD_EOM;
+  return CT_SendEOM(pgResult);
+}
+
+// ==============================================================================================================
+// send EOM and await until seen on bus.
+// returns 0 on ok 1 on timeout
+// ==============================================================================================================
+int CT_SendEOM(dword pgn, byte src, byte dst, dword msgSize, byte pkgCount)
+{
+  pg J1939::J1939_CT_RT::TPCMxx pgEOM;
+  return CT_SendEOM(pgEOM, pgn, src, dst, msgSize, pkgCount);
+}
+
+// ==============================================================================================================
+// send EOM and await until seen on bus.
+// returns 0 on ok 1 on timeout
+// ==============================================================================================================
+int CT_SendEOM(pg J1939::J1939_CT_RT::TPCMxx pgEOM)
+{
+  pgEOM.ControlByte = gc_TPCM_CTRL_WORD_EOM;
+  output(pgEOM);
+  return CT_WaitForEOM( pgEOM, pgEOM.PGNumber, pgEOM.sa, pgEOM.da); 
+}
+
+// ==============================================================================================================
+// send NM and await response.
+// returns 0 on ok 1 on timeout
+// ==============================================================================================================
+int CT_SendNM_And_Await_Response(pg * pgReq, pg * pgResp, byte mode, byte flags, byte src, byte dst, qword dstDevName, struct DeviceName newDevName, char errText[])
+{
+  byte debug=0;
+  char infoText[255];
+  pgReq.dlc=8;
+  pgReq.id=0x80000000;
+  pgReq.prio = gc_PRIO_DEFAULT;
+  pgReq.sa = src;
+  pgReq.da = dst;
+  pgReq.pgn = gc_PGN_NM;
+  pgReq.dp = 0;
+  pgReq.edp = 0;
+  
+  pgReq.qword(0) = CT_DevName(newDevName) | gc_NM_RESERVED_BITMASK;
+  pgReq.byte(0) = CT_NMChkSum(dstDevName);
+  pgReq.byte(1) = flags;
+  if (mode==7) pgReq.qword(0) = -1;
+  pgReq.byte(2) = (pgReq.byte(2)&0xF0) | (mode&0x0F);
+  
+  snprintf(infoText, elcount(infoText), "Sending NM to DUT (Mode %d)", mode);
+  if(debug) CT_Info(1,"",infoText);
+  output(pgReq);
+  testWaitForJ1939PG(pgReq.pgn, pgReq.sa, pgReq.da, gc_TIMEOUT_TR);
+  testGetWaitJ1939PGData(pgReq);
+  
+  if (mode == 7) 
+  {
+    int result;
+    dword timeout;
+    pg J1939::J1939_CT_RT::AC pgAC;
+    timeout = gc_TIMEOUT_AC;
+    snprintf(infoText, elcount(infoText), "Awaiting AC from DUT within %dms", timeout);
+    if (debug) CT_Info(1,"", infoText);
+    result = CT_AWAIT_AC(pgAC, dst, timeout, errText);
+    if (!result)
+    {
+      snprintf(errText, elcount(errText), "Reaction for NM at t=%.06f missing. %s", CT_Ns2Sec(pgReq.time_ns), errText);
+    }
+    pgResp = pgAC;
+    return result;
+  }
+  return CT_AWAIT_PG_FROM(pgResp, dst, src, gc_PGN_NM, gc_TIMEOUT_TR, errText, gUnicast);
+}
+
+// ==============================================================================================================
+// build id with given pgn, src and dst.
+dword CT_BuildId(dword pgn, byte src, byte dst)
+{
+  dword result;
+  result = 0;
+  if (CT_IsPdu2(pgn)) dst=0;
+  result = pgn<<8 | dst<<8 | src;
+  return result;
+}
+
+// ==============================================================================================================
+// build a request of given type with given infos...
+void CT_BuildRequest(enum gReqType rqt, pg* result, dword requestPgn, byte src, byte dst, byte prio, enum gXferType xfer)
+{
+  result.id = 0x80000000; // initialize with id=0 inclusive extended identifier bit (highest bit) // later may be obsolete...
+  result.pgn = (rqt==gReqType1) ? gc_PGN_RQST : gc_PGN_RQST2;
+  result.prio = prio;
+  result.sa = src;
+  result.da = dst;
+  result.dlc = (rqt==gReqType1) ? 3 : 8;
+  result.dir = tx;
+  result.word(0) = requestPgn;
+  result.byte(2) = (requestPgn & 0x00FF0000) >> 16;
+  if (rqt==gReqType2) 
+  {
+    result.byte(3) = (byte)xfer;
+    result.dword(4) = 0xFFFFFFFF; // pad bytes.
+  }
+}
+
+// ==============================================================================================================
+// build request of type 1.
+void CT_BuildRequest(pg* result, dword requestPgn, byte src, byte dst, byte prio)
+{
+  CT_BuildRequest(gReqType1, result, requestPgn, src, dst, prio, gXferNo);
+}
+// ==============================================================================================================
+// build request of type 2
+void CT_BuildRequest2(pg* result, dword requestPgn, byte src, byte dst, byte prio, enum gXferType xfer)
+{
+  CT_BuildRequest(gReqType2, result, requestPgn, src, dst, prio, xfer);
+}
+
+// ==============================================================================================================
+// sync capl system time with the given pg.
+// if the time of the pg is greater, then a wait is done. else nothing is done.
+// returns dt
+int CT_SYNC_WITH_PG(pg* p)
+{
+  dword dt;
+  int64 t;
+  t=timeNowInt64();
+  dt = CT_Ns2Ms(p.time_ns-t);
+  if ( (dt>0) && @CT::DEBUG::HELPER ) write("SYNC_WITH_PG: timenow=%.6f, pgTime=%.6f, dt=%d", CT_Ns2Sec(t), CT_Ns2Sec(p.time_ns), dt);
+  if (dt>0) CT_WAIT( dt );
+  return dt;
+}
+// ==============================================================================================================
+// helper to reset DUT's address...
+byte CT_STEP_CA_RESET_DUT_ADR(byte funcPathOnFail)
+{
+  pg J1939::J1939_CT_RT::AC pgACDUT;
+  pg J1939::J1939_CT_RT::CA pgCA;
+  dword timeout;
+  
+  timeout = 3*gc_TP_BAM_MAX_RECEIVE_DT;
+  
+  pgCA.sa = gTOOL_Addr;
+  pgCA.AddressAssignment = gDUT_Addr;
+  
+  CT_STEP_BEGIN("Reset DUT's address...");
+  pgCA.dp  = 0;
+  pgCA.edp = 0;
+  if (CT_CommandedDUTAdressAndAwaitResponse(pgACDUT, pgCA, timeout, 0, 0) != 0)
+  {
+    CT_STEP_END_FAIL(funcPathOnFail, "Reset address through Commanded Address not working. ");
+    return 0;
+  }
+  
+  CT_STEP_END_PASS(gFuncPath);
+  return 1;
+}
+
+// ==============================================================================================================
+// 0: ok
+// 1: DUT does not respond with ACL (timeout)
+// 2: DUT reacts with wrong content (DUT's DevName expected).
+byte CT_CommandedDUTAdressAndAwaitResponse(pg J1939::J1939_CT_RT::AC pgACResponse, pg J1939::J1939_CT_RT::CA pgCA, dword timeout, byte waitForGap, byte allowSameAddress)
+{
+  byte src;
+  byte dst;
+  byte newAdr;
+  byte debug = 1;
+  
+  src = pgCA.sa;
+  
+  dst = gc_BC_ADDR;
+  newAdr = pgCA.AddressAssignment;
+  
+  pgCA.qword(0) = gDUT_DevName;
+  
+  if (waitForGap) CT_WAIT_FOR_BAM_GAP(src, dst, newAdr);
+  
+  output(pgCA);
+  
+  // wait for pgCA's wide event...
+  if (debug) write("%.06f: waiting for pgCA (%x) from %x->%x", CT_Ns2Sec(timeNowNS()), pgCA.pgn, src, dst);
+  TestWaitForJ1939PG(pgCA.pgn, src, dst, gc_TP_BAM_MAX_DT*3);
+  TestGetWaitJ1939PGData(pgCA);
+  
+  if (debug) write("%.06f: waiting for ACL from %x->%x", CT_Ns2Sec(timeNowNS()), newAdr, dst);
+  if (allowSameAddress)
+  {
+    if (testWaitForJ1939PG(gc_PGN_AC, timeout+1) != 1) return 1;
+  }
+  else
+  {
+    if (testWaitForJ1939PG(gc_PGN_AC, newAdr, dst, timeout+1) != 1) return 1;
+  }
+  TestGetWaitJ1939PGData(pgACResponse);
+  if (allowSameAddress)
+  {
+    if ( (pgACResponse.sa != newAdr) && (pgACResponse.sa != gDUT_Addr) && (pgACResponse.sa != dst) ) return 1;
+  }
+  CT_SYNC_WITH_PG(pgACResponse);
+
+  // after address changed wait at least 250ms...
+  CT_WAIT(gc_TIMEOUT_AC);
+  
+  if (pgACResponse.qword(0) != gDUT_DevName) return 2;
+  
+  return 0;
+}
+
+// ==============================================================================================================
+// 0: ok
+// 1: DUT does not respond with ACL (timeout)
+// 2: DUT reacts with wrong content (DUT's DevName expected).
+byte CT_CommandedDUTAdressAndAwaitResponse(pg J1939::J1939_CT_RT::AC pgACResponse, pg J1939::J1939_CT_RT::CA pgCA, dword timeout)
+{
+  return CT_CommandedDUTAdressAndAwaitResponse(pgACResponse, pgCA, timeout, 1, 0);
+}
+
+// ==============================================================================================================
+// combined BAM gap waiting function.
+void CT_WAIT_FOR_BAM_GAP(byte src, byte dst, byte newAdr)
+{
+  CT_WAIT_UNTIL_NO_BAM(src);    // wait until there is no BAM running from source...
+  CT_WAIT_UNTIL_NO_BAM(dst);    // wait until there is no BAM running from dest...
+  CT_WAIT_UNTIL_NO_BAM(newAdr); // wait until there is no BAM running from newAdr (after previous change)
+}
+
+// ==============================================================================================================
+// combined BAM gap waiting function.
+void CT_WAIT_FOR_BAM_GAP(byte src, byte dst)
+{
+    CT_WAIT_UNTIL_NO_BAM(src);    // wait until there is no BAM running from source...
+    CT_WAIT_UNTIL_NO_BAM(dst);    // wait until there is no BAM running from dest...
+}
+
+// ==============================================================================================================
+// wait for bam gap of any node.
+void CT_WAIT_FOR_BAM_GAP()
+{
+  CT_WAIT_UNTIL_NO_BAM(gc_BC_ADDR); // give bc address means no bam at all...
+}
+
+// ==============================================================================================================
+// combined TP gap waiting function.
+void CT_WAIT_FOR_TP_GAP(byte src, byte dst)
+{
+  CT_WAIT_UNTIL_NO_TP(src, dst); // wait until there is no TP from src->dest
+  CT_WAIT_UNTIL_NO_TP(dst, src); // wait until there is no TP from dst->src
+}
+
+// ==============================================================================================================
+// wait for bam gap of any node.
+void CT_WAIT_FOR_TP_GAP()
+{
+  CT_WAIT_UNTIL_NO_TP(gc_BC_ADDR, gc_BC_ADDR);
+}
+
+// ==============================================================================================================
+// send a requst to dst for given requestPgn with given prio
+// returns the timestamp of the output
+int64 CT_SendRequest(enum gReqType rqt, dword requestPgn, byte src, byte dst, byte prio, enum gXferType xfer, word nowait)
+{
+  pg* pgReq = {dlc=gc_J1939_PG_DLC_MAX};
+  pgReq.dlc = gc_J1939_PG_DLC_MAX;
+  CT_BuildRequest(rqt, pgReq, requestPgn, src, dst, prio, xfer);
+  //writeEx(-3,3, "OUTPUT!");
+  output(pgReq);
+  if (!nowait) 
+  {
+    testWaitForJ1939PG(pgReq.pgn, src, dst, 0); // wait until request really is detected on trace.
+    testGetWaitJ1939PGData(pgReq);
+    gPgLastRequest=pgReq;
+    return pgReq.time_ns;
+  }
+  gPgLastRequest=pgReq;
+  return timeNowInt64();
+}
+int64 CT_SendRequest(enum gReqType rqt, dword requestPgn, byte src, byte dst, byte prio, enum gXferType xfer)
+{
+  return CT_SendRequest(rqt, requestPgn, src, dst, prio, xfer, 0);
+}
+
+// ==============================================================================================================
+// send a requst1 to dst for given requestPgn with given prio
+// returns the timestamp after the output.
+int64 CT_SendRequest(dword requestPgn, byte src, byte dst, byte prio, word nowait)
+{
+  return CT_SendRequest(gReqType1, requestPgn, src, dst, prio, gXferNo, nowait);
+}
+int64 CT_SendRequest(dword requestPgn, byte src, byte dst, byte prio)
+{
+  return CT_SendRequest(gReqType1, requestPgn, src, dst, prio, gXferNo);
+}
+
+// ==============================================================================================================
+// send a requst to dst for given requestPgn with default prio 3
+// returns the timestamp after the output.
+int64 CT_SendRequest(dword requestPgn, byte src, byte dst, word nowait)
+{
+  return CT_SendRequest(requestPgn, src, dst, gc_PRIO_DEFAULT, nowait);
+}
+int64 CT_SendRequest(dword requestPgn, byte src, byte dst)
+{
+  return CT_SendRequest(requestPgn, src, dst, (byte)gc_PRIO_DEFAULT);
+}
+
+// ==============================================================================================================
+// send a request2 to dst for given requestPgn with given prio
+// returns the timestamp after the output.
+int64 CT_SendRequest2(dword requestPgn, byte src, byte dst, byte prio, enum gXferType xfer)
+{
+  pg* pgReq = {dlc=gc_J1939_PG_DLC_MAX};
+  pgReq.dlc = gc_J1939_PG_DLC_MAX;
+  CT_BuildRequest(gReqType2, pgReq, requestPgn, src, dst, prio, xfer);
+  output(pgReq);
+  return timeNowInt64();
+}
+
+// ==============================================================================================================
+// send a request2 to dst for given requestPgn with default prio 3
+// returns the timestamp after the output.
+int64 CT_SendRequest2(dword requestPgn, byte src, byte dst, enum gXferType xfer)
+{
+  return CT_SendRequest2(requestPgn, src, dst, gc_PRIO_DEFAULT, xfer);
+}
+
+// ==============================================================================================================
+// build a message to dst for given pgn with given prio and dlc.
+void CT_BuildMessage(pg* pgMsg, dword pgn, byte src, byte dst, byte dlc, byte prio)
+{
+  //pg 0xEA00 pgReq;
+  pgMsg.id = 0x80000000; // initialize with id=0 inclusive extended identifier bit (highest bit) // later may be obsolete...
+  pgMsg.pgn = pgn;
+  pgMsg.prio = prio;
+  pgMsg.sa = src;
+  if (!CT_IsPdu2(pgn)) pgMsg.da = dst;
+  pgMsg.dlc = dlc;
+  pgMsg.dir = tx;
+}
+
+// ==============================================================================================================
+// build a message to dst for given pgn with given prio and dlc=8.
+void CT_BuildMessage(pg* pgMsg, dword pgn, byte src, byte dst, byte prio)
+{
+  CT_BuildMessage(pgMsg, pgn, src, dst, 8, prio);
+}
+
+// ==============================================================================================================
+// build a message to dst for given pgn with default prio and dlc=8.
+void CT_BuildMessage(pg* pgMsg, dword pgn, byte src, byte dst)
+{
+  CT_BuildMessage(pgMsg, pgn, src, dst, 8, gc_PRIO_DEFAULT);
+}
+
+// ==============================================================================================================
+// build up a message for sending later on with output.
+int64 CT_SendMessage( dword pgn, byte src, byte dst, byte prio)
+{
+  pg* pgMsg = {dlc=gc_J1939_PG_DLC_MAX};
+  pgMsg.dlc = gc_J1939_PG_DLC_MAX;
+  CT_BuildMessage(pgMsg, pgn, src, dst, 8, prio);
+  output(pgMsg);
+  return timeNowInt64();
+}
+// ==============================================================================================================
+// send a requst to dst for given requestPgn with default prio 3
+int64 CT_SendMessage(dword pgn, byte src, byte dst)
+{
+  return CT_SendMessage(pgn,src,dst,gc_PRIO_DEFAULT);
+}
+
+// ==============================================================================================================
+// send AC.
+// returns:
+// 1: ok
+// 0: timeout
+int CT_Send_AC(pg J1939::J1939_CT_RT::AC pgAC, byte src, qword devName, byte waitAfterAC)
+{
+  char errText[1024];
+  
+  CT_BuildMessage(pgAC, gc_PGN_AC, src, gc_BC_ADDR, gc_PRIO_DEFAULT);
+  pgAC.qword(0) = devName;
+  output(pgAC);
+  
+  // wait until pgAC output was completed.
+  if (testWaitForJ1939PG(pgAC.pgn, pgAC.sa, pgAC.da, gc_TIMEOUT_TR) != 1) return 0;
+  testGetWaitJ1939PGData(pgAC);
+
+  // Wait at least 250ms after AC to be sent if wanted.
+  if (waitAfterAC) CT_WAIT(gc_TIMEOUT_AC); 
+  return 1;
+}
+// ==============================================================================================================
+// send DUT AC 
+// returns:
+// 1: ok
+// 0: timeout
+int CT_Send_DUT_AC(pg J1939::J1939_CT_RT::AC pgAC, byte waitAfterAC)
+{
+  return CT_Send_AC(pgAC, gDUT_Addr, gDUT_DevName, waitAfterAC);
+}
+// ==============================================================================================================
+// send cannot claim
+// returns:
+// 1: ok
+// 0: timeout
+int CT_Send_Cannot_Claim( pg J1939::J1939_CT_RT::AC pgAC, qword devName )
+{
+  return CT_Send_AC(pgAC, gc_NULL_ADDR, devName, 0);
+}
+// ==============================================================================================================
+// output given device name structure to write.
+void CT_PrintDeviceName(byte active, char funcName[], struct DeviceName dn)
+{
+  CT_Info(active, funcName, "====[ DeviceName ]====\r\n");
+  if (active)
+  {
+    writeEx(CT_OUT_TAB, SVR_INFO, "DeviceName            : 0x%llX\r\n", CT_DevName(dn));
+    writeEx(CT_OUT_TAB, SVR_INFO, "AAC                   : %d\r\n", dn.aac);
+    writeEx(CT_OUT_TAB, SVR_INFO, "IndustryGroup         : %d\r\n", dn.industryGroup);
+    writeEx(CT_OUT_TAB, SVR_INFO, "vehicleSystemInstance : %d\r\n", dn.vehicleSystemInstance);
+    writeEx(CT_OUT_TAB, SVR_INFO, "vehicleSystem         : %d\r\n", dn.vehicleSystem);
+    writeEx(CT_OUT_TAB, SVR_INFO, "function              : %d\r\n", dn.function);
+    writeEx(CT_OUT_TAB, SVR_INFO, "functionInstance      : %d\r\n", dn.functionInstance);
+    writeEx(CT_OUT_TAB, SVR_INFO, "ecuInstance           : %d\r\n", dn.ecuInstance);
+    writeEx(CT_OUT_TAB, SVR_INFO, "manufacturerCode      : %d\r\n", dn.manufacturerCode);
+    writeEx(CT_OUT_TAB, SVR_INFO, "identityNumber        : %d\r\n", dn.identityNumber);
+  }
+}
+
+// ==============================================================================================================
+// output the DUT's devicename information into the report.
+void CT_Report_PrintDUTDeviceName()
+{
+  struct DeviceName dn;
+  CT_CreateDevNameStruct(gDUT_DevName, dn);
+  testReportAddMiscInfoBlock("DUT Device Name Info");
+  testReportAddMiscInfo( "DeviceName            ", "0x%llX", CT_DevName(dn));
+  testReportAddMiscInfo( "AAC                   ", "%d (0x%X)", dn.aac, dn.aac);
+  testReportAddMiscInfo( "IndustryGroup         ", "%d (0x%X)", dn.industryGroup, dn.industryGroup);
+  testReportAddMiscInfo( "vehicleSystemInstance ", "%d (0x%X)", dn.vehicleSystemInstance, dn.vehicleSystemInstance);
+  testReportAddMiscInfo( "vehicleSystem         ", "%d (0x%X)", dn.vehicleSystem, dn.vehicleSystem);
+  testReportAddMiscInfo( "function              ", "%d (0x%X)", dn.function, dn.function);
+  testReportAddMiscInfo( "functionInstance      ", "%d (0x%X)", dn.functionInstance, dn.functionInstance);
+  testReportAddMiscInfo( "ecuInstance           ", "%d (0x%X)", dn.ecuInstance, dn.ecuInstance);
+  testReportAddMiscInfo( "manufacturerCode      ", "%d (0x%X)", dn.manufacturerCode, dn.manufacturerCode);
+  testReportAddMiscInfo( "identityNumber        ", "%d (0x%X)", dn.identityNumber, dn.identityNumber);
+}
+
+// ==============================================================================================================
+// print given can-message into the report.
+void CT_Report_PrintCANMessage(message* m)
+{
+  testReportAddMiscInfoBlock("Message Info");
+  testReportAddMiscInfo( "time", "%dms", m.time_ns);
+  testReportAddMiscInfo( "ID  ", "0x%X", m.id);
+  testReportAddMiscInfo( "DLC ", "%d", m.dlc);
+}
+
+// ==============================================================================================================
+// output given CAN-Message into the write.
+void CT_PrintCANMessage(byte active, char funcName[], message* m )
+{
+  CT_Info(active, funcName, "\r\n====[ CAN Message ]====\r\n");
+  if (active)
+  {
+    writeEx(CT_OUT_TAB, SVR_INFO, "time : %dms\r\n", m.time_ns);
+    if ( (m.id & 0x80000000) == 0x80000000 )
+    {
+      writeEx(CT_OUT_TAB, SVR_INFO, "ID   : 0x%Xx\r\n", m.id & 0x7FFFFFFF);
+    }
+    else
+    {
+      writeEx(CT_OUT_TAB, SVR_INFO, "ID   : 0x%X\r\n", m.id);
+    }
+    
+    writeEx(CT_OUT_TAB, SVR_INFO, "DLC  : %d\r\n", m.dlc);
+  }
+}
+
+// ==============================================================================================================
+// wait for dut's AC.
+// independant of the configuration "supportsAC" wait for it... even on misconfiguration an AC can be detected on startup.
+void CT_INIT_AWAIT_ACL()
+{
+  testWaitForTimeout(2*gc_RESP_TIMEOUT);
+}
+
+// ==============================================================================================================
+// internal helper to mark a request as failed.
+void CT_STEP_END_Failed_To_Detect_Requested_PGN(byte funcPath, char errText[], dword timeout)
+{
+  char reportText[1024];
+  // not wanted anymore... snprintf(reportText, elcount(reportText), "%s\r\nRequested PGN was not detected within %dms.\r\nCheck if DUT is running and responds with PGN in right order and position within the frame-header.\r\nAlso remember that the EDP and DP bits may be implied within the PGN.", errText, timeout);
+  snprintf(reportText, elcount(reportText), "%s\r\n", errText);
+  CT_STEP_END_FAIL(funcPath, reportText);
+}
+
+// ==============================================================================================================
+// internal helper to mark not implemented functions.
+void CT_STEP_END_FAIL_NotImplemented(char funcName[])
+{
+  char text[1024];
+  snprintf(text, elcount(text), "Function '%s' is not implemented yet.", funcName);
+  CT_STEP_END_FAIL(0, text);
+}
+// ==============================================================================================================
+// internal helper to mark not implemented functions.
+void CT_STEP_END_INCONCLUSIVE_NotImplemented(char funcName[])
+{
+  char text[1024];
+  snprintf(text, elcount(text), "Function '%s' is not implemented yet.", funcName);
+  CT_STEP_END_INCONCLUSIVE(0, text);
+}
+
+// ==============================================================================================================
+// internal helper to mark not active testable use cases.
+void CT_STEP_END_INCONCLUSIVE_ActiveTestingNotPossible(byte funcPath)
+{
+  CT_STEP_END_INCONCLUSIVE(funcPath, "This test is inconclusive, due it's not actively testable.\nEither it's not possible, due the testing environment, or the DUT can not be controlled to do something.");
+}
+
+// ==============================================================================================================
+// internal helper to mark things that are not testable at all with this test environment.
+void CT_STEP_END_INCONCLUSIVE_NotTestable(byte funcPath)
+{
+  CT_STEP_END_INCONCLUSIVE(funcPath, "This test is not testable with this test environment.");
+}
+
+// ==============================================================================================================
+// helper to start a test-step and end in an inconclusive state for things that are not testable with
+// this test environment at all.
+void CT_NOT_TESTABLE(byte funcPath)
+{
+  CT_STEP_BEGIN(-1, "Not Testable.");
+  CT_STEP_END_INCONCLUSIVE_NotTestable(funcPath);
+}
+
+// ==============================================================================================================
+// find in message buffer.
+// get the first entry (index) in the buffer starting at given timestamp ts that fits the id
+// masked out by given bitmask.
+word CT_Find_In_MsgBuf(int64 ts, dword pgn, byte src, byte dst, dword bitmask)
+{
+  word ri;
+  char fn[255] = "CT_Find_In_MsgBuf";
+  message * canMsg;
+  
+  // if the given bitmask contans PGN parts, but the PGN is of type 2 (broadcast),
+  // then dst is 0xFF and the bitmask has to be extended by the DST part.
+  if ( ((bitmask & gc_CANID_BITMASK_PGN)>0) && (CT_IsPdu2(pgn)) )
+  {
+    dst = 0xFF;
+    bitmask |= gc_CANID_BITMASK_DST;
+  }
+  
+  // find pgn within message ids for given pgn.
+  ri = MsgBuf_FindByID(ts, CT_BuildId(pgn, src, dst), bitmask);
+
+  if (ri != IDX_NOT_FOUND) 
+  {
+    MsgBuf_Copy(canMsg, gMsgBuf[ri]);
+    CT_PrintCANMessage(@CT::DEBUG::HELPER, fn, canMsg);
+  }
+  
+  return ri;
+}
+
+// ==============================================================================================================
+// find in message buffer.
+// get the first entry (index) in the buffer starting at given index si that fits the id
+// masked out by given bitmask.
+word CT_Find_In_MsgBuf(word si, dword pgn, byte src, byte dst, dword bitmask)
+{
+  word ri;
+  char fn[255] = "CT_Find_In_MsgBuf";
+  message* canMsg;
+
+  // if the given bitmask contans PGN parts, but the PGN is of type 2 (broadcast),
+  // then dst is 0xFF and the bitmask has to be extended by the DST part.
+  if ( ((bitmask & gc_CANID_BITMASK_PGN)>0) && (CT_IsPdu2(pgn)) )
+  {
+    dst = 0xFF;
+    bitmask |= gc_CANID_BITMASK_DST;
+  }
+
+  // find pgn within message ids for given pgn.
+  ri = MsgBuf_FindByID(si, CT_BuildId(pgn, src, dst), bitmask);
+  if (ri != IDX_NOT_FOUND) 
+  {
+    MsgBuf_Copy(canMsg, gMsgBuf[ri]);
+    CT_PrintCANMessage(@CT::DEBUG::HELPER, fn, canMsg);
+  }
+  
+  return ri;
+}
+
+// ==============================================================================================================
+// get all bufferindices ...
+// returns 0 if there are no messages found.
+// return 1 if there are messages found.
+byte CT_Find_All_In_MsgBuf(word result[long], int64 ts, dword pgn, byte src, byte dst, dword bitmask)
+{
+  word si;
+  char fn[255] = "CT_Find_All_In_MsgBuf";
+  message* canMsg;
+  result.clear();
+  // if the given bitmask contans PGN parts, but the PGN is of type 2 (broadcast),
+  // then dst is 0 and the bitmask has to be extended by the DST part.
+  if ( ((bitmask & gc_CANID_BITMASK_PGN)>0) && (CT_IsPdu2(pgn)) )
+  {
+    dst = 0;
+    bitmask |= gc_CANID_BITMASK_DST;
+  }
+  if (src == gc_ANY_ADDR)
+  {
+    src = 0;
+    bitmask &= gc_CANID_BITMASK_PGN_DST;
+  }
+  
+  si = MsgBuf_FindByTimestamp(0, ts);
+  //write("CT_Find_All_In_MsgBuf: ts=%.06f, si=%d, (id=%x, pgn=%x, src=%x, dst=%x, bm=%x)",CT_Ns2Sec(ts), si, CT_BuildId(pgn, src, dst), pgn, src, dst, bitmask);
+  if (si != IDX_NOT_FOUND)
+  {
+    MsgBuf_FindAllByID(result, si, CT_BuildId(pgn, src, dst), bitmask);
+  }
+  
+  
+  if (0) // for debugging write if(1) instead of if(0)
+  {
+    for(long i: result)
+    {
+      MsgBuf_Copy(canMsg, gMsgBuf[result[i]]);
+      CT_PrintCANMessage(1, fn, canMsg);
+    }
+  }
+  
+  if (result.size()>0)
+  {
+    return 1;
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get all bufferindices ...
+// returns 0 if there are no messages found.
+// return 1 if there are messages found.
+byte CT_Find_All_In_MsgBuf(word result[long], int64 ts, dword pgn, byte src, byte dst)
+{
+  return CT_Find_All_In_MsgBuf(result, ts, pgn, src, dst, gc_CANID_BITMASK_EPGN_SRC_DST);
+}
+
+// ==============================================================================================================
+// get all bufferindices from src to dst.
+// returns 0 if there are no messages found.
+// return 1 if there are messages found.
+byte CT_Find_All_In_MsgBuf_From_To(word result[long], int64 ts, byte src, byte dst)
+{
+  return CT_Find_All_In_MsgBuf(result, ts, 0, src, dst, gc_CANID_BITMASK_SRC_DST);
+}
+
+// ==============================================================================================================
+// get all bufferindices from given timestamp onwards belonging to given src.
+// returns 0 if there are no messages found.
+// return 1 if there are messages found.
+byte CT_Find_All_In_MsgBuf(word result[long], int64 ts, byte src)
+{
+  return CT_Find_All_In_MsgBuf(result, ts, (dword)0, src, 0, gc_CANID_BITMASK_SRC);
+}
+
+// ==============================================================================================================
+// get all bufferindices from given timestamp onwards belonging to given src with given pgn.
+// returns 0 if there are no messages found.
+// return 1 if there are messages found.
+byte CT_Find_All_In_MsgBuf(word result[long], int64 ts, dword pgn, byte src)
+{
+  return CT_Find_All_In_MsgBuf(result, ts, pgn, src, 0, gc_CANID_BITMASK_PGN_SRC);
+}
+
+
+// ==============================================================================================================
+// get buffer indices of NACKS from src to dst
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_NACKs_In_MsgBuf(word result[long], int64 ts, byte src, byte dst, byte ackDst, dword pgn, char errText[])
+{
+  word bufIndices[long];
+  long i;
+  byte cb;
+  dword p;
+  qword payload;
+  
+  CT_Find_All_In_MsgBuf(bufIndices, ts, gc_PGN_NACK, src, dst, gc_CANID_BITMASK_PGN_SRC_DST);
+  result.clear();
+  i=0;
+  for (long k: bufIndices)
+  {
+    payload = MsgBuf_GetQWPayload(gMsgBuf[bufIndices[k]]);
+    // check for nack
+    //write("CT_Get_NACKs_In_MsgBuf: chk nack for pgn %x for ackDst %x...", pgn, ackDst);
+    if (CT_CHECK_NACK(payload, pgn, ackDst, errText))
+    {
+      // nack found. add to result.
+      //write("CT_Get_NACKs_In_MsgBuf: nack ok.");
+      result[i++]=bufIndices[k];
+    }
+    //else write("CT_Get_NACKs_In_MsgBuf: nack not ok.");
+  }
+  return (i!=0);
+}
+
+// ==============================================================================================================
+// get buffer indices of last tpcm entry in messagebuf.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf(word result[long], int64 ts, byte src, byte dst)
+{
+  CT_Find_All_In_MsgBuf(result, ts, gc_PGN_TPCM, src, dst, gc_CANID_BITMASK_PGN_SRC_DST);
+  if (result.size()>0)
+  {
+    return 1;
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get buffer indices of last tpcm entry in messagebuf.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf(word result[long], int64 ts, byte src)
+{
+  CT_Find_All_In_MsgBuf(result, ts, gc_PGN_TPCM, src, 0, gc_CANID_BITMASK_PGN_SRC);
+  if (result.size()>0)
+  {
+    return 1;
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get buffer indices of last tpcm entry in messagebuf.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(word result[long], int64 ts, byte src, byte dst, byte ctrlByte)
+{
+  word bufIndices[long];
+  long i;
+  byte cb;
+  dword p;
+  double t;
+  
+  CT_Find_All_In_MsgBuf(bufIndices, ts, gc_PGN_TPCM, src, dst, gc_CANID_BITMASK_PGN_SRC_DST);
+  result.clear();
+  i=0;
+  for (long k: bufIndices)
+  {
+    t   = CT_Ns2Sec(gMsgBuf[bufIndices[k]].time_ns);
+    cb  = CT_GetTPCMCtrlByte(gMsgBuf[bufIndices[k]]);
+    p   = CT_GetTPCMPgn(gMsgBuf[bufIndices[k]]);
+    // write("CT_Get_TPCMs_In_MsgBuf_By_CtrlByte: cb=%x, t=%.6f, p=%x", cb, t, p);
+    if (cb == ctrlByte)
+    {
+      result[i++]=bufIndices[k];
+    }
+  }
+  return (i!=0);
+}
+
+// ==============================================================================================================
+// get buffer indices of last tpcm entry in messagebuf.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(word result[long], int64 ts, byte src, byte ctrlByte)
+{
+  word bufIndices[long];
+  long i;
+  byte cb;
+  dword p;
+  double t;
+  
+  CT_Find_All_In_MsgBuf(bufIndices, ts, gc_PGN_TPCM, src, 0, gc_CANID_BITMASK_PGN_SRC);
+  result.clear();
+  i=0;
+  for (long k: bufIndices)
+  {
+    t   = CT_Ns2Sec(gMsgBuf[bufIndices[k]].time_ns);
+    cb  = CT_GetTPCMCtrlByte(gMsgBuf[bufIndices[k]]);
+    p   = CT_GetTPCMPgn(gMsgBuf[bufIndices[k]]);
+    // write("CT_Get_TPCMs_In_MsgBuf_By_CtrlByte: cb=%x, t=%.6f, p=%x", cb, t, p);
+    if (cb == ctrlByte)
+    {
+      result[i++]=bufIndices[k];
+    }
+  }
+  return (i!=0);
+}
+
+// ==============================================================================================================
+// get buffer indices of last tpcm entry in messagebuf.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf_By_Pgn(word result[long], int64 ts, byte src, byte dst, dword pgn)
+{
+  word bufIndices[long];
+  long i;
+  byte cb;
+  dword p;
+  double t;
+  
+  CT_Find_All_In_MsgBuf(bufIndices, ts, gc_PGN_TPCM, src, dst, gc_CANID_BITMASK_PGN_SRC_DST);
+  result.clear();
+  i=0;
+  for (long k: bufIndices)
+  {
+    t   = CT_Ns2Sec(gMsgBuf[bufIndices[k]].time_ns);
+    cb  = CT_GetTPCMCtrlByte(gMsgBuf[bufIndices[k]]);
+    p   = CT_GetTPCMPgn(gMsgBuf[bufIndices[k]]);
+    // write("cb=%x, t=%.6f, p=%x", cb, t, p);
+    if (p == pgn)
+    {
+      result[i++]=bufIndices[k];
+    }
+  }
+  return (i!=0);
+}
+
+// ==============================================================================================================
+// get buffer indices of last tpcm entry in messagebuf.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf_By_Pgn(word result[long], int64 ts, byte src, dword pgn)
+{
+  word bufIndices[long];
+  long i;
+  byte cb;
+  dword p;
+  double t;
+  
+  CT_Find_All_In_MsgBuf(bufIndices, ts, gc_PGN_TPCM, src, 0, gc_CANID_BITMASK_PGN_SRC);
+  result.clear();
+  i=0;
+  for (long k: bufIndices)
+  {
+    t   = CT_Ns2Sec(gMsgBuf[bufIndices[k]].time_ns);
+    cb  = CT_GetTPCMCtrlByte(gMsgBuf[bufIndices[k]]);
+    p   = CT_GetTPCMPgn(gMsgBuf[bufIndices[k]]);
+    // write("cb=%x, t=%.6f, p=%x", cb, t, p);
+    if (p == pgn)
+    {
+      result[i++]=bufIndices[k];
+    }
+  }
+  return (i!=0);
+}
+
+// ==============================================================================================================
+// get buffer indices of last tpcm entry in messagebuf.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(word result[long], int64 ts, byte src, byte dst, byte ctrlByte, dword pgn)
+{
+  word bufIndices[long];
+  long i;
+  byte cb;
+  dword p;
+  double t;
+  byte debug=0;
+  if (debug) write("find tpcm from %.06f from %x->%x with cb=%x and pgn=%X...", CT_Ns2Sec(ts), src, dst, ctrlByte, pgn);
+  CT_Find_All_In_MsgBuf(bufIndices, ts, gc_PGN_TPCM, src, dst, gc_CANID_BITMASK_PGN_SRC_DST);
+  result.clear();
+  i=0;
+  for (long k: bufIndices)
+  {
+    t   = CT_Ns2Sec(gMsgBuf[bufIndices[k]].time_ns);
+    cb  = CT_GetTPCMCtrlByte(gMsgBuf[bufIndices[k]]);
+    p   = CT_GetTPCMPgn(gMsgBuf[bufIndices[k]]);
+    if (debug) write("cb=%x, t=%.6f, p=%x", cb, t, p);
+    if ( (cb == ctrlByte) && ( p == pgn) )
+    {
+      result[i++]=bufIndices[k];
+    }
+  }
+  return (i!=0);
+}
+
+// ==============================================================================================================
+// get buffer indices of last tpcm entry in messagebuf.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(word result[long], int64 ts, byte src, byte ctrlByte, dword pgn)
+{
+  word bufIndices[long];
+  long i;
+  byte cb;
+  dword p;
+  double t;
+  
+  if (!CT_Find_All_In_MsgBuf(bufIndices, ts, gc_PGN_TPCM, src, 0, gc_CANID_BITMASK_PGN_SRC))
+  {
+    return 0;
+  };
+  //write("bufindices.size()=%d", bufIndices.size());
+  result.clear();
+  i=0;
+  for (long k: bufIndices)
+  {
+    //MsgBuf_Print_Entry(bufIndices[k], -1);
+    t   = CT_Ns2Sec(gMsgBuf[bufIndices[k]].time_ns);
+    cb  = CT_GetTPCMCtrlByte(gMsgBuf[bufIndices[k]]);
+    p   = CT_GetTPCMPgn(gMsgBuf[bufIndices[k]]);
+    //write("cb=%x, t=%.6f, p=%x", cb, t, p);
+    if ( (cb == ctrlByte) && ( p == pgn) )
+    {
+      result[i++]=bufIndices[k];
+    }
+  }
+  return (i!=0);
+}
+
+// ==============================================================================================================
+// get buffer index of tpdt entrys sent from given source to given dest starting from given timestamp.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPDTs_In_MsgBuf(word result[long], int64 ts, byte src, byte dst)
+{
+  CT_Find_All_In_MsgBuf(result, ts, gc_PGN_TPDT, src, dst, gc_CANID_BITMASK_PGN_SRC_DST);
+  if (result.size()>0)
+  {
+    return 1;
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get buffer index of tpdt entries sent by given source starting from given timestamp
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPDTs_In_MsgBuf(word result[long], int64 ts, byte src)
+{
+  CT_Find_All_In_MsgBuf(result, ts, gc_PGN_TPDT, src, 0, gc_CANID_BITMASK_PGN_SRC);
+  if (result.size()>0)
+  {
+    return 1;
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get buffer index of tpdt entrys sent from given source to given dest starting from given timestamp.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPDTs_In_MsgBuf_with_SeqNr(word result[long], byte seqNr, int64 ts, byte src, byte dst)
+{
+  word buf[long];
+  long k;
+  result.clear();
+  CT_Find_All_In_MsgBuf(buf, ts, gc_PGN_TPDT, src, dst, gc_CANID_BITMASK_PGN_SRC_DST);
+  k=0;
+  if (buf.size()>0)
+  {
+    for(long i: buf) if (CT_GetDataByte(0, gMsgBuf[buf[i]]) == seqNr) result[k++]=buf[i];
+    return 1;
+  }
+  return 0;
+}
+
+
+// ==============================================================================================================
+// get buffer index of tpdt entrys sent from given source to given dest between given timestamps ts and te.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPDTs_In_MsgBuf_Between(word result[long], int64 ts, int64 te, byte src, byte dst)
+{
+  int64 a,b;
+  a=_min(ts, te);
+  b=_max(ts, te);
+  if (CT_Get_TPDTs_In_MsgBuf(result, a, src, dst))
+  {
+    MsgBuf_FilterByTimestamp(result, a, b);
+    if (result.size()>0)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get buffer index of tpdt entries sent by given source between given timestamps ts and te
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPDTs_In_MsgBuf_Between(word result[long], int64 ts, int64 te, byte src)
+{
+  int64 a,b;
+  a=_min(ts, te);
+  b=_max(ts, te);
+  if (CT_Get_TPDTs_In_MsgBuf(result, a, src))
+  {
+    MsgBuf_FilterByTimestamp(result, a, b);
+    if (result.size()>0)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get buffer index of tpcm entrys sent from given source to given dest between given timestamps ts and te.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf_Between(word result[long], int64 ts, int64 te, byte src, byte dst)
+{
+  int64 a,b;
+  a=_min(ts, te);
+  b=_max(ts, te);
+  if (CT_Get_TPCMs_In_MsgBuf(result, a, src, dst))
+  {
+    MsgBuf_FilterByTimestamp(result, a, b);
+    if (result.size()>0)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get buffer index of tpcm entries sent by given source between given timestamps ts and te
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf_Between(word result[long], int64 ts, int64 te, byte src)
+{
+  int64 a,b;
+  a=_min(ts, te);
+  b=_max(ts, te);
+  if (CT_Get_TPCMs_In_MsgBuf(result, a, src))
+  {
+    MsgBuf_FilterByTimestamp(result, a, b);
+    if (result.size()>0)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+// ==============================================================================================================
+// get buffer index of tpcm entrys sent from given source to given dest between given timestamps ts and te.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_Between(word result[long], int64 ts, int64 te, byte src, byte dst, byte ctrlByte)
+{
+  int64 a,b;
+  a=_min(ts, te);
+  b=_max(ts, te);
+  if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(result, a, src, dst, ctrlByte))
+  {
+    MsgBuf_FilterByTimestamp(result, a, b);
+    if (result.size()>0)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get buffer index of tpcm entries sent by given source between given timestamps ts and te
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_Between(word result[long], int64 ts, int64 te, byte src, byte ctrlByte)
+{
+  int64 a,b;
+  a=_min(ts, te);
+  b=_max(ts, te);
+  if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(result, a, src, ctrlByte))
+  {
+    MsgBuf_FilterByTimestamp(result, a, b);
+    if (result.size()>0)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+// ==============================================================================================================
+// get buffer index of tpcm entrys sent from given source to given dest between given timestamps ts and te.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf_By_Pgn_Between(word result[long], int64 ts, int64 te, byte src, byte dst, dword pgn)
+{
+  int64 a,b;
+  a=_min(ts, te);
+  b=_max(ts, te);
+  if (CT_Get_TPCMs_In_MsgBuf_By_Pgn(result, a, src, dst, pgn))
+  {
+    MsgBuf_FilterByTimestamp(result, a, b);
+    if (result.size()>0)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get buffer index of tpcm entries sent by given source between given timestamps ts and te
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf_By_Pgn_Between(word result[long], int64 ts, int64 te, byte src, dword pgn)
+{
+  int64 a,b;
+  a=_min(ts, te);
+  b=_max(ts, te);
+  if (CT_Get_TPCMs_In_MsgBuf_By_Pgn(result, a, src, pgn))
+  {
+    MsgBuf_FilterByTimestamp(result, a, b);
+    if (result.size()>0)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+// ==============================================================================================================
+// get buffer index of tpcm entrys sent from given source to given dest between given timestamps ts and te.
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn_Between(word result[long], int64 ts, int64 te, byte src, byte dst, byte ctrlByte, dword pgn)
+{
+  int64 a,b;
+  a=_min(ts, te);
+  b=_max(ts, te);
+  if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(result, a, src, dst, ctrlByte, pgn))
+  {
+    MsgBuf_FilterByTimestamp(result, a, b);
+    if (result.size()>0)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get buffer index of tpcm entries sent by given source between given timestamps ts and te
+// returns 0 if there are no entries.
+// returns 1 if there are entries found.
+byte CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn_Between(word result[long], int64 ts, int64 te, byte src, byte ctrlByte, dword pgn)
+{
+  int64 a,b;
+  a=_min(ts, te);
+  b=_max(ts, te);
+  if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(result, a, src, ctrlByte, pgn))
+  {
+    MsgBuf_FilterByTimestamp(result, a, b);
+    if (result.size()>0)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+
+// ==============================================================================================================
+// get a new address different from tool and dut.
+byte CT_Get_Third_Node_Adr(byte toolAddr, byte dutAddr, byte sendAC)
+{
+  pg J1939::J1939_CT_RT::AC pgAC;
+  byte newAdr;
+  newAdr = dutAddr+1;
+  if (newAdr==toolAddr) newAdr++;
+  if (sendAC) CT_Send_AC(pgAC, newAdr, 0x33333333, 0);
+  return newAdr;
+}
+byte CT_Get_Third_Node_Adr(byte toolAddr, byte dutAddr)
+{
+  return CT_Get_Third_Node_Adr(toolAddr, dutAddr, 0);
+}
+// ==============================================================================================================
+// get a new address different from tool and dut and a given address
+byte CT_Get_Fourth_Node_Adr(byte toolAddr, byte dutAddr, byte thirdnode, byte sendAC)
+{
+  pg J1939::J1939_CT_RT::AC pgAC;
+  byte newAdr;
+  newAdr = dutAddr+1;
+  if (newAdr==toolAddr) newAdr++;
+  if (newAdr==thirdnode) newAdr++;
+  if (newAdr==toolAddr) newAdr++;
+  if (sendAC) CT_Send_AC(pgAC, newAdr, 0x44444444, 0);
+  return newAdr;
+}
+byte CT_Get_Fourth_Node_Adr(byte toolAddr, byte dutAddr, byte thirdnode)
+{
+  return CT_Get_Fourth_Node_Adr(toolAddr, dutAddr, thirdnode, 0);
+}
+// ==============================================================================================================
+// padding byte calculation.
+// m: MessageSize in bytes
+// 
+// result as reference:
+// n: Total packets
+// p: Nr of padding bytes
+// d: Nr of data bytes
+// ds: start data byte index of first valid data byte.
+// de: end data byte index of last valid data byte.
+// ps: start padding byte index of first padding byte 
+// pe: end padding byte index of last padding byte 
+void CT_Calc_TP_Packets( word m, byte& n, byte& p, byte& d, byte& ds, byte& de, byte& ps, byte& pe)
+{
+  byte r;
+  n = _ceil(m/7.0);
+  r = m%7;
+  p = (7-r)%7;
+  d = 7-p;
+  ds = 1;
+  de = d;
+  ps = d+1;
+  pe = 7;
+  //write("m=%d, n=%d, r=%d, p=%d, d=%d, ds=%d, de=%d, ps=%d, pe=%d", m, n,r,p,d,ds,de,ps,pe);
+}
+byte CT_Calc_TP_TotalPacketCount(word m)
+{
+  byte p,d,ds,de,ps,pe,n;
+  CT_Calc_TP_Packets(m,n,p,d,ds,de,ps,pe);
+  return n;
+}
+byte CT_Calc_TP_TotalPacketCount(word m, byte& n)
+{
+  return (n = CT_Calc_TP_TotalPacketCount(m));
+}
+
+byte CT_Calc_TP_LastDataPacketCount(word m)
+{
+  byte p,n,ds,de,ps,pe,d;
+  CT_Calc_TP_Packets(m,n,p,d,ds,de,ps,pe);
+  return d;
+}
+byte CT_Calc_TP_LastDataPacketCount(word m, byte& d)
+{
+  return (d=CT_Calc_TP_LastDataPacketCount(m));
+}
+byte CT_Calc_TP_PaddingByteCount(word m)
+{
+  byte n,d,ds,de,ps,pe,p;
+  CT_Calc_TP_Packets(m,n,p,d,ds,de,ps,pe);
+  return p;
+}
+byte CT_Calc_TP_PaddingByteCount(word m, byte& p)
+{
+  return (p=CT_Calc_TP_PaddingByteCount(m));
+}
+void CT_Calc_TP_LastDataByteIndices( word m, byte& ds, byte& de)
+{
+  byte n,p,d,ps,pe;
+  CT_Calc_TP_Packets(m,n,p,d,ds,de,ps,pe);
+}
+byte CT_Calc_TP_LastDataByteIndex( word m, byte& de)
+{
+  byte n,p,d,ps,pe,ds;
+  CT_Calc_TP_Packets(m,n,p,d,ds,de,ps,pe);
+  return de;
+}
+void CT_Calc_TP_PaddingByteIndices( word m, byte& ps, byte& pe)
+{
+  byte n,p,d,ds,de;
+  CT_Calc_TP_Packets(m,n,p,d,ds,de,ps,pe);
+}
+void CT_Calc_TP_FirstPaddingByteIndex( word m, byte& ps)
+{
+  byte n,p,d,ds,de,pe;
+  CT_Calc_TP_Packets(m,n,p,d,ds,de,ps,pe);
+}
+void CT_Calc_TP_CountPackets( word m, byte& n, byte& p, byte& d)
+{
+  byte ds,de,ps,pe;
+  CT_Calc_TP_Packets(m,n,p,d,ds,de,ps,pe);
+}
+void CT_Calc_TP_ByteIndices( word m, byte& ds, byte& de, byte& ps, byte& pe)
+{
+  byte n,p,d;
+  CT_Calc_TP_Packets(m,n,p,d,ds,de,ps,pe);
+}
+
+// ==============================================================================================================
+byte CT_ENABLE_TESTNODE_IL(byte state)
+{
+  /* alt 
+  byte result;
+  char nn[255], vns[255];
+  sysGetVariableString(sysvar::CT::SYSTEM::NetworkName, nn, elcount(nn));
+  snprintf(vns, elcount(vns), "%s::TOOL", nn);
+  
+  result = sysGetVariableInt(vns, "ILEnable");
+  if (state != result)
+  {
+    sysSetVariableInt(vns, "ILEnable", state);
+    if (state)
+    {
+      if (@CT::DEBUG::HELPER) CT_Info(1, "TOOL", "IL Enabled");
+    }
+    else
+    {
+      if (@CT::DEBUG::HELPER) CT_Info(1, "TOOL", "IL Disabled");
+    }
+  }
+  
+  return result;
+  */
+  byte result;
+  result = @CT::CFG::TOOL::Enabled;
+  if (state != @CT::CFG::TOOL::Enabled)
+  {
+    @CT::CFG::TOOL::Enabled = state;
+    if (@CT::CFG::TOOL::Enabled)
+    {
+      if (@CT::DEBUG::HELPER) CT_Info(1, "TOOL", "IL Enabled");
+    }
+    else
+    {
+      if (@CT::DEBUG::HELPER) CT_Info(1, "TOOL", "IL Disabled");
+    }
+  }
+  
+  return result;
+}
+byte CT_ENABLE_TESTNODE_IL()
+{
+  return CT_ENABLE_TESTNODE_IL(1);
+}
+byte CT_DISABLE_TESTNODE_IL()
+{
+  return CT_ENABLE_TESTNODE_IL(0);
+}

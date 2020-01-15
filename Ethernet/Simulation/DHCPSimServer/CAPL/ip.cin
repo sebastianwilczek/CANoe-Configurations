@@ -1,0 +1,91 @@
+/*@!Encoding:1252*/
+variables
+{
+  //Protocols
+  enum Protocols{
+    kIPPROTO_IP   = 0 ,   /* dummy for IP */
+    kIPPROTO_ICMP = 1 ,   /* control message protocol */
+    kIPPROTO_IGMP = 2 ,   /* group management protocol */
+    kIPPROTO_GGP  = 3 ,   /* gateway^2 (deprecated) */
+    kIPPROTO_TCP  = 6 ,   /* tcp */
+    kIPPROTO_PUP  = 12,   /* pup */
+    kIPPROTO_UDP  = 17,   /* user datagram protocol */
+    kIPPROTO_IDP  = 22,   /* xns idp */
+    kIPPROTO_ND   = 77,   /* UNOFFICIAL net disk proto */
+
+    kIPPROTO_RAW  = 255,  /* raw IP packet */
+    kIPPROTO_MAX  = 256
+  };
+  
+   // ip constants and header
+  const int kIP_HDR_LEN = 20;
+  // flags
+  const int	kIP_RF = 0x8000;      /* reserved fragment flag */
+  const int	kIP_DF = 0x4000;      /* dont fragment flag */
+  const int	kIP_MF = 0x2000;      /* more fragments flag */
+  const int	kIP_OFFMASK = 0x1fff; /* mask for fragmenting bits */
+    
+  _align(2) struct ip_header
+  {
+	  byte ip_hl_v; /* header length and version */
+	  byte ip_tos;	/* type of service */
+	  word	ip_len;	/* total length */
+	  word	ip_id;	/* identification */
+	  word	ip_off;	/* fragment offset field */
+	  byte	ip_ttl; /* time to live */
+	  byte	ip_p;		/* protocol */
+	  word	ip_sum;	/* checksum */
+	  dword ip_src; /* source and dest address */
+    dword ip_dst;	/* source and dest address */
+  };
+}
+
+word in_cksum_hdr(struct ip_header ip)
+{
+	dword sum;
+  byte ipArray[20];
+  
+  sum = 0;
+  memcpy(ipArray, ip);
+  
+  sum=ipArray.WORD(0)+
+    ipArray.WORD(2)+
+    ipArray.WORD(4)+
+    ipArray.WORD(6)+
+    ipArray.WORD(8)+
+    ipArray.WORD(10)+
+    ipArray.WORD(12)+
+    ipArray.WORD(14)+
+    ipArray.WORD(16)+
+    ipArray.WORD(18);
+
+ while (sum>>16)
+	  sum = (sum & 0xFFFF)+(sum >> 16);
+
+	return ~sum & 0xffff;
+}
+
+word checksum(byte data[], dword count)
+{
+  dword sum;
+  dword offset;
+
+  sum = 0;
+  offset = 0;
+  while (count > 1)
+  {
+    sum += data.WORD(offset);
+    offset += 2;
+    if (sum & 0x80000000)
+      sum = (sum & 0xFFFF) + (sum >> 16);
+    count -= 2;
+  }
+
+  if (count)
+    sum += data[offset];
+
+  while (sum >> 16)
+    sum = (sum & 0xFFFF) + (sum >> 16);
+
+  return ~sum & 0xffff;
+}

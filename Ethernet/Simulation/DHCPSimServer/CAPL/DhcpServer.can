@@ -1,0 +1,1035 @@
+/*@!Encoding:1252*/
+/*
+ * DHCP Server
+ *
+ * Copyright 2015, Vector Informatik GmbH - All right reserved
+ *
+ * The DHCP server offers ip addresses, masks and the default gateway
+ * to the requesting clients.
+ */
+
+includes
+{
+  #include "Ethernet.cin"
+  #include "libc.cin"
+  #include "eth.cin"
+  #include "ip.cin"
+  #include "udp.cin"
+  #include "dhcp.cin"
+}
+
+variables
+{
+  //
+  // enums
+  //
+  enum VerbosityLevel
+  {
+    kVERBOSE_OFF = 0,
+    kVERBOSE_ERROR,
+    kVERBOSE_WARNING,
+    kVERBOSE_INFO
+  };
+  
+  enum dhcp_address_state
+  {
+    NOTAVAILABLE,
+    NOTALLOCATED,
+    TIMEDOUT,
+    ALLOCATED
+  };
+  
+  char gAddressStateNames[4][20] = 
+  { 
+    "NOTAVAILABLE",
+    "NOTALLOCATED",
+    "TIMEDOUT",
+    "ALLOCATED"
+  };
+  
+  //
+  // structures
+  //
+   struct dhcp_message{
+    long channel;
+    enum DhcpMessageType msgType;
+    struct dhcp_packet dhcpPacket;
+    struct dhcp_option dhcpOptions[256];
+  };
+  
+  struct dhcp_lease{
+    byte  clientMacId[6];                 // mac id of the dhcp client
+    dword ipAddr;                         // ip address of the lease given by the dhcp server
+    dword mask;                           // mask of the ip address
+    dword time;                           // the lease time 
+    dword router;                         // the router address
+    enum dhcp_address_state addressState; // marking of the current address state
+    dword expirationTime;                 // time when the lease expires
+  };
+  
+  //
+  // constants
+  //
+  const int   kLineLength        = 26;              // number of characters per line in the dhcp servers output console 
+  const int   kMaxLines          = 20;              // maximum lines to display
+  const int   gVerbosity         = kVERBOSE_ERROR;  // the verbosity level
+  const dword kBroadcastIpv4Addr = 0xFFFFFFFF;      // broadcast IP address
+  
+  // 
+  // global variables
+  //  
+  struct  dhcp_lease gLeases[char[]];     // list of all leases
+  dword   gSocket;                        // udp socket opened on port 67 to avoid icmp error messages
+  msTimer gUpdatePanelTimer;              // cyclic timer called every second to update the dhcp servers output console
+}
+
+/*
+  The OnStart handler activates the dhcp server
+*/
+on Start
+{
+ Enable(@DHCPServer::Enable);
+}
+
+/*
+  cyclic timer called every second to update the dhcp 
+  servers output console
+*/
+on timer gUpdatePanelTimer
+{
+  UpdatePanel();
+}
+
+/*
+  handler for the Enable/Disable button
+*/
+on sysvar DHCPServer::Enable
+{
+  Enable(@this);
+}
+
+/*
+  Enable or disable the dhcp server
+
+  enable - 1: Enable the dhcp server
+           0: Disable the dhcp server
+*/
+void Enable(int enable)
+{
+   if(enable == @DHCPServer::Enable::On)
+  {
+    BYTE emptyMacAddress[6] = { 0x00,0x00,0x00,0x00,0x00, 0x00};
+    setBusContext(getBusNameContext("Ethernet"));
+    EthReceiveRawPacket( 0x7, emptyMacAddress, emptyMacAddress, 0x0000, "OnEthRawPacket" );
+    gSocket = UdpOpen(0,67);
+    setTimerCyclic(gUpdatePanelTimer, 0, 1000);
+  }
+  else
+  {
+    if(gSocket != 0)
+    {
+      UdpClose(gSocket);
+    }
+  }
+}
+
+/*
+  Check type of received packet and parse it if necessary
+
+  channel      - the channel where the packet occured
+  dir          - the direction of the packet (send/receive)
+  packetLength - the size of the packet
+*/
+void OnEthRawPacket( LONG channel, LONG dir, LONG packetLength )
+{
+  struct dhcp_message msg;
+  LONG rxLength;
+  int offset;
+  int ipOffset;
+  int error;
+  int i;
+  
+  if(dir == 0 && @DHCPServer::Enable == @DHCPServer::Enable::On )
+  {  
+    if(ntohs(EthGetThisValue16(kETHER_TYPE_OFFSET)) == kETHERTYPE_IP)
+    {
+      // check if it is a dhcp packet
+      if (packetLength < kDHCP_FIXED_LEN) return;
+      if (EthGetThisValue16(20) & 0xFF1F) return; // check OFFSET ? 0 (not a fragment)
+      if (EthGetThisValue8(23) != kIPPROTO_UDP) return; // check IPPROTO ? UDP
+      ipOffset = (EthGetThisValue8(14) & 0x0F) << 2;
+      offset = kETHER_HDR_LEN + ipOffset; // ethernet header length + ip header length
+      if (offset < 34) return; // check if ip header length was at least 20 byte
+      if (EthGetThisValue16(offset + 2) != 0x4300)return; // check UDP port 67
+      
+      if(gVerbosity >= kVERBOSE_INFO)
+      {
+        writeLineEx(1, 1, "%BASE_FILE_NAME%: received DHCP packet.");
+      }
+      // init message struct
+      msg.channel = channel;
+      msg.msgType = kUNKNOWN;
+      for(i = 0; i < elcount(msg.dhcpOptions); i++) 
+      {
+        msg.dhcpOptions[i].code = 0;
+        msg.dhcpOptions[i].len = 0;
+      }
+      EthGetThisData(0, kETHER_HDR_LEN, msg.dhcpPacket.eth);
+      EthGetThisData(kETHER_HDR_LEN, kIP_HDR_LEN, msg.dhcpPacket.ip);
+      EthGetThisData(kETHER_HDR_LEN + ipOffset, kUDP_HDR_LEN, msg.dhcpPacket.udp);
+      rxLength = EthGetThisData(offset + kUDP_HDR_LEN, __size_of(struct dhcp_packet), msg.dhcpPacket.dhcp);
+      if((error = ParseDhcpPacket(msg, rxLength)) < 0 && gVerbosity >= kVERBOSE_ERROR)
+      {
+        writeLineEx(1, 3, "%BASE_FILE_NAME%: failed to parse DHCP packet. Error: %d", error);
+      }
+    }
+  }
+}
+
+/*
+  Parse a dhcp packet and call the handler for the given message type
+
+  dhcpMessage - the received dhcp messaqe
+  dhcpSize    - size of the given dhcp message
+*/
+int ParseDhcpPacket(struct dhcp_message dhcpMessage, DWORD dhcpSize)
+{
+  dword optionOffset; 
+  dword optionLength;
+  byte optionCode;
+  int i;
+  
+  // check magic cookie
+  optionOffset = 0;
+  
+  if((dhcpMessage.dhcpPacket.dhcp.options[optionOffset++] != 0x63) ||
+    (dhcpMessage.dhcpPacket.dhcp.options[optionOffset++] != 0x82) ||
+    (dhcpMessage.dhcpPacket.dhcp.options[optionOffset++] != 0x53) ||
+    (dhcpMessage.dhcpPacket.dhcp.options[optionOffset++] != 0x63))
+  {
+    if(gVerbosity >= kVERBOSE_ERROR)
+    {
+      writeLineEx(1,3,"%BASE_FILE_NAME%: invalid magic cookie");
+    }
+    return -1;
+  }
+
+  // parse options
+  optionLength = dhcpSize - kDHCP_FIXED_NON_UDP;
+  if(gVerbosity >= kVERBOSE_INFO)
+  {
+    writeLineEx(1,1,"%BASE_FILE_NAME%: options:");
+  }
+  while(((optionOffset+1) < optionLength ) && // are there enough data to read the next option size
+    ((optionOffset + dhcpMessage.dhcpPacket.dhcp.options[optionOffset+1]) < optionLength) &&  // is option smaller than available data
+    (dhcpMessage.dhcpPacket.dhcp.options[optionOffset] != kDHO_END)) // is option not the end option
+  {
+    optionCode = dhcpMessage.dhcpPacket.dhcp.options[optionOffset++];
+    dhcpMessage.dhcpOptions[optionCode].code = optionCode;
+    dhcpMessage.dhcpOptions[optionCode].len = dhcpMessage.dhcpPacket.dhcp.options[optionOffset++];
+    for(i=0; i<dhcpMessage.dhcpOptions[optionCode].len; i++)
+    {
+      dhcpMessage.dhcpOptions[optionCode].data[i] = dhcpMessage.dhcpPacket.dhcp.options[optionOffset++];
+    }
+
+    // print options in verbose info mode
+    if(gVerbosity >= kVERBOSE_INFO)
+    {
+      writeLineEx (1,1,"    option code: %s, option length: %d value:", DhcpOptionCodeNames[optionCode], dhcpMessage.dhcpOptions[optionCode].len);
+      if(optionCode == kDHO_DHCP_MESSAGE_TYPE)
+      {
+        writeEx(1,1," %s", DhcpMessageTypeNames[dhcpMessage.dhcpOptions[kDHO_DHCP_MESSAGE_TYPE].data[0]]);
+      }
+      else
+      {
+        for(i=0; i<dhcpMessage.dhcpOptions[optionCode].len; i++)
+        {
+          writeEx(1,1," %02x", dhcpMessage.dhcpOptions[optionCode].data[i]);
+        }
+      }
+    }
+  }
+  
+  // handle message
+  switch(dhcpMessage.dhcpOptions[kDHO_DHCP_MESSAGE_TYPE].data[0])
+  {
+    case kDHCPDISCOVER:
+      dhcpMessage.msgType = kDHCPDISCOVER;
+      HandleDhcpDiscover(dhcpMessage);
+      break;
+    case kDHCPREQUEST:
+      dhcpMessage.msgType = kDHCPREQUEST;
+      HandleDhcpRequest(dhcpMessage);
+      break;
+    case kDHCPDECLINE:
+      dhcpMessage.msgType = kDHCPDECLINE;
+      // this simple demo DHCP client do not support the DHCPDECLINE message
+      break;
+    case kDHCPRELEASE:
+      dhcpMessage.msgType = kDHCPRELEASE;
+      // this simple demo DHCP client do not support the DHCPRELEASE message
+      break;
+    case kDHCPINFORM:
+      dhcpMessage.msgType = kDHCPINFORM;
+      // this simple demo DHCP client do not support the DHCPINFORM message
+      break;
+    default:
+      return -1;
+  }
+
+  return 0;
+}
+
+/*
+  Handler for a received DHCPDISCOVER message
+
+  dhcpMessage - the received DHCPDISCOVER message
+*/
+void HandleDhcpDiscover(struct dhcp_message dhcpMessage)
+{
+  dword size;
+  dword result;
+  struct dhcp_packet packet;
+  struct dhcp_lease lease;
+  
+  // check message type
+  if(dhcpMessage.msgType != kDHCPDISCOVER)
+  {
+    if(gVerbosity >= kVERBOSE_ERROR)
+    {
+      writeLineEx(1,3,"%BASE_FILE_NAME%: HandleDhcpDiscover: invalid message type: %s", DhcpMessageTypeNames[dhcpMessage.msgType]);
+    }
+    return;
+  }
+  
+  // get a lease to offer to the client
+  if(GetLeaseForClient(dhcpMessage.dhcpPacket.dhcp.chaddr, lease) < 0)
+  {
+    // if there is no lease available, create a new one
+    if(CreateLease(dhcpMessage, lease) < 0)
+    {
+      if(gVerbosity >= kVERBOSE_ERROR)
+      {
+        writeLineEx(1,3,"%BASE_FILE_NAME%: pool of ip addresses empty 1");
+      }
+      return;
+    }
+  }
+  
+  if(IsIpAddressValid(lease.ipAddr) <= 0)
+  {
+    lease.ipAddr = GetFreeAddress();
+    if(lease.ipAddr > 0)
+    {
+      UpdateLease(lease, NOTALLOCATED);
+    }
+    else
+    {
+      // no more addresses available
+      UpdateLease(lease, NOTAVAILABLE);
+      if(gVerbosity >= kVERBOSE_ERROR)
+      {
+        writeLineEx(1,3,"%BASE_FILE_NAME%: pool of ip addresses empty 2");
+      }
+      return;
+    }
+  }
+  
+  // create message and send it
+  size = CreateDhcpOffer(packet, lease, dhcpMessage);
+
+  // we have to output a raw ethernet packet instead of using the tcp/ip stack
+  // because the tcp/ip stack will try to detect the remote mac address by 
+  // sending a arp request. This request will not be answered because the 
+  // client do not have the address already.
+  result = EthOutputRawPacket(size, packet);
+  
+  if(gVerbosity >= kVERBOSE_ERROR && result != 0)
+  {
+    writeLineEx(1,3,"%BASE_FILE_NAME%: failed to send DHCPOFFER");
+  }
+}
+
+/*
+  Handler for a received DHCPREQUEST message
+
+  dhcpMessage - the received DHCPREQUEST message
+*/
+void HandleDhcpRequest(struct dhcp_message dhcpMessage)
+{
+  dword size;
+  dword result;
+  struct dhcp_packet packet;
+  struct dhcp_lease lease;
+  int    leaseAvailable;
+  dword  adapterAddr[1];
+  dword  requestedAddress;
+  
+  // check message type
+  if(dhcpMessage.msgType != kDHCPREQUEST)
+  {
+    if(gVerbosity >= kVERBOSE_ERROR)
+    {
+      writeLineEx(1,3,"%BASE_FILE_NAME%: HandleDhcpRequest: invalid message type: %s", DhcpMessageTypeNames[dhcpMessage.msgType]);
+    }
+    return;
+  }
+  
+  // get a lease for the client
+  leaseAvailable = GetLeaseForClient(dhcpMessage.dhcpPacket.dhcp.chaddr, lease);
+
+  // get local Ip address
+  IpGetAdapterAddress(dhcpMessage.channel, adapterAddr, dhcpMessage.channel);
+  
+  // determine the state of the client
+  if((dhcpMessage.dhcpOptions[kDHO_DHCP_SERVER_IDENTIFIER].data.DWORD(0) == adapterAddr[0]) &&
+    (dhcpMessage.dhcpPacket.dhcp.ciaddr == 0 ) &&
+    (dhcpMessage.dhcpOptions[kDHO_DHCP_REQUESTED_ADDRESS].data.DWORD(0) == lease.ipAddr) &&
+    (IsIpAddressValid(dhcpMessage.dhcpOptions[kDHO_DHCP_REQUESTED_ADDRESS].data.DWORD(0)) > 0))
+  {
+    // valid request from client in selecting state
+    if(gVerbosity >= kVERBOSE_INFO)
+    {
+      writeLineEx(1,1,"%BASE_FILE_NAME%: Received DHCPREQUEST from client in selecting state. Create DHCPACK");
+    }
+    UpdateLease(lease, ALLOCATED);
+    size = CreateDhcpAck(packet, lease, dhcpMessage);
+  }
+  else if((dhcpMessage.dhcpOptions[kDHO_DHCP_SERVER_IDENTIFIER].code == 0) &&
+    (dhcpMessage.dhcpPacket.dhcp.ciaddr == 0 ) &&
+    (IsIpAddressValid(dhcpMessage.dhcpOptions[kDHO_DHCP_REQUESTED_ADDRESS].data.DWORD(0)) > 0))
+  {
+    // request in init reboot state
+    // check if address is available in address pool and decide to send ack or nak
+    requestedAddress = dhcpMessage.dhcpOptions[kDHO_DHCP_REQUESTED_ADDRESS].data.DWORD(0);
+    if((leaseAvailable < 0) || (lease.ipAddr != requestedAddress))
+    {
+      if(leaseAvailable < 0)
+      {
+        CreateLease(dhcpMessage, lease);
+      }
+      if( IsAddressAvailable(requestedAddress) > 0 )
+      {
+        if(gVerbosity >= kVERBOSE_INFO)
+        {
+          writeLineEx(1,1,"%BASE_FILE_NAME%: Received DHCPREQUEST from client in init-reboot state. Create DHCPACK1");
+        }
+        memcpy(lease.clientMacId, dhcpMessage.dhcpPacket.dhcp.chaddr, elcount(lease.clientMacId));
+        lease.ipAddr = requestedAddress;
+        UpdateLease(lease, ALLOCATED);
+        size = CreateDhcpAck(packet, lease, dhcpMessage);
+      }
+      else
+      {
+        if(gVerbosity >= kVERBOSE_ERROR)
+        {
+          writeLineEx(1,3,"%BASE_FILE_NAME%: Requested address not available");
+        }
+        UpdateLease(lease, NOTAVAILABLE);
+        size = CreateDhcpNack(packet, lease, dhcpMessage);
+      }
+    }
+    else
+    {
+      if(gVerbosity >= kVERBOSE_INFO)
+      {
+        writeLineEx(1,1,"%BASE_FILE_NAME%: Received DHCPREQUEST from client in init-reboot state. Create DHCPACK2");
+      }
+      lease.ipAddr = requestedAddress;
+      UpdateLease(lease, ALLOCATED);
+      size = CreateDhcpAck(packet, lease, dhcpMessage);
+    }
+  }
+  else if((dhcpMessage.dhcpOptions[kDHO_DHCP_SERVER_IDENTIFIER].code == 0) &&
+    (dhcpMessage.dhcpOptions[kDHO_DHCP_REQUESTED_ADDRESS].code == 0) &&
+    (dhcpMessage.dhcpPacket.dhcp.ciaddr == lease.ipAddr) &&
+    (IsIpAddressValid(dhcpMessage.dhcpPacket.dhcp.ciaddr) > 0) &&
+    (lease.addressState == ALLOCATED))
+  {
+    // valid request in renewing or rebinding state
+    if(gVerbosity >= kVERBOSE_INFO)
+    {
+      writeLineEx(1,1,"%BASE_FILE_NAME%: Received DHCPREQUEST from client in renewing or rebinding state. Create DHCPACK");
+    }
+    UpdateLease(lease, ALLOCATED);
+    size = CreateDhcpAck(packet, lease, dhcpMessage);
+  }
+  else
+  {
+    if(gVerbosity >= kVERBOSE_INFO)
+    {
+      writeLineEx(1,1,"%BASE_FILE_NAME%: Invalid DHCPREQUEST. Create DHCPNAK");
+    }
+    UpdateLease(lease, NOTALLOCATED);
+    size = CreateDhcpNack(packet, lease, dhcpMessage);
+  }
+
+  // we have to output a raw ethernet packet instead of using the tcp/ip stack
+  // because the tcp/ip stack will try to detect the remote mac address by 
+  // sending a arp request. This request will not be answered because the 
+  // client do not have the address already.
+  result = EthOutputRawPacket(size, packet);
+  
+  if(gVerbosity >= kVERBOSE_ERROR && result != 0)
+  {
+    writeLineEx(1,3,"%BASE_FILE_NAME%: failed to send DHCPOFFER");
+  }
+}
+
+/*
+  Check if the given address is available
+
+ return  - 0: address not valid 
+           1: address valid
+ address - the address to check
+*/
+int IsAddressAvailable(dword address)
+{
+  if(IsIpAddressValid(address) > 0)
+  {
+    for(char [] clientIdentifier : gLeases)
+    {
+      if(gLeases[clientIdentifier].ipAddr == address)
+      {
+        return 0;
+      }
+    }
+    return 1;
+  }
+  return 0;
+}
+
+/*
+  Check if the given address is in the range configured by the user
+
+  return  - 0: address not valid 
+            1: address valid
+  address - the address to check
+*/
+int IsIpAddressValid(dword address)
+{
+  char buffer[18];
+  dword rangeBegin;
+  dword rangeEnd;
+  
+  // get system variables and calculate valid address range
+  sysGetVariableString(sysvar::DHCPServer::AddressRangeStart, buffer, elcount(buffer));
+  if((IpGetAddressAsNumber(buffer) == ~0) && (gVerbosity >= kVERBOSE_ERROR))
+  {
+    writeLineEx(1,3,"%BASE_FILE_NAME%: Invalid address given (%s)", buffer);
+    return 0;
+  }
+  rangeBegin = htonl(IpGetAddressAsNumber(buffer));
+  sysGetVariableString(sysvar::DHCPServer::AddressRangeEnd, buffer, elcount(buffer));
+  if((IpGetAddressAsNumber(buffer) == ~0) && (gVerbosity >= kVERBOSE_ERROR))
+  {
+    writeLineEx(1,3,"%BASE_FILE_NAME%: Invalid address given (%s)", buffer);
+    return 0;
+  }
+  rangeEnd = htonl(IpGetAddressAsNumber(buffer));
+
+  if(rangeEnd >= htonl(address) && htonl(address) >= rangeBegin)
+  {
+    return 1;
+  }
+  return 0;
+}
+
+/*
+  Update the lease for a client
+
+  lease      - the lease to update
+  leaseState - the new state of the lease
+*/
+void UpdateLease(struct dhcp_lease lease, enum dhcp_address_state leaseState)
+{
+  char buffer[18];
+
+  if(IsIpAddressValid(lease.ipAddr) > 0)
+  {
+    lease.addressState = leaseState;
+  }
+  else
+  {
+    lease.addressState = NOTAVAILABLE;
+  }
+  
+  if(leaseState == ALLOCATED)
+  {
+    lease.expirationTime = timeNow() / 100000 + @sysvar::DHCPServer::LeaseDuration;
+    lease.time = @sysvar::DHCPServer::LeaseDuration;
+  }
+    
+  sysGetVariableString(sysvar::DHCPServer::SubnetMask, buffer, elcount(buffer));
+  if((IpGetAddressAsNumber(buffer) == ~0) && (gVerbosity >= kVERBOSE_ERROR))
+  {
+    writeLineEx(1,3,"%BASE_FILE_NAME%: Invalid mask given (%s)", buffer);
+  }
+  lease.mask = IpGetAddressAsNumber(buffer);
+  sysGetVariableString(sysvar::DHCPServer::DefaultGateway, buffer, elcount(buffer));
+  if((IpGetAddressAsNumber(buffer) == ~0) && (gVerbosity >= kVERBOSE_ERROR))
+  {
+    writeLineEx(1,3,"%BASE_FILE_NAME%: Invalid router given (%s)", buffer);
+  }
+  lease.router = IpGetAddressAsNumber(buffer);
+  
+  SetLeaseForClient(lease);
+}
+
+/*
+  Get the lease for the client with the given MAC id. If there is no
+  lease available the function returns -1
+
+  return - 0: lease available
+          -1: no lease available
+  macId  - the mac id of the client
+  lease  - the returned lease. Only valid if return value is 0
+*/
+int GetLeaseForClient(byte macId[], struct dhcp_lease lease)
+{
+  char macIdStr[18];
+  EthMacId2Str(macId, 0, macIdStr);
+  if(gLeases.containsKey(macIdStr)>0)
+  {
+    memcpy(lease, gLeases[macIdStr]);
+    return 0;
+  }
+  return -1;
+}
+
+/*
+  Set the values of the given lease to the lease for the client with 
+  the leases macId. If there is no lease available the function 
+  returns -1
+
+  return - 0: lease available
+          -1: no lease available
+  lease  - the lease to set
+*/
+int SetLeaseForClient(struct dhcp_lease lease)
+{
+  char macIdStr[18];
+  EthMacId2Str(lease.clientMacId, 0, macIdStr);
+  if(gLeases.containsKey(macIdStr)>0)
+  {
+    memcpy(gLeases[macIdStr], lease);
+    return 0;
+  }
+  return -1;
+}
+
+/*
+  get a free address from the user defined address range
+
+  return - 0: address not valid 
+          >0: the valid address
+*/
+dword GetFreeAddress()
+{
+  char buffer[18];
+  dword rangeBegin;
+  dword rangeEnd;
+  dword alreadyUsed;
+  
+  sysGetVariableString(sysvar::DHCPServer::AddressRangeStart, buffer, elcount(buffer));
+  if((IpGetAddressAsNumber(buffer) == ~0) && (gVerbosity >= kVERBOSE_ERROR))
+  {
+    writeLineEx(1,3,"%BASE_FILE_NAME%: Invalid address range begin given (%s)", buffer);
+    return 0;
+  }
+  rangeBegin = htonl(IpGetAddressAsNumber(buffer));
+  sysGetVariableString(sysvar::DHCPServer::AddressRangeEnd, buffer, elcount(buffer));
+  if((IpGetAddressAsNumber(buffer) == ~0) && (gVerbosity >= kVERBOSE_ERROR))
+  {
+    writeLineEx(1,3,"%BASE_FILE_NAME%: Invalid address range end given (%s)", buffer);
+    return 0;
+  }
+  rangeEnd = htonl(IpGetAddressAsNumber(buffer));
+  
+  // find next free address
+  while(rangeBegin <= rangeEnd)
+  {
+    if(IsAddressAvailable(ntohl(rangeBegin)) > 0)
+    {
+      return ntohl(rangeBegin);
+    }
+    rangeBegin++; 
+  }
+  
+  return 0;
+}
+
+/*
+  Init the given lease with the server rules. Then the lease will
+  be added to the lease container
+ 
+  return - 0: lease created
+          -1: no lease available
+  msg    - the dhcp message to get some parameters of the client
+  lease  - the returned lease. Only valid if return value is 0
+*/
+int CreateLease( struct dhcp_message msg, struct dhcp_lease lease)
+{
+  char buffer[18];
+  
+  lease.ipAddr = GetFreeAddress();
+  if(lease.ipAddr != 0)
+  {
+    memcpy(lease.clientMacId, msg.dhcpPacket.dhcp.chaddr, elcount(lease.clientMacId));
+    lease.expirationTime = timeNow() / 100000 + @sysvar::DHCPServer::LeaseDuration;
+    sysGetVariableString(sysvar::DHCPServer::SubnetMask, buffer, elcount(buffer));
+    lease.mask = IpGetAddressAsNumber(buffer);
+    lease.time = @sysvar::DHCPServer::LeaseDuration;
+    sysGetVariableString(sysvar::DHCPServer::DefaultGateway, buffer, elcount(buffer));
+    lease.router = IpGetAddressAsNumber(buffer);
+    lease.addressState = NOTALLOCATED;
+    
+    // put lease to the list of leases
+    EthMacId2Str(lease.clientMacId, 0, buffer);
+    memcpy(gLeases[buffer], lease);
+   
+    return 0;
+  }
+  
+  return -1;
+}
+
+/*
+  Fill the eth header
+
+  return      - size of the ethernet packet
+  packet      - the dhcp packet where the ethernet header should be set
+  payloadSize - the size of the ethernet payload
+  srcMac      - the source MAC id of the packet
+  dstMac      - the destination MAC id of the packet
+*/
+dword FillEthHeader(struct dhcp_packet packet, dword payloadSize, byte srcMac[], byte dstMac[])
+{
+  memcpy(packet.eth.ether_dhost, dstMac, elcount(packet.eth.ether_dhost));
+  memcpy(packet.eth.ether_shost, srcMac, elcount(packet.eth.ether_shost));
+  packet.eth.ether_type = htons(kETHERTYPE_IP);
+  return payloadSize + kETHER_HDR_LEN;
+}
+
+/*
+  Fill the Ip header 
+
+  return      - size of the ip part of the packet
+  packet      - the dhcp packet where the ip header should be set
+  payloadSize - the size of the ethernet payload
+  srcAddr     - the source IP address of the packet
+  dstAddr     - the destination IP address of the packet
+*/
+dword FillIpHeader(struct dhcp_packet packet, dword payloadSize, dword srcAddr, dword dstAddr)
+{
+  packet.ip.ip_hl_v = 0x45;
+  packet.ip.ip_tos  = 0;
+  packet.ip.ip_len  = htons(payloadSize + kIP_HDR_LEN);
+  packet.ip.ip_id   = random(0xFFFF);
+  packet.ip.ip_off  = htons(kIP_DF);
+  packet.ip.ip_ttl  = 0x20;
+  packet.ip.ip_p    = kIPPROTO_UDP;
+  packet.ip.ip_src  = srcAddr;
+  packet.ip.ip_dst  = dstAddr;
+  packet.ip.ip_sum  = 0;
+  
+  packet.ip.ip_sum = in_cksum_hdr(packet.ip);
+    
+  return payloadSize + kIP_HDR_LEN;
+}
+
+/*
+  Fill the Udp header without checksum
+
+  return      - size of the udp part of the packet
+  packet      - the dhcp packet where the udp header should be set
+  payloadSize - the size of the ethernet payload
+*/ 
+dword FillUdpHeader(struct dhcp_packet packet, dword payloadSize)
+{
+  packet.udp.uh_dport = htons(kDHCP_DEFAULT_CLIENT_PORT);
+  packet.udp.uh_sport = htons(kDHCP_DEFAULT_SERVER_PORT);
+  packet.udp.uh_sum = 0;
+  packet.udp.uh_ulen = htons(payloadSize + kUDP_HDR_LEN);
+  return payloadSize + kUDP_HDR_LEN;
+}
+
+/*
+  Set the udp checksum in the given packet 
+
+  packet - the dhcp packet where the udp checksum should be set
+*/
+void SetUdpChecksum(struct dhcp_packet packet)
+{
+  byte data[1500];
+  memcpy_off(data, 0, packet, 14, ntohs(packet.ip.ip_len));
+  memset(data, 0, 9);
+  data.word(10) = packet.udp.uh_ulen;
+  packet.udp.uh_sum = checksum(data, ntohs(packet.ip.ip_len));
+}
+
+/*
+  Create a dhcp packet for a DHCPOFFER message
+
+  return      - the size of the packet
+  packet      - the packet where the data should be set
+  lease       - the dedicated lease entry from which this offer should be created
+  discoverMsg - the dedicated discover message for which this offer should be created
+*/
+dword CreateDhcpOffer(struct dhcp_packet packet, struct dhcp_lease lease, struct dhcp_message discoverMsg)
+{
+  int optionOffset;
+  int payloadSize;
+  int i;
+  DWORD adapterAddr[1];
+  dword destinationAddress;
+  byte  adapterMac[6];
+  
+  IpGetAdapterAddress(discoverMsg.channel, adapterAddr, discoverMsg.channel);
+  IpGetAdapterMacId(discoverMsg.channel, adapterMac);
+  
+  // fill dhcp header
+  optionOffset = 0;
+  packet.dhcp.op = 2;
+  packet.dhcp.htype = 1;
+  packet.dhcp.hlen = 6;
+  packet.dhcp.hops = 0;
+  packet.dhcp.xid = discoverMsg.dhcpPacket.dhcp.xid;
+  packet.dhcp.secs = 0;
+  packet.dhcp.ciaddr = 0;
+  packet.dhcp.yiaddr = lease.ipAddr;
+  packet.dhcp.siaddr = 0;
+  packet.dhcp.flags = discoverMsg.dhcpPacket.dhcp.flags;
+  packet.dhcp.giaddr = discoverMsg.dhcpPacket.dhcp.giaddr;
+  memcpy(packet.dhcp.chaddr,discoverMsg.dhcpPacket.dhcp.chaddr, 6);
+  memset(packet.dhcp.sname, 0, elcount(packet.dhcp.sname));
+  memset(packet.dhcp.file, 0, elcount(packet.dhcp.file));
+  memset(packet.dhcp.options, 0, elcount(packet.dhcp.options));
+  
+  // add magic cookie
+  packet.dhcp.options[optionOffset++] = 0x63;
+  packet.dhcp.options[optionOffset++] = 0x82;
+  packet.dhcp.options[optionOffset++] = 0x53;
+  packet.dhcp.options[optionOffset++] = 0x63;
+
+  // add options
+  optionOffset = AppendDhcpOption(packet.dhcp, optionOffset, kDHO_DHCP_MESSAGE_TYPE, 1, kDHCPOFFER);
+  optionOffset = AppendDhcpOption(packet.dhcp, optionOffset, kDHO_DHCP_SERVER_IDENTIFIER, 4, adapterAddr[0]);
+  optionOffset = AppendDhcpOption(packet.dhcp, optionOffset, kDHO_DHCP_LEASE_TIME, 4, htonl(lease.time));
+  
+  for(i=0;i<discoverMsg.dhcpOptions[kDHO_DHCP_PARAMETER_REQUEST_LIST].len; i++)
+  {
+    switch(discoverMsg.dhcpOptions[kDHO_DHCP_PARAMETER_REQUEST_LIST].data[i])
+    {
+      case kDHO_SUBNET_MASK:
+        optionOffset = AppendDhcpOption(packet.dhcp, optionOffset, kDHO_SUBNET_MASK, 4, lease.mask);
+        break;
+      case kDHO_ROUTERS:
+        if(lease.router != 0)
+        {
+          optionOffset = AppendDhcpOption(packet.dhcp, optionOffset, kDHO_ROUTERS, 4, lease.router);
+        }
+        break;
+    }
+  }
+  
+  packet.dhcp.options[optionOffset++] = kDHO_END;
+  payloadSize = kDHCP_FIXED_NON_UDP + optionOffset;
+  
+  // check whether the server shall respond via broadcast
+  destinationAddress = (packet.dhcp.flags & (word)kDHCP_BROADCAST_FLAG) ? kBroadcastIpv4Addr : lease.ipAddr;
+  
+  // fill the lower level headers
+  payloadSize = FillUdpHeader(packet, payloadSize);
+  payloadSize = FillIpHeader(packet, payloadSize, adapterAddr[0], destinationAddress);
+  payloadSize = FillEthHeader(packet, payloadSize, adapterMac, lease.clientMacId);
+  
+  SetUdpChecksum(packet);
+  
+  return payloadSize;
+}
+
+/*
+  Create a dhcp packet for a DHCPACK message
+
+  return      - the size of the packet
+  packet      - the packet where the data should be set
+  lease       - the dedicated lease entry from which this ack should be created
+  requestMsg  - the dedicated request message for which this ack should be created
+*/
+dword CreateDhcpAck(struct dhcp_packet packet, struct dhcp_lease lease, struct dhcp_message requestMsg)
+{
+  int optionOffset;
+  int payloadSize;
+  int i;
+  DWORD adapterAddr[1];
+  dword destinationAddress;
+  byte  adapterMac[6];
+  
+  IpGetAdapterAddress(requestMsg.channel, adapterAddr, requestMsg.channel);
+  IpGetAdapterMacId(requestMsg.channel, adapterMac);
+  
+  // fill dhcp header
+  optionOffset = 0;
+  packet.dhcp.op = 2;
+  packet.dhcp.htype = 1;
+  packet.dhcp.hlen = 6;
+  packet.dhcp.hops = 0;
+  packet.dhcp.xid = requestMsg.dhcpPacket.dhcp.xid;
+  packet.dhcp.secs = 0;
+  packet.dhcp.ciaddr = requestMsg.dhcpPacket.dhcp.ciaddr;
+  packet.dhcp.yiaddr = lease.ipAddr;
+  packet.dhcp.siaddr = 0;
+  packet.dhcp.flags = requestMsg.dhcpPacket.dhcp.flags;
+  packet.dhcp.giaddr = requestMsg.dhcpPacket.dhcp.giaddr;
+  memcpy(packet.dhcp.chaddr,requestMsg.dhcpPacket.dhcp.chaddr, 6);
+  memset(packet.dhcp.sname, 0, elcount(packet.dhcp.sname));
+  memset(packet.dhcp.file, 0, elcount(packet.dhcp.file));
+  memset(packet.dhcp.options, 0, elcount(packet.dhcp.options));
+  
+  // add magic cookie
+  packet.dhcp.options[optionOffset++] = 0x63;
+  packet.dhcp.options[optionOffset++] = 0x82;
+  packet.dhcp.options[optionOffset++] = 0x53;
+  packet.dhcp.options[optionOffset++] = 0x63;
+
+  // add options
+  optionOffset = AppendDhcpOption(packet.dhcp, optionOffset, kDHO_DHCP_MESSAGE_TYPE, 1, kDHCPACK);
+  optionOffset = AppendDhcpOption(packet.dhcp, optionOffset, kDHO_DHCP_SERVER_IDENTIFIER, 4, adapterAddr[0]);
+  optionOffset = AppendDhcpOption(packet.dhcp, optionOffset, kDHO_DHCP_LEASE_TIME, 4, htonl(lease.time));
+  for(i=0;i<requestMsg.dhcpOptions[kDHO_DHCP_PARAMETER_REQUEST_LIST].len; i++)
+  {
+    switch(requestMsg.dhcpOptions[kDHO_DHCP_PARAMETER_REQUEST_LIST].data[i])
+    {
+      case kDHO_SUBNET_MASK:
+        optionOffset = AppendDhcpOption(packet.dhcp, optionOffset, kDHO_SUBNET_MASK, 4, lease.mask);
+        break;
+      case kDHO_ROUTERS:
+        if(lease.router != 0)
+        {
+          optionOffset = AppendDhcpOption(packet.dhcp, optionOffset, kDHO_ROUTERS, 4, lease.router);
+        }
+        break;
+    }
+  }  
+  packet.dhcp.options[optionOffset++] = kDHO_END;
+  payloadSize = kDHCP_FIXED_NON_UDP + optionOffset;
+  
+  // check whether the server shall respond via broadcast
+  destinationAddress = (packet.dhcp.flags & (word)kDHCP_BROADCAST_FLAG) ? kBroadcastIpv4Addr : lease.ipAddr;
+  
+    // fill the lower level headers
+  payloadSize = FillUdpHeader(packet, payloadSize);
+  payloadSize = FillIpHeader(packet, payloadSize, adapterAddr[0], destinationAddress);
+  payloadSize = FillEthHeader(packet, payloadSize, adapterMac, lease.clientMacId);
+  
+  SetUdpChecksum(packet);
+  return payloadSize;
+}
+
+/*
+  Create a dhcp packet for a DHCPNAK message
+
+  return      - the size of the packet
+  packet      - the packet where the data should be set
+  lease       - the dedicated lease entry from which this nack should be created
+  requestMsg  - the dedicated request message for which this nack should be created
+*/
+dword CreateDhcpNack(struct dhcp_packet packet, struct dhcp_lease lease, struct dhcp_message requestMsg)
+{
+  int optionOffset;
+  int payloadSize;
+  int i;
+  DWORD adapterAddr[1];
+  dword destinationAddress;
+  byte  adapterMac[6];
+  
+  IpGetAdapterAddress(requestMsg.channel, adapterAddr, requestMsg.channel);
+  IpGetAdapterMacId(requestMsg.channel, adapterMac);
+  
+  // fill dhcp header
+  optionOffset = 0;
+  packet.dhcp.op = 2;
+  packet.dhcp.htype = 1;
+  packet.dhcp.hlen = 6;
+  packet.dhcp.hops = 0;
+  packet.dhcp.xid = requestMsg.dhcpPacket.dhcp.xid;
+  packet.dhcp.secs = 0;
+  packet.dhcp.ciaddr = 0;
+  packet.dhcp.yiaddr = 0;
+  packet.dhcp.siaddr = 0;
+  packet.dhcp.flags = requestMsg.dhcpPacket.dhcp.flags;
+  packet.dhcp.giaddr = requestMsg.dhcpPacket.dhcp.giaddr;
+  memcpy(packet.dhcp.chaddr,requestMsg.dhcpPacket.dhcp.chaddr, 6);
+  memset(packet.dhcp.sname, 0, elcount(packet.dhcp.sname));
+  memset(packet.dhcp.file, 0, elcount(packet.dhcp.file));
+  memset(packet.dhcp.options, 0, elcount(packet.dhcp.options));
+  
+  // add magic cookie
+  packet.dhcp.options[optionOffset++] = 0x63;
+  packet.dhcp.options[optionOffset++] = 0x82;
+  packet.dhcp.options[optionOffset++] = 0x53;
+  packet.dhcp.options[optionOffset++] = 0x63;
+
+  // add options
+  optionOffset = AppendDhcpOption(packet.dhcp, optionOffset, kDHO_DHCP_MESSAGE_TYPE, 1, kDHCPNAK);
+  optionOffset = AppendDhcpOption(packet.dhcp, optionOffset, kDHO_DHCP_SERVER_IDENTIFIER, 4, adapterAddr[0]);
+  packet.dhcp.options[optionOffset++] = kDHO_END;
+  payloadSize = kDHCP_FIXED_NON_UDP + optionOffset;
+  
+    // fill the lower level headers
+  payloadSize = FillUdpHeader(packet, payloadSize);
+  if(lease.ipAddr == 0)
+  {
+    // if no address available answer to broadcast address
+    destinationAddress = kBroadcastIpv4Addr;
+  }
+  else if(packet.dhcp.flags & (word)kDHCP_BROADCAST_FLAG)
+  {
+    // if the DHCP broadcast flag is set, answer to broadcast address
+    destinationAddress = kBroadcastIpv4Addr;
+  }
+  else
+  {
+    destinationAddress = lease.ipAddr;
+  }
+    
+  payloadSize = FillIpHeader(packet, payloadSize, adapterAddr[0], destinationAddress);
+  payloadSize = FillEthHeader(packet, payloadSize, adapterMac, requestMsg.dhcpPacket.dhcp.chaddr);
+  
+  SetUdpChecksum(packet);
+  return payloadSize;
+}
+
+/*
+  Update the client section in the panel
+*/
+void UpdatePanel()
+{
+  char buffer[kLineLength * kMaxLines];
+  char line[kLineLength];
+  char ipAddr[16];
+  dword time;
+  
+  time = timeNow() / 100000;
+  strncpy(buffer, "", elcount(buffer));
+  for(char [] clientIdentifier : gLeases)
+  {
+    strncat(buffer, "-------------------------\n", elcount(buffer));
+    snprintf(line, elcount(line), "Client: %s\n", clientIdentifier);
+    strncat(buffer, line, elcount(buffer));
+    IpGetAddressAsString(gLeases[clientIdentifier].ipAddr, ipAddr, elcount(ipAddr));
+    snprintf(line, elcount(line), "Address: %16s", ipAddr);
+    strncat(buffer, line, elcount(buffer));
+    if(gLeases[clientIdentifier].expirationTime - time < 0)
+    {
+      snprintf(line, elcount(line), "Lease expired            ");
+    }
+    else
+    {
+      snprintf(line, elcount(line), "Lease time: %13d\n", gLeases[clientIdentifier].expirationTime - time);
+    }
+    strncat(buffer, line, elcount(buffer));
+  }
+  sysSetVariableString(sysvar::DHCPServer::Console, buffer);
+}

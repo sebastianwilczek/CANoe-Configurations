@@ -1,0 +1,221 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+variables
+{
+  enum CheckType {
+    kNotCheck, // No check performed. Will always pass
+    kEquals, // Checks whether ObservedValue == ExpectedValue
+    kNotEquals, // Checks whether ObservedValue != ExpectedValue
+    kEqualsOrZero, // Checks whether ObservedValue == ExpectedValue or ObservedValue == 0
+    kGreaterThan, // Checks whether ObservedValue > ExpectedValue
+    kGreaterThanOrEqual, // Checks whether ObservedValue >= ExpectedValue
+    kLessThan, // Checks whether ObservedValue < ExpectedValue
+    kLessThanOrEqual, // Checks whether ObservedValue <= ExpectedValue
+    kValidChecksum, // Checks whether the observed value is a valid checksum of the protocol. The expected value will be ignored
+    kMultipleOf, // Checks whether the observed value is an integer multiple of the given value (e.g. observed = 14, expect = 7 will pass; observed 15, expected 7 will fail)
+    kEqualsBitwiseOr, // Checks whether (ObservedValue | ExpectedValue) == ExpectedValue
+    kBitwiseAndGreatherThanZero, // Checks whether the observedVale & ExpectedValue > 0 is true (can be used for flags)
+    kBitwiseAndEqualsZero // Checks whether observedVale & ExpectedValue == 0 is true (can be used for flags)
+  };
+
+  enum ExpectedResult {
+    kAnswerExpected,
+    kTwoAnswersExpected,
+    kThreeAnswersExpected,
+    kNoAnswerExpected,
+    kWaitUntilTimeout,
+    kNoCheck
+  };
+
+  enum Bool {
+    kFalse,
+    kTrue
+  };
+
+  enum ExtractingType {
+    kDoNotExtract,
+    kExtractInt64,
+    kExtractData
+  };
+
+  enum TestGroup {
+    kNoTestGroup																= 0,
+    kInteropTests																= 1,
+    kPMA																				= 2,
+    kVlanTesting																= 3,
+    kGeneral																		= 4,
+    kAddressLearning														= 5,
+    kFilteringOfIncomingFrames									= 6,
+    kTc11																				= 7,
+    kArp																				= 8,
+    kIcmpv4																			= 9,
+    kIpv4																				= 10,
+    kDynamicConfigurationOfIpv4LinkLocalAddress = 11,
+    kUdp																				= 12,
+    kDhcpv4																			= 13,
+    kTcp																				= 14,
+    kSomeIpEts																	= 15,
+    kSomeIpServer																= 16
+  };
+
+  enum IcmpMessageTypes {
+    echoReply								= 0,
+    destinationUnreachable	= 3,
+    redirect								= 5,
+    echo										= 8,
+    timeExceeded						= 11,
+    parameterProblem				= 12,
+    timestamp								= 13,
+    timestampReply					= 14,
+    informationRequest			= 15,
+    informationReply				= 16,
+    invalidIcmpType					= 20
+  };
+  
+  enum IcmpDestUnreachableCodes {
+    netUnreachable = 0,
+    hostUnreachable = 1,
+    protocolUnreachable = 2,
+    portUnreachable = 3,
+    fragmentationNeededAndDfTest = 4,
+    sourceRouteFailed = 5
+  };
+  
+  enum SendingType
+  {
+    kCompleteMessage,
+    kFirstHalf,
+    kSecondHalf,
+    kInvalidChecksum
+  };
+  
+  //Obsolete
+  enum IpVersion
+  {
+    kIPv4,
+    kIPv6
+  };
+  
+   enum FragmentationFlag
+  {
+    kFragDefault = 0,
+    kDF = 2,  // Don't fragment
+    kMF = 1   // More fragments 
+  };
+  
+   enum TcpFlag
+  {
+    TcpFlagUndefined = -1,
+    TcpFlagNone = 0x00,
+    TcpFlagFin = 0x01,
+    TcpFlagSyn = 0x02,
+    TcpFlagRst = 0x04,
+    TcpFlagSynRst = 0x06,
+    TcpFlagPsh = 0x08,
+    TcpFlagAck = 0x10,
+    TcpFlagFinAck = 0x11,
+    TcpFlagSynAck = 0x12,
+    TcpFlagRstAck = 0x14,
+    TcpFlagSynAckRst = 0x16,
+    TcpFlagPshAck = 0x18,
+    TcpFlagUrg = 0x20,
+    TcpFlagUrgPsh = 0x28,
+    TcpFlagUrgAck = 0x30,
+    TcpFlagUrgPshAck = 0x38,
+    TcpFlagEce = 0x40,
+    TcpFlagCwr = 0x80
+  };
+  
+  enum TcpStateId
+  {
+    TcpStateWorkaround    = -1,
+    TcpStateIdClosed      = 0x00,
+    TcpStateIdListen      = 0x01,
+    TcpStateIdSynSent     = 0x02,
+    TcpStateIdSynReceived = 0x03,
+    TcpStateIdEstablished = 0x04,
+    TcpStateIdCloseWait   = 0x05,
+    TcpStateIdFinWait1    = 0x06,
+    TcpStateIdClosing     = 0x07,
+    TcpStateIdLastAck     = 0x08,
+    TcpStateIdFinWait2    = 0x09,
+    TcpStateIdTimeWait    = 0x0A,
+    TcpStateIdInvalid     = 0xFF
+  };
+  
+  enum StubErrorCode
+  {
+    TcpErrorWorkaround = -1,
+    Success = 0x00,
+    TcpConnectionRefused = 0xE2,
+    TcpConnectionAbortedDueToUserTimeout = 0xE3,
+    TcpConnectionReset = 0xE4,
+    TcpConnectionDoesNotExist = 0xE5,
+    TcpConnectionClosing = 0xE6,
+    TcpConnectionAlreadyExists = 0xE7,
+    TcpInsufficientResources = 0xE8,
+    TcpConnectionIllegalForThisProcess = 0xE9,
+    TcpForeignSocketUnspecified = 0xEA,
+    TcpPrecedenceNotAllowed = 0xEB,
+    InvalidNetwork = 0xEC,
+    UnableToBindSocket = 0xED,
+    UnableToCreateSocket = 0xEE,
+    Invalid_socket_ID = 0xEF
+  };
+  
+  enum TcpParameterId
+  {
+    TcpParameterIdWorkaround = -1,
+    TcpTtlHopLimit = 0x00,
+    TcpPriority = 0x01,
+    TcpIpDfDontFragment = 0x02,
+    TcpIpTimestampOptionDataStoredInIpHeaderOption = 0x03,
+    TcpIpTypeOfServiceTosEncoded = 0x04,
+    TcpSetMaxSegmentSize = 0x05,
+    TcpEnableNagleAlgorithmParameter = 0x06, // Enable or disable nagle algorithm parameter (enabled = 1)
+    TcpSsthresh = 0xFFFF,
+    TcpWindow = 0xFFFE
+  };
+  
+  enum SomeIpEntryType
+  {
+    SomeIpEntryNull = -1,
+    FindService = 0x00,
+    OfferService = 0x01,
+    Subscribe = 0x06,
+    SubscribeAck = 0x07
+  };
+  
+  enum SomeIpOptionType
+  {
+    Configuration = 0x01,
+    LoadBalancing = 0x02,
+    Protection = 0x03,
+    IPv4Endpoint = 0x04,
+    IPv6Endpoint = 0x06,
+    IPv4Multicast = 0x14,
+    IPv6Multicast = 0x16
+  };    
+}

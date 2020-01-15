@@ -1,0 +1,365 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  // MOST node address of AudioDiskPlayer
+  word gDefaultGroup = 0x300;
+
+  // InstanceId of SUT
+  int gADPInstance;
+
+  dword tWaitForProcess1 = 200;  // timeout to wait for first response 
+  dword tWaitForProcess2 = 200;  // timeout to wait for any follwoing response
+  dword tMaxDuration = 1000;        // timeout to wait for final 'Result'
+
+}
+/*@@end*/
+
+/*@@mainTest:MainTest():*/
+void MainTest()
+{
+  dword checkId; 
+  // Set test module title and detailed infos for test report.
+  TestModuleTitle ("MOST Tester - Testing of basic AudioDiskPlayer functionality");
+  SetReportInfos ();
+
+  gADPInstance = GetADPInstance(); // get the first available instance of the AudioDiskPlayer
+
+  TC_GetMediaInfo();       // example of TestWaitForMostAMSMessage usage
+  TestWaitForTimeout(100);
+  TC_TrackPosition();      // example of TestWaitForMostAMSReport usage
+  TestWaitForTimeout(100);
+  TC_Notification();       // example of TestJoinMostAMSMessageEvent
+  TestWaitForTimeout(100);
+
+  // setup a check to get detailed information about method protocol violation in report
+  checkId = ChkStart_MostMethodProtocolError("AudioDiskPlayer.Allocate", gADPInstance, tWaitForProcess1, tWaitForProcess2, tMaxDuration);
+  TestAddConstraint(checkId);
+  TC_ChannelAlloc();       // example of TestWaitForMostAMSResult
+  TestWaitForTimeout(100);
+  TestRemoveConstraint(checkId);
+  ChkControl_Destroy(checkId);
+
+  TC_EnsurePlayback();     // example of TestWaitForMostAMSResponse
+}
+/*@@end*/
+
+/*@@caplFunc:SetReportInfos():*/
+// Determine info about test engineer, test setup etc.
+// and write info into report. A text that describes the
+// test module is written into the report, too.
+
+void SetReportInfos ()
+{
+  TestModuleDescription ("This test module contains several test cases that use");
+  TestModuleDescription ("TestWaitFor...-functions of the Test Feature Set to ");
+  TestModuleDescription ("test the functionality of a MOST AudioDiskPlayer.");
+
+  TestReportAddEngineerInfo ("Name", "not available");
+  TestReportAddEngineerInfo ("Company", "not available");
+
+  TestReportAddSetupInfo ("CANoe Configuration", "MOSTTester");
+  TestReportAddSetupInfo ("Creator", "Vector Informatik GmbH, Stuttgart");
+  TestReportAddSetupInfo ("Version and Date", "3.0 from 2006-10-10");
+
+  TestReportAddSUTInfo ("Device Name", "MOST AudioDiskPlayer");
+}
+/*@@end*/
+
+/*@@mostLightLockError:mostLightLockError:*/
+on mostLightLockError
+{
+  TestSupplyTextEvent ("LightLockError");
+}
+/*@@end*/
+
+/*@@mostNetState:OnMostNetState(long,long):*/
+OnMostNetState(long oldstate, long newstate) 
+{
+  // 5 == MostNetState_ConfigOk; transition to any other NetState triggers constraint
+  // NOTE: In this demo, 'ConfigNotOk' means any other state than 'ConfigOk', NOT the 
+  // defined state corresponding to 4 = MostNetState_ConfigNotOk
+  if(newstate != 5)
+  {
+    TestSupplyTextEvent("ConfigNotOk");
+  }
+
+  if(newstate == 5)
+  {
+    TestSupplyTextEvent("ConfigOk");
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:GetADPInstance():*///function
+// returns a instance number of the AudioDiskPlayer (0x31)
+int GetADPInstance ()
+{
+  int i; 
+  gADPInstance = 1 ; // default value
+  for(i = 0; i < MostAsRgGetSize(kBusRegistry); i++)
+  {
+    if(MostAsRgGetFBlockID(kBusRegistry, i) == 0x31) 
+    {
+      return MostAsrgGetInstID(kBusRegistry, i) ;
+    }
+  }
+  return 0;
+}
+/*@@end*/
+
+/*@@testcase:TC_GetMediaInfo():*/
+// This test case demonstrates a simple usage of the TFS functions
+//   - TestWaitForMostAMSMessage()
+//   - TestSendMostAMSMessage()
+// The AudioDiskPlayer is expected to either deliver a MediaInfo status 
+// message that contains track number information, or a error message in 
+// case a MediaInfo record was requested for a disk that is not available. 
+//------------------------------------------------------------------------
+
+testcase TC_GetMediaInfo ()
+{
+  mostAMSMessage * statusMsg;   // variable to store received message
+  char strStep[100];
+  int nOfTracks;
+
+  TestCaseTitle ("MediaInfo", "Get media information about CD in AudioDiskPlayer.");
+  TestCaseDescription ("To get the number of tracks on a CD, a MediaInfo status message must be reported by the AudioDiskPlayer.");
+
+  TestStep ("1", "Send request for LastTrack parameter in MediaInfo record of CD at position 1.");
+  // 0x0105: Selector for 'LastTrack' record field
+  TestSendMostAMSMessage(0x101, "AudioDiskPlayer.MediaInfo.Get(0x0105)", gADPInstance);  
+
+  if(TestWaitForMostAMSMessage("AudioDiskPlayer.MediaInfo.Status", gADPInstance, 100) > 0)
+  {
+    testGetWaitEventMostAMSMsgData(statusMsg);                // store received message data
+    if(mostParamIsAvailable(statusMsg, "Data.Record[].LastTrack", 1))
+    {
+      nOfTracks = mostParamGet(statusMsg, "Data.Record[].LastTrack", 1); // store number of tracks
+      snprintf(strStep, 100, "Ok, status message with LastTrack = %d received", nOfTracks );
+      TestStepPass ("2", strStep);
+    }
+    else
+    {
+      TestStepFail("2", "Unable to determine number of tracks of first disc.");
+    }
+  }
+  else
+  {
+    TestStepFail("2", "Timeout. No status message received.");
+  }
+
+
+  TestStep ("3", "Send request for MediaInfo record with selector parameter out of range. Error expected.");
+
+  TestSendMostAMSMessage(0x101, "AudioDiskPlayer.MediaInfo.Get(0x0705)", gADPInstance);
+
+  if(TestWaitForMostAMSMessage("AudioDiskPlayer.MediaInfo.Error", gADPInstance, 100) > 0)
+  {
+    TestStepPass ("4", "Ok. Received expected error message.");
+  }
+  else
+  {
+    TestStepFail("4", "Timeout. No status message received.");
+  }
+}
+/*@@end*/
+
+/*@@testcase:TC_TrackPosition():*/
+// This test case demonstrates a simple usage of the TFS functions
+//   - TestWaitForMostAMSReport()
+//   - TestSendMostAMSMessage()
+// The number of tracks of the CD, determined by querying the MediaInfo
+// function, is used as an input for testing direct selection of tracks. 
+//------------------------------------------------------------------------
+testcase TC_TrackPosition ()
+{
+  int trackPos;
+  int i;
+  char strTestStep[10];
+  char strTestStepNote[100];
+  char strTrackPositionMsg[100];	// symbolic message string for TrackPosition
+  char strSymMsg[100];
+
+  mostAMSMessage AudioDiskPlayer.TrackPosition.SetGet setPosMsg;
+  mostAMSMessage * statusMsg; // container for received status message 
+  trackPos = 0;
+
+  TestCaseTitle ("TrackPosition", "Set track position within and outside allowed range");
+  TestCaseDescription ("Select the last but one track position, the last track position and the position after the last track and wait for corresponding status messages");
+
+  TestStep ("1", "Send request for LastTrack parameter in MediaInfo to AudioDiskPlayer.");
+  // 0x0105: Selector for 'LastTrack' record field
+  TestSendMostAMSMessage("AudioDiskPlayer.MediaInfo.Get(0x0105)", gADPInstance);  
+
+  if(TestWaitForMostAMSMessage("AudioDiskPlayer.MediaInfo.Status", gADPInstance, 100) > 0)
+  {
+    testGetWaitEventMostAMSMsgData(statusMsg); // store received message data
+    if(mostParamIsAvailable(statusMsg, "Data.Record[].LastTrack", 1))
+    {
+      trackPos = mostParamGet(statusMsg, "Data.Record[].LastTrack", 1); // store number of tracks
+      snprintf(strTestStepNote, 100, "Ok, status message with LastTrack = %d received", trackPos );
+      TestStepPass ("2", strTestStepNote);
+    }
+    else
+    {
+      TestStepFail("2", "Unable to determine number of tracks of first disc.");
+    }
+  }
+  else
+  {
+    TestStepFail("2", "Timeout. No status message received.");
+  }
+
+  if(trackPos == 0)
+    return; // cannot execute test without a disc
+
+  // select the last but one track position, 
+  // ... the last track position and the position after the last track
+  trackPos = trackPos - 1;
+
+  for(i = 0; i < 3; i++)
+  {
+    // prepare strings for report output
+    snprintf(strTestStep, 10, "%d", (i*2)+3);
+    snprintf(strTestStepNote, 100, "Set track position to %d", trackPos + i); 
+
+    snprintf(strSymMsg, 100, "AudioDiskPlayer.TrackPosition.SetGet(%d)", trackPos + i);
+    TestSendMostAMSMessage(strSymMsg, gADPInstance);
+
+    TestStep (strTestStep, strTestStepNote);
+
+    snprintf(strTestStep, 10, "%d", (i*2)+4);
+
+    if(TestWaitForMostAMSReport("AudioDiskPlayer.TrackPosition", gADPInstance, 2000) > 0)
+    {
+      testGetWaitEventMostAMSMsgData(statusMsg);
+      if(statusMsg.OpType == kOpTStatus)
+        TestStepPass (strTestStep, "Valid track position: Expected status message received.");
+      else if(statusMsg.OpType == kOpTError)
+      {
+        if(statusMsg.BYTE(0) == kErrParamWrong) // ErrorCode parameter
+          TestStepPass(strTestStep, "Invalid track position: Expected error message received.");
+        else
+          TestStepFail(strTestStep, "Error. Received error message with unexpected error code.");
+      }
+      else
+       TestStepFail (strTestStep, "Message with unexpected OPType received.");
+    }
+    else
+    {
+       TestStepFail (strTestStep, "Expected message did not occur. Timeout.");
+    }
+  }
+}
+/*@@end*/
+
+/*@@testcase:TC_Notification():*/
+// This test case demonstrates a simple usage of the TFS functions
+//   - TestJoinMostAMSMessageEvent()
+//   - TestWaitForAllJoinedEvents()
+//   - TestSendMostAMSMessage()
+// The AudioDiskPlayer fullfills the requirements of the test, if it sends 
+// notifications for the TimePostion, TrackPosition and MagazineStatus, 
+// after notification was activated.
+//--------------------------------------------------------------------------
+
+testcase TC_Notification()
+{
+  char strSymMsg[100]; 
+
+  TestCaseTitle ("Notification", "Set Notifications for essential AudioDiskPlayer functions");
+  TestCaseDescription ("The AudioDiskPlayer sends notifications for all relevant events ocurring during playback of a CD.");
+
+  TestStep ("1", "Send message for notification on all functions.");
+
+  snprintf(strSymMsg, 100, "AudioDiskPlayer.Notification.Set(SetAll, %d)", gDefaultGroup);
+  TestSendMostAMSMessage(strSymMsg, gADPInstance);
+
+  TestStep ("2", "Wait for status messages of notified functions.");
+
+  // Each of the following message events must occur for a positive test result
+  TestJoinMostAMSMessageEvent("AudioDiskPlayer.TrackPosition.Status", gADPInstance); 
+  TestJoinMostAMSMessageEvent("AudioDiskPlayer.TimePosition.Status", gADPInstance);
+  TestJoinMostAMSMessageEvent("AudioDiskPlayer.MagazineStatus.Status", gADPInstance);
+  if(testWaitForAllJoinedEvents(2000) > 0)
+  {
+    TestStepPass ("3", "All expected notifications have been received.");
+  }
+  else
+  {
+    TestStepFail ("3", "Timeout. Some or all expected notifications did not occur.");
+  }
+
+  // delete notifications
+  TestStep ("4", "Send message for deactivation of notification on all functions.");
+
+  snprintf(strSymMsg, 100, "AudioDiskPlayer.Notification.Set(ClearAll, %d)", gDefaultGroup);
+  TestSendMostAMSMessage(strSymMsg, gADPInstance);
+
+  TestWaitForTimeout(2000);
+
+}
+/*@@end*/
+
+/*@@testcase:TC_ChannelAlloc():*/
+// This test case demonstrates a simple usage of the TFS function
+//   - TestWaitForMostAMSResult()
+// The AudioDiskPlayer allocates a synchronous channel in the MOST ring 
+//------------------------------------------------------------------------
+
+testcase TC_ChannelAlloc ()
+{
+  TestCaseTitle ("ChannelAlloc", "Synchronous channel allocation");
+  TestCaseDescription ("The AudioDiskPlayer allocates a synchronous channel in the MOST ring.");
+ 
+  // Ensure that label is deallocated
+  TestSendMostAMSMessage(0x101, "AudioDiskPlayer.DeAllocate.StartResult(1)", gADPInstance);
+
+  TestWaitForTimeout(100);
+
+  TestStep ("1", "Send allocation message to AudioDiskPlayer and wait for 'Result'.");
+  if(TestWaitForMostAMSResult("AudioDiskPlayer.Allocate.StartResult(1)", gADPInstance, tMaxDuration, tWaitForProcess1, tWaitForProcess2) > 0)
+  {
+    TestStepPass("2", "Ok. Received expected 'Result' message.");
+  }
+  else
+  {
+    TestStepFail("2", "Error. No 'Result' message received so far.");
+  }
+  TestWaitForTimeout(500);
+}
+/*@@end*/
+
+/*@@testcase:TC_EnsurePlayback():*/
+// This test case demonstrates a simple usage of the TFS function
+//   - TestWaitForMostAMSResponse()
+// The command to start playback of the AudioDiskPlayer is sent, and after
+// a given amout of time has passed without receiving an error response,
+// the operation will be considered a success.
+//------------------------------------------------------------------------
+
+testcase TC_EnsurePlayback ()
+{
+  TestCaseTitle ("EnsurePlayback", "Save start of playback");
+  TestCaseDescription ("The command to start playback is transmitted and a possible occurring error response will be registered as failure.");
+
+  TestStep ("1", "Send 'DeckStatus.Set(Play)' and wait for response. Timeout expected.");
+
+  if(TestWaitForMostAMSResponse("AudioDiskPlayer.DeckStatus.Set(Play)", gADPInstance, 500) > 0)
+  {
+    TestStepFail("2", "Error. Received a report message. Either an error occurred or notification is activated.");
+  }
+  else
+  {
+    TestStepPass("2", "Timeout. 'Set' command has been processed successfully.");
+  }
+}
+/*@@end*/
+

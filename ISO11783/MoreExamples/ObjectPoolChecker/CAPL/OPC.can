@@ -1,0 +1,1263 @@
+/*@!Encoding:1252*/
+/*
+ * Version 2.0
+ *
+ * Copyright 2001-2011 - Vector Informatik GmbH
+ *
+ * You can use this CAPL programm to load and transmit an object pool
+ * which is stored in a file (*.iop).
+ *
+ * Dependencies
+ *       Nodelayer DLL ISO11783DLL.dll
+ *
+ * History
+ * 2.2  2016-05-23 Remove obsolete command Execute OpCode
+ * 2.1  2016-01-12 Use new command ISO11783IL_OPDeleteObjectPool
+ * 2.0  2011-11-18 Support commands of VT version 4 and 5
+ * 1.3  2007-07-29 Clear environment variable evOPCFilename on measurement start
+ * 1.2  2007-01-23 Use Object Pool API now
+ * 1.1  2005-02-14 Increased buffers to 256kB
+ * 1.0  2001       Created
+ */
+variables
+{
+  //
+  // Global variables for communication
+  //
+
+  char  gBus[20]      = "ISO11783";
+  char  gECULabel[32] = "OPC";          // Name of the node
+  pg    VT21 gVT21 = {dlc = 8};         // VT21 message
+  byte  gVTAddress = 0x26;              // Address of the VT  
+ 
+
+  // Sub commands of a graphics context object
+  const kSetGraphicsCursor            = 0;
+  const kMoveGraphicsCursor           = 1;
+  const kSetForegroundColour          = 2;
+  const kSetBackgroundColour          = 3;
+  const kSetLineAttrObjId             = 4;
+  const kSetFillAttrObjId             = 5;
+  const kSetFontAttrObjId             = 6;
+  const kEraseRectangle               = 7;
+  const kDrawPoint                    = 8;
+  const kDrawLine                     = 9;
+  const kDrawRectangle                = 10;
+  const kCreawClosedEllipse           = 11;
+  const kDrawPolygon                  = 12;
+  const kDrawText                     = 13;
+  const kPanViewport                  = 14;
+  const kZoomViewport                 = 15;
+  const kPanAndZoomViewport           = 16;
+  const kChangeViewportSize           = 17;
+  const kDrawVTObject                 = 18;
+  const kCopyCanvasToPictureGraphic   = 19;
+  const kCopyViewportToPictureGraphic = 20;
+
+  // Changing attributes cyclically
+  msTimer gChangeAttrValueTimer;   // Timer to incremet attribute value
+  word  gChangeAttrValueTime = 1;// This time is used to incremet attribute value
+  const gChangeAttrValueTimeFact = 20; // Factor which is muliplied with the time value
+}
+
+on preStart
+{
+  OPCInit(); // initialize global variables
+}
+
+on start
+{
+  // init environment variables with default values
+  putValue(evOPCAddress, OPC.NmStationAddress );
+  putValue( evOPCFilename, "" );  // iop file path is inserted in evOPCOnOffSwitch
+  putValue( evOPCVersion, "ver1" );  
+
+  // disable/enable controls
+  OPCEnableControls( 0 );
+}
+
+//
+// Switch on/off the Object Pool Checker ECU 
+//
+on envVar evOPCOnOffSwitch
+{
+  char path[256];
+
+  if (getValue(this) == 1) {
+    OPCStartUp();    
+
+    // read filename of object pool from ini file
+    getProfileString( "ObjectPool", "Path", "noname", path, elCount(path), "ObjectPoolChecker.ini" );
+    putValue( evOPCFilename, path );    
+  }
+  else {
+    OPCShutDown();
+  }
+}
+
+//
+// Load the object pool from file and transmit it to
+// the virtual terminal.
+//
+on envVar evOPCTransmit
+{
+  char nameOfFile[256];
+  long result;
+
+  if (getValue(this) == 1) {
+    getValue( evOPCFilename, nameOfFile );    
+    // write filename of object pool to ini file
+    writeProfileString( "ObjectPool", "Path", nameOfFile, "ObjectPoolChecker.ini" );
+
+    // here we can get the current VT properties
+    write( "<%s> Print current VT properties:", gECULabel, nameOfFile );    
+    if ((result = Iso11783IL_OPGetVTInfo( "VersionNumber"          )) > 0) write( "<%s> VersionNumber          = %u", gECULabel , result );      
+    if ((result = Iso11783IL_OPGetVTInfo( "NavigationSoftKeyCount" )) > 0) write( "<%s> NavigationSoftKeyCount = %u", gECULabel , result );      
+    if ((result = Iso11783IL_OPGetVTInfo( "SoftKeyWidth"           )) > 0) write( "<%s> SoftKeyWidth           = %u", gECULabel , result );      
+    if ((result = Iso11783IL_OPGetVTInfo( "SoftKeyHeight"          )) > 0) write( "<%s> SoftKeyHeight          = %u", gECULabel , result );      
+    if ((result = Iso11783IL_OPGetVTInfo( "VirtualSoftKeyCount"    )) > 0) write( "<%s> VirtualSoftKeyCount    = %u", gECULabel , result );      
+    if ((result = Iso11783IL_OPGetVTInfo( "PhysicalSoftKeyCount"   )) > 0) write( "<%s> PhysicalSoftKeyCount   = %u", gECULabel , result );      
+    if ((result = Iso11783IL_OPGetVTInfo( "SmallFontSizes"         )) > 0) write( "<%s> SmallFontSizes         = %u", gECULabel , result );      
+    if ((result = Iso11783IL_OPGetVTInfo( "LargeFontSizes"         )) > 0) write( "<%s> LargeFontSizes         = %u", gECULabel , result );      
+    if ((result = Iso11783IL_OPGetVTInfo( "FontTypeAttribute"      )) > 0) write( "<%s> FontTypeAttribute      = %u", gECULabel , result );      
+    if ((result = Iso11783IL_OPGetVTInfo( "BootTime"               )) > 0) write( "<%s> BootTime               = %u", gECULabel , result );      
+    if ((result = Iso11783IL_OPGetVTInfo( "GraphicType"            )) > 0) write( "<%s> GraphicType            = %u", gECULabel , result );      
+    if ((result = Iso11783IL_OPGetVTInfo( "Hardware"               )) > 0) write( "<%s> Hardware               = %u", gECULabel , result );      
+    if ((result = Iso11783IL_OPGetVTInfo( "Width"                  )) > 0) write( "<%s> Width                  = %u", gECULabel , result );      
+    if ((result = Iso11783IL_OPGetVTInfo( "Height"                 )) > 0) write( "<%s> Height                 = %u", gECULabel , result );      
+    
+    write( "<%s> Load object Pool '%s'", gECULabel, nameOfFile );
+    Iso11783IL_OPLoad( nameOfFile );
+  }
+}
+
+//
+// Send the load version command to the VT.
+//
+on envVar evOPCLoad
+{
+  char version[255];
+
+  if (getValue(this) == 1) {
+    getValue( evOPCVersion, version );
+    
+    Iso11783IL_OPLoadVersion( version );
+  }
+}
+
+//
+// Send the activation comand to the VT
+//
+on envVar evCmdActivate
+{
+  if (getValue(this) == 1) {
+    Iso11783IL_OPActivate( 15 );
+  }
+}
+
+//
+// Send the deactivation comand to the VT
+//
+on envVar evCmdDeactivate
+{
+  if (getValue(this) == 1) {
+    Iso11783IL_OPDeactivate(  );
+  }
+}
+
+//
+// Send the store version command to the VT.
+//
+on envVar evOPCStore
+{
+  char version[255];
+
+  if (getValue(this) == 1) {
+    getValue( evOPCVersion, version );
+
+    Iso11783IL_OPStoreVersion( version );
+  }
+}
+
+//
+// Send get version command to the VT
+//
+on envVar evOPCGetVersion
+{
+  if (getValue(this) == 1) {
+    Iso11783IL_OPGetVersion();
+  }
+}
+
+//
+// Send get extended version command to the VT
+//
+on envVar evOPCGetExtendedVersion
+{
+  if (getValue(this) == 1) {
+    Iso11783IL_OPGetVersion( 1 );
+  }
+}
+
+//
+// Send command 'Hide Show' to the VT
+//
+on envVar evCmdHideShow
+{
+  if (getValue( this ) == 1) {
+    Iso11783IL_OPShowObject( getValue( evCmdShowHideObjectId ), getValue( evCmdShow ) );
+  }
+}
+
+//
+// Send enable/disable command
+//
+on envVar evCmdEnableDisable
+{
+  if (getValue( this ) == 1) {
+    Iso11783IL_OPEnableObject( getValue( evCmdEnableDisableObjectId ), getValue( evCmdEnable ) );
+  }
+}
+
+//
+// Send command "Select Input' to the VT
+//
+on envVar evCmdSelect
+{
+  if (getValue( this ) == 1) {
+    Iso11783IL_OPSelectInput( getValue( evCmdSelectObjectId ), getValue( evCmdSelectSelectionType ) );
+  }
+}
+
+//
+// Send ESC command
+//
+on envVar evCmdESC
+{
+  if (getValue( this ) == 1) {
+    Iso11783IL_OPESC();
+  }
+}
+
+//
+// Send control audio device command
+//
+on envVar evCmdControlAudioDevice
+{
+  if (getValue( this ) == 1) {
+    Iso11783IL_OPControlAudio( getValue(evCmdControlAudioDeviceNumOfActivation), getValue(evCmdControlAudioDeviceFrequency),
+                               getValue(evCmdControlAudioDeviceOnTimeDuration), getValue(evCmdControlAudioDeviceOffTimeDuration) );
+  }
+}
+
+//
+// Send control audio device command
+//
+on envVar evCmdSetAudioVolume
+{
+  if (getValue( this ) == 1) {
+    Iso11783IL_OPSetAudioVolume( getValue(evCmdSetAudioVolumeValue) );
+  }
+}
+
+//
+// Send change numeric value command
+//
+on envVar evCmdChangeNumeric
+{
+  if (getValue( this ) == 1) {
+    Iso11783IL_OPSetNumericValue( getValue(evCmdChangeNumericObjecId), getValue(evCmdChangeNumericValue) );
+  }
+}
+
+//
+// Send change string command
+//
+on envVar evCmdChangeString
+{
+  char buffer[40];
+
+  if (getValue( this ) == 1) {
+    getValue( evCmdChangeStringValue, buffer );
+
+    Iso11783IL_OPSetStringValue( getValue(evCmdChangeStringObjectId), buffer );
+  }
+}
+
+//
+// Send change aktive mask command
+//
+on envVar evCmdChangeActiveMask
+{
+  if (getValue( this ) == 1) {
+    Iso11783IL_OPChangeActiveMask( getValue(evCmdChangeMaskMaskId) );
+  }
+}
+
+//
+// Send change softkey mask command
+//
+on envVar evCmdChangeSoftKeyMask
+{
+  if (getValue( this ) == 1) {
+    Iso11783IL_OPChangeSoftKeyMask( getValue(evCmdChangeSoftDataMaskId), getValue(evCmdChangeSoftKeyMaskId) );
+  }
+}
+
+//
+// Send change list item command
+//
+on envVar evCmdChangeListItem
+{
+  if (getValue( this ) == 1) {
+    Iso11783IL_OPChangeListItem( 
+      getValue(evCmdChangeListObjectId), 
+      getValue(evCmdChangeListItemIndex), 
+      getValue(evCmdChangeListNewId) 
+    );
+  }
+}
+
+//
+// Send change child location command to the VT.
+//
+on envVar evCmdChangeChildLocation
+{
+  if (getValue(this) == 1) {
+    Iso11783IL_OPChangeChildLocation( 
+      getValue(evCmdChangeChildParentId), 
+      getValue(evCmdChangeChildObjectId), 
+      getValue(evCmdChangeChildX), 
+      getValue(evCmdChangeChildY)
+    );
+  }
+}
+
+//
+// Send change size command to the VT.
+//
+on envVar evCmdChangeSize
+{
+  if (getValue(this) == 1) {
+    Iso11783IL_OPChangeSize(
+      getValue(evCmdChangeSizeID),
+      getValue(evCmdChangeSizeWidth),
+      getValue(evCmdChangeSizeHeight)
+    );
+  }
+}
+
+//
+// Send change background color command to the VT.
+//
+on envVar evCmdChangeBkColor
+{
+  if (getValue(this) == 1) {
+    Iso11783IL_OPChangeBackgroundColor( 
+      getValue(evCmdChangeBkColorID), 
+      getValue(evCmdChangeBkColorValue) 
+    );
+  }
+}
+
+//
+// Send change end point command to the VT.
+//
+on envVar evCmdChangeEndPoint
+{
+  if (getValue(this) == 1) {
+    Iso11783IL_OPChangeEndPoint( 
+      getValue(evCmdChangeEndPointID),
+      getValue(evCmdChangeEndPointWidth),
+      getValue(evCmdChangeEndPointHeight),
+      getValue(evCmdChangeEndPointDirection) 
+    );
+  }
+}
+
+//
+// Send change font attribute command to the VT.
+//
+on envVar evCmdChangeFont
+{
+  if (getValue(this) == 1) {
+    Iso11783IL_OPChangeFontAttribute(
+      getValue(evCmdChangeFontID),
+      getValue(evCmdChangeFontColor),
+      getValue(evCmdChangeFontSize),
+      getValue(evCmdChangeFontType),
+      getValue(evCmdChangeFontStyle)
+    );
+  }
+}
+
+//
+// Send change line attribute command to the VT.
+//
+on envVar evCmdChangeLine
+{
+  if (getValue(this) == 1) {
+    Iso11783IL_OPChangeLineAttribute(
+      getValue(evCmdChangeLineID),
+      getValue(evCmdChangeLineColor),
+      getValue(evCmdChangeLineWidth),
+      getValue(evCmdChangeLineArt)
+    );
+  }
+}
+
+//
+// Send change fill attribute command to the VT.
+//
+on envVar evCmdChangeFill
+{
+  if (getValue(this) == 1) {
+    Iso11783IL_OPChangeFillAttribute(
+      getValue(evCmdChangeFillID),
+      getValue(evCmdChangeFillColor),
+      getValue(evCmdChangeFillType),
+      getValue(evCmdChangeFillPatternID)
+    );
+  }
+}
+
+//
+// Send change attribute command to the VT.
+//
+on envVar evCmdChangeAttribute
+{
+  if (getValue(this) == 1) 
+  {
+    CmdChangeAttribute();
+  }
+}
+
+//
+// Send change priority command to the VT.
+//
+on envVar evCmdChangePriority
+{
+  if (getValue(this) == 1) {
+    Iso11783IL_OPChangePriority(
+      getValue(evCmdChangePriorityID),
+      getValue(evCmdChangePriorityValue)
+    );
+  }
+}
+
+//
+// Initiaialize all global variables in this function.
+//
+void OPCInit()
+{
+  // suppress the auto-start function of the IL
+  Iso11783IL_ControlInit();
+}
+
+//
+// Call this function to connect the node to the bus
+//
+void OPCStartUp()
+{
+  Write( "<%s> Supported VT Version: %u", gECULabel,  getValue( evOPCVTVersion ) );
+  Iso11783IL_OPSetProperty( "Version", getValue( evOPCVTVersion ) );
+  
+  Iso11783IL_ControlStart();
+
+  // select ECU page
+  putValue( evOPCCurrentTabPage, 0 );
+
+  // disable some controls
+  OPCEnableControls( 1 );
+
+
+  gVT21.da = gVTAddress;
+  gVT21.sa = OPC.NmStationAddress;
+}
+
+//
+// Call this function to disconnect the node from the bus
+//
+void OPCShutDown()
+{
+  Iso11783IL_ControlStop();
+  
+  // enable controls
+  OPCEnableControls( 0 );
+}
+
+//
+// Send change child position command to the VT.
+//
+on envVar evCmdChangeChildPosition
+{
+  if (getValue(this) == 1) {
+    Iso11783IL_OPChangeChildPosition( 
+      getValue(evCmdChangeChildParentId), 
+      getValue(evCmdChangeChildObjectId), 
+      getValue(evCmdChangeChildX), 
+      getValue(evCmdChangeChildY) 
+    );
+  }
+}
+
+//
+// Increase/decrease timer value for sending modified attribute values to the Vt
+// 
+on envVar evCmdChangeAttributeValueCycle
+{
+  if (getValue(evCmdChangeAttributeValueEnblCyc)>0) {
+    cancelTimer( gChangeAttrValueTimer );
+    gChangeAttrValueTime = getValue( this );
+    if (gChangeAttrValueTime > 0) {
+      setTimer( gChangeAttrValueTimer, gChangeAttrValueTime * gChangeAttrValueTimeFact );
+    }
+  }
+}
+
+on timer gChangeAttrValueTimer
+{
+  int value;
+  if (getValue(evCmdChangeAttributeValueCycle)>0) {
+    value = getValue(evCmdChangeAttributeValue);
+    if (value < getValue(evCmdChangeAttributeValueMax)) {
+      value++;
+    }
+    else {
+      value = getValue(evCmdChangeAttributeValueMin); 
+    }
+    putValue( evCmdChangeAttributeValue, value ); 
+
+    CmdChangeAttribute();
+
+    setTimer( gChangeAttrValueTimer, gChangeAttrValueTime * gChangeAttrValueTimeFact);
+  }
+}
+
+//
+// Enables/disables cyclically increment of the attribute value
+// which is sent via command 'Change attribute' to the VT
+//
+on envVar evCmdChangeAttributeValueEnblCyc
+{
+  cancelTimer( gChangeAttrValueTimer ); 
+  if (getValue(this)>0) {
+    gChangeAttrValueTime = getValue( evCmdChangeAttributeValueCycle );
+    if (gChangeAttrValueTime > 0) {
+      setTimer( gChangeAttrValueTimer, gChangeAttrValueTime * gChangeAttrValueTimeFact );
+    }  
+  }
+}
+
+//
+// Increment attribute value and send it via command 'Change attribute' to the VT
+//
+on envVar evCmdChangeAttributeValueNext
+{
+  int value;
+
+  if (getValue(this) == 1) {
+    value = getValue(evCmdChangeAttributeValue);
+    if (value < getValue(evCmdChangeAttributeValueMax)) {
+      value++;
+    }
+    else {
+      value = getValue(evCmdChangeAttributeValueMin); 
+    }
+    putValue( evCmdChangeAttributeValue, value ); 
+
+    CmdChangeAttribute();
+  }
+}
+
+//
+// Decrement attribute value and send it via command 'Change attribute' to the VT
+//
+on envVar evCmdChangeAttributeValuePrev
+{
+  int value;
+  if (getValue(this) == 1) {
+    value = getValue(evCmdChangeAttributeValue);
+    if (value > getValue(evCmdChangeAttributeValueMin)) {
+      value--;
+    }
+    else {
+      value = getValue(evCmdChangeAttributeValueMax); 
+    }
+    putValue( evCmdChangeAttributeValue, value ); 
+    
+    CmdChangeAttribute();
+  }
+}
+
+//
+// Send command 'Change Polygon Point' to the VT
+//
+on envVar evCmdChangePolygonPoint
+{
+  if (getValue( this ) == 1) {
+    ResetVtData();
+    gVT21.VTFunctionECUtoVT        = 182;
+    gVT21.PolygonObjectToChangeID  = getValue(evCmdChangePolygonPointId );
+    gVT21.IndexOfThePointToReplace = getValue(evCmdChangePolygonPointIndex );
+    gVT21.NewValueX                = getValue(evCmdChangePolygonPointX );
+    gVT21.NewValueY                = getValue(evCmdChangePolygonPointY );
+    output( gVT21 );
+  }
+}
+
+//
+// Send command 'Change Polygon Scale' to the VT
+//
+on envVar evCmdChangePoylgonScale
+{
+  if (getValue( this ) == 1) {
+    ResetVtData();
+    gVT21.VTFunctionECUtoVT       = 183;
+    gVT21.PolygonObjectToScaleID  = getValue(evCmdChangePoylgonScaleId );
+    gVT21.NewWidthAttribute       = getValue(evCmdChangePoylgonScaleWidth );
+    gVT21.NewHeigthAttribute      = getValue(evCmdChangePoylgonScaleHeight );
+    output( gVT21 );
+  }
+}
+
+//
+// Send command 'Execute Macro' to the VT
+//
+on envVar evCmdExecuteMacro
+{
+  if (getValue( this ) == 1) {
+    ResetVtData();
+    gVT21.VTFunctionECUtoVT = 190;
+    gVT21.MacroObjecID      = getValue(evCmdExecuteMacroObjId );
+    output( gVT21 );
+  }
+}
+
+//
+// Send Graphics Context command 'Change Viewport Size' to the VT
+//
+on envVar evCmdGcChangeViewportSize
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( kChangeViewportSize, getValue(evCmdGcChangeViewportSizeWidth), getValue(evCmdGcChangeViewportSizeHeight) );
+  }
+}
+
+//
+// Send Graphics Context command 'Copy Canvas to Picture' to the VT
+//
+on envVar evCmdGcCopyCanvasToPicture
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 19, getValue(evCmdGcCopyCanvasToPictureValue), 0xFFFF );
+  }
+}
+
+//
+// Send Graphics Context command 'Copy Viewport to Picture' to the VT
+//
+on envVar evCmdGcCopyViewportToPicture
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 20, getValue(evCmdGcCopyViewportToPictureValue), 0xFFFF );
+  }
+}
+
+//
+// Send Graphics Context command 'Draw Closed Ellipse' to the VT
+//
+on envVar evCmdGcDrawClosedEllipse
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 11, getValue(evCmdGcDrawClosedEllipseWidth), getValue(evCmdGcDrawClosedEllipseHeight) );
+  }
+}
+
+//
+// Send Graphics Context command 'Draw Line' to the VT
+//
+on envVar evCmdGcDrawLine
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 9, getValue(evCmdGcDrawLineX), getValue(evCmdGcDrawLineY) );
+  }
+}
+
+//
+// Send Graphics Context command 'Draw Point' to the VT
+//
+on envVar evCmdGcDrawPoint
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 8, getValue(evCmdGcDrawPointX), getValue(evCmdGcDrawPointY) );
+  }
+}
+
+//
+// Send Graphics Context command 'Draw Polygon' to the VT
+//
+on envVar evCmdGcDrawPolygon
+{
+  if (getValue( this ) == 1) {  
+
+    pg VT21 vt21 = {dlc = 21};
+    vt21.sa = OPC.NmStationAddress;
+    vt21.da = gVTAddress;
+
+    vt21.byte(0)  = 184;
+    vt21.byte(1)  = getValue( evCmdGcObjectID ) & 0xff;
+    vt21.byte(2)  = (getValue( evCmdGcObjectID ) >> 8) & 0xff;
+    vt21.byte(3)  = 12;
+    vt21.byte(4)  = 4; // num of points 
+    vt21.byte(5)  = getValue( evCmdGcDrawPolygonX1 ) & 0xff;
+    vt21.byte(6)  = (getValue( evCmdGcDrawPolygonX1 ) >> 8) & 0xff;
+    vt21.byte(7)  = getValue( evCmdGcDrawPolygonY1 ) & 0xff;
+    vt21.byte(8)  = (getValue( evCmdGcDrawPolygonY1 ) >> 8) & 0xff;
+    vt21.byte(9)  = getValue( evCmdGcDrawPolygonX2 ) & 0xff;
+    vt21.byte(10)  = (getValue( evCmdGcDrawPolygonX2 ) >> 8) & 0xff;
+    vt21.byte(11) = getValue( evCmdGcDrawPolygonY2 ) & 0xff;
+    vt21.byte(12) = (getValue( evCmdGcDrawPolygonY2 ) >> 8) & 0xff;
+    vt21.byte(13) = getValue( evCmdGcDrawPolygonX3 ) & 0xff;
+    vt21.byte(14) = (getValue( evCmdGcDrawPolygonX3 ) >> 8) & 0xff;
+    vt21.byte(15) = getValue( evCmdGcDrawPolygonY3 ) & 0xff;
+    vt21.byte(16) = (getValue( evCmdGcDrawPolygonY3 ) >> 8) & 0xff;
+    vt21.byte(17) = getValue( evCmdGcDrawPolygonX4 ) & 0xff;
+    vt21.byte(18) = (getValue( evCmdGcDrawPolygonX4 ) >> 8) & 0xff;
+    vt21.byte(19) = getValue( evCmdGcDrawPolygonY4 ) & 0xff;
+    vt21.byte(20) = (getValue( evCmdGcDrawPolygonY4 ) >> 8) & 0xff;
+
+    output( vt21 );
+  }
+}
+
+//
+// Send Graphics Context command 'Draw Rectangle' to the VT
+//
+on envVar evCmdGcDrawRecangle
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 10, getValue(evCmdGcDrawRecangleWidth), getValue(evCmdGcDrawRecangleHeight) );
+  }
+}
+
+//
+// Send Graphics Context command 'Draw Text' to the VT
+//
+on envVar evCmdGcDrawText
+{
+  int  i;
+  word length;
+  char buf[25];
+  pg VT21 vt21 = {dlc = 18};
+
+  if (getValue( this ) == 1) {
+
+    vt21.sa = OPC.NmStationAddress;
+    vt21.da = gVTAddress;
+    
+    getValue(evCmdGcDrawTextValue, buf);
+
+    length = strlen( buf );
+    vt21.dlc = 6 + length;
+    
+    vt21.byte(0) = 184;
+    vt21.byte(1) = getValue( evCmdGcObjectID ) & 0xff;
+    vt21.byte(2) = (getValue( evCmdGcObjectID ) >> 8) & 0xff;
+    vt21.byte(3) = 13;
+    vt21.byte(4) = getValue( evCmdGcDrawTextTransparent );;
+    vt21.byte(5) = length;
+
+    for( i = 0; i < length; i++ ) {
+      vt21.byte(i+6) = buf[i];
+    }
+    
+    output( vt21 );
+  }
+}
+
+//
+// Send Graphics Context command 'Draw VT Object' to the VT
+//
+on envVar evCmdGcDrawVTObject
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 18, getValue(evCmdGcDrawVTObjectValue), 0xFFFF );
+  }
+}
+
+//
+// Draw a wide character text into the graphics context object 
+//
+on envVar evCmdGcDrawWideCharText
+{
+  int  i;
+  word length;
+  char buf[25];
+  pg VT21 vt21 = {dlc = 18};
+
+  vt21.sa = OPC.NmStationAddress;
+  vt21.da = gVTAddress;
+
+  if (getValue( this ) == 1) {
+    length = 14;
+    vt21.byte(0) = 184;
+    vt21.byte(1) = getValue( evCmdGcObjectID ) & 0xff;
+    vt21.byte(2) = (getValue( evCmdGcObjectID ) >> 8) & 0xff;
+    vt21.byte(3) = 13;
+    vt21.byte(4) = getValue( evCmdGcDrawTextTransparent );;
+    vt21.byte(5) = length;
+    // BOM
+    vt21.byte(6) = 0xff;
+    vt21.byte(7) = 0xfe;
+    // Unicode text
+    vt21.byte(8)  = 'U';
+    vt21.byte(9)  = 0x00;
+    vt21.byte(10) = 'N';
+    vt21.byte(11) = 0x00;
+    vt21.byte(12) = '\n';
+    vt21.byte(13) = 0x00;
+    vt21.byte(14) = 'I';
+    vt21.byte(15) = 0x00;
+    vt21.byte(16) = 'C';
+    vt21.byte(17) = 0x00;
+
+    output( vt21 );
+  }
+}
+
+//
+// Send Graphics Context command 'Erase Rectangle' to the VT
+//
+on envVar evCmdGcEraseRectangle
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 7, getValue(evCmdGcEraseRectangleWidth), getValue(evCmdGcEraseRectangleHeight) );
+  }
+}
+
+//
+// Send Graphics Context command 'Move Graphics Cursor' to the VT
+//
+on envVar evCmdGcMoveGraphicsCursor
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 1, getValue(evCmdGcMoveGraphicsCursorX), getValue(evCmdGcMoveGraphicsCursorY) );
+  }
+}
+
+//
+// Send Graphics Context command 'Pan and Zoom Viewport' to the VT
+//
+on envVar evCmdGcPanAndZoomViewport
+{
+  int  i;
+  word length;
+  char buf[25];
+  float zoom;
+  byte zoomValue[4];
+  pg VT21 vt21 = {dlc = 12};
+
+  vt21.sa = OPC.NmStationAddress;
+  vt21.da = gVTAddress;
+  
+  if (getValue( this ) == 1) {
+
+    Float64ToInt32( getValue( evCmdGcZoomViewportValue ), zoomValue );
+
+    vt21.byte(0)  = 184;
+    vt21.byte(1)  =  getValue( evCmdGcObjectID ) & 0xff;
+    vt21.byte(2)  = (getValue( evCmdGcObjectID ) >> 8) & 0xff;
+    vt21.byte(3)  = 16;
+    vt21.byte(4)  =  getValue( evCmdGcPanViewportX ) & 0xff;
+    vt21.byte(5)  = (getValue( evCmdGcPanViewportX ) >> 8) & 0xff;
+    vt21.byte(6)  =  getValue( evCmdGcPanViewportY ) & 0xff;
+    vt21.byte(7)  = (getValue( evCmdGcPanViewportY ) >> 8) & 0xff;
+    vt21.byte(8)  =  zoomValue[0];
+    vt21.byte(9)  =  zoomValue[1];
+    vt21.byte(10) =  zoomValue[2];
+    vt21.byte(11) =  zoomValue[3];
+
+    output( vt21 );
+  }
+}
+
+//
+// Send Graphics Context command 'Pan Viewport' to the VT
+//
+on envVar evCmdGcPanViewport
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 14, getValue(evCmdGcPanViewportX), getValue(evCmdGcPanViewportY) );
+  }
+}
+
+//
+// Send Graphics Context command 'Set Background Colour' to the VT
+//
+on envVar evCmdGcSetBackgroundColour
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 3, getValue(evCmdGcSetBackgroundColourValue), 0xFFFF );
+  }
+}
+
+//
+// Send Graphics Context command 'Set Fill Attributes' to the VT
+//
+on envVar evCmdGcSetFillAttributesID
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 5, getValue(evCmdGcSetFillAttributesIDValue), 0xFFFF );
+  }
+}
+
+//
+// Send Graphics Context command 'Set Font Attributes' to the VT
+//
+on envVar evCmdGcSetFontAttributesID
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 6, getValue(evCmdGcSetFontAttributesIDValue), 0xFFFF );
+  }
+}
+
+//
+// Send Graphics Context command 'SEt Foreground Colour' to the VT
+//
+on envVar evCmdGcSetForegroundColour
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 2, getValue(evCmdGcSetForegroundColourValue), 0xFFFF );
+  }
+}
+
+//
+// Send Graphics Context command 'Set Graphics Cursor' to the VT
+//
+on envVar evCmdGcSetGraphicsCursor
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 0, getValue(evCmdGcSetGraphicsCursorX), getValue(evCmdGcSetGraphicsCursorY) );
+  }
+}
+
+//
+// Send Graphics Context command 'Set Line Attributes' to the VT
+//
+on envVar evCmdGcSetLineAttributesID
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmd( 4, getValue(evCmdGcSetLineAttributesIDValue), 0xFFFF );
+  }
+}
+
+//
+// Send Graphics Context command 'Zoom Viewport' to the VT
+//
+on envVar evCmdGcZoomViewport
+{
+  if (getValue( this ) == 1) {
+    SendGraphicsContextCmdFloat( 15, getValue(evCmdGcZoomViewportValue) );
+  }
+}
+
+//
+// Send command 'Get Attribute' to the VT
+//
+on envVar evCmdGetAttribute
+{
+  if (getValue( this ) == 1) {
+    ResetVtData();
+    gVT21.VTFunctionECUtoVT      = 185;
+    gVT21.ObjectToGetAttributeID = getValue(evCmdGetAttributeId );
+    gVT21.AttributeID            = getValue(evCmdGetAttributeAttrId );
+    output( gVT21 );
+  }
+}
+
+//
+// Send command 'Get Window Mask Data' to the VT
+//
+on envVar evCmdGetWindowMaskData
+{
+  if (getValue( this ) == 1) {
+    ResetVtData();
+    gVT21.VTFunctionECUtoVT = 196; // Get Window Mask Data
+    output ( gVT21 );
+  }
+}
+
+//
+// Send command 'Get Memory' to the VT
+//
+on envVar evCmdGetMemory
+{
+  if (getValue(this) == 1) {
+    ResetVtData();
+    gVT21.VTFunctionECUtoVT = 192; // get memory
+    gVT21.MemoryRequired    = getValue(evCmdGetMemoryNumOfBytes);
+    output( gVT21 );
+  }
+}
+
+//
+// Send command 'Get Supported Wide Characters' to the VT
+//
+on envVar evCmdGetSupportedWideChars
+{
+  if (getValue( this ) == 1) {
+    ResetVtData();
+    gVT21.VTFunctionECUtoVT = 193; // get supported wide chars
+    gVT21.CodePlane         = getValue(evCmdGetSupportedWideCharsCodeplane);
+    gVT21.FirstWideChar     = getValue(evCmdGetSupportedWideCharsFirstChar);
+    gVT21.LastWideChar      = getValue(evCmdGetSupportedWideCharsLastChar);
+    output( gVT21 );
+  }
+}
+
+//
+// Send command 'Get Supported Objects' to the VT
+//
+on envVar evCmdGetSupportedObjects
+{
+  if (getValue( this ) == 1) {
+    ResetVtData();
+    gVT21.VTFunctionECUtoVT = 197; // get supported objects
+    output( gVT21 );
+  }
+}
+
+//
+// Send command 'Identify VT' to the VT
+//
+on envVar evCmdIdentifyVT
+{
+  if (getValue( this ) == 1) {
+    ResetVtData();
+    gVT21.VTFunctionECUtoVT     = 187; // identify VT
+    output( gVT21 );
+  }
+}
+
+//
+// Send command 'Lock Unlock Mask' to the VT
+//
+on envVar evCmdLockUnlockMask
+{
+  if (getValue( this ) == 1) {
+    ResetVtData();
+    gVT21.VTFunctionECUtoVT       = 189;
+    gVT21.LockUnlockCommand       = getValue(evCmdLockUnlockMaskType );
+    gVT21.ObjectIDOfDataMaskToLock= getValue(evCmdLockUnlockMaskId );
+    gVT21.LockTimeout             = getValue(evCmdLockUnlockMaskTimeout );
+    output( gVT21 );
+  }
+}
+
+//
+// Send command 'Select Colour Map' to the VT
+//
+on envVar evCmdSelectColourMap
+{
+  if (getValue( this ) == 1) {
+    ResetVtData();
+    gVT21.VTFunctionECUtoVT = 186;
+    gVT21.ColourMapObjectID = getValue(evCmdSelectColourMapId );
+    output( gVT21 );
+  }
+}
+
+//
+// Send command 'Set Object Label' to the VT
+//
+on envVar evCmdSetObjectLabel
+{
+  if (getValue( this ) == 1) {
+    ResetVtData();
+    gVT21.VTFunctionECUtoVT = 181;
+    gVT21.ObjectToAssociateLabelWithID   = getValue(evCmdSetObjectLabelId );
+    gVT21.StringVariableObjectID         = getValue(evCmdSetObjectLabelStringVarId );
+    gVT21.FontType                       = getValue(evCmdSetObjectLabelFontType );
+    gVT21.GraphicRepresentationObjectID  = getValue(evCmdSetObjectLabelLabelObjId );
+    output( gVT21 );
+  }
+}
+
+//
+// Send Graphics Context Command
+//
+SendGraphicsContextCmd( BYTE subCmd, WORD val1, WORD val2)
+{
+  ResetVtData();
+  gVT21.VTFunctionECUtoVT         = 184;
+  gVT21.GraphicsContextObjectID   = getValue( evCmdGcObjectID );
+  gVT21.SubCommandID              = subCmd;
+  gVT21.byte(4) = val1 & 0xff;
+  gVT21.byte(5) = (val1 >> 8) & 0xff;
+  gVT21.byte(6) = val2 & 0xff;
+  gVT21.byte(7) = (val2 >> 8) & 0xff;
+  gVT21.dlc = 8;
+
+  output( gVT21 );
+}
+
+//
+// Send Graphics Context Command
+//
+SendGraphicsContextCmdFloat( BYTE subCmd, float val )
+{
+  byte floatValue[4];
+
+  Float64ToInt32( val, floatValue );
+
+  ResetVtData();
+  gVT21.VTFunctionECUtoVT         = 184;
+  gVT21.GraphicsContextObjectID   = getValue( evCmdGcObjectID );
+  gVT21.SubCommandID              = subCmd;
+  gVT21.byte(4) = floatValue[0];
+  gVT21.byte(5) = floatValue[1];
+  gVT21.byte(6) = floatValue[2];
+  gVT21.byte(7) = floatValue[3];
+
+  output( gVT21 );
+}
+
+//
+// Enable/disable some panel controls
+//
+void OPCEnableControls( byte measurementIsRunning )
+{ 
+  enableControl( "", "VT Version Box"   , measurementIsRunning > 0 ? 0 : 1 );
+  enableControl( "", "ECU Address"      , measurementIsRunning > 0 ? 0 : 1 );
+  enableControl( "", "Object Pool Path" , measurementIsRunning > 0 ? 1 : 0 );
+  enableControl( "", "Transmit"         , measurementIsRunning > 0 ? 1 : 0 );
+  enableControl( "", "Load"             , measurementIsRunning > 0 ? 1 : 0 );
+  enableControl( "", "Store"            , measurementIsRunning > 0 ? 1 : 0 );
+  enableControl( "", "Get"              , measurementIsRunning > 0 ? 1 : 0 );
+  enableControl( "", "Get Extended"     , measurementIsRunning > 0 ? 1 : 0 );
+  enableControl( "", "Delete"           , measurementIsRunning > 0 ? 1 : 0 );
+}
+
+// 
+// Reset data of the VT12 message
+//
+void ResetVtData()
+{
+  int cnt;
+  for (cnt=0; cnt<gVT21.dlc; ++cnt)
+  {
+    gVT21.byte(cnt) = 0xFF;
+  }
+}
+
+//
+// Send command 'Get Text Font Data' to the VT
+//
+on envVar evCmdGetTextFontData
+{
+  if (getValue( this ) == 1) {
+    ResetVtData();
+    gVT21.VTFunctionECUtoVT = 195; // Get Text Font Data
+    output ( gVT21 );
+  }
+}
+
+int Float64ToInt32( float inValue, byte outValue[] )
+{
+  int intValue;
+  int signBit; // 1 bit
+  int exponent; // 11 bit (64 bit float) -> 8 bit (32 bit float)
+  int64 mantisse; // 52 bit (64 bit float) -> 23 bit (32 bit float) 
+
+  struct { float val; } floatStruct;
+  byte buf[8];
+
+  // check size
+  if (elcount(outValue)<4) return -1;
+
+  // get sign bit, mantisse and exponent
+  floatStruct.val = inValue;
+  memcpy( buf, floatStruct );
+  signBit = buf[7] >> 7;
+  exponent = ((buf[7] & 0x7F) << 4) | ((buf[6] & 0xF0) >> 4); // 8 bit
+  exponent = (exponent - 1023) + 127;
+  mantisse = ((buf[6] & 0x0F) << 19) | (buf[5] << 11)  | (buf[4] << 3)  | (buf[3] >> 5); // 23 bit
+
+  // create 32 bit float value
+  outValue.byte(0) = mantisse & 0xFF;
+  outValue.byte(1) = (mantisse >> 8) & 0xFF;
+  outValue.byte(2) = ((exponent & 0x01) << 7) | (mantisse >> 16);
+  outValue.byte(3) = (signBit << 7) | (exponent >> 0x01);
+
+  return 0;
+}
+
+//
+// Send the delete version command to the VT.
+//
+on envVar evOPCDelete
+{
+  char version[255];
+  int i, versionLength;
+
+  if (getValue(this) == 1) {
+    getValue( evOPCVersion, version );
+    
+    ResetVtData();
+    
+    if (strlen(version)>7)
+    {
+      gVT21.VTFunctionECUtoVT = 214; // Extended Delete Version command
+      versionLength = 32;
+    }
+    else{
+      gVT21.VTFunctionECUtoVT = 210; // Delete Version command
+      versionLength = 7;
+    }
+    gVT21.dlc = versionLength + 1;
+    
+    // copy string  
+    for (i=0; i<strlen(version); ++i)
+    {
+      gVT21.byte(i+1) = version[i];
+    }
+    // fill up with blanks
+    for (; i<versionLength; ++i)
+    {
+      gVT21.byte(i+1) = 0x20;
+    }
+    
+    output( gVT21 );
+  }
+}
+
+//
+// Send command 'Delete Object Pool' to the VT
+//
+on envVar evCmdDeleteObjectPool
+{
+  if (getValue( this ) == 1) {
+    Iso11783IL_OPDeleteObjectPool();
+  }
+}
+
+void CmdChangeAttribute()
+{
+  byte floatValue[4];
+  long rawValue;
+
+  if (getValue(evCmdChangeAttributeUseFloat) > 0)
+  {
+    Float64ToInt32( getValue(evCmdChangeAttributeValue), floatValue );
+    rawValue =  (floatValue[3]<<24) | (floatValue[2]<<16) | (floatValue[1]<<8) | floatValue[0];
+  }
+  else
+  {
+    rawValue = getValue(evCmdChangeAttributeValue);
+  }
+
+  Iso11783IL_OPSetAttribute( getValue(evCmdChangeAttributeID), getValue(evCmdChangeAttributeAID), rawValue );
+
+}
+

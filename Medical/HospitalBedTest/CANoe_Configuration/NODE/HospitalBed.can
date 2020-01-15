@@ -1,0 +1,171 @@
+/*@!Encoding:1252*/
+
+includes
+{
+  #include "Diagnostics/CCI_CanTp.cin"
+}
+
+variables
+{
+  const cIsTester  = 0;
+  const int kOFF   = 0;
+  const int kON    = 1;
+
+  msTimer tHeightAdj;
+  const int gHEIGHT_ADJ_HEAD_SPEED = 100;
+  int gHeightAdjErrorValue = 0; // in ms
+
+  msTimer tHeadAdj;
+  const int gHEAD_ADJ_HEAD_SPEED = 100;
+  int gHeadAdjErrorValue = 0; // in ms
+
+  // Variables for Transport-Layer
+  char gECU[15] = "Bed";
+
+  int gTxPending = kOFF; 
+  int gPendingState = 0;
+}
+
+on start
+{
+  setWriteDbgLevel(0);  // Set '1' for more informations
+
+  SetTimer(tHeightAdj,gHEIGHT_ADJ_HEAD_SPEED + gHeightAdjErrorValue);
+  SetTimer(tHeadAdj,gHEIGHT_ADJ_HEAD_SPEED + gHeadAdjErrorValue);
+}
+
+on timer tHeadAdj
+{
+  if($HeadAdjustmentUp && !$HeadAdjustmentDown)
+  {
+    $Head_Block = 20 == $Head_Pos.txrq;
+
+    if(!$Head_Block.txrq)
+    {
+      $Head_Pos += 1;
+    }
+  }
+  else if($HeadAdjustmentDown && !$HeadAdjustmentUp)
+  {
+    $Head_Block = 0 == $Head_Pos.txrq;
+
+    if(!$Head_Block.txrq)
+    {
+      $Head_Pos -= 1;
+    }
+  }
+
+  SetTimer(this,gHEAD_ADJ_HEAD_SPEED + gHeadAdjErrorValue);  
+}
+
+on timer tHeightAdj
+{
+  if($HeightAdjustmentUp && !$HeightAdjustmentDown)
+  {
+    $Height_Block = 20 == $Height_Pos.txrq;
+
+    if(!$Height_Block.txrq)
+    {
+      $Height_Pos += 1;
+    }
+  }
+  else if($HeightAdjustmentDown && !$HeightAdjustmentUp)
+  {
+    $Height_Block = 0 == $Height_Pos.txrq;
+
+    if(!$Height_Block.txrq)
+    {
+      $Height_Pos -= 1;
+    }
+  }
+
+  SetTimer(this,gHEIGHT_ADJ_HEAD_SPEED + gHeightAdjErrorValue);  
+}
+
+on diagRequest Manufacturer_Date_Lesen
+{
+  diagresponse Manufacturer_Date_Lesen resp;
+
+  DiagSetParameter(resp,"Date_year","2007");
+  DiagSetParameter(resp,"Date_month","02");
+  DiagSetParameter(resp,"Date_day","19");
+  DiagSetParameter(resp,"Supplier","Vector Informatik GmbH");
+
+  DiagSendResponse(resp);
+}
+
+on diagRequest Bed_Variant_Lesen
+{
+  diagresponse Bed_Variant_Lesen resp;
+
+  if(@sysvar::HospitalBedTester::BedVariant == sysvar::HospitalBedTester::BedVariant::Basis) 
+    DiagSetParameter(resp,"Bed_Variant","Basis");
+  else 
+    DiagSetParameter(resp,"Bed_Variant","Comfort");
+  DiagSendResponse(resp);
+}
+
+on diagRequest Serial_Number_Lesen
+{
+  diagresponse Serial_Number_Lesen resp;
+
+  DiagSetParameter(resp,"Serial_Number",123456);
+
+  DiagSendResponse(resp);
+}
+
+// ///////////////////////////////////////////////////////////////////////////////////
+// With this Callback-Function it is possible to prevent sending of certain messages.
+// ///////////////////////////////////////////////////////////////////////////////////
+dword applILTxPending(long aID)
+{
+  message BedMsg msg;
+
+  if(aID == msg.id && gTxPending == kON)
+  {
+    gPendingState = gPendingState < 1 ? 1 : 0;
+
+    return gPendingState;
+  }
+
+  return 1;
+}
+
+on sysvar_update sysvar::HospitalBedTester::SetCyclicMsgError
+{
+  gTxPending = @this ? kON : kOFF;
+}
+
+on sysvar_update sysvar::HospitalBedTester::SetHeightAdjError
+{
+  gHeightAdjErrorValue = @this ? 300 : 0;
+}
+
+on sysvar_update sysvar::HospitalBedTester::SetHeadtAdjError
+{
+  gHeadAdjErrorValue = @this ? 300 : 0;
+}
+
+on signal_change LightToggle
+{
+  // The Basis variant has no light
+  if (@HospitalBedTester::BedVariant == sysvar::HospitalBedTester::BedVariant::Basis)
+  {
+    return;
+  }
+  
+  // Toggle the light status
+  if ($LightToggle == 1) 
+  {
+     $Light_Status = ($Light_Status == VtSig_Light_Status::Off) ? VtSig_Light_Status::On : VtSig_Light_Status::Off; // RGB A value for the LED band is defined in the DBC
+  }
+}
+
+on sysvar_update sysvar::HospitalBedTester::BedVariant
+{
+  // Switch the light off when the bed variant is changed to Basis
+  if (@this == sysvar::HospitalBedTester::BedVariant::Basis)
+  {
+    $Light_Status = VtSig_Light_Status::Off;
+  }
+}

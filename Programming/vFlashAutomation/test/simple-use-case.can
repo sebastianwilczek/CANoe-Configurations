@@ -1,0 +1,137 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "Baudrate.cin"
+  #include "vFlash\Utilities.cin"
+}
+
+variables
+{
+  float gFlashingBaudRate = 500000; // this is the increased baud rate during flashing
+  char  gFlashpack[cMaxPathNameLen] = "flashpacks\\demo.vflashpack";  
+  
+  // Definitions to show status on VN89xx
+  const kLedMaskS1=0x200;
+  const kLedOnGreen=0x00000008;
+  const kLedOff=0x00000001;
+  dword status;
+}
+
+on preStop
+{
+  LEDOff();  
+  @sysvar::vFlash::StartReprogramming=0; // Reset system variable for next test module start
+}
+
+// Used with VN89xx devices
+
+void LEDOn()
+{
+  status=xlAcquireLED(kLedMaskS1);
+  if( 0 == status)
+  {
+     xlSetLed(kLedMaskS1, kLedOnGreen);
+  }  
+}
+
+void LEDOff()
+{
+  if (0 == status) {
+    xlSetLed(kLedMaskS1, kLedOff);
+  }    
+}
+
+void MainTest()
+{
+  // the baud rate is read out and saved before switching to the flashing-baud-rate
+  float testingBaudRate1;
+
+  LEDOn();
+  
+  TestModuleTitle("vFlash Automation Demo");
+  TestModuleDescription("A simple example of how to use the vFlash for flashing a flashpack.");
+
+  // increase baud rate for flashing (if necessary). Remember the old testing baud rate.
+  testingBaudRate1 = SetBaudRate(gFlashingBaudRate, 1);
+    
+  BlockingReprogramming();
+  NonBlockingReprogramming();
+
+  // Reset baud rate after flashing to the old testing baud rate (if necessary).
+  SetBaudRate(testingBaudRate1, 1);
+
+  LEDOff();
+  
+  @sysvar::vFlash::StartReprogramming=0; // Reset system variable for next test module start
+  TestStatus("Tests Completed");
+}
+
+void TestStatus(char mesg[])
+{
+  write(mesg);
+  sysSetVariableString("vFlash", "TestStatus", mesg);
+}
+
+word FlashingInProgress()
+{
+  if (@vFlash::RemainingTime != 0) {
+    TestStepFail("Reprogramming failed. Flash process was already started/in progress.");
+    return 1;
+  }
+  return 0;
+}
+
+testcase BlockingReprogramming()
+{
+  enum vFlashStatusCode result;
+  
+  TestCaseTitle("TC 1.0", "Blocking Reprogramming API");
+  TestCaseDescription("Using TestWaitFor...() API (blocking calls allowed in TestModules only)");
+  if(!FlashingInProgress()) {
+    TestStatus("Start BlockingReprogramming Test (loading flashpack may need a few seconds)");
+    @vFlash::Progress = 0;
+    @vFlash::RemainingTime = 100; // Set to value != 0
+    
+    result = TestWaitForvFlashPackReprogrammed(gFlashpack); 
+    if (result != Success)
+    {
+      TestStepFail("Reprogramming failed. See CANoe Write window for detailed information.");
+    }
+    else
+    {
+      TestStatus("... BlockingReprogramming successfully finished");
+    }
+  }
+}
+
+testcase NonBlockingReprogramming()
+{
+  TestCaseTitle("TC 2.0", "Non Blocking Reprogramming API");
+  TestCaseDescription("Using vFlash...() API (all calls are asynchronous)");
+  if(!FlashingInProgress()) {
+    TestStatus("Start NonBlockingReprogramming Test (loading flashpack may need a few seconds)");
+    @vFlash::Progress = 0;
+    @vFlash::RemainingTime = 100; // Set to value != 0
+      
+    vFlashStartPackReprogramming(gFlashpack);
+    
+    // wait explicit until all steps are performed asynchronous
+    testWaitForTextEvent(gReprogrammingDone, 450000); 
+
+    if (gReprogrammingResult != Success)
+    {
+      TestStepFail("Reprogramming failed. See CANoe Write window for detailed information.");
+    }
+    else
+    {
+      TestStatus("... NonBlockingReprogramming successfully finished");
+    }
+  }
+}
+
+// will be called when the flash progress changed
+void vFlashProgramProgressCallback(DWORD progressInPercent, DWORD remainingTimeInS)
+{
+  @vFlash::Progress = progressInPercent;
+  @vFlash::RemainingTime = remainingTimeInS;
+}

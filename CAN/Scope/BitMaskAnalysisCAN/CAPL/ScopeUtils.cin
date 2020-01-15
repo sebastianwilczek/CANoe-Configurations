@@ -1,0 +1,546 @@
+/*@!Encoding:1252*/
+includes
+{
+  
+}
+
+variables
+{
+  char scopeTestStepName[256];
+
+  const long domVoltageThreshold = 900; //mV
+  const long recVoltageThreshold = 500; // mV
+
+  //bit masks used for analysis
+  ScopeBitMaskPolygon bitMaskArb;
+  ScopeBitMaskPolygon bitMaskBRS;
+  ScopeBitMaskPolygon bitMaskData;
+  ScopeBitMaskPolygon bitMaskCRCdel;
+  
+  //bit lengths in ns
+  double bitLengthArb, bitLengthBRS, bitLengthData, bitLengthCRCdel;
+
+  //the one and only analysis handle used for all analysis functions
+  ScopeAnalyseHandle scopeAnlyzHandle = {Handle = 999};
+  
+  long maxNumOfErrorsToShow = 10; //max. number of errors added in test report
+  
+  CANSettings arbPhaseSettings;
+  CANSettings dataPhaseSettings;
+  
+}
+
+int CheckStatusInternal(long status, char text[])
+{
+ if(status <= 0)
+ {
+   testStepFail(scopeTestStepName, " Internal error in %s, return code = %d", text, status);
+   return 0;
+ }
+ return 1;
+}
+
+int DoScopeConnect()
+{
+  long res;
+  res = scopeConnect();
+  if(!CheckStatusInternal(res, "scopeConnect"))return 0; 
+
+  if(res == 2) return 1;
+
+  if(res < 0)
+    return res;
+  
+  res = testWaitForScopeEvent(eScopeConnected, 8000);
+  if(!CheckStatusInternal(res, "scopeConnect"))return 0; 
+  return 1;
+}
+
+int DoScopeTrigger()
+{
+  long res;
+  res = scopeTriggerNow();
+  if(!CheckStatusInternal(res, "scopeTriggerNow")) return 0;
+
+  // wait till action done
+  res =(testWaitForScopeEvent(eScopeTriggered, 5000));
+  if(!CheckStatusInternal(res, "scopeTriggerNow")) return 0;
+
+  return 1; 
+}
+
+int DoGetCAPLViolationMask(ScopeAnalyseHandle handle, long index, ScopeMaskViolationData maskViolationData)
+{
+  long res;
+  res = TestWaitScopeGetMaskViolation(handle, index, maskViolationData);
+  if(!CheckStatusInternal(res, "TestWaitScopeGetMaskViolation")) return 0;
+
+  return 1;
+}
+
+void ShowBitMask(ScopeAnalyseHandle handle, int invalidMaskNumber, ScopeMaskViolationData bitMaskViolation, ScopeBitMaskPolygon bitMaskPolygon, double bitLength)
+{
+  const int   textlen = 512;
+  char        text[textlen], bitFieldName[textlen];
+
+  if(0) //sometimes write window messages are helpful
+  {
+    write("Output violated bit mask: \n");
+    write("CorruptBitField: %d", bitMaskViolation.bitField);  
+    write("ErrorType: %d", bitMaskViolation.ErrorType);  
+    write("BitIndex: %d", bitMaskViolation.bitNo);  
+    write("bitStartTime: %.6fs", bitMaskViolation.bitStartTime/1000000000.);  //in ns : Bit-Start bzgl. Simulationszeit (Zeitbezugspunkt)
+    write("thresholdTimeOffset: %d", bitMaskViolation.thresholdTimeOffset); //distance to bit start in ns - Threshold-Zeit bzgl. Bit-Sart
+    write("disturbanceTimeStart: %d", bitMaskViolation.disturbanceTimeStart);	//distance of disturbance to bit start in ns - Start der Störung bzg. Bit-Start
+    write("disturbanceTimeEnd: %d", bitMaskViolation.disturbanceTimeEnd);	//distance of end of disturbance to bit start in ns - Ende der Störung bzg. Bit-Start
+    write("sample point voltage: %d", bitMaskViolation.samplePointVoltage);	//distance of end of disturbance to bit start in ns - Ende der Störung bzg. Bit-Start
+    write("ThresholdVoltage: %d", bitMaskViolation.ThresholdVoltage);// threshold level in mV realtive to scope ground
+  }
+  
+  GetBitFieldName(bitFieldName, textlen, bitMaskViolation.bitField);
+  snprintf(text, textlen, "Error #%d: bit field %s, bit %d. The start of the disturbance was found at %d ns after start of bit (%.2f%% of the bit). The disturbance length is %d ns, %.2f%% of the bit is disturbed (configured bit length: %d ns)." 
+              , invalidMaskNumber
+              , bitFieldName
+              , bitMaskViolation.bitNo
+              , bitMaskViolation.disturbanceTimeStart - bitMaskViolation.thresholdTimeOffset
+              , (bitMaskViolation.disturbanceTimeStart - bitMaskViolation.thresholdTimeOffset)/bitLength*100
+              , bitMaskViolation.disturbanceTimeEnd-bitMaskViolation.disturbanceTimeStart
+              , ((double)(bitMaskViolation.disturbanceTimeEnd-bitMaskViolation.disturbanceTimeStart))/bitLength*100
+              , (int)bitLength);
+
+  DoShowBitMask(handle, bitMaskViolation.bitField, bitMaskViolation.bitNo, 8, text);
+}
+
+int DoBitAnlyz(ScopeBitMaskPolygon bitMask, dword startField, dword endField, char text[], double bitLength)
+{
+  int i;
+  const int testRepetitions = 3;
+  const long textLength = 256;
+  char text1[textLength], bitNameStartField[textLength], bitNameEndField[textLength];
+  
+  long flags, numOfInValidMasks, invalidMaskNumber;
+ 
+  GetBitFieldName(bitNameStartField, textLength, startField);
+  GetBitFieldName(bitNameEndField, textLength, endField);
+  if(startField != endField) testReportAddExtendedInfo("text", "Analysing bits from %s to %s", bitNameStartField, bitNameEndField);
+  else testReportAddExtendedInfo("text", "Analysing bit %s", bitNameStartField);
+  
+  flags = 0;
+
+  for(i=0;;++i)
+  {
+    numOfInValidMasks = TestWaitScopeAnalyseSignal(canTestMessage, flags, 
+    startField, endField, 
+    bitMask, domVoltageThreshold, recVoltageThreshold, scopeAnlyzHandle);
+  
+    if(numOfInValidMasks < 0)
+    {
+      if(i<testRepetitions)
+      {
+        testStepWarning(testStepName, " Internal error in %s, return code = %d", "TestWaitScopeAnalyseSignal", numOfInValidMasks);
+      }
+      else
+      {
+        testStepFail(testStepName, " Internal error in %s, return code = %d", "TestWaitScopeAnalyseSignal", numOfInValidMasks);
+        return 0;
+      }
+    }
+    else break;
+  }
+  if(numOfInValidMasks == 0)
+  {
+    //no mask violations found
+    snprintf(text1, textLength, "First bit(s) of the analyzed cutout");
+    DoShowBitMask(scopeAnlyzHandle, startField, 0, 10, text1);
+  }
+  else 
+  {
+    //there are bit mask violations
+    testStepFail(scopeTestStepName, "%d bit mask violations found.", numOfInValidMasks);
+
+    //iterate through all erroneous bits, make a screen shot, and  add a description to the test report
+    for(invalidMaskNumber = 1; invalidMaskNumber <= numOfInValidMasks && invalidMaskNumber <= maxNumOfErrorsToShow; ++invalidMaskNumber)
+    {
+      ScopeMaskViolationData maskViolationData;
+      if(DoGetCAPLViolationMask(scopeAnlyzHandle, invalidMaskNumber, maskViolationData)){
+        ShowBitMask(scopeAnlyzHandle, invalidMaskNumber, maskViolationData, bitMask, bitLength);
+      }
+    }
+  }
+  
+  //get average voltages
+  if(startField != endField)
+  {
+    long res;
+    ScopeMaskViolationData maskViolationData;
+    res = testWaitScopeGetBitInfo(scopeAnlyzHandle, startField, 0, endField, 0, maskViolationData);
+    if(!CheckStatusInternal(res, "testWaitScopeGetBitInfo")) return 0;
+    
+    TestReportAddExtendedInfo("text", "Average voltages:\nCAN high dominant = %d mV, CAN high recessive = %d mV\nCAN low dominant = %d mV, CAN low recessive = %d mV\nCAN diff dominant = %d mV, CAN diff recessive = %d mV", 
+     maskViolationData.domVoltageCANH, maskViolationData.recVoltageCANH,
+     maskViolationData.domVoltageCANL, maskViolationData.recVoltageCANL,
+     maskViolationData.domVoltageDiff, maskViolationData.recVoltageDiff);
+  }
+  return 1;
+}
+
+
+int DoShowBitMask(ScopeAnalyseHandle handle, long msgFieldStart, long bitIndex, long bitCount, char text[])
+{
+  long res;
+
+  //display the cutout in the scope window
+  res = TestWaitScopeShowMask(handle, msgFieldStart, bitIndex, bitCount);
+  if(res != 1) 
+  {
+    testStepFail(scopeTestStepName, " Internal error in TestWaitScopeShowMask, return code = %d", res);
+    return 0;
+  }
+
+  //make a scrren shot and add it to the test report
+  TestReportAddWindowCapture("Scope", scopeTestStepName, text);
+  
+  return 1;
+}
+
+int DoScopeDisconnect()
+{
+  long res;
+  
+  res = scopeDisconnect();
+  if(!CheckStatusInternal(res, "scopeDisconnect")) return 0;
+
+  res =testWaitForScopeEvent(eScopeDisconnected, 8000);
+  if(!CheckStatusInternal(res, "scopeDisconnect")) return 0;
+
+  return 1;
+}
+
+
+int FillTsegSettings()
+{
+  if(!canFdGetConfiguration(%CHANNEL%, arbPhaseSettings, dataPhaseSettings) || arbPhaseSettings.baudrate == 0)
+  {
+    return 0;
+  }
+  
+  //in simulation mode the function canFDGetConfiguration, doesn't return TSEG values
+  //We set the values to the default values of the configuration
+  //The sample value is always 75 % for arbitration and data phase
+  if(isSimulated()) 
+  {
+    arbPhaseSettings.tseg1 = 11;
+    arbPhaseSettings.tseg2 = 4;
+    arbPhaseSettings.sjw   = 3;
+    arbPhaseSettings.sam   = 0;
+    
+    dataPhaseSettings.tseg1 = 5;
+    dataPhaseSettings.tseg2 = 2;
+    dataPhaseSettings.sjw   = 2;
+    dataPhaseSettings.sam   = 0;
+  }
+  
+  return 1;
+}
+
+//init the default bit mask used for arbitration phase bits
+int InitBitMaskArbitration()
+{
+  double arbSamplingPointInPercent;
+  
+  if(FillTsegSettings())
+  {
+    arbSamplingPointInPercent = GetSamplingPointInPercent(arbPhaseSettings.tseg1, arbPhaseSettings.tseg2);
+    bitLengthArb = 1e9/arbPhaseSettings.baudrate;
+    
+    bitMaskArb.maskPointCount = 4;
+    bitMaskArb.data_0_Mask[0] = domVoltageThreshold + 200; //mV
+    bitMaskArb.data_0_Mask[1] = domVoltageThreshold + 1000; //mV
+    bitMaskArb.data_0_Mask[2] = domVoltageThreshold + 1000; //mV
+    bitMaskArb.data_0_Mask[3] = domVoltageThreshold + 500; //mV
+    
+    bitMaskArb.data_1_Mask[0] = recVoltageThreshold; //mV
+    bitMaskArb.data_1_Mask[1] = recVoltageThreshold/2; //mV
+    bitMaskArb.data_1_Mask[2] = recVoltageThreshold/2; //mV
+    bitMaskArb.data_1_Mask[3] = recVoltageThreshold; //mV
+    
+    bitMaskArb.timeOffset[0] = 30 ; // in %
+    bitMaskArb.timeOffset[1] = 35; // in %
+    bitMaskArb.timeOffset[2] = arbSamplingPointInPercent + (100.0 - arbSamplingPointInPercent)/3; // in %
+    bitMaskArb.timeOffset[3] = arbSamplingPointInPercent + (100.0 - arbSamplingPointInPercent)/2; // in %
+    
+    return 1;
+  }
+  
+  return 0;
+}
+
+testfunction AddBitmaskInfoCANFD()
+{
+  TestReportAddMiscInfoBlock("Bit mask settings");
+
+  AddSetupInfo(bitMaskArb,  "Arbitration phase mask");
+  AddSetupInfo(bitMaskData, "Data phase mask");
+  AddSetupInfo(bitMaskBRS,  "BRS mask");
+  AddSetupInfo(bitMaskCRCdel, "CRC delimiter mask");
+}
+
+testfunction AddBitmaskInfoCANClassic()
+{
+  TestReportAddMiscInfoBlock("Bit mask settings");
+
+  AddSetupInfo(bitMaskArb,  "Bit mask");
+}
+
+void AddSetupInfo(ScopeBitMaskPolygon bitmask, char name[])
+{
+  int i;
+  const long bufLength = 512;
+  char buffer[bufLength], buffer1[bufLength];
+  
+  i = 0;
+  snprintf(buffer1, bufLength, "%2.2f%%%% (%4d mV, %4d mV)", bitmask.timeOffset[i], bitmask.data_0_Mask[i], bitmask.data_1_Mask[i]);
+  for(i=1;i< bitmask.maskPointCount; ++i)
+  {
+    snprintf(buffer, bufLength, ", %2.2f%%%% (%4d mV, %4d mV)", bitmask.timeOffset[i], bitmask.data_0_Mask[i], bitmask.data_1_Mask[i]);
+    strncat(buffer1, buffer, bufLength);
+  }
+  TestReportAddMiscInfo(name, buffer1);
+}
+
+//init the default bit mask used for data phase bits (CAN FD only)
+int  InitBitMaskData()
+{
+  double dataSamplingPointInPercent;
+
+  if(FillTsegSettings())
+  {
+    dataSamplingPointInPercent = GetSamplingPointInPercent(dataPhaseSettings.tseg1, dataPhaseSettings.tseg2);
+    
+    bitLengthData = 1e9/dataPhaseSettings.baudrate;
+    
+    bitMaskData.maskPointCount = 4;
+    bitMaskData.data_0_Mask[0] = domVoltageThreshold ; //mV
+    bitMaskData.data_0_Mask[1] = domVoltageThreshold + 1000; //mV
+    bitMaskData.data_0_Mask[2] = domVoltageThreshold + 1000; //mV
+    bitMaskData.data_0_Mask[3] = domVoltageThreshold ; //mV
+    
+    bitMaskData.data_1_Mask[0] = recVoltageThreshold; //mV
+    bitMaskData.data_1_Mask[1] = recVoltageThreshold/2; //mV
+    bitMaskData.data_1_Mask[2] = recVoltageThreshold/2; //mV
+    bitMaskData.data_1_Mask[3] = recVoltageThreshold; //mV
+    
+    bitMaskData.timeOffset[0] = 30 ; // in %
+    bitMaskData.timeOffset[1] = 35; // in %
+    bitMaskData.timeOffset[2] = dataSamplingPointInPercent + (100 - dataSamplingPointInPercent)/3; // in %
+    bitMaskData.timeOffset[3] = dataSamplingPointInPercent + (100 - dataSamplingPointInPercent)/2; // in %
+    
+    return 1;
+  }
+  
+  return 0;
+}
+
+double GetSamplingPointInPercent(long tseg1, long tseg2)
+{
+  return 100.0 * (1. + tseg1)/(1. + tseg1 + tseg2);
+}
+
+//init the default bit mask used for BRS (CAN FD only)
+int  InitBitMaskBRS()
+{
+  double bitLengthInNSArb, bitLengthInNSData, bitLengthInPercentOfArb, arbSamplingPointInPercent;
+  
+  const long domVoltageThreshold = 900; //mV
+  const long recVoltageThreshold = 500; // mV
+
+  if(FillTsegSettings())
+  {
+    arbSamplingPointInPercent = GetSamplingPointInPercent(arbPhaseSettings.tseg1, arbPhaseSettings.tseg2);
+    
+    bitMaskBRS.maskPointCount = 4;
+    bitMaskBRS.data_0_Mask[0] = domVoltageThreshold + 500; //mV
+    bitMaskBRS.data_0_Mask[1] = domVoltageThreshold + 1000; //mV
+    bitMaskBRS.data_0_Mask[2] = domVoltageThreshold + 1000; //mV
+    bitMaskBRS.data_0_Mask[3] = domVoltageThreshold + 500; //mV
+    
+    bitMaskBRS.data_1_Mask[0] = recVoltageThreshold; //mV
+    bitMaskBRS.data_1_Mask[1] = recVoltageThreshold/2; //mV
+    bitMaskBRS.data_1_Mask[2] = recVoltageThreshold/2; //mV
+    bitMaskBRS.data_1_Mask[3] = recVoltageThreshold; //mV
+    
+    bitMaskBRS.timeOffset[0] = 30 ; // in %
+    bitMaskBRS.timeOffset[1] = 35; // in %
+    
+    //the last point of the bit mask must be between the arbitration's sampling point and the end of the bit
+    //how long is the bit relative to the arbitration bit length?
+    
+    //Arb-Part:
+    bitLengthInNSArb = 1e9/arbPhaseSettings.baudrate*(1. + arbPhaseSettings.tseg1)/(1. + arbPhaseSettings.tseg1 + arbPhaseSettings.tseg2);
+    //Data-Part:
+    bitLengthInNSData = 1e9/dataPhaseSettings.baudrate*(dataPhaseSettings.tseg2)/(1. + dataPhaseSettings.tseg1 + dataPhaseSettings.tseg2);
+    
+    bitLengthBRS = bitLengthInNSArb + bitLengthInNSData;
+    
+    bitLengthInPercentOfArb = 100 * (bitLengthBRS)/ 1e9 * arbPhaseSettings.baudrate;
+    
+    bitMaskBRS.timeOffset[2] = arbSamplingPointInPercent + (bitLengthInPercentOfArb - arbSamplingPointInPercent)/3; // in %
+    bitMaskBRS.timeOffset[3] = arbSamplingPointInPercent + (bitLengthInPercentOfArb - arbSamplingPointInPercent)/2; // in %
+    
+    return 1;
+  }
+  
+  return 0;
+}
+
+//init the default bit mask used for CRC delimiter (CAN FD only)
+int InitBitMaskCRCdel()
+{
+  double bitLengthInNSArb, bitLengthInNSData, bitLengthInPercentOfData, dataSamplingPointInPercent;
+  
+  const long domVoltageThreshold = 900; //mV
+  const long recVoltageThreshold = 500; // mV
+
+  if(FillTsegSettings())
+  {
+    dataSamplingPointInPercent = GetSamplingPointInPercent(dataPhaseSettings.tseg1, dataPhaseSettings.tseg2);
+    
+    bitMaskCRCdel.maskPointCount = 4;
+    bitMaskCRCdel.data_0_Mask[0] = domVoltageThreshold + 200; //mV
+    bitMaskCRCdel.data_0_Mask[1] = domVoltageThreshold + 1000; //mV
+    bitMaskCRCdel.data_0_Mask[2] = domVoltageThreshold + 1000; //mV
+    bitMaskCRCdel.data_0_Mask[3] = domVoltageThreshold + 500; //mV
+    
+    bitMaskCRCdel.data_1_Mask[0] = recVoltageThreshold; //mV
+    bitMaskCRCdel.data_1_Mask[1] = recVoltageThreshold-100; //mV
+    bitMaskCRCdel.data_1_Mask[2] = recVoltageThreshold-100; //mV
+    bitMaskCRCdel.data_1_Mask[3] = recVoltageThreshold; //mV
+    
+    bitMaskCRCdel.timeOffset[0] = 30 ; // in %
+    bitMaskCRCdel.timeOffset[1] = 35; // in %
+    
+    //the last point of the bit mask must be between the arbitration's sampling point and the end of the bit
+    //how long is the bit relative to the arbitration bit length?
+    
+    //Data-Part:
+    bitLengthInNSData = 1e9/dataPhaseSettings.baudrate*(1. + dataPhaseSettings.tseg1)/(1. + dataPhaseSettings.tseg1 + dataPhaseSettings.tseg2);
+    //Arb-Part:
+    bitLengthInNSArb = 1e9/arbPhaseSettings.baudrate*(arbPhaseSettings.tseg2)/(1. + arbPhaseSettings.tseg1 + arbPhaseSettings.tseg2);
+    
+    bitLengthCRCdel = bitLengthInNSArb + bitLengthInNSData;
+    
+    bitLengthInPercentOfData = 100 * (bitLengthCRCdel)/ 1e9 * dataPhaseSettings.baudrate;
+    
+    //write ("bitLengthInPercentOfData %f %f %f",bitLengthInNSArb, bitLengthInNSData, bitLengthInPercentOfData);
+    
+    //the last mask point shall be between the sampling point and the end of the bit
+    bitMaskCRCdel.timeOffset[2] = dataSamplingPointInPercent + (bitLengthInPercentOfData - dataSamplingPointInPercent)/3; // in %
+    bitMaskCRCdel.timeOffset[3] = dataSamplingPointInPercent + (bitLengthInPercentOfData - dataSamplingPointInPercent)/2; // in %
+    
+    return 1;
+  }
+  
+  return 0;
+}
+
+void GetBitFieldName(char name[], long length, dword bitFieldNo)
+{
+  switch(bitFieldNo)
+  {
+  	case eCAPLScopeDataField_CAN_StartofFrame:strncpy(name,"StartofFrame",length);return;
+  	case eCAPLScopeDataField_CAN_Arbitration_Identifier:strncpy(name,"Arbitration_Identifier",length);return;
+  	case eCAPLScopeDataField_CAN_Arbitration_Ext_Identifier_1:strncpy(name,"Arbitration_Ext_Identifier_1",length);return;
+  	case eCAPLScopeDataField_CAN_Arbitration_Ext_Identifier_2:strncpy(name,"Arbitration_Ext_Identifier_2",length);return;
+  	case eCAPLScopeDataField_CAN_Arbitration_IDE_Bit:strncpy(name,"Arbitration_IDE_Bit",length);return;
+  	case eCAPLScopeDataField_CAN_Arbitration_SRR_Bit:strncpy(name,"Arbitration_SRR_Bit",length);return;
+  	case eCAPLScopeDataField_CAN_Arbitration_RTR_Bit:strncpy(name,"Arbitration_RTR_Bit",length);return;
+  	case eCAPLScopeDataField_CAN_ControlBit_IDE_R1_Bit:strncpy(name,"ControlBit_IDE_R1_Bit",length);return;
+  	case eCAPLScopeDataField_CAN_ControlBit_R0_Bit:strncpy(name,"ControlBit_R0_Bit",length);return;
+  	case eCAPLScopeDataField_CAN_Data_Length_Code:strncpy(name,"Data_Length_Code",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_1:strncpy(name,"DataField_Byte_1",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_2:strncpy(name,"DataField_Byte_2",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_3:strncpy(name,"DataField_Byte_3",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_4:strncpy(name,"DataField_Byte_4",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_5:strncpy(name,"DataField_Byte_5",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_6:strncpy(name,"DataField_Byte_6",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_7:strncpy(name,"DataField_Byte_7",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_8:strncpy(name,"DataField_Byte_8",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_9:strncpy(name,"DataField_Byte_9",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_10:strncpy(name,"DataField_Byte_10",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_11:strncpy(name,"DataField_Byte_11",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_12:strncpy(name,"DataField_Byte_12",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_13:strncpy(name,"DataField_Byte_13",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_14:strncpy(name,"DataField_Byte_14",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_15:strncpy(name,"DataField_Byte_15",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_16:strncpy(name,"DataField_Byte_16",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_17:strncpy(name,"DataField_Byte_17",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_18:strncpy(name,"DataField_Byte_18",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_19:strncpy(name,"DataField_Byte_19",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_20:strncpy(name,"DataField_Byte_20",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_21:strncpy(name,"DataField_Byte_21",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_22:strncpy(name,"DataField_Byte_22",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_23:strncpy(name,"DataField_Byte_23",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_24:strncpy(name,"DataField_Byte_24",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_25:strncpy(name,"DataField_Byte_25",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_26:strncpy(name,"DataField_Byte_26",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_27:strncpy(name,"DataField_Byte_27",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_28:strncpy(name,"DataField_Byte_28",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_29:strncpy(name,"DataField_Byte_29",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_30:strncpy(name,"DataField_Byte_30",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_31:strncpy(name,"DataField_Byte_31",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_32:strncpy(name,"DataField_Byte_32",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_33:strncpy(name,"DataField_Byte_33",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_34:strncpy(name,"DataField_Byte_34",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_35:strncpy(name,"DataField_Byte_35",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_36:strncpy(name,"DataField_Byte_36",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_37:strncpy(name,"DataField_Byte_37",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_38:strncpy(name,"DataField_Byte_38",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_39:strncpy(name,"DataField_Byte_39",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_40:strncpy(name,"DataField_Byte_40",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_41:strncpy(name,"DataField_Byte_41",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_42:strncpy(name,"DataField_Byte_42",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_43:strncpy(name,"DataField_Byte_43",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_44:strncpy(name,"DataField_Byte_44",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_45:strncpy(name,"DataField_Byte_45",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_46:strncpy(name,"DataField_Byte_46",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_47:strncpy(name,"DataField_Byte_47",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_48:strncpy(name,"DataField_Byte_48",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_49:strncpy(name,"DataField_Byte_49",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_50:strncpy(name,"DataField_Byte_50",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_51:strncpy(name,"DataField_Byte_51",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_52:strncpy(name,"DataField_Byte_52",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_53:strncpy(name,"DataField_Byte_53",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_54:strncpy(name,"DataField_Byte_54",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_55:strncpy(name,"DataField_Byte_55",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_56:strncpy(name,"DataField_Byte_56",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_57:strncpy(name,"DataField_Byte_57",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_58:strncpy(name,"DataField_Byte_58",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_59:strncpy(name,"DataField_Byte_59",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_60:strncpy(name,"DataField_Byte_60",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_61:strncpy(name,"DataField_Byte_61",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_62:strncpy(name,"DataField_Byte_62",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_63:strncpy(name,"DataField_Byte_63",length);return;
+  	case eCAPLScopeDataField_CAN_DataField_Byte_64:strncpy(name,"DataField_Byte_64",length);return;
+  	case eCAPLScopeDataField_CAN_CRC:strncpy(name,"CRC",length);return;
+  	case eCAPLScopeDataField_CAN_CRC_Delimiter:strncpy(name,"CRC_Delimiter",length);return;
+  	case eCAPLScopeDataField_CAN_Acknowledge_Slot:strncpy(name,"Acknowledge_Slot",length);return;
+  	case eCAPLScopeDataField_CAN_Acknowledge_Delimiter:strncpy(name,"Acknowledge_Delimiter",length);return;
+  	case eCAPLScopeDataField_CAN_EndOfFrame:strncpy(name,"EndOfFrame",length);return;
+  	case eCAPLScopeDataField_CAN_MESSAGE:strncpy(name,"MESSAGE",length);return;
+  	case eCAPLScopeDataField_CAN_FD_MESSAGE:strncpy(name,"FD_MESSAGE",length);return;
+  	case eCAPLScopeDataField_CAN_FD_ControlBit_EDL:strncpy(name,"FD_ControlBit_EDL",length);return;
+  	case eCAPLScopeDataField_CAN_FD_ControlBit_BRS:strncpy(name,"FD_ControlBit_BRS",length);return;
+  	case eCAPLScopeDataField_CAN_FD_ControlBit_ESI:strncpy(name,"FD_ControlBit_ESI",length);return;
+  	case eCAPLScopeDataField_CAN_Arbitration_Field:strncpy(name,"Arbitration_Field",length);return;
+  	case eCAPLScopeDataField_CAN_CRC_Field:strncpy(name,"CRC_Field",length);return;
+  	case eCAPLScopeDataField_CAN_ACK_Field:strncpy(name,"ACK_Field",length);return;
+  	case eCAPLScopeDataField_CAN_CONTROL_Field:strncpy(name,"CONTROL_Field",length);return;
+  	case eCAPLScopeDataField_CAN_DATA_Field:strncpy(name,"DATA_Field",length);return;
+    case eCAPLScopeDataField_CAN_ControlBit_IDE:strncpy(name,"ControlBit_IDE", length);return;
+    case eCAPLScopeDataField_CAN_FD_Arbitration_RRS_Bit:strncpy(name,"FD_Arbitration_RRS_Bit", length);return;
+    case eCAPLScopeDataField_CAN_ControlBit_FDF:strncpy(name,"FD_ControlBit_FDF", length);return;
+    case eCAPLScopeDataField_CAN_FD_ControlBit_RES:strncpy(name,"FD_ControlBit_Res", length);return;
+    case eCAPLScopeDataField_CAN_FD_STUFF_COUNT:strncpy(name,"FD_Stuff_Count", length);return;
+
+  }
+}

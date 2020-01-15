@@ -1,0 +1,155 @@
+/*@!Encoding:1252*/
+//
+// This test module demonstrates the usage of new ISO TP features with
+// diagnostics:
+//
+// - TC_TestCANFD will check that the ECU responds with the same CAN FD
+//   mode as the request, i.e. if a CAN 2.0 request is sent, the response
+//   must be CAN 2.0 too; the same applies for CAN FD.
+//
+// - TC_TestJumboFrames shows the sending of TP messages larger than
+//   4095 bytes by sending two blocks of 64 KiB each. The time it takes
+//   to transfer this data is measured, and if CAN FD has been deactivated
+//   the test will fail because transfer takes too long.
+
+includes
+{
+  #include "Diagnostics/CCI_CanTp.cin"
+}
+
+variables
+{
+  char gECU[10] = "Tester";
+  const cIsTester = 1;
+}
+
+testcase TC_TestCANFD()
+{
+  diagRequest DevelopmentData_Read req;
+
+  // Setting the target will determin if CAN FD is active
+  DiagSetTarget( "Door");
+  
+  if( !gCANFDavailable)
+  {
+    TestStepFail( "Since CAN FD is not available, this test case cannot function. Aborting.");
+    return;
+  }
+  
+  // First step: Send CAN 2.0 request and expect a CAN 2.0 response
+  gCANFDConnectionUsed = 0;
+  req.SendRequest(); // sets gCANFDConnectionUsed to 0
+
+  if( 1 == TestWaitForDiagResponse( req, 1000) && !gCANFDConnectionUsed)
+    TestStepPass( "CAN 2.0 request is answered with CAN 2.0 response. OK");
+  else
+    TestStepFail( "CAN 2.0 request is not answered with CAN 2.0 response!");
+
+  // Second step: Send CAN FD request and expect a CAN FD response
+  gCANFDConnectionUsed = 1;
+  req.SendRequest(); // sets gCANFDConnectionUsed to 0
+
+  if( 1 == TestWaitForDiagResponse( req, 1000) && gCANFDConnectionUsed)
+    TestStepPass( "CAN FD request is answered with CAN FD response. OK");
+  else
+    TestStepFail( "CAN FD request is not answered with CAN FD response!");
+
+  CCI_CloseConnections();
+}
+
+testcase TC_TestJumboFrames()
+{
+  // Send 2 blocks of 64 KiB each
+  const blockLen = 0x10000;
+  const blockCount = 2;
+
+  WORD i;
+
+  diagStopTesterPresent( "Door");  // Make sure that no TesterPresent interferes
+
+  // Setting the target will determin if CAN FD is active
+  DiagSetTarget( "Door");
+  
+  if( !gCANFDavailable)
+  {
+    testStepWarning( "CAN FD is not available at this bus, therefore this testcase will fail since it takes too long!");
+  }
+  
+  // Preparation: unlock ECU
+  {
+    diagRequest ExtendedDiagnosticSession_Start reqExtSess;
+    diagRequest SeedLevel1_Request reqSeed;
+    diagRequest KeyLevel1_Send reqKey;
+    reqExtSess.SendRequest();
+    TestWaitForDiagResponse( reqExtSess, 1000);
+    reqSeed.SendRequest();
+    TestWaitForDiagResponse( reqSeed, 1000);
+    reqKey.SetParameter( "SecurityKey", 0xB7F5);
+    reqKey.SendRequest();
+    if( 1 != TestWaitForDiagResponse( reqKey, 1000) || reqKey.GetLastResponseCode() != -1)
+    {
+      TestStepFail( "Cannot unlock ECU!");
+      return;
+    }
+    TestStepPass( "ECU unlocked");
+  }
+
+  // announce a download to the ECU
+  {
+    diagRequest Download_Request reqDownload;
+    BYTE memAddrAndSize[6] = { /* address */ 0x10, 0x00, 0x00,   /* size */ blockCount, 0x00, 0x00 };
+
+    reqDownload.Resize( 3 + 3 + 3);
+    reqDownload.SetParameter( "dataFormatIdentifier", 0x00); // no special encoding/encryption
+    reqDownload.SetParameter( "addressAndLengthFormatIdentifier", 0x33); // 3 bytes each for size and address
+    reqDownload.SetParameterRaw( "memoryAddressAndSize", memAddrAndSize, elcount( memAddrAndSize));
+
+    if( !SendAndEvaluateResponse( reqDownload))
+      return;
+  }
+
+  // Perform the download, using the CAN FD connection if available
+  for( i = 0; i < blockCount; ++i)
+  {
+    diagRequest Download_Transmit reqTransmit;
+    int64 startTime;
+    long  duration_ms;
+    
+    reqTransmit.Resize( 2 + blockLen);
+    reqTransmit.SetParameter( "blockSequenceCounter", i + 1);
+    
+    startTime = timeNowInt64();
+    gCANFDConnectionUsed = gCANFDavailable;
+    if( !SendAndEvaluateResponse( reqTransmit))
+      return;
+
+    duration_ms = (timeNowInt64() - startTime) / 1000000;
+    if( duration_ms > 900) // 64 KiB = 524288 bit @ 1Mbps CAN => approx 800 ms
+      TestStepFail( "", "Transfer of %d bytes takes %d ms, probably not on FD!", blockLen, duration_ms);
+    else
+      TestStepPass( "", "Transfer of %d bytes takes %d ms, OK", blockLen, duration_ms);
+  }
+
+  CCI_CloseConnections();
+}
+
+// Send given request and expect a positive response
+long SendAndEvaluateResponse( diagRequest * req)
+{
+  req.SendRequest(); // sets gCANFDConnectionUsed to 0 afterwards
+  if( 1 == TestWaitForDiagResponse( req, 5000))
+  {
+    if( req.GetLastResponseCode() == -1)
+    {
+      TestStepPass( "Positive response from ECU");
+      return 1;
+    } else
+    {
+      TestStepFail( "Negative response from ECU");
+      return 0;
+    }
+  }
+
+  TestStepFail( "No response from ECU");
+  return 0;    
+}

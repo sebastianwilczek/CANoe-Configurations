@@ -1,0 +1,3923 @@
+/*@!Encoding:1252*/
+
+///////////////////////////////////////
+// v. 2.1
+///////////////////////////////////////
+includes
+{
+  #include "CommonConst.CIN"
+  #include "CommonFunctions.cin"
+  #include "Plugin\Plugin_TIMClient.cin"
+}
+
+variables
+{
+  byte sAutoStart = 0; // > 0 if auto start of the server is enabled
+  char sLwATableFile[100] = "ClientLwATable.txt";
+  char sPanelNameClient[100] = "TIM Client 3";
+  char sPanelNameAuxValves[100] = "TIM Client 3 Auxiliary Valves";
+  int  sFreezedHearbeatCounter = -1;
+
+  int sNumOfReqForTestlabCertToIgnore;
+  int sNumOfReqForManufactCertToIgnore;
+  int sNumOfReqForManufactSeriesCertToIgnore;
+  int sNumOfReqForDeviceCertToIgnore;
+  
+  int sRequiredAuxValve[33]; // value 0 is not used
+  int sRequiredFrontPTO;
+  int sRequiredRearPTO;
+  int sRequiredFrontHitch;
+  int sRequiredRearHitch;
+  int sRequiredVehicleSpeed;
+  int sRequiredExtGuidance;
+}
+
+on start
+{
+  sysSetVariableInt(sysvar::TIMClient3::svStart, 0);
+  @sysvar::TIMClient3::svTIMClientFreezeState = 0;
+
+  Iso11783IL_SetVerbosity(cVerbosityErrorsAndWarnings);
+  Iso11783IL_TIMSetProperty("enableDemoMode", @svDemoModeActive);
+  
+  ReflectRequiredFacilitiesByColor_Reset();
+  
+  Plugin_OnStart();
+}
+
+on sysvar sysvar::ISO11783::TIMClient3::ILState
+{
+  if (sAutoStart && @this == 2) //Online
+  {
+    if(@TIMClient3::svIdentifyTIMServerByAddress == 0)
+      Iso11783IL_TIMConnectToServer(TIMServer);
+    else
+      Iso11783IL_TIMConnectToServer(@TIMClient3::svAddressOfTIMServer);
+  }
+}
+
+on sysvar sysvar::TIMClient3::svStart
+{
+  if(@this > 0)
+  {
+    StartClient();
+  }
+  else
+  {
+    StopClient();
+  }
+}
+
+on sysvar sysvar::TIMClient3::svReconnectClientToServer
+{
+  if(@this > 0)
+  {
+    ReconnectClientToServer();
+  }
+}
+
+on sysvar sysvar::TIMClient3::svRestartAuthentication
+{
+  if(@this > 0)
+  {
+    if(@TIMClient3::svIdentifyTIMServerByAddress == 0)
+      Iso11783IL_TIMRestartAuthentication(TIMServer);
+    else
+      Iso11783IL_TIMRestartAuthentication(@TIMClient3::svAddressOfTIMServer);
+  }
+}
+
+on sysvar sysvar::TIMClient3::svOperatorEnable
+{
+  if(@this > 0)
+  {
+    if(@TIMClient3::svIdentifyTIMServerByAddress == 0)
+      Iso11783IL_TIMOperatorEnable(TIMServer);
+    else
+      Iso11783IL_TIMOperatorEnable(@TIMClient3::svAddressOfTIMServer);
+  }
+}
+
+on sysvar sysvar::TIMClient3::svStoreLwAKeyTable
+{
+  if(@this > 0)
+  {
+    Iso11783IL_TIMSaveLwATable(sLwATableFile);
+  }
+}
+
+on sysvar sysvar::TIMClient3::svClearLwAKeyTable
+{
+  if(@this > 0)
+  {
+    Iso11783IL_TIMClearLwATable();
+    Iso11783IL_TIMSaveLwATable(sLwATableFile);
+  }
+}
+
+on sysvar sysvar::TIMClient3::svContinue
+{
+  if(@this > 0)
+  {
+    if(@TIMClient3::svIdentifyTIMServerByAddress == 0)
+      Iso11783IL_TIMContinueConnection(TIMServer);
+    else
+      Iso11783IL_TIMContinueConnection(@TIMClient3::svAddressOfTIMServer);
+  } 
+}
+
+on sysvar sysvar::TIMClient3::svContinueAndFreeze
+{
+  if(@this > 0)
+  {
+    if(@TIMClient3::svIdentifyTIMServerByAddress == 0)
+      Iso11783IL_TIMContinueConnection(TIMServer);
+    else
+      Iso11783IL_TIMContinueConnection(@TIMClient3::svAddressOfTIMServer);
+  } 
+  
+  // set new freeze state if state has been changed
+  if (@sysvar::TIMClient3::svTIMClientFreezeState > 0)
+  {
+    if(@TIMClient3::svIdentifyTIMServerByAddress == 0)
+      Iso11783IL_TIMFreezeConnection(TIMServer, @sysvar::TIMClient3::svTIMClientFreezeState);
+    else
+      Iso11783IL_TIMFreezeConnection(@TIMClient3::svAddressOfTIMServer, @sysvar::TIMClient3::svTIMClientFreezeState);
+  }
+}
+
+on sysvar sysvar::TIMClient3::svDisableNameCheck
+{
+  UpdateDeactivatedCertificateChecks();
+}
+
+on sysvar sysvar::TIMClient3::svDisableICCCheck
+{
+  UpdateDeactivatedCertificateChecks();
+}
+
+on sysvar sysvar::TIMClient3::svDisableFctCapibilitiesCheck
+{
+  UpdateDeactivatedCertificateChecks();
+}
+
+on sysvar sysvar::TIMClient3::svDisableCRLCheck
+{
+  UpdateDeactivatedCertificateChecks();
+}
+
+on sysvar sysvar::TIMClient3::svDisableCertificateTypeCheck
+{
+  UpdateDeactivatedCertificateChecks();
+}
+
+
+////////////////////////////////////////////////////////
+//            Rear PTO                               //
+////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::RearPTO::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cRearPTO);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::RearPTO::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cRearPTO);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::RearPTO::svReleaseControl
+{
+  if (@this)
+  {
+    Iso11783IL_TIMFunctionRequest(cRearPTO, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cRearPTO, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::RearPTO::svSpeed
+{
+  int result;
+  
+  result = SetPTOSpeed(cRearPTO, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Rear PTO to %f 1/min", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::RearPTO::svEngagement
+{
+  if(Iso11783IL_TIMFunctionRequest(cRearPTO, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Rear PTO to 0xFB00 (PTO on, Speed clockwise set by TIM Server)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::RearPTO::svEngagementCCW
+{
+  if(Iso11783IL_TIMFunctionRequest(cRearPTO, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Rear PTO to 0x0 (PTO on, Speed counter-clockwise set by TIM Server)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::RearPTO::svDisengagement
+{
+  if(Iso11783IL_TIMFunctionRequest(cRearPTO, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Rear PTO to 0x7D80 (PTO off)");
+  }
+}
+
+
+////////////////////////////////////////////////////////
+//            Front PTO                               //
+////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::FrontPTO::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cFrontPTO);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::FrontPTO::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cFrontPTO);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::FrontPTO::svReleaseControl
+{
+  if (@this)
+  {
+    Iso11783IL_TIMFunctionRequest(cFrontPTO, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cFrontPTO, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::FrontPTO::svSpeed
+{
+  int result;
+  
+  result = SetPTOSpeed(cFrontPTO, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Front PTO to %f 1/min", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::FrontPTO::svEngagement
+{
+  if(Iso11783IL_TIMFunctionRequest(cFrontPTO, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Front PTO to 0xFB00 (PTO on, Speed clockwise set by TIM Server)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::FrontPTO::svEngagementCCW
+{
+  if(Iso11783IL_TIMFunctionRequest(cFrontPTO, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Front PTO to 0x0 (PTO on, Speed counter-clockwise set by TIM Server)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::FrontPTO::svDisengagement
+{
+  if(Iso11783IL_TIMFunctionRequest(cFrontPTO, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Front PTO to 0x7D80 (PTO off)");
+  }
+}
+
+int SetPTOSpeed(int funcId, double physSpeed)
+{
+  int result;
+  word rawValue;
+  
+  rawValue = (physSpeed + 4016.0) * 8;
+  result = Iso11783IL_TIMFunctionRequest(funcId, rawValue );
+  
+  return result;
+}
+
+
+////////////////////////////////////////////////////////
+//            Rear Hitch                              //
+////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::RearHitch::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cRearHitch);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::RearHitch::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cRearHitch);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::RearHitch::svReleaseControl
+{
+  if (@this)
+  {
+    Iso11783IL_TIMFunctionRequest(cRearHitch, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cRearHitch, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::RearHitch::svPosition
+{
+  int result;
+  
+  result = SetHitchPosition(cRearHitch, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Rear Hitch to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::RearHitch::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cRearHitch, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Rear Hitch to 0xFB00 (Float)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::RearHitch::svStop
+{
+  if(Iso11783IL_TIMFunctionRequest(cRearHitch, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Rear Hitch to 0xFB01 (Stop)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::RearHitch::svLowerUntilStop
+{
+  if(Iso11783IL_TIMFunctionRequest(cRearHitch, 0xFB02 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Rear Hitch to 0xFB02 (Lower until Stop request)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::RearHitch::svRaiseUntilStop
+{
+  if(Iso11783IL_TIMFunctionRequest(cRearHitch, 0xFB03 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Rear Hitch to 0xFB03 (Raise until Stop request)");
+  }
+}
+
+////////////////////////////////////////////////////////
+//            Front Hitch                              //
+////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::FrontHitch::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cFrontHitch);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::FrontHitch::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cFrontHitch);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::FrontHitch::svReleaseControl
+{
+  if (@this)
+  {
+    Iso11783IL_TIMFunctionRequest(cFrontHitch, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cFrontHitch, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::FrontHitch::svPosition
+{
+  int result;
+  
+  result = SetHitchPosition(cFrontHitch, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Front Hitch to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::FrontHitch::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cFrontHitch, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Front Hitch to 0xFB00 (Float)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::FrontHitch::svStop
+{
+  if(Iso11783IL_TIMFunctionRequest(cFrontHitch, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Front Hitch to 0xFB01 (Stop)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::FrontHitch::svLowerUntilStop
+{
+  if(Iso11783IL_TIMFunctionRequest(cFrontHitch, 0xFB02 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Front Hitch to 0xFB02 (Lower until Stop request)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::FrontHitch::svRaiseUntilStop
+{
+  if(Iso11783IL_TIMFunctionRequest(cFrontHitch, 0xFB03 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Front Hitch to 0xFB03 (Raise until Stop request)");
+  }
+}
+
+int SetHitchPosition(int funcId, double hitchPos)
+{
+  int result;
+  word rawValue;
+  
+  rawValue = hitchPos * 100.0;
+  result = Iso11783IL_TIMFunctionRequest(funcId, rawValue );
+  
+  return result;
+}
+
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 1                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve01::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve01);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve01::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve01);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve01::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve01, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve01, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve01::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve01, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve01 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve01::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve01, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve01 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve01::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve01, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve01 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve01::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve01, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve01 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve01::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve01, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve01 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 2                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve02::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve02);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve02::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve02);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve02::svReleaseControl
+{
+  if (@this)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve02, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve02, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve02::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve02, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve2 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve02::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve02, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve02 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve02::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve02, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve02 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve02::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve02, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve02 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve02::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve02, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve02 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 3                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve03::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve03);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve03::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve03);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve03::svReleaseControl
+{
+  if (@this)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve03, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve03, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve03::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve03, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve3 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve03::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve03, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve03 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve03::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve03, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve03 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve03::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve03, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve03 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve03::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve03, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve03 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 4                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve04::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve04);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve04::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve04);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve04::svReleaseControl
+{
+  if (@this)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve04, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve04, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve04::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve04, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve4 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve04::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve04, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve04 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve04::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve04, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve04 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve04::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve04, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve04 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve04::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve04, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve04 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 1                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve05::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve05);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve05::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve05);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve05::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve05, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve05, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve05::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve05, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve05 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve05::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve05, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve05 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve05::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve05, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve05 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve05::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve05, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve05 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve05::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve05, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve05 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 6                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve06::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve06);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve06::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve06);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve06::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve06, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve06, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve06::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve06, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve06 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve06::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve06, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve06 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve06::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve06, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve06 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve06::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve06, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve06 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve06::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve06, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve06 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 7                                                 //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve07::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve07);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve07::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve07);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve07::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve07, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve07, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve07::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve07, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve07 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve07::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve07, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve07 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve07::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve07, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve07 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve07::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve07, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve07 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve07::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve07, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve07 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 8                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve08::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve08);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve08::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve08);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve08::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve08, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve08, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve08::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve08, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve08 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve08::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve08, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve08 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve08::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve08, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve08 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve08::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve08, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve08 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve08::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve08, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve08 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 9                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve09::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve09);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve09::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve09);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve09::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve09, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve09, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve09::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve09, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve09 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve09::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve09, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve09 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve09::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve09, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve09 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve09::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve09, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve09 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve09::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve09, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve09 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 10                                                  //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve10::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve10);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve10::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve10);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve10::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve10, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve10, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve10::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve10, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve10 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve10::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve10, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve10 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve10::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve10, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve10 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve10::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve10, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve10 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve10::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve10, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve10 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 11                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve11::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve11);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve11::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve11);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve11::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve11, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve11, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve11::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve11, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve11 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve11::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve11, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve11 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve11::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve11, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve11 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve11::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve11, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve11 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve11::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve11, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve11 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 12                                                  //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve12::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve12);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve12::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve12);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve12::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve12, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve12, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve12::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve12, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve12 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve12::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve12, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve12 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve12::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve12, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve12 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve12::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve12, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve12 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve12::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve12, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve12 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 13                                                  //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve13::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve13);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve13::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve13);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve13::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve13, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve13, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve13::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve13, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve13 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve13::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve13, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve13 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve13::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve13, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve13 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve13::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve13, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve13 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve13::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve13, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve13 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 14                                                  //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve14::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve14);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve14::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve14);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve14::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve14, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve14, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve14::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve14, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve14 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve14::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve14, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve14 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve14::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve14, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve14 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve14::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve14, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve14 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve14::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve14, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve14 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 15                                                  //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve15::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve15);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve15::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve15);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve15::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve15, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve15, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve15::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve15, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve15 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve15::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve15, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve15 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve15::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve15, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve15 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve15::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve15, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve15 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve15::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve15, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve15 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 16                                                  //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve16::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve16);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve16::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve16);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve16::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve16, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve16, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve16::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve16, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve16 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve16::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve16, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve16 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve16::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve16, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve16 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve16::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve16, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve16 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve16::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve16, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve16 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 17                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve17::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve17);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve17::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve17);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve17::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve17, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve17, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve17::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve17, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve17 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve17::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve17, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve17 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve17::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve17, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve17 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve17::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve17, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve17 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve17::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve17, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve17 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 18                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve18::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve18);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve18::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve18);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve18::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve18, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve18, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve18::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve18, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve18 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve18::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve18, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve18 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve18::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve18, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve18 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve18::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve18, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve18 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve18::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve18, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve18 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 19                                                  //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve19::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve19);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve19::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve19);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve19::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve19, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve19, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve19::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve19, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve19 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve19::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve19, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve19 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve19::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve19, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve19 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve19::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve19, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve19 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve19::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve19, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve19 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 20                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve20::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve20);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve20::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve20);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve20::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve20, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve20, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve20::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve20, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve20 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve20::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve20, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve20 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve20::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve20, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve20 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve20::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve20, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve20 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve20::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve20, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve20 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 21                                                  //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve21::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve21);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve21::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve21);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve21::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve21, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve21, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve21::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve21, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve21 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve21::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve21, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve21 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve21::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve21, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve21 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve21::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve21, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve21 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve21::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve21, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve21 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 22                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve22::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve22);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve22::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve22);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve22::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve22, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve22, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve22::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve22, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve22 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve22::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve22, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve22 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve22::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve22, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve22 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve22::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve22, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve22 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve22::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve22, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve22 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 23                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve23::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve23);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve23::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve23);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve23::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve23, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve23, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve23::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve23, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve23 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve23::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve23, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve23 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve23::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve23, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve23 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve23::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve23, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve23 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve23::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve23, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve23 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 24                                                  //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve24::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve24);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve24::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve24);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve24::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve24, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve24, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve24::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve24, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve24 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve24::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve24, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve24 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve24::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve24, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve24 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve24::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve24, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve24 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve24::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve24, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve24 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 25                                                  //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve25::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve25);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve25::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve25);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve25::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve25, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve25, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve25::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve25, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve25 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve25::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve25, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve25 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve25::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve25, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve25 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve25::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve25, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve25 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve25::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve25, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve25 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 26                                                  //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve26::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve26);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve26::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve26);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve26::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve26, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve26, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve26::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve26, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve26 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve26::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve26, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve26 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve26::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve26, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve26 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve26::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve26, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve26 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve26::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve26, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve26 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 27                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve27::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve27);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve27::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve27);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve27::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve27, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve27, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve27::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve27, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve27 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve27::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve27, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve27 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve27::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve27, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve27 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve27::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve27, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve27 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve27::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve27, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve27 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 28                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve28::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve28);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve28::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve28);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve28::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve28, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve28, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve28::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve28, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve28 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve28::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve28, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve28 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve28::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve28, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve28 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve28::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve28, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve28 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve28::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve28, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve28 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 29                                                  //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve29::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve29);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve29::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve29);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve29::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve29, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve29, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve29::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve29, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve29 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve29::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve29, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve29 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve29::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve29, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve29 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve29::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve29, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve29 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve29::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve29, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve29 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 30                                                  //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve30::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve30);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve30::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve30);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve30::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve30, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve30, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve30::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve30, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve30 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve30::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve30, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve30 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve30::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve30, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve30 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve30::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve30, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve30 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve30::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve30, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve30 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 31                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve31::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve31);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve31::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve31);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve31::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve31, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve31, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve31::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve31, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve31 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve31::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve31, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve31 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve31::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve31, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve31 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve31::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve31, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve31 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve31::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve31, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve31 to 0xFB01 (Float)");
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Aux Valve 32                                                   //
+///////////////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve32::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cAuxValve32);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve32::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cAuxValve32);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve32::svReleaseControl
+{
+  if (@this == 1)
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve32, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cAuxValve32, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve32::svValue
+{
+  int result;
+  
+  result = SetCurrentAuxValveFlow(cAuxValve32, @this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve32 to %f %%", @this);
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve32::svFullyOpenedExtend
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve32, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve32 to 0x0 (Fully Opened, Extend)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve32::svBlock
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve32, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve32 to 0x7D80 (Block)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve32::svFullyOpenedRetract
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve32, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve32 to 0xFB00 (Fully Opened, Retract)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::AuxValve32::svFloat
+{
+  if(Iso11783IL_TIMFunctionRequest(cAuxValve32, 0xFB01 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set AuxValve32 to 0xFB01 (Float)");
+  }
+}
+
+
+int SetCurrentAuxValveFlow(int funcId, double auxValveFlow)
+{
+  int result;
+  word rawValue;
+  
+  rawValue = (auxValveFlow + 128.512) * 250.0;
+  result = Iso11783IL_TIMFunctionRequest(funcId, rawValue );
+  
+  return result;
+}
+
+
+//////////////////////////////////////////////////////////
+// Vehicle Speed                                        //
+//////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::VehicleSpeed::svValue
+{
+  int result;
+  
+  result = SetVehicleSpeed(@this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set Vehicle Speed to %f m/s", @this);
+  
+}
+
+on sysvar sysvar::TIMClient3::Functions::VehicleSpeed::svForwardSetByServer
+{
+  if(Iso11783IL_TIMFunctionRequest(cVehicleSpeed, 0xFB00 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set VehicleSpeed to 0xFB00 (Forward speed set by TIM Server)");
+    
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::VehicleSpeed::svReverseSetByServer
+{
+  if(Iso11783IL_TIMFunctionRequest(cVehicleSpeed, 0x0 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set VehicleSpeed to 0x0 (Reverse speed set by TIM Server)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::VehicleSpeed::svStop
+{
+  if(Iso11783IL_TIMFunctionRequest(cVehicleSpeed, 0x7D80 ) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set VehicleSpeed to 0x7D80 (Stop)");
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::VehicleSpeed::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cVehicleSpeed);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::VehicleSpeed::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cVehicleSpeed);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::VehicleSpeed::svReleaseControl
+{
+  if (@this)
+  {
+    Iso11783IL_TIMFunctionRequest(cVehicleSpeed, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cVehicleSpeed, cReadyToControl);   
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::VehicleSpeed::svReleaseControlWithoutAwareness
+{
+  if (@this)
+  {
+    Iso11783IL_TIMFunctionRequest(cVehicleSpeed, cReleasedControlAndAcceptFunctionValueIncrease);   
+  }
+}
+
+int SetVehicleSpeed(double speed)
+{
+  int result;
+  word rawValue;
+  
+  rawValue = (@sysvar::TIMClient3::Functions::VehicleSpeed::svValue + 32.128) * 1000;
+  result = Iso11783IL_TIMFunctionRequest(cVehicleSpeed, rawValue );
+  return result;
+}
+
+//////////////////////////////////////////////////////////
+// External Guidance                                        //
+//////////////////////////////////////////////////////////
+
+on sysvar sysvar::TIMClient3::Functions::ExtGuidance::svCurvature
+{
+  int result;
+  
+  result = SetExtGuidanceCurvature(@this);
+  if(result != 0)    
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set External Guidance Curvature to %f 1/km", @this);
+  
+}
+
+int SetExtGuidanceCurvature(double extGuidanceCurvature)
+{
+  int result;
+  word rawValue;
+  
+  rawValue = (@sysvar::TIMClient3::Functions::ExtGuidance::svCurvature + 8032) * 4;
+  result = Iso11783IL_TIMFunctionRequest(cExternalGuidance, rawValue );
+  return result;
+}
+
+on sysvar sysvar::TIMClient3::Functions::ExtGuidance::svAssignFct
+{
+  if (@this)
+  {
+    AssignFunction(cExternalGuidance);
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::ExtGuidance::svUnassignFct
+{
+  if (@this)
+  {
+    Iso11783IL_TIMUnassignFunction(cExternalGuidance);       
+  }
+}
+
+on sysvar sysvar::TIMClient3::Functions::ExtGuidance::svReleaseControl
+{
+  if (@this)
+  {
+    Iso11783IL_TIMFunctionRequest(cExternalGuidance, cReleasedControlRequestingOperator);   
+  }
+  else
+  {
+    Iso11783IL_TIMFunctionRequest(cExternalGuidance, cReadyToControl);   
+  }
+}
+
+
+
+on sysvar sysvar::TIMClient3::svSetAllRequiredFacilities
+{
+  SetAllAuxValveFacilities(1);
+
+  @TIMClient3::RequiredFacilities::FrontPTO::svDisengagement = 1;
+  @TIMClient3::RequiredFacilities::FrontPTO::svEngagementCounterClockwise = 1;
+  @TIMClient3::RequiredFacilities::FrontPTO::svEngagementClockwise = 1;
+  @TIMClient3::RequiredFacilities::FrontPTO::svSpeedCounterClockwise = 1;
+  @TIMClient3::RequiredFacilities::FrontPTO::svSpeedClockwise = 1;
+  @TIMClient3::RequiredFacilities::RearPTO::svDisengagement = 1;
+  @TIMClient3::RequiredFacilities::RearPTO::svEngagementCounterClockwise = 1;
+  @TIMClient3::RequiredFacilities::RearPTO::svEngagementClockwise = 1;
+  @TIMClient3::RequiredFacilities::RearPTO::svSpeedCounterClockwise = 1;
+  @TIMClient3::RequiredFacilities::RearPTO::svSpeedClockwise = 1;
+  @TIMClient3::RequiredFacilities::FrontHitch::svMotion = 1;
+  @TIMClient3::RequiredFacilities::FrontHitch::svPosition = 1;
+  @TIMClient3::RequiredFacilities::RearHitch::svMotion = 1;
+  @TIMClient3::RequiredFacilities::RearHitch::svPosition = 1;
+  @TIMClient3::RequiredFacilities::VehicleSpeed::svForwardDirection = 1;
+  @TIMClient3::RequiredFacilities::VehicleSpeed::svReverseDirection = 1;
+  @TIMClient3::RequiredFacilities::VehicleSpeed::svStopMotion = 1;
+  @TIMClient3::RequiredFacilities::VehicleSpeed::svStartMotion = 1;
+  @TIMClient3::RequiredFacilities::VehicleSpeed::svForwardSpeed = 1;
+  @TIMClient3::RequiredFacilities::VehicleSpeed::svReverseSpeed = 1;
+  @TIMClient3::RequiredFacilities::VehicleSpeed::svChangeOfDirection = 1;
+  @TIMClient3::RequiredFacilities::ExtGuidance::svCurvature = 1;
+}
+
+on sysvar sysvar::TIMClient3::svSetAllAuxValveRequiredFacilities
+{
+  SetAllAuxValveFacilities(1);
+}
+
+on sysvar sysvar::TIMClient3::svResetAllRequiredFacilities
+{
+  SetAllAuxValveFacilities(0);
+  
+  @TIMClient3::RequiredFacilities::FrontPTO::svDisengagement = 0;
+  @TIMClient3::RequiredFacilities::FrontPTO::svEngagementCounterClockwise = 0;
+  @TIMClient3::RequiredFacilities::FrontPTO::svEngagementClockwise = 0;
+  @TIMClient3::RequiredFacilities::FrontPTO::svSpeedCounterClockwise = 0;
+  @TIMClient3::RequiredFacilities::FrontPTO::svSpeedClockwise = 0;
+  @TIMClient3::RequiredFacilities::RearPTO::svDisengagement = 0;
+  @TIMClient3::RequiredFacilities::RearPTO::svEngagementCounterClockwise = 0;
+  @TIMClient3::RequiredFacilities::RearPTO::svEngagementClockwise = 0;
+  @TIMClient3::RequiredFacilities::RearPTO::svSpeedCounterClockwise = 0;
+  @TIMClient3::RequiredFacilities::RearPTO::svSpeedClockwise = 0;
+  @TIMClient3::RequiredFacilities::FrontHitch::svMotion = 0;
+  @TIMClient3::RequiredFacilities::FrontHitch::svPosition = 0;
+  @TIMClient3::RequiredFacilities::RearHitch::svMotion = 0;
+  @TIMClient3::RequiredFacilities::RearHitch::svPosition = 0;
+  @TIMClient3::RequiredFacilities::VehicleSpeed::svForwardDirection = 0;
+  @TIMClient3::RequiredFacilities::VehicleSpeed::svReverseDirection = 0;
+  @TIMClient3::RequiredFacilities::VehicleSpeed::svStopMotion = 0;
+  @TIMClient3::RequiredFacilities::VehicleSpeed::svStartMotion = 0;
+  @TIMClient3::RequiredFacilities::VehicleSpeed::svForwardSpeed = 0;
+  @TIMClient3::RequiredFacilities::VehicleSpeed::svReverseSpeed = 0;
+  @TIMClient3::RequiredFacilities::VehicleSpeed::svChangeOfDirection = 0;
+  @TIMClient3::RequiredFacilities::ExtGuidance::svCurvature = 0;
+}
+
+on sysvar sysvar::TIMClient3::svResetAllAuxValveRequiredFacilities
+{
+  SetAllAuxValveFacilities(0);
+}
+
+on sysvar sysvar::TIMClient3::svTIMClientState
+{  
+  byte valveNumber;
+
+  if(@this == 54) // Client state switches to AuthenticationSucceeded
+  {
+    if(@TIMClient3::svRequestAllFunctionsAutomatically == 1)
+    {
+      //assign all enabled facilities
+      for (valveNumber = 1; valveNumber<=32; ++valveNumber)
+      {
+        AssignFunctionIfRequired(valveNumber, sRequiredAuxValve[valveNumber]);
+      }
+      AssignFunctionIfRequired(cFrontPTO, sRequiredFrontPTO);
+      AssignFunctionIfRequired(cRearPTO, sRequiredRearPTO);
+      AssignFunctionIfRequired(cFrontHitch, sRequiredFrontHitch);
+      AssignFunctionIfRequired(cRearHitch, sRequiredRearHitch);
+      AssignFunctionIfRequired(cVehicleSpeed, sRequiredVehicleSpeed);
+      AssignFunctionIfRequired(cExternalGuidance, sRequiredExtGuidance);
+      
+      //Now enable it
+      if(@TIMClient3::svIdentifyTIMServerByAddress == 0)
+        Iso11783IL_TIMOperatorEnable(TIMServer);
+      else
+        Iso11783IL_TIMOperatorEnable(@TIMClient3::svAddressOfTIMServer);
+    }
+  }
+}
+
+on sysvar sysvar::TIMClient3::svOpenAuxValvesPanel
+{
+  if (@this == 0)
+  {
+    openPanel("TIM Client 3 Auxiliary Valves");
+  }
+}
+
+
+///////////////////////////////////////////////////////////
+// Functions
+///////////////////////////////////////////////////////////
+
+void SetAllAuxValveFacilities(byte enable)
+{
+  byte valveNumber;
+  char valveNamespace[100];
+  for (valveNumber = 1; valveNumber<=32; ++valveNumber)
+  {
+    snprintf(valveNamespace, elcount(valveNamespace), "TIMClient3::RequiredFacilities::AuxValve%02d", valveNumber);
+    if (sysSetVariableDWord(valveNamespace, "svState", enable) != 0)
+    {
+      writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set state value of %s", valveNamespace);
+    }      
+    if (sysSetVariableDWord(valveNamespace, "svFlow", enable) != 0)
+    {
+      writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set flow value of %s", valveNamespace);
+    }     
+  } 
+}
+
+void AssignFunctionIfRequired(int functionId, int required)
+{
+  if(required)
+  {
+    AssignFunction(functionId);
+  }
+}
+
+void AssignFunction(int function)
+{
+  if(@TIMClient3::svIdentifyTIMServerByAddress == 0)
+  {
+    Iso11783IL_TIMAssignFunction(function, TIMServer);
+  }
+  else
+  {
+    Iso11783IL_TIMAssignFunction(function, @TIMClient3::svAddressOfTIMServer);
+  }
+}
+
+void StartClient()
+{
+  dword fileHandle;
+
+  Plugin_StartClient();
+  
+  sNumOfReqForTestlabCertToIgnore        = @TIMClient3::svNumOfIgnRqstForTestlab;
+  sNumOfReqForManufactCertToIgnore       = @TIMClient3::svNumOfIgnRqstForManufact;  
+  sNumOfReqForManufactSeriesCertToIgnore = @TIMClient3::svNumOfIgnRqstForManufactSeries;  
+  sNumOfReqForDeviceCertToIgnore         = @TIMClient3::svNumOfIgnRqstForDevice;  
+
+  DefaultPreparationSequence_Client();
+  
+  if(@TIMClient3::svIdentifyTIMServerByAddress == 0)
+    Iso11783IL_TIMConnectSysVarToState(TIMServer, "TIMClient3::svTIMClientState");
+  else
+    Iso11783IL_TIMConnectSysVarToState(@TIMClient3::svAddressOfTIMServer, "TIMClient3::svTIMClientState");
+  
+  // load LwA key table if file exists
+  fileHandle = openFileRead(sLwATableFile, 0);
+  if (fileHandle)
+  {
+    fileClose(fileHandle);
+    Iso11783IL_TIMLoadLwATable(sLwATableFile);
+  }
+  
+  if(@sysvar::TIMClient3::svTIMClientFreezeState > 0)
+  {
+    if(@TIMClient3::svIdentifyTIMServerByAddress == 0)
+      Iso11783IL_TIMFreezeConnection(TIMServer, @sysvar::TIMClient3::svTIMClientFreezeState);
+    else
+      Iso11783IL_TIMFreezeConnection(@TIMClient3::svAddressOfTIMServer, @sysvar::TIMClient3::svTIMClientFreezeState);
+  }
+  
+  if(@TIMClient3::svIdentifyTIMServerByAddress == 0)
+    Iso11783IL_TIMConnectToServer(TIMServer);
+  else
+    Iso11783IL_TIMConnectToServer(@TIMClient3::svAddressOfTIMServer);
+}
+
+void ReconnectClientToServer()
+{ 
+  SetRequiredFunctionFacilities();
+  ReflectRequiredFacilitiesByColor();
+  ControlReleased_ResetAll();
+  
+  if(@TIMClient3::svIdentifyTIMServerByAddress == 0)
+  {
+    Iso11783IL_TIMConnectToServer(TIMServer);
+  }
+  else
+  {
+    Iso11783IL_TIMConnectToServer(@TIMClient3::svAddressOfTIMServer);
+  }
+}
+
+void StopClient()
+{
+  if(@TIMClient3::svIdentifyTIMServerByAddress == 0)
+  {
+    Iso11783IL_TIMDisconnectFromServer(TIMServer, 1);
+  }
+  else
+  {
+    Iso11783IL_TIMDisconnectFromServer(@TIMClient3::svAddressOfTIMServer, 1);
+  }
+  ReflectRequiredFacilitiesByColor_Reset();
+
+ Plugin_StopClient();
+}
+
+void DefaultPreparationSequence_Client()
+{
+  char buf[100], version[100];
+  long value, implementedVersion;
+  
+  UpdateDeactivatedCertificateChecks();
+
+  Iso11783IL_TIMSetProperty("useRequestCounter", @sysvar::TIMClient3::svUseRequestCounter);
+
+  value = sysGetVariableInt(sysvar::TIMClient3::svMinimumVersion);
+  Iso11783IL_TIMSetProperty("minimumVersion", value);
+  implementedVersion = sysGetVariableInt(sysvar::TIMClient3::svImplementedVersion);
+  Iso11783IL_TIMSetProperty("implementedVersion", implementedVersion);
+  if (implementedVersion <= 1)
+  {
+    if (@TIMClient3::RequiredFacilities::VehicleSpeed::svChangeOfDirection == 1)
+    {
+      writeLineEx(cWriteTargetCaplPage, cWriteSeverityInformation, "TIM Client 3: Because implemented version is <= 1, the facility 'Vehicle change of direction' is disabled");
+      @TIMClient3::RequiredFacilities::VehicleSpeed::svChangeOfDirection = 0;
+    }
+  }
+  //Set product identification
+  sysGetVariableString(sysvar::TIMClient3::svProductIdentification, buf, elcount(buf));
+  Iso11783IL_TIMSetProductIdentification(buf);
+
+  //Set compliance information
+  Iso11783IL_TIMSetComplianceCertification( @TIMClient3::svCCITestProtocolPublicationYear, 
+                                            @TIMClient3::svCCITestProtocolRevision, 
+                                            @TIMClient3::svCCILaboratoryType, 
+                                            @TIMClient3::svCCILaboratoryID, 
+                                            @TIMClient3::svCCIReferenceNumber);
+  
+  // Set sequence of requested certficates
+  if (Iso11783IL_TIMSetCertificateSequence( @TIMClient3::svCertificateType1, 
+                                            @TIMClient3::svCertificateType2, 
+                                            @TIMClient3::svCertificateType3, 
+                                            @TIMClient3::svCertificateType4) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set certificate sequence");
+  }
+  
+  //Set required functions
+  CheckRequiredFunctions();
+  SetRequiredFunctionFacilities();
+  ReflectRequiredFacilitiesByColor();
+  ControlReleased_ResetAll();
+  
+  // Define which functions have to be assigned to which server
+  Iso11783IL_TIMUnAssignFunction(-1);
+   
+  // Set root certificates
+  sysGetVariableString(sysvar::TIMClient3::svRootCertificate, buf, elcount(buf));
+  Iso11783IL_TIMAddCertificate(cCertificateType_AEFRoot, buf);     
+  
+  // Set test lab certifiates 
+  sysGetVariableString(sysvar::TIMClient3::svAEFTestlabCertificate, buf, elcount(buf));
+  Iso11783IL_TIMAddCertificate(cCertificateType_Testlab, buf); 
+  
+  // Set manufacturer certificate
+  sysGetVariableString(sysvar::TIMClient3::svManufacturerCertificate, buf, elcount(buf));
+  Iso11783IL_TIMAddCertificate(cCertificateType_Manufacturer, buf);
+  
+  // Set manufacturer series certificate (if there is one)
+  if (strncmp(buf, "-", elcount(buf)) == 0)
+  {
+    Iso11783IL_TIMRemoveCertificate(cCertificateType_ManufacturerSeries);
+  }
+  else if (strlen(buf) > 0)
+  {
+    sysGetVariableString(sysvar::TIMClient3::svManufacturerSeriesCertificate, buf, elcount(buf));
+    Iso11783IL_TIMAddCertificate(cCertificateType_ManufacturerSeries, buf);
+  }
+  
+  // Set device certificate
+  sysGetVariableString(sysvar::TIMClient3::svDeviceCertificate, buf, elcount(buf));
+  Iso11783IL_TIMAddCertificate(cCertificateType_Device, buf);
+  
+  // Set server private key
+  sysGetVariableString(sysvar::TIMClient3::svPrivateKey, buf, elcount(buf));
+  Iso11783IL_TIMSetPrivateKey(buf);
+  
+  // Set CRL Signing
+  sysGetVariableString(sysvar::TIMClient3::svCRLSigningCertificate, buf, elcount(buf));
+  Iso11783IL_TIMAddCertificate(cCertificateType_CRLSigning, buf);   
+  
+  // Set CRL
+  sysGetVariableString(sysvar::TIMClient3::svCRLCertificate, buf, elcount(buf));
+  Iso11783IL_TIMSetCRL(cCRLType_CRL, buf);                             
+
+  // Set CRL Sub CA
+  sysGetVariableString(sysvar::TIMClient3::svCRLSubCACertificate, buf, elcount(buf));
+  Iso11783IL_TIMSetCRL(cCRLType_CRLSignCA, buf);                
+
+  // connect system variable to function states
+  ConnectSystemVariablesToAllAuxValveStates();
+  Iso11783IL_TIMConnectSysVarToFunctionState(cFrontPTO, "TIMClient3::Functions::FrontPTO::svState");
+  Iso11783IL_TIMConnectSysVarToFunctionState(cRearPTO, "TIMClient3::Functions::RearPTO::svState");
+  Iso11783IL_TIMConnectSysVarToFunctionState(cFrontHitch, "TIMClient3::Functions::FrontHitch::svState");
+  Iso11783IL_TIMConnectSysVarToFunctionState(cRearHitch, "TIMClient3::Functions::RearHitch::svState");
+  Iso11783IL_TIMConnectSysVarToFunctionState(cVehicleSpeed, "TIMClient3::Functions::VehicleSpeed::svState");
+  Iso11783IL_TIMConnectSysVarToFunctionState(cExternalGuidance, "TIMClient3::Functions::ExtGuidance::svState");
+}
+
+void ConnectSystemVariablesToAllAuxValveStates()
+{
+  byte valveNumber;
+  char valveStateWithNamespace[100];
+  
+  for (valveNumber = 1; valveNumber<=32; ++valveNumber)
+  {
+    snprintf(valveStateWithNamespace, elcount(valveStateWithNamespace), "TIMClient3::Functions::AuxValve%02d::svState", valveNumber);
+    Iso11783IL_TIMConnectSysVarToFunctionState(valveNumber, valveStateWithNamespace);
+  }
+}
+
+void ControlReleased_ResetAll()
+{
+  byte valveNumber;
+  char valveNamespace[100];
+  for (valveNumber = 1; valveNumber<=32; ++valveNumber)
+  {
+    snprintf(valveNamespace, elcount(valveNamespace), "TIMClient3::Functions::AuxValve%02d", valveNumber);
+    if (sysSetVariableDWord(valveNamespace, "svReleaseControl", 0) != 0)
+    {
+      writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Server: Failed to set release control value of %s", valveNamespace);
+    }
+  } 
+  
+  @TIMClient3::Functions::FrontPTO::svReleaseControl = 0;
+  @TIMClient3::Functions::RearPTO::svReleaseControl = 0;
+
+  @TIMClient3::Functions::FrontHitch::svReleaseControl = 0;
+  @TIMClient3::Functions::RearHitch::svReleaseControl = 0;
+  
+  @TIMClient3::Functions::VehicleSpeed::svReleaseControl = 0;
+  
+  @TIMClient3::Functions::ExtGuidance::svReleaseControl = 0;
+}
+
+void CheckRequiredFunctions()
+{
+  byte valveNumber;
+  char valveNamespace[100], facilityStateName[30], facilityFlowName[30];
+  dword stateValue, flowValue;
+
+  for (valveNumber = 1; valveNumber<=32; ++valveNumber)
+  {
+    snprintf(valveNamespace, elcount(valveNamespace), "TIMClient3::RequiredFacilities::AuxValve%02d", valveNumber); 
+    stateValue = sysGetVariableDWord(valveNamespace, "svState");
+    flowValue  = sysGetVariableDWord(valveNamespace, "svFlow");
+    sRequiredAuxValve[valveNumber] = stateValue | flowValue;
+  }
+  
+  sRequiredFrontPTO = ( @TIMClient3::RequiredFacilities::FrontPTO::svDisengagement ||
+                        @TIMClient3::RequiredFacilities::FrontPTO::svEngagementCounterClockwise ||
+                        @TIMClient3::RequiredFacilities::FrontPTO::svEngagementClockwise ||
+                        @TIMClient3::RequiredFacilities::FrontPTO::svSpeedCounterClockwise ||
+                        @TIMClient3::RequiredFacilities::FrontPTO::svSpeedClockwise);
+  
+  sRequiredRearPTO = (  @TIMClient3::RequiredFacilities::RearPTO::svDisengagement ||
+                        @TIMClient3::RequiredFacilities::RearPTO::svEngagementCounterClockwise ||
+                        @TIMClient3::RequiredFacilities::RearPTO::svEngagementClockwise ||
+                        @TIMClient3::RequiredFacilities::RearPTO::svSpeedCounterClockwise ||
+                        @TIMClient3::RequiredFacilities::RearPTO::svSpeedClockwise);
+  
+  sRequiredFrontHitch = ( @TIMClient3::RequiredFacilities::FrontHitch::svMotion ||
+                          @TIMClient3::RequiredFacilities::FrontHitch::svPosition);
+  
+  sRequiredRearHitch = (@TIMClient3::RequiredFacilities::RearHitch::svMotion ||
+                        @TIMClient3::RequiredFacilities::RearHitch::svPosition);
+  
+  sRequiredVehicleSpeed = ( @TIMClient3::RequiredFacilities::VehicleSpeed::svForwardSpeed ||
+                            @TIMClient3::RequiredFacilities::VehicleSpeed::svReverseSpeed ||
+                            @TIMClient3::RequiredFacilities::VehicleSpeed::svStartMotion ||
+                            @TIMClient3::RequiredFacilities::VehicleSpeed::svStopMotion ||
+                            @TIMClient3::RequiredFacilities::VehicleSpeed::svForwardDirection ||
+                            @TIMClient3::RequiredFacilities::VehicleSpeed::svReverseDirection);
+  
+  sRequiredExtGuidance = @TIMClient3::RequiredFacilities::ExtGuidance::svCurvature;
+}
+
+void SetRequiredFunctionFacilities()
+{
+  //Set required functions
+  
+  Iso11783IL_TIMResetAllRequiredFunctions();
+  
+  SetRequiredAuxValvuesFacilities();
+  
+  // Front PTO
+  if( sRequiredFrontPTO)
+  {
+    Iso11783IL_TIMSetRequiredFacility("frontPTODisengagement",             @TIMClient3::RequiredFacilities::FrontPTO::svDisengagement);
+    Iso11783IL_TIMSetRequiredFacility("frontPTOEngagementCounterClockwise",@TIMClient3::RequiredFacilities::FrontPTO::svEngagementCounterClockwise);
+    Iso11783IL_TIMSetRequiredFacility("frontPTOEngagementClockwise",       @TIMClient3::RequiredFacilities::FrontPTO::svEngagementClockwise);
+    Iso11783IL_TIMSetRequiredFacility("frontPTOSpeedCounterClockwise",     @TIMClient3::RequiredFacilities::FrontPTO::svSpeedCounterClockwise);
+    Iso11783IL_TIMSetRequiredFacility("frontPTOSpeedClockwise",            @TIMClient3::RequiredFacilities::FrontPTO::svSpeedClockwise);
+  }
+
+  // Rear PTO
+  if(sRequiredRearPTO)
+  {
+    Iso11783IL_TIMSetRequiredFacility("rearPTODisengagement",             @TIMClient3::RequiredFacilities::RearPTO::svDisengagement);
+    Iso11783IL_TIMSetRequiredFacility("rearPTOEngagementCounterClockwise",@TIMClient3::RequiredFacilities::RearPTO::svEngagementCounterClockwise);
+    Iso11783IL_TIMSetRequiredFacility("rearPTOEngagementClockwise",       @TIMClient3::RequiredFacilities::RearPTO::svEngagementClockwise);
+    Iso11783IL_TIMSetRequiredFacility("rearPTOSpeedCounterClockwise",     @TIMClient3::RequiredFacilities::RearPTO::svSpeedCounterClockwise);
+    Iso11783IL_TIMSetRequiredFacility("rearPTOSpeedClockwise",            @TIMClient3::RequiredFacilities::RearPTO::svSpeedClockwise);
+  }
+  
+  // Front Hitch
+  if(sRequiredFrontHitch)
+  {
+    Iso11783IL_TIMSetRequiredFacility("frontHitchMotion",             @TIMClient3::RequiredFacilities::FrontHitch::svMotion);
+    Iso11783IL_TIMSetRequiredFacility("frontHitchPosition",           @TIMClient3::RequiredFacilities::FrontHitch::svPosition);
+  }
+
+  // Rear Hitch
+  if( sRequiredRearHitch)
+  {
+    Iso11783IL_TIMSetRequiredFacility("rearHitchMotion",             @TIMClient3::RequiredFacilities::RearHitch::svMotion);
+    Iso11783IL_TIMSetRequiredFacility("rearHitchPosition",           @TIMClient3::RequiredFacilities::RearHitch::svPosition);
+  }
+  
+  // Vehicle Speed
+  if( sRequiredVehicleSpeed)
+  {  
+    Iso11783IL_TIMSetRequiredFacility("vehicleSpeedForward",            @TIMClient3::RequiredFacilities::VehicleSpeed::svForwardSpeed);
+    Iso11783IL_TIMSetRequiredFacility("vehicleSpeedReverse",            @TIMClient3::RequiredFacilities::VehicleSpeed::svReverseSpeed);
+    Iso11783IL_TIMSetRequiredFacility("vehicleSpeedStartMotion",        @TIMClient3::RequiredFacilities::VehicleSpeed::svStartMotion);
+    Iso11783IL_TIMSetRequiredFacility("vehicleSpeedStopMotion",         @TIMClient3::RequiredFacilities::VehicleSpeed::svStopMotion);
+    Iso11783IL_TIMSetRequiredFacility("vehicleSpeedForwardDirection",   @TIMClient3::RequiredFacilities::VehicleSpeed::svForwardDirection);
+    Iso11783IL_TIMSetRequiredFacility("vehicleSpeedReverseDirection",   @TIMClient3::RequiredFacilities::VehicleSpeed::svReverseDirection);
+    if (@TIMClient3::RequiredFacilities::VehicleSpeed::svChangeOfDirection)
+    {
+      Iso11783IL_TIMSetRequiredFacility("vehicleSpeedChangeOfDirection", 1); // call only succeeds if implemented version is > 1  
+    }
+  }
+  
+  //External Guidance
+  if(sRequiredExtGuidance)
+  {
+    Iso11783IL_TIMSetRequiredFacility("externalGuidanceCurvature",   @TIMClient3::RequiredFacilities::ExtGuidance::svCurvature);
+  }
+}
+
+void SetRequiredAuxValvuesFacilities()
+{
+  byte valveNumber;
+  char valveNamespace[100], facilityStateName[30], facilityFlowName[30];
+  dword stateValue, flowValue;
+  long result;
+  
+  for (valveNumber = 1; valveNumber<=32; ++valveNumber)
+  {
+    snprintf(valveNamespace, elcount(valveNamespace), "TIMClient3::RequiredFacilities::AuxValve%02d", valveNumber);
+    snprintf(facilityStateName, elcount(facilityStateName), "auxiliaryValve%dState", valveNumber);
+    snprintf(facilityFlowName, elcount(facilityFlowName), "auxiliaryValve%dFlow", valveNumber);
+    
+    // get system variable values
+    if (sysGetVariableDWord(valveNamespace, "svState", stateValue) != 0)
+    {
+      writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to get state value of %s", valveNamespace);
+    }      
+    if (sysGetVariableDWord(valveNamespace, "svFlow", flowValue) != 0)
+    {
+      writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to get flow value of %s", valveNamespace);
+    }
+    
+    // set supported TIM server facilities
+    if (stateValue || flowValue)
+    {
+      if (Iso11783IL_TIMSetRequiredFacility(facilityStateName, stateValue) != 0)
+      {
+        writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set required state facility of valve %d", valveNumber);
+      }
+      if (Iso11783IL_TIMSetRequiredFacility(facilityFlowName,  flowValue) != 0)
+      {
+        writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set supported valve facility of valve %d", valveNumber);
+      }
+    }
+  }
+}
+
+void ReflectRequiredFacilitiesByColor_Reset()
+{
+  byte valveNumber;
+  char buffer[100];
+
+  // Auxiliary Values ----------------------------------------------------------
+  for (valveNumber = 1; valveNumber<=32; ++valveNumber)
+  {
+    if( sRequiredAuxValve[valveNumber])
+    {
+      snprintf(buffer, elcount(buffer), "btnAuxValve%d_Assign", valveNumber); 
+      ResetTextColor(sPanelNameClient, sPanelNameAuxValves, buffer);
+      snprintf(buffer, elcount(buffer), "btnAuxValve%d_Unassign", valveNumber); 
+      ResetTextColor(sPanelNameClient, sPanelNameAuxValves, buffer);
+      snprintf(buffer, elcount(buffer), "textAuxValve%d_ControlReleased", valveNumber); 
+      ResetTextColor(sPanelNameClient, sPanelNameAuxValves, buffer);
+    }
+    // State
+    snprintf(buffer, elcount(buffer), "btnAuxValve%d_FOE", valveNumber); 
+    ResetTextColor(sPanelNameClient, sPanelNameAuxValves, buffer);
+    snprintf(buffer, elcount(buffer), "btnAuxValve%d_Block", valveNumber); 
+    ResetTextColor(sPanelNameClient, sPanelNameAuxValves, buffer);
+    snprintf(buffer, elcount(buffer), "btnAuxValve%d_FOR", valveNumber); 
+    ResetTextColor(sPanelNameClient, sPanelNameAuxValves, buffer);
+    snprintf(buffer, elcount(buffer), "btnAuxValve%d_Float", valveNumber); 
+    ResetTextColor(sPanelNameClient, sPanelNameAuxValves, buffer);
+    // Flow
+    snprintf(buffer, elcount(buffer), "textAuxValve%dFlow", valveNumber); 
+    ResetTextColor(sPanelNameClient, sPanelNameAuxValves, buffer);
+  }
+  
+  // Front PTO -----------------------------------------------------------------
+  if( sRequiredFrontPTO)
+  {
+    ResetTextColor(sPanelNameClient, "btnFrontPTO_Assign");
+    ResetTextColor(sPanelNameClient, "btnFrontPTO_Unassign");
+    ResetTextColor(sPanelNameClient, "textFrontPTO_ControlReleased");
+  }
+  //FrontPTO Disengagement 
+  ResetTextColor(sPanelNameClient, "btnFrontPTO_Disengagement");
+  //FrontPTO Engagement CCW
+  ResetTextColor(sPanelNameClient, "btnFrontPTO_EngagementCCW");
+  //FrontPTO Engagement 
+  ResetTextColor(sPanelNameClient, "btnFrontPTO_Engagement");
+  //FrontPTO Speed CCW
+  ResetTextColor(sPanelNameClient, "textFrontPTO_SpeedCCW");
+  //FrontPTO Speed
+  ResetTextColor(sPanelNameClient, "textFrontPTO_Speed");
+ 
+  // Rear PTO -------------------------------------------------------------------
+  if( sRequiredRearPTO)
+  {
+    ResetTextColor(sPanelNameClient, "btnRearPTO_Assign");
+    ResetTextColor(sPanelNameClient, "btnRearPTO_Unassign");
+    ResetTextColor(sPanelNameClient, "textRearPTO_ControlReleased");
+  }
+  //RearPTO Disengagement 
+  ResetTextColor(sPanelNameClient, "btnRearPTO_Disengagement");
+  //RearPTO Engagement CCW
+  ResetTextColor(sPanelNameClient, "btnRearPTO_EngagementCCW");
+  //RearPTO Engagement 
+  ResetTextColor(sPanelNameClient, "btnRearPTO_Engagement");
+  //RearPTO Speed CCW
+  ResetTextColor(sPanelNameClient, "textRearPTO_SpeedCCW");
+  //RearPTO Speed
+  ResetTextColor(sPanelNameClient, "textRearPTO_Speed");
+ 
+  // Front Hitch --------------------------------------------------------------
+  if( sRequiredFrontHitch)
+  {
+    ResetTextColor(sPanelNameClient, "btnFrontHitch_Assign");
+    ResetTextColor(sPanelNameClient, "btnFrontHitch_Unassign");
+    ResetTextColor(sPanelNameClient, "textFrontHitch_ControlReleased");
+  }
+  //FrontHitch Motion 
+  ResetTextColor(sPanelNameClient, "btnFrontHitch_LowerUntilStop");
+  ResetTextColor(sPanelNameClient, "btnFrontHitch_RaiseUntilStop");
+  ResetTextColor(sPanelNameClient, "btnFrontHitch_Float");
+  ResetTextColor(sPanelNameClient, "btnFrontHitch_Stop");
+  //FrontHitch Position 
+  ResetTextColor(sPanelNameClient, "textFrontHitch_Position");
+ 
+  // Rear Hitch ----------------------------------------------------------------
+  if( sRequiredRearHitch)
+  {
+    ResetTextColor(sPanelNameClient, "btnRearHitch_Assign");
+    ResetTextColor(sPanelNameClient, "btnRearHitch_Unassign");
+    ResetTextColor(sPanelNameClient, "textRearHitch_ControlReleased");
+  }
+  //RearHitch Motion 
+  ResetTextColor(sPanelNameClient, "btnRearHitch_LowerUntilStop");
+  ResetTextColor(sPanelNameClient, "btnRearHitch_RaiseUntilStop");
+  ResetTextColor(sPanelNameClient, "btnRearHitch_Float");
+  ResetTextColor(sPanelNameClient, "btnRearHitch_Stop");
+  //RearHitch Position 
+  ResetTextColor(sPanelNameClient, "textRearHitch_Position");
+  
+  // Vehicle Speed -------------------------------------------------------------
+  if( sRequiredVehicleSpeed)
+  {  
+    ResetTextColor(sPanelNameClient, "btnVehicleSpeed_Assign");
+    ResetTextColor(sPanelNameClient, "btnVehicleSpeed_Unassign");
+    ResetTextColor(sPanelNameClient, "textVehicleSpeed_ControlReleased");
+    ResetTextColor(sPanelNameClient, "btnVehicleSpeed_ReleaseWithoutAwareness");
+  }
+  //VehicleSpeed Forward Speed set by TIM Server
+  ResetTextColor(sPanelNameClient, "btnVehicleSpeed_ForwardByServer");
+  //VehicleSpeed Reverse Speed set by TIM Server
+  ResetTextColor(sPanelNameClient, "btnVehicleSpeed_ReverseByServer");
+  //VehicleSpeed Reverse Stop
+  ResetTextColor(sPanelNameClient, "btnVehicleSpeed_Stop");
+  //VehicleSpeed Reverse Start
+  ResetTextColor(sPanelNameClient, "btnVehicleSpeed_Start");
+  //VehicleSpeed Forward Speed
+  ResetTextColor(sPanelNameClient, "textVehicleSpeed_Forward");
+  //VehicleSpeed Reverse Speed
+  ResetTextColor(sPanelNameClient, "textVehicleSpeed_Reverse");
+
+  //External Guidance---------------------------------------------------
+  if(sRequiredExtGuidance)
+  {
+    ResetTextColor(sPanelNameClient, "btnExtGuidance_Assign");
+    ResetTextColor(sPanelNameClient, "btnExtGuidance_Unassign");
+    ResetTextColor(sPanelNameClient, "textExtGuidance_ControlReleased");
+  }
+  //External Guidance Curvature
+  ResetTextColor(sPanelNameClient, "textExtGuidance_Curvature");
+}
+
+void ReflectRequiredFacilitiesByColor()
+{
+  byte valveNumber;
+  char valveNamespace[100], facilityStateName[30], facilityFlowName[30], buffer[100];
+  dword stateValue, flowValue;
+
+  // Auxiliary Values --------------------------------------------
+  for (valveNumber = 1; valveNumber<=32; ++valveNumber)
+  {
+    snprintf(valveNamespace, elcount(valveNamespace), "TIMClient3::RequiredFacilities::AuxValve%02d", valveNumber); 
+    stateValue = sysGetVariableDWord(valveNamespace, "svState");
+    flowValue  = sysGetVariableDWord(valveNamespace, "svFlow");
+    
+    if (stateValue || flowValue)
+    {
+      snprintf(buffer, elcount(buffer), "btnAuxValve%d_Assign", valveNumber); 
+      UpdateTextColor2(sPanelNameClient, sPanelNameAuxValves, buffer, 1);
+      snprintf(buffer, elcount(buffer), "btnAuxValve%d_Unassign", valveNumber); 
+      UpdateTextColor2(sPanelNameClient, sPanelNameAuxValves, buffer, 1);
+      snprintf(buffer, elcount(buffer), "textAuxValve%d_ControlReleased", valveNumber); 
+      UpdateTextColor2(sPanelNameClient, sPanelNameAuxValves, buffer, 1);
+    }
+    // State
+    snprintf(buffer, elcount(buffer), "btnAuxValve%d_FOE", valveNumber); 
+    UpdateTextColor2(sPanelNameClient, sPanelNameAuxValves, buffer, stateValue);
+    snprintf(buffer, elcount(buffer), "btnAuxValve%d_Block", valveNumber); 
+    UpdateTextColor2(sPanelNameClient, sPanelNameAuxValves, buffer, stateValue);
+    snprintf(buffer, elcount(buffer), "btnAuxValve%d_FOR", valveNumber); 
+    UpdateTextColor2(sPanelNameClient, sPanelNameAuxValves, buffer, stateValue);
+    snprintf(buffer, elcount(buffer), "btnAuxValve%d_Float", valveNumber); 
+    UpdateTextColor2(sPanelNameClient, sPanelNameAuxValves, buffer, stateValue);
+    // Flow
+    snprintf(buffer, elcount(buffer), "textAuxValve%dFlow", valveNumber); 
+    UpdateTextColor2(sPanelNameClient, sPanelNameAuxValves, buffer, flowValue);
+  }
+    
+  // Front PTO -----------------------------------------------------------------
+  if( @TIMClient3::RequiredFacilities::FrontPTO::svDisengagement ||
+      @TIMClient3::RequiredFacilities::FrontPTO::svEngagementCounterClockwise ||
+      @TIMClient3::RequiredFacilities::FrontPTO::svEngagementClockwise ||
+      @TIMClient3::RequiredFacilities::FrontPTO::svSpeedCounterClockwise ||
+      @TIMClient3::RequiredFacilities::FrontPTO::svSpeedClockwise)
+  {
+    UpdateTextColor(sPanelNameClient, "btnFrontPTO_Assign", 1);
+    UpdateTextColor(sPanelNameClient, "btnFrontPTO_Unassign", 1);
+    UpdateTextColor(sPanelNameClient, "textFrontPTO_ControlReleased", 1);
+  }
+  //FrontPTO Disengagement 
+  UpdateTextColor(sPanelNameClient, "btnFrontPTO_Disengagement", @TIMClient3::RequiredFacilities::FrontPTO::svDisengagement );
+  //FrontPTO Engagement CCW
+  UpdateTextColor(sPanelNameClient, "btnFrontPTO_EngagementCCW", @TIMClient3::RequiredFacilities::FrontPTO::svEngagementCounterClockwise );
+  //FrontPTO Engagement 
+  UpdateTextColor(sPanelNameClient, "btnFrontPTO_Engagement", @TIMClient3::RequiredFacilities::FrontPTO::svEngagementClockwise );
+  //FrontPTO Speed CCW
+  UpdateTextColor(sPanelNameClient, "textFrontPTO_SpeedCCW", @TIMClient3::RequiredFacilities::FrontPTO::svSpeedCounterClockwise );
+  //FrontPTO Speed
+  UpdateTextColor(sPanelNameClient, "textFrontPTO_Speed", @TIMClient3::RequiredFacilities::FrontPTO::svSpeedClockwise );
+ 
+  // Rear PTO -------------------------------------------------------------------
+  if( @TIMClient3::RequiredFacilities::RearPTO::svDisengagement ||
+      @TIMClient3::RequiredFacilities::RearPTO::svEngagementCounterClockwise ||
+      @TIMClient3::RequiredFacilities::RearPTO::svEngagementClockwise ||
+      @TIMClient3::RequiredFacilities::RearPTO::svSpeedCounterClockwise ||
+      @TIMClient3::RequiredFacilities::RearPTO::svSpeedClockwise)
+  {
+    UpdateTextColor(sPanelNameClient, "btnRearPTO_Assign", 1);
+    UpdateTextColor(sPanelNameClient, "btnRearPTO_Unassign", 1);
+    UpdateTextColor(sPanelNameClient, "textRearPTO_ControlReleased", 1);
+  }
+  //RearPTO Disengagement 
+  UpdateTextColor(sPanelNameClient, "btnRearPTO_Disengagement", @TIMClient3::RequiredFacilities::RearPTO::svDisengagement );
+  //RearPTO Engagement CCW
+  UpdateTextColor(sPanelNameClient, "btnRearPTO_EngagementCCW", @TIMClient3::RequiredFacilities::RearPTO::svEngagementCounterClockwise );
+  //RearPTO Engagement 
+  UpdateTextColor(sPanelNameClient, "btnRearPTO_Engagement", @TIMClient3::RequiredFacilities::RearPTO::svEngagementClockwise );
+  //RearPTO Speed CCW
+  UpdateTextColor(sPanelNameClient, "textRearPTO_SpeedCCW", @TIMClient3::RequiredFacilities::RearPTO::svSpeedCounterClockwise );
+  //RearPTO Speed
+  UpdateTextColor(sPanelNameClient, "textRearPTO_Speed", @TIMClient3::RequiredFacilities::RearPTO::svSpeedClockwise );
+ 
+  // Front Hitch --------------------------------------------------------------
+  if( @TIMClient3::RequiredFacilities::FrontHitch::svMotion ||
+      @TIMClient3::RequiredFacilities::FrontHitch::svPosition)
+  {
+    UpdateTextColor(sPanelNameClient, "btnFrontHitch_Assign", 1);
+    UpdateTextColor(sPanelNameClient, "btnFrontHitch_Unassign", 1);
+    UpdateTextColor(sPanelNameClient, "textFrontHitch_ControlReleased", 1);
+  }
+  //FrontHitch Motion 
+  UpdateTextColor(sPanelNameClient, "btnFrontHitch_LowerUntilStop", @TIMClient3::RequiredFacilities::FrontHitch::svMotion );
+  UpdateTextColor(sPanelNameClient, "btnFrontHitch_RaiseUntilStop", @TIMClient3::RequiredFacilities::FrontHitch::svMotion );
+  UpdateTextColor(sPanelNameClient, "btnFrontHitch_Float", @TIMClient3::RequiredFacilities::FrontHitch::svMotion );
+  UpdateTextColor(sPanelNameClient, "btnFrontHitch_Stop", @TIMClient3::RequiredFacilities::FrontHitch::svMotion );
+  //FrontHitch Position 
+  UpdateTextColor(sPanelNameClient, "textFrontHitch_Position", @TIMClient3::RequiredFacilities::FrontHitch::svPosition );
+ 
+  // Rear Hitch ----------------------------------------------------------------
+  if( @TIMClient3::RequiredFacilities::RearHitch::svMotion ||
+      @TIMClient3::RequiredFacilities::RearHitch::svPosition)
+  {
+    UpdateTextColor(sPanelNameClient, "btnRearHitch_Assign", 1);
+    UpdateTextColor(sPanelNameClient, "btnRearHitch_Unassign", 1);
+    UpdateTextColor(sPanelNameClient, "textRearHitch_ControlReleased", 1);
+  }
+  //RearHitch Motion 
+  UpdateTextColor(sPanelNameClient, "btnRearHitch_LowerUntilStop", @TIMClient3::RequiredFacilities::RearHitch::svMotion );
+  UpdateTextColor(sPanelNameClient, "btnRearHitch_RaiseUntilStop", @TIMClient3::RequiredFacilities::RearHitch::svMotion );
+  UpdateTextColor(sPanelNameClient, "btnRearHitch_Float", @TIMClient3::RequiredFacilities::RearHitch::svMotion );
+  UpdateTextColor(sPanelNameClient, "btnRearHitch_Stop", @TIMClient3::RequiredFacilities::RearHitch::svMotion );
+  //RearHitch Position 
+  UpdateTextColor(sPanelNameClient, "textRearHitch_Position", @TIMClient3::RequiredFacilities::RearHitch::svPosition );
+  
+  // Vehicle Speed -------------------------------------------------------------
+  if( @TIMClient3::RequiredFacilities::VehicleSpeed::svForwardSpeed ||
+      @TIMClient3::RequiredFacilities::VehicleSpeed::svReverseSpeed ||
+    @TIMClient3::RequiredFacilities::VehicleSpeed::svStartMotion ||
+    @TIMClient3::RequiredFacilities::VehicleSpeed::svStopMotion ||
+    @TIMClient3::RequiredFacilities::VehicleSpeed::svForwardDirection ||
+    @TIMClient3::RequiredFacilities::VehicleSpeed::svReverseDirection)
+  {  
+    UpdateTextColor(sPanelNameClient, "btnVehicleSpeed_Assign", 1);
+    UpdateTextColor(sPanelNameClient, "btnVehicleSpeed_Unassign", 1);
+    UpdateTextColor(sPanelNameClient, "textVehicleSpeed_ControlReleased", 1);
+    UpdateTextColor(sPanelNameClient, "btnVehicleSpeed_ReleaseWithoutAwareness", 1);
+  }
+  //VehicleSpeed Forward Speed set by TIM Server
+  UpdateTextColor(sPanelNameClient, "btnVehicleSpeed_ForwardByServer", @TIMClient3::RequiredFacilities::VehicleSpeed::svForwardDirection );
+  //VehicleSpeed Reverse Speed set by TIM Server
+  UpdateTextColor(sPanelNameClient, "btnVehicleSpeed_ReverseByServer", @TIMClient3::RequiredFacilities::VehicleSpeed::svReverseDirection );
+  //VehicleSpeed Reverse Stop
+  UpdateTextColor(sPanelNameClient, "btnVehicleSpeed_Stop", @TIMClient3::RequiredFacilities::VehicleSpeed::svStopMotion );
+  //VehicleSpeed Reverse Start
+  UpdateTextColor(sPanelNameClient, "btnVehicleSpeed_Start", @TIMClient3::RequiredFacilities::VehicleSpeed::svStartMotion );
+  //VehicleSpeed Forward Speed
+  UpdateTextColor(sPanelNameClient, "textVehicleSpeed_Forward", @TIMClient3::RequiredFacilities::VehicleSpeed::svForwardSpeed );
+  //VehicleSpeed Reverse Speed
+  UpdateTextColor(sPanelNameClient, "textVehicleSpeed_Reverse", @TIMClient3::RequiredFacilities::VehicleSpeed::svReverseSpeed );
+
+  //External Guidance---------------------------------------------------
+  if(@TIMClient3::RequiredFacilities::ExtGuidance::svCurvature)
+  {
+    UpdateTextColor(sPanelNameClient, "btnExtGuidance_Assign", 1);
+    UpdateTextColor(sPanelNameClient, "btnExtGuidance_Unassign", 1);
+    UpdateTextColor(sPanelNameClient, "textExtGuidance_ControlReleased", 1);
+  }
+  //External Guidance Curvature
+  UpdateTextColor(sPanelNameClient, "textExtGuidance_Curvature", @TIMClient3::RequiredFacilities::ExtGuidance::svCurvature);
+}
+
+void UpdateDeactivatedCertificateChecks()
+{
+  long deactivatedChecks;
+  
+  deactivatedChecks = 0;
+  deactivatedChecks |= (@TIMClient3::svDisableICCCheck > 0)             ?  0x01 : 0;   
+  deactivatedChecks |= (@TIMClient3::svDisableNameCheck > 0)            ?  0x02 : 0;   
+  deactivatedChecks |= (@TIMClient3::svDisableFctCapibilitiesCheck > 0) ?  0x04 : 0;   
+  deactivatedChecks |= (@TIMClient3::svDisableCRLCheck > 0)             ?  0x08 : 0;   
+  deactivatedChecks |= (@TIMClient3::svDisableCertificateTypeCheck > 0) ?  0x10 : 0;   
+  
+  if (Iso11783IL_TIMSetProperty("deactivateCertificateValidation", deactivatedChecks) != 0)
+  {
+    writeLineEx(cWriteTargetCaplPage, cWriteSeverityError, "TIM Client 3: Failed to set deactivated certificate validations");
+  }
+}
+
+void Iso11783IL_TIMOnFunctionStateChanged(dword functionID, dword newState) 
+{
+  switch (newState)
+  {
+    case 4: // // Automation Pending
+      switch(functionID)
+      {
+        case cAuxValve01: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve01::svValue);  break;
+        case cAuxValve02: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve02::svValue);  break;
+        case cAuxValve03: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve03::svValue);  break;
+        case cAuxValve04: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve04::svValue);  break;
+        case cAuxValve05: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve05::svValue);  break;
+        case cAuxValve06: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve06::svValue);  break;
+        case cAuxValve07: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve07::svValue);  break;
+        case cAuxValve08: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve08::svValue);  break;
+        case cAuxValve09: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve09::svValue);  break;
+        case cAuxValve10: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve10::svValue);  break;
+        case cAuxValve11: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve11::svValue);  break;
+        case cAuxValve12: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve12::svValue);  break;
+        case cAuxValve13: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve13::svValue);  break;
+        case cAuxValve14: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve14::svValue);  break;
+        case cAuxValve15: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve15::svValue);  break;
+        case cAuxValve16: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve16::svValue);  break;
+        case cAuxValve17: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve17::svValue);  break;
+        case cAuxValve18: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve18::svValue);  break;
+        case cAuxValve19: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve19::svValue);  break;
+        case cAuxValve20: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve20::svValue);  break;
+        case cAuxValve21: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve21::svValue);  break;
+        case cAuxValve22: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve22::svValue);  break;
+        case cAuxValve23: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve23::svValue);  break;
+        case cAuxValve24: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve24::svValue);  break;
+        case cAuxValve25: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve25::svValue);  break;
+        case cAuxValve26: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve26::svValue);  break;
+        case cAuxValve27: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve27::svValue);  break;
+        case cAuxValve28: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve28::svValue);  break;
+        case cAuxValve29: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve29::svValue);  break;
+        case cAuxValve30: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve30::svValue);  break;
+        case cAuxValve31: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve31::svValue);  break;
+        case cAuxValve32: SetCurrentAuxValveFlow(functionID, @sysvar::TIMClient3::Functions::AuxValve32::svValue);  break;
+        case cFrontPTO:
+          SetPTOSpeed(functionID, @sysvar::TIMClient3::Functions::FrontPTO::svSpeed);
+          break;
+        case cRearPTO:
+          SetPTOSpeed(functionID, @sysvar::TIMClient3::Functions::RearPTO::svSpeed);
+          break;
+        case cFrontHitch:
+          SetHitchPosition(functionID, @sysvar::TIMClient3::Functions::FrontHitch::svPosition);
+          break;
+        case cRearHitch:
+          SetHitchPosition(functionID, @sysvar::TIMClient3::Functions::RearHitch::svPosition);
+          break;
+        case cVehicleSpeed:
+          SetVehicleSpeed(@sysvar::TIMClient3::Functions::VehicleSpeed::svValue);
+          break;
+        case cExternalGuidance:
+          SetExtGuidanceCurvature(@sysvar::TIMClient3::Functions::ExtGuidance::svCurvature);
+          break;
+        default:
+          break;
+      }
+    default:
+      break;
+  }
+}
+
+long Iso11783IL_OnTxPrepare( pg * txPG )
+{ 
+  switch( txPG.PGN ) {
+  case TIM21.pgn:
+    switch (txPG.byte(0))
+    {
+      case TIMClientStatus_Msg:
+        if (sysGetVariableInt(sysvar::TIMClient3::svFreezeClientHeartbeatCounter) > 0)
+        {
+          // if error injection is active we always send the same heartbeat counter
+          if (sFreezedHearbeatCounter < 0)
+          {
+            sFreezedHearbeatCounter =  txPG.byte(1);
+          }
+          txPG.byte(1) = sFreezedHearbeatCounter;
+        }
+        else
+        {
+          // if error injection is deactivated we reset the heartbeat variable  
+          sFreezedHearbeatCounter = -1;
+        }
+        break;
+      default:
+        break;
+    }
+    
+    break;
+  default:
+    break;
+  }
+    
+  return 1; // send message
+}
+
+long Iso11783IL_OnRxMessage(pg * rxPG)
+{
+  if((rxPG.pgn == AUTH12.pgn) && (rxPG.byte(0) == 3)) // Client Certificate Request
+  {
+    switch(rxPG.Byte(4))
+    {
+      case 1: // testlab
+      {
+        if(sNumOfReqForTestlabCertToIgnore > 0)
+        {
+          sNumOfReqForTestlabCertToIgnore--;
+          return 0;
+        }
+        else
+        {
+          return 1;
+        }
+      }
+      break;
+
+      case 2: // Manufacturer
+      {
+        if(sNumOfReqForManufactCertToIgnore > 0)
+        {
+          sNumOfReqForManufactCertToIgnore--;
+          return 0;
+        }
+        else
+        {
+          return 1;
+        }
+      }
+      break;
+      
+      case 3: // Manufacturer Series
+      {
+        if(sNumOfReqForManufactSeriesCertToIgnore > 0)
+        {
+          sNumOfReqForManufactSeriesCertToIgnore--;
+          return 0;
+        }
+        else
+        {
+          return 1;
+        }
+      }
+      break;
+      
+      case 4: // Device
+      {
+        if(sNumOfReqForDeviceCertToIgnore > 0)
+        {
+          sNumOfReqForDeviceCertToIgnore--;
+          return 0;
+        }
+        else
+        {
+          return 1;
+        }
+      }
+      break;
+    }
+  }
+   
+  return Plugin_OnRxMessage(rxPG);
+}

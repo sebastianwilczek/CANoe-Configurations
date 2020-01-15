@@ -1,0 +1,230 @@
+/*@!Encoding:1252*/
+/*
+ * Navigation node (GPS)                                Version 1.2
+ *
+ * Copyright 2002-2005, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.2 (Jr) Changed gDbgLevel from kDbgInfo to kDbgWarning
+ * 1.0 (Jr) Created 
+ */
+variables
+{
+  // some constants
+  const BYTE kNullAddr   = 0xfe;
+  const BYTE kGlobalAddr = 0xff;
+
+  BYTE gECUAddress   = kNullAddr;  // Address of this node
+  char gECUName[8];                // Device name
+  char gECULabel[20] = "GPSNode";  // Label for output to write window
+
+  // error codes
+  const int kOk         = 0;
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel         = kDbgWarning; // Set debug level for output to write window
+}
+
+on sysvar ISOBUS::sysvarECU_PWR
+{
+  if ((gECUAddress == kNullAddr) && (@this > 10.0)) 
+  {
+    EcuStartUp();
+  }
+  else if ((gECUAddress != kNullAddr) && (@this < 8.0)) {
+    EcuShutDown();
+  }
+}
+
+EcuInit ()
+{
+  // init device name
+  GNSSMakeName( gECUName,
+                GPSNode.NmJ1939AAC,
+                GPSNode.NmJ1939IndustryGroup,
+                GPSNode.NmJ1939SystemInstance,
+                GPSNode.NmJ1939System,
+                GPSNode.NmJ1939Function,
+                GPSNode.NmJ1939FunctionInstance,
+                GPSNode.NmJ1939ECUInstance,
+                GPSNode.NmJ1939ManufacturerCode,
+                GPSNode.NmJ1939IdentityNumber 
+              );
+}
+
+on preStart
+{
+  setWriteDbgLevel( gDbgLevel );
+
+  EcuInit();
+}
+
+EcuStartUp()
+{
+  long                result;
+  pg GNSSPositionData gpsPG;
+  
+
+  if (gECUAddress == kNullAddr) {
+    gECUAddress = GPSNode.NmStationAddress;
+    result = GNSSStartUp( gECUName, gECUAddress );
+    if (result != kOk) {
+      writeDbgLevel( kDbgInfo, "<%s> ERROR, GNSSStartUp failed", gECULabel );
+    }
+
+    // Initialze the waypoints
+    InitWaypoints();
+    
+    // Start replay of the position
+    result = GNSSStartSimulation( 0 );
+    if (result != kOk) {
+      writeDbgLevel( kDbgInfo, "<%s> ERROR, GNSSStartReplay failed", gECULabel );
+    }
+
+    writeDbgLevel( kDbgInfo, "<%s> start up", gECULabel );
+  }
+}
+
+EcuShutDown()
+{
+  long result;
+
+  if (gECUAddress != kNullAddr) 
+  {
+    GNSSRemoveWp();
+
+    result = GNSSShutDown();
+  	if (result != kOk) {
+        writeDbgLevel( kDbgInfo, "<%s> ERROR, GNSSShutDown failed", gECULabel );
+  	}
+
+	  gECUAddress = kNullAddr;
+    writeDbgLevel( kDbgInfo, "<%s> start up", gECULabel );
+  }
+}
+
+on start
+{
+  if (@ISOBUS::sysvarECU_PWR > 10.0) 
+  {
+    EcuStartUp();
+  }
+}
+
+on envVar EvVecTECU_TractorSpeed
+{
+  if (gECUAddress != kNullAddr) 
+  {
+    GNSSSetSpeed( getValue(this) );
+  }
+}
+
+InitWaypoints()
+{
+  int i;
+
+  // set reference point
+  GNSSSetRefPoint( 48.826, 9.093, 322.0 ); // start position is in Stuttgart-Weilimdorf
+  GNSSAddWpRef( 0,  0, 0 );
+
+  // set waypoints in [m]
+  for( i = 0; i < 2; i++ ) 
+  {
+    GNSSAddWpRel( 200,  0, 0 );
+    GNSSAddWpRel(   0, 20, 0 );
+    GNSSAddWpRel(-200,  0, 0 );
+    GNSSAddWpRel(   0, 20, 0 );
+  }
+  GNSSAddWpRel( 200,  0, 0 );
+  GNSSAddWpRel(   0, 20, 0 );
+  GNSSAddWpRel(-220,  0, 0 );
+
+  GNSSAddWpRef( 0.0, 0.0, 0.0 ); // back to start point
+}
+
+//
+// Error indication
+//
+void GNSSAppErrorIndication( long errorClass, long errorNumber, long addCode)
+{
+  char strErrClass[32];
+  char strErrInfo[64];
+
+  switch(errorClass) 
+  {
+    case 1: snprintf( strErrClass, elCount(strErrClass), "TimeOut" ); break;
+    case 2: snprintf( strErrClass, elCount(strErrClass), "AddressClaiming" ); break;
+    case 3: snprintf( strErrClass, elCount(strErrClass), "CAN Error" ); break;
+    case 4: snprintf( strErrClass, elCount(strErrClass), "System Error" ); break;
+	  case 5: snprintf( strErrClass, elCount(strErrClass), "Transport Protocol Error Error" ); break;
+  }
+
+  switch( errorNumber ) 
+  {
+    case 0x1: snprintf( strErrInfo, elCount(strErrInfo), "cts error" ); break;
+    case 0x2: snprintf( strErrInfo, elCount(strErrInfo), "peer to peer data timeout" ); break;
+    case 0x3: snprintf( strErrInfo, elCount(strErrInfo), "BAM data timeout" ); break;
+    case 0x4: snprintf( strErrInfo, elCount(strErrInfo), "acknowledge timeout" ); break;
+	  case 0x10: snprintf( strErrInfo, elCount(strErrInfo), "lost address claiming or received address claim with higher priority" ); break;
+    case 0x15: snprintf( strErrInfo, elCount(strErrInfo), "init error: node name detected two times" ); break;
+    case 0x17: snprintf( strErrInfo, elCount(strErrInfo), "init error: node address detected two times" ); break;
+    case 0x30: snprintf( strErrInfo, elCount(strErrInfo), "exeption while choosing protokoll BAM or CMDT" ); break;
+    case 0x40: snprintf( strErrInfo, elCount(strErrInfo), "internal data buffer full" ); break;
+    case 0x60: snprintf( strErrInfo, elCount(strErrInfo), "user sends system pg " ); break;
+    case 0x71: snprintf( strErrInfo, elCount(strErrInfo), "transmission abort by receiver" ); break;
+    case 0x72: snprintf( strErrInfo, elCount(strErrInfo), "transmission abort by sender" ); break;
+  }
+
+  writeDbgLevel( kDbgInfo, "<%s> ERROR(0x%x) %s, %s", gECULabel, errorNumber, strErrClass, strErrInfo );
+}
+
+//
+// Reached last waypoint
+//
+void GNSSOnLastWpReached()
+{
+  long result;
+
+  // Start replay of the position
+  result = GNSSStopSimulation();
+  result = GNSSStartSimulation( 0 );
+  if (result != kOk) 
+  {
+    writeDbgLevel( kDbgInfo, "<%s> ERROR, GNSSStartReplay failed", gECULabel );
+  }
+}
+
+//
+// Commanded address indication
+//
+void GNSSAppCmdAddrIndication( long dataLen )
+{
+}
+
+//
+//
+//
+void GNSSOnSetSpeed ( float newSpeed )
+{
+}
+
+//
+//
+//
+void GNSSOnWpBeforeLastReached()
+{
+}
+
+//
+// Adress Claimed
+//
+void GNSSAppAddrClaimed()
+{
+}
+

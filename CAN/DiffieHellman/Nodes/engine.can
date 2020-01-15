@@ -1,0 +1,91 @@
+/*@!Encoding:1252*/
+variables 
+{
+  message BrakeState msg_BrakeState;
+  
+  //Secure Communication over CAN Bus (2017)
+  int ecuName;
+  int publicKey;
+  int privateKey;
+  message PublicID msg_PublicId;
+  int64 publicKeyStore[int64];
+  ////
+  
+  //Automobile CAN Bus Network Security and Vulnerabilities
+  int secret = 456;
+  int g = 321;
+  int p = 256;
+  int I;
+  message DH_Exchange msg_dhExchange;
+  int dhKeyStore[int64];
+  ////
+}
+
+on preStart
+{
+  ecuName = 1;
+  //Secure Communication over CAN Bus (2017)
+  /*ecuName = 1;
+  publicKey = random(65536);
+  if(publicKey < 0)
+  {
+    publicKey = publicKey * -1;
+  }
+  privateKey = -publicKey;*/
+  ////
+}
+
+on start
+{
+  //Secure Communication over CAN Bus (2017)
+  /*write("ENGINE: Public Key %d", publicKey);
+  write("ENGINE: Private Key %d", privateKey);
+  msg_PublicId.ECUName = ecuName;
+  msg_PublicId.PublicKey = publicKey;
+  output(msg_PublicId);*/
+  ////
+  
+  //Automobile CAN Bus Network Security and Vulnerabilities
+  //Compute DH payload
+  I = (g^secret)%p;
+  write("ENGINE: Computed DH payload: %d", I);
+  //Send out DH exchange
+  msg_dhExchange.DHPayload = I;
+  msg_dhExchange.Transmitter = ecuName;
+  msg_dhExchange.Receiver = 2;
+  output(msg_dhExchange);
+  ////
+}
+
+on message DH_Exchange
+{
+  if(this.Transmitter != ecuName)
+  {
+    write("DISPLAY: Received DH %d by ECU %d", this.DHPayload, this.Transmitter);
+    dhKeyStore[this.Transmitter] = this.DHPayload^secret % p;
+    write("Computed shared key %d", dhKeyStore[this.Transmitter]);
+  }
+}
+
+//Secure Communication over CAN Bus (2017)
+/*on message PublicID
+{
+  if(this.ECUName != ecuName)
+  {
+    write("ENGINE: Received public key %d by ID %d", this.PublicKey, this.ECUName);
+    publicKeyStore[this.ECUName] = this.PublicKey;
+  }
+}*/
+
+on sysvar sysvar::Brakes::BrakePressure
+{
+  write("ENGINE: Brake pressure applied");
+  msg_BrakeState.BrakePressure = @this;
+  
+  //Secure Communication over CAN Bus (2017)
+  /*msg_BrakeState.PrivateChallenge = privateKey;
+  msg_BrakeState.ECUName = ecuName;*/
+  ////
+  
+  output(msg_BrakeState);
+}

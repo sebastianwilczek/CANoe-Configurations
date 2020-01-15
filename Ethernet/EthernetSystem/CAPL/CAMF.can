@@ -1,0 +1,127 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "include\PDU-NM-ASR_Eth.cin"
+  #include "include\VectorConceptCar_Grid.cin"
+}
+
+variables
+{
+  const double kLaneWidth = 4.0;
+}
+
+on sysvar sysvar::ConceptCar::Vehicle::Position
+{
+  if (UdpNm_GetState() > 1)
+  {
+    //
+    // Update detected traffic signs
+    //
+    
+    struct VCC_Object foundObjects[3];
+    int               foundObjectsCount;
+    int               i;
+    
+    //
+    // Find nearest traffic signs
+    //
+    
+    foundObjectsCount = VCC_FindNearestObjects( @sysvarMember::ConceptCar::Vehicle::Position.RelativeX, 
+                                                @sysvarMember::ConceptCar::Vehicle::Position.RelativeY,
+                                                @sysvarMember::ConceptCar::Vehicle::Position.Heading,
+                                                -70, 70, 150, foundObjects, elcount(foundObjects) );
+
+    //
+    // Copy found sign to service-signals, so that it transmitted.
+    //
+    
+    for( i = 0; i < elcount(foundObjects); i++ )
+    {
+      dword signType;
+      dword distance;
+      dword reliability;
+      
+      if (i < foundObjectsCount)
+      {
+        signType    = foundObjects[i].symbol;
+        distance    = foundObjects[i].distance;
+        reliability = 100;
+      }
+      else
+      {
+        signType    = 0;
+        distance    = 0;
+        reliability = 0;
+      }
+      
+      switch(i)
+      {
+        case 0:
+          $TrafficSignDetection::DetectedTrafficSign[0].Reliability     = reliability;
+          $TrafficSignDetection::DetectedTrafficSign[0].DistanceToSign  = distance;
+          $TrafficSignDetection::DetectedTrafficSign[0].SignType        = signType;
+          break;
+        case 1:
+          $TrafficSignDetection::DetectedTrafficSign[1].Reliability    = reliability;
+          $TrafficSignDetection::DetectedTrafficSign[1].DistanceToSign = distance;
+          $TrafficSignDetection::DetectedTrafficSign[1].SignType       = signType;
+          break;
+        case 2:
+          $TrafficSignDetection::DetectedTrafficSign[2].Reliability    = reliability;
+          $TrafficSignDetection::DetectedTrafficSign[2].DistanceToSign = distance;
+          $TrafficSignDetection::DetectedTrafficSign[2].SignType       = signType;
+          break;
+      }
+    }
+    
+    {
+      //
+      // Update detected lanes
+      //
+      
+      double laneOffset;
+      double d1, d2;
+      dword  reliabilityLeft;
+      dword  reliabilityRight;
+      
+      laneOffset       = @sysvar::CAMF::FaultInjection::LaneOffsetY;
+      d1               = _min( 1, _max( -1, @sysvarMember::ConceptCar::Vehicle::WaypointState.HeadingDelta/4.0 ));
+      d2               = _min( 2, _max( -2, @sysvarMember::ConceptCar::Vehicle::WaypointState.HeadingDelta/3.0 ));
+      reliabilityLeft  = @sysvar::CAMF::FaultInjection::ReliablityLeft;
+      reliabilityRight = @sysvar::CAMF::FaultInjection::ReliablityRight;
+        
+      $LaneDetection::DetectedLaneBorder[0].ReliabilityLeft  = reliabilityLeft;
+      $LaneDetection::DetectedLaneBorder[0].ReliabilityRight = reliabilityRight;
+      $LaneDetection::DetectedLaneBorder[0].BorderLeft       = laneOffset - kLaneWidth / 2;
+      $LaneDetection::DetectedLaneBorder[0].BorderRight      = laneOffset + kLaneWidth / 2;
+      $LaneDetection::DetectedLaneBorder[0].LaneSegmentX     = 5.0;
+      
+      $LaneDetection::DetectedLaneBorder[1].ReliabilityLeft = reliabilityLeft;
+      $LaneDetection::DetectedLaneBorder[1].ReliabilityRight = reliabilityRight;
+      $LaneDetection::DetectedLaneBorder[1].BorderLeft     = (laneOffset + d1) - kLaneWidth / 2;
+      $LaneDetection::DetectedLaneBorder[1].BorderRight    = (laneOffset + d1) + kLaneWidth / 2;
+      $LaneDetection::DetectedLaneBorder[1].LaneSegmentX   = 10.0;
+
+      $LaneDetection::DetectedLaneBorder[2].ReliabilityLeft   = reliabilityLeft;
+      $LaneDetection::DetectedLaneBorder[2].ReliabilityRight = reliabilityRight;
+      $LaneDetection::DetectedLaneBorder[2].BorderLeft   = (laneOffset + d2) - kLaneWidth / 2;
+      $LaneDetection::DetectedLaneBorder[2].BorderRight  = (laneOffset + d2) + kLaneWidth / 2;
+      $LaneDetection::DetectedLaneBorder[2].LaneSegmentX = 15.0;
+    }
+  }
+  else
+  {
+    // clear detected traffic signs
+    $TrafficSignDetection::DetectedTrafficSign[0].Reliability    = 0;
+    $TrafficSignDetection::DetectedTrafficSign[0].DistanceToSign = 0;
+    $TrafficSignDetection::DetectedTrafficSign[0].SignType       = 0;
+    $TrafficSignDetection::DetectedTrafficSign[1].Reliability    = 0;
+    $TrafficSignDetection::DetectedTrafficSign[1].DistanceToSign = 0;
+    $TrafficSignDetection::DetectedTrafficSign[1].SignType       = 0;
+    $TrafficSignDetection::DetectedTrafficSign[2].Reliability    = 0;
+    $TrafficSignDetection::DetectedTrafficSign[2].DistanceToSign = 0;
+    $TrafficSignDetection::DetectedTrafficSign[2].SignType       = 0;
+    
+    // clear detected lanes;
+  }
+}

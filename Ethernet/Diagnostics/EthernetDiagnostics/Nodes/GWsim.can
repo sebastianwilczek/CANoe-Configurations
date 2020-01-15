@@ -1,0 +1,206 @@
+/*@!Encoding:1252*/
+// Gateway simulation, CAPL callback interface and forwarding to CAN
+
+includes
+{
+  #include "DownloadSim.cin"
+  #include "GWdiag.cin"
+}
+
+variables
+{
+  const dword cDoIP = 0;  
+  const dword cTxId = 1;
+  const dword cRxId = 2;
+  const dword cCanTPHandle = 3;
+  dword gDoIPAddressTable[2][4] =
+        {
+          // DoIP Address,  TxId,  RxId, CanTpHandle(created)
+          {          0x21,     0,     0, 0}  // GW  settings, not forwarded to CAN
+        , {          0x20, 0x700, 0x600, 0}  // ECU settings
+          // add values for further ECUs here
+        };
+
+  DWORD gDLLHandle;
+
+  WORD gTesterForMe    = 0;
+  WORD gTesterForDoor  = 0;
+
+  char gECU[10] = "GW";
+}
+
+_Diag_DataRequest( BYTE data[], DWORD count, long furtherSegments)
+{
+  writeDbgLevel(1, "%s: DataRequest %d byte: %02x ...",
+    gECU, count, data[0]);
+  write( "[%.3f] Sending response to %02x", timenow()/100000.0, gTesterForMe);
+  DoIP_DataReq( data, count, gDoIPAddressTable[0][cDoIP], gTesterForMe);
+}
+
+_Diag_SetChannelParameters()
+{
+  // All configuration will be performed in the gateway initialization
+}
+
+CanTp_SendCon( long handle, DWORD txCount)
+{
+  writeDbgLevel(1,"(CanTP) %s: CanTp_SendCon", gECU);
+}
+
+CanTp_ErrorInd( long handle, long error) 
+{
+  char cErrorText[12][30] = {
+    "(no error)"
+  , "Timeout while waiting for CF" // 1
+  , "Timeout while waiting for FC" // 2
+  , "Wrong Sequence Number"        // 3
+  , "TP_DLL busy"                  // 4
+  , "Unexpected PDU"               // 5
+  , "Timeout waiting for Tx-Ack"   // 6
+  , "WFT Overrun"                  // 7
+  , "Buffer overflow"              // 8
+  , "Wrong parameter"              // 9
+  , "Invalid FlowStatus received"  // 10
+  , "Transfer abort requested"     // 11
+  };
+
+  if( error < elcount(cErrorText))
+    writeDbgLevel( 1, "(CanTP) %s: CanTp_ErrorInd(%d): %s", gECU, error, cErrorText[error]);
+  else
+    writeDbgLevel( 1, "(CanTP) %s: CanTp_ErrorInd(%d): unknown error!", gECU, error);
+}
+
+CanTp_ReceptionInd( long handle, BYTE data[])
+{
+  if( gResetRunning)
+    return; // The ECU is currently resetting and ignores all requests.
+
+  tGWResponsePending.cancel();
+  
+  if( gCurrentSession > 0)
+  {
+    // The tester is still there, so restart the session timeout timer
+    cancelTimer( tSessionTimer);
+    setTimer( tSessionTimer, cSessionTimeout);
+  }
+
+  write( "[%.3f] Sending response to %02x", timenow()/100000.0, gTesterForDoor);
+  DoIP_DataReq( data, elcount( data), GatewayGetDoIPAddress( handle), gTesterForDoor);
+}
+
+on preStart
+{
+  dword i;
+  char buffer[256];
+  long protocolVersion;
+
+  // Register to allow callbacks from a CAPL DLL into this node, e.g. a Seed&key DLL
+  gDLLHandle = registerCAPLDLL();
+
+  // Configure DownloadSim.cin
+  gDownloadMaxBlockSize = 0x00100000;
+
+  // Connect this node to the GW's diagnostics layer.
+  // Note that the TP connections are hard coded for this gateway via the address table!
+  diagInitEcuSimulation("GW");
+
+  protocolVersion=diagGetCommParameter("DoIP.Protocol");
+  DoIP_SetProtocol(protocolVersion);
+    
+  DoIP_SetVIN( "VECT0RVEH1CLE8100");
+  for ( i = 0; i < elcount( gDoIPAddressTable); ++i)
+  {
+    DoIP_AddECU( gDoIPAddressTable[i][cDoIP]);
+  }
+
+  // Create and configure the CanTp connection for communicating with the ECUs
+  for ( i = 1; i < elcount( gDoIPAddressTable); ++i)
+  {
+    long canTPHandle;
+    canTPHandle = CanTpCreateConnection(0);
+    gDoIPAddressTable[i][cCanTPHandle] = canTPHandle;
+    CanTpSetTxIdentifier( canTPHandle, gDoIPAddressTable[i][cTxId]);
+    CanTpSetRxIdentifier( canTPHandle, gDoIPAddressTable[i][cRxId]);
+    CanTpSetSTmin(canTPHandle, 0); // CANoe can handle full speed
+    CanTpSetBlockSize( canTPHandle, 0); // No need to slow down ECU
+  }
+  
+  DoIP_SetVehicleLogicalAddress(DiagGetCommParameter( "DoIP.VEHICLE_LogicalAddress"));
+  write("DoIP.VEHICLE_LogicalAddress=0x%02lx", DiagGetCommParameter( "DoIP.VEHICLE_LogicalAddress"));
+  
+  DoIP_AddTester( DiagGetCommParameter( "DoIP.TESTER_LogicalAddress"));
+  write("DoIP.TESTER_LogicalAddress=0x%02lx", DiagGetCommParameter( "DoIP.TESTER_LogicalAddress"));
+}
+
+word GatewayGetDoIPAddress( long connHandle)
+{
+  dword i;
+
+  for ( i = 0; i < elcount( gDoIPAddressTable); ++i)
+  {
+    if ( gDoIPAddressTable[i][cCanTPHandle] == connHandle)
+    {
+      return gDoIPAddressTable[i][cDoIP];
+    }
+  }
+
+  return 0;
+}
+
+dword GatewayGetCanTpHandle( word wDoIPAddress)
+{
+  dword i;
+
+  for ( i = 0; i < elcount( gDoIPAddressTable); ++i)
+  {
+    if ( gDoIPAddressTable[i][cDoIP] == wDoIPAddress)
+    {
+      return gDoIPAddressTable[i][cCanTPHandle];
+    }
+  }
+
+  return 0;
+}
+
+DoIP_DataInd( byte buffer[], dword count, dword address, dword testerAddress) 
+{
+  // Inform the diagnostics code that the tester has sent another request
+  IndicateRequest();
+
+  if ( address != gDoIPAddressTable[0][cDoIP])
+  {
+    // Access ECU on CAN, not this gateway
+    long canTpHandle;
+    gTesterForDoor = testerAddress;
+    canTpHandle = GatewayGetCanTpHandle( address);
+
+    if ( 0 != canTpHandle)
+    {
+      CanTpSendData( canTpHandle, buffer, count);
+
+   //   write( "Starting ResponsePending timer");
+      tGWResponsePending.Set( 200);
+      gGWResponsePendingFor = address;
+      gGWResponsePendingSID = buffer[0];
+      return;
+    }
+  }
+
+  gTesterForMe = testerAddress;
+  Diag_DataInd( buffer, count, 0);
+}
+
+on timer tGWResponsePending
+{
+  BYTE rpRaw[3] = { 0x7f, 0x99, 0x78 };
+  rpRaw[1] = gGWResponsePendingSID;
+  write( "[%.3f] Sending ResponsePending from gateway for %04x", timenow()/100000.0, gGWResponsePendingFor);
+  DoIP_DataReq( rpRaw, 3, gGWResponsePendingFor, 0);
+  tGWResponsePending.set(1900);
+}
+
+DoIP_DataCon( dword count) 
+{
+  writeDbgLevel(1,"%s: DoIP_DataCon", gECU);
+  Diag_DataCon( count);
+}

@@ -1,0 +1,130 @@
+/*@!Encoding:1252*/
+// -------------------------------------------------------------------------
+// Module: GPS2FDS.can
+// Interfaces: -
+// -------------------------------------------------------------------------
+// Example Configuration: FDSDemo.cfg
+// -------------------------------------------------------------------------
+// Copyright (c) Vector Informatik GmbH. All rights reserved.
+// -------------------------------------------------------------------------
+/*@!Encoding:1252*/
+
+includes
+{
+  #include "AFDX\Utils.cin"
+}
+
+variables
+{
+  // GPS-Route around Stuttgart
+  float s_GPS_Entries[6][3] = { 
+    {48.685777,9.200664, 389.0},
+    {48.711296,9.333660, 602.0},
+    {48.826951,9.436362, 602.0},
+    {48.865806,9.262634, 602.0},
+    {48.843101,9.120734, 602.0},
+    {48.775551,9.030415, 602.0}
+  };
+
+  a664Message DEMOMSG_GPS myMsg;
+  PDU FDS_Demo_LAT pduJoyStickLat;
+  PDU FDS_Demo_LONG pduJoyStickLong;
+  PDU FDS_Demo_ALT pduJoystickAlt;
+  
+  //timer period of GPS Variable Update
+  long GPSValTimerPeriodMS = 100;
+  long TimePerRoundMS = 60000;
+  long climbingRateMeterPerSecond = 30;
+  long TimePerArrayEntry;
+  msTimer GPSValTimer;
+}
+
+// This event procedure is called before the start of measurement, at the start.
+on start
+{
+  //start a cyclic timer that updates the GPS-coordinates
+  setTimerCyclic(GPSValTimer, GPSValTimerPeriodMS);
+  
+  TimePerArrayEntry = TimePerRoundMS / elCount (s_GPS_Entries);
+  
+  //Set the start point of the gps to stuttgart airport (STR)
+  @sysvarMember::GPS::GPS1.Latitude = s_GPS_Entries[0][0];
+  @sysvarMember::GPS::GPS1.Longitude = s_GPS_Entries[0][1];
+  @sysvarMember::GPS::GPS1.Altitude = s_GPS_Entries[0][2];
+  //Set the input mode of the GPS to manual
+  @sysvarMember::GPS::GPS1.FixQuality = 7;
+  
+  //Trigger message once to enable message scheduling
+  a664TriggerMessage (myMsg, SingleShot);  
+}
+
+// These event handlers set the FDS-signal, set the functional state of the FDS
+// and trigger the FDS to be sent out
+on sysvar sysvarMember::GPS::GPS1.Latitude
+{
+  pduJoyStickLat.Demo_LAT_float = @sysvarMember::GPS::GPS1.Latitude;
+  a664SetFunctionalStatus (pduJoyStickLat, AfdxNO);
+  triggerPDU (pduJoyStickLat);
+}
+
+on sysvar sysvarMember::GPS::GPS1.Longitude
+{
+  pduJoyStickLong.Demo_Long_float = @sysvarMember::GPS::GPS1.Longitude;
+  a664SetFunctionalStatus (pduJoyStickLong, AfdxNO);
+  triggerPDU (pduJoyStickLong);
+}
+
+on sysvar sysvarMember::GPS::GPS1.Altitude
+{
+  pduJoystickAlt.Demo_ALT_float = @sysvarMember::GPS::GPS1.Altitude;
+  a664SetFunctionalStatus (pduJoystickAlt, AfdxNO);
+  triggerPDU (pduJoystickAlt);
+}
+
+//timer function
+on timer GPSValTimer
+{
+  //save the current time in ms
+  dword curTimeMS;
+  //current and next position in the GPS data array
+  long pos = 0;
+  long posNext = 0;
+  //factor of the current intersection vector
+  float curFac;
+  //two points for calculating intersection vector
+  float p[2];
+  float q[2];
+  
+  //calculate array positions by the current time
+  curTimeMS = timeNow()/100.0;
+  pos = (curTimeMS % TimePerRoundMS) / TimePerArrayEntry;
+  curFac = ( (curTimeMS % TimePerRoundMS) / (float)TimePerArrayEntry) - pos;
+  posNext = pos + 1;
+  if (posNext > 5)
+  {
+    posNext = 0;
+  }
+  
+  //calculate the intersection vector to determine actual position
+  p[0] = s_GPS_Entries[pos][0];
+  p[1] = s_GPS_Entries[pos][1];
+  
+  q[0] = s_GPS_Entries[posNext][0];
+  q[1] = s_GPS_Entries[posNext][1];
+  
+  q[0] = p[0] - q[0];
+  q[1] = p[1] - q[1];
+  
+  //store the calculated position into the system variables
+  if (@sysvarMember::GPS::GPS1.Altitude > s_GPS_Entries[posNext][2])
+  {
+    @sysvarMember::GPS::GPS1.Altitude -= (climbingRateMeterPerSecond / 10);
+  }
+  else if (@sysvarMember::GPS::GPS1.Altitude < s_GPS_Entries[posNext][2])
+  {
+    @sysvarMember::GPS::GPS1.Altitude += (climbingRateMeterPerSecond / 10);
+  }
+  
+  @sysvarMember::GPS::GPS1.Latitude = p[0] - (q[0] * curFac);
+  @sysvarMember::GPS::GPS1.Longitude = p[1] - (q[1] * curFac);
+}

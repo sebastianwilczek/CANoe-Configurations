@@ -1,0 +1,95 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "Includes\ProprietaryProtocol.cin"
+}
+
+variables
+{
+  //
+  // Constants
+  //
+  
+  const word  kUdpSourcePort      = 40001;
+}
+
+// forward every event, which is not handled by this CAPL program
+on *
+{
+  output( this );
+}
+
+on ethernetPacket *
+{
+  dword offset;
+  
+  // forward event to next analysis block
+  output( this );
+  
+  // ignore packets, which are not IPv4
+  if (this.type != 0x0800)
+  {
+    return;
+  }
+  
+  // ignore packets, which are not UDP
+  if (this.byte(9) != 0x11) // protocol field is a byte-offset 9
+  {
+    return;
+  }
+
+  // ignore packets, which have not UDP source port 40001 
+  if (SwapWord(this.word(20)) != kUdpSourcePort) // protocol field is a byte-offset 9
+  {
+    return;
+  }
+  
+  //
+  // enumerate over message within UDP packet
+  //
+  
+  offset = 28;
+  while(offset < this.Length)
+  {
+    dword  i;
+    byte   headerData[__size_of(struct MessageHeader)];
+    byte   messageData[1500];
+    struct MessageHeader header;
+    
+    //
+    // get message header
+    //
+    
+    for( i = 0; i < __size_of(struct MessageHeader); i++ )
+    {
+      headerData[i] = this.byte(offset);
+      offset += 1;
+    }
+    
+    memcpy_n2h( header, headerData );
+    
+    //
+    // Copy message data
+    //
+    
+    for( i = 0; i < header.messageLength; i++ )
+    {
+      messageData[i] = this.byte(offset);
+      offset += 1;
+    }
+    
+    //
+    // Dispatch message to SysVar
+    //
+    
+    switch(header.messageId)
+    {
+      case 100:
+        sysSetVariableData( sysvar::ProprietaryObserver::MeasuredData, messageData, header.messageLength );
+        break;
+      case 101:
+        sysSetVariableData( sysvar::ProprietaryObserver::SensorStatus, messageData, header.messageLength );
+        break;
+    }
+  }
+}

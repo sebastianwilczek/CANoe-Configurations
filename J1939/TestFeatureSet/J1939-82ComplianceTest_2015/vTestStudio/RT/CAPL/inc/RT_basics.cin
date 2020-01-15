@@ -1,0 +1,632 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "RT_const.cin"
+  #include "csv.cin"
+  #include "path.cin"
+}
+
+variables
+{
+  struct DeviceName             // device name as structure.
+  {
+    byte aac;
+    byte industryGroup;
+    byte vehicleSystemInstance;
+    byte vehicleSystem;
+    byte function;
+    byte functionInstance;
+    byte ecuInstance;
+    word manufacturerCode;
+    dword identityNumber;
+  };
+}
+
+// ==============================================================================================================
+// create a device name structure using the given devicename-bytes.
+qword CT_CreateDevNameStruct(qword devName, struct DeviceName result)
+{
+  result.aac                    = (devName & 0x8000000000000000LL) >> 63;
+  result.industryGroup          = (devName & 0x7000000000000000LL) >> 60;
+  result.vehicleSystemInstance  = (devName & 0x0F00000000000000LL) >> 56;
+  result.vehicleSystem          = (devName & 0x00FE000000000000LL) >> 49;
+  result.function               = (devName & 0x0000FF0000000000LL) >> 40;
+  result.functionInstance       = (devName & 0x000000F800000000LL) >> 35;
+  result.ecuInstance            = (devName & 0x0000000700000000LL) >> 32;
+  result.manufacturerCode       = (devName & 0x00000000FFE00000LL) >> 21;
+  result.identityNumber         = (devName & 0x00000000001FFFFFLL);
+  return CT_DevName(result);
+}
+qword CT_CreateDevNameStruct(qword devName, struct DeviceName result, byte aac)
+{
+  CT_CreateDevNameStruct(devName, result);
+  result.aac = aac;
+  return CT_DevName(result);
+}
+// ==============================================================================================================
+// Build a human readably payload - like in the CANoes trace.
+void CT_HumanReadablePayload(char result[], qword payload)
+{
+  message * m;
+  m.qword(0) = payload;
+  snprintf(result, elcount(result), "%.02X %.02X %.02X %.02X %.02X %.02X %.02X %.02X", m.byte(0), m.byte(1), m.byte(2), m.byte(3), m.byte(4), m.byte(5), m.byte(6), m.byte(7));
+}
+void CT_MarkDiffInHumanReadablePayload(char a[], char b[])
+{
+  int i,k;
+  for (i=0; i<elcount(a); i++)
+  {
+    if (a[i]==' ') k=i;
+    if (a[i]!=b[i])
+    {
+      a[k]='[';
+      a[k+3]=']';
+      b[k]='[';
+      b[k+3]=']';
+      i++;
+    }
+  }
+  str_replace(a, "[", " [");
+  str_replace(a, "]", "] ");
+  str_replace(b, "[", " [");
+  str_replace(b, "]", "] ");
+}
+// ==============================================================================================================
+// convert a devicename structure into devicename
+qword CT_DevName(struct DeviceName devNameStruct)
+{
+  qword result;
+  result = 0LL
+  | (((qword)devNameStruct.aac                   & 0x0000000000000001LL)<< 63)
+  | (((qword)devNameStruct.industryGroup         & 0x0000000000000007LL)<< 60)
+  | (((qword)devNameStruct.vehicleSystemInstance & 0x000000000000000FLL)<< 56)
+  | (((qword)devNameStruct.vehicleSystem         & 0x000000000000007FLL)<< 49)
+  | (((qword)devNameStruct.function              & 0x00000000000000FFLL)<< 40)
+  | (((qword)devNameStruct.functionInstance      & 0x000000000000001FLL)<< 35)
+  | (((qword)devNameStruct.ecuInstance           & 0x0000000000000007LL)<< 32)
+  | (((qword)devNameStruct.manufacturerCode      & 0x00000000000007FFLL)<< 21)
+  | (((qword)devNameStruct.identityNumber        & 0x00000000001FFFFFLL)     );
+  
+  // clear reserved bit...
+  result &= ~gc_AC_RESERVED_BITMASK;
+  return result;
+}
+qword CT_DevName(struct DeviceName devNameStruct, byte aac)
+{
+  struct DeviceName temp;
+  memcpy(temp,devNameStruct);
+  temp.aac = aac;
+  return CT_DevName(temp);
+}
+qword CT_DevName(qword devName, byte aac)
+{
+  struct DeviceName temp;
+  return CT_CreateDevNameStruct(devName, temp, aac);
+}
+// ==============================================================================================================
+// nano seconds to a float of seconds.
+// best format string for it is: %.6f
+double CT_Ns2Sec(qword ns)
+{
+  return (double)ns/(double)1000000000;
+}
+dword CT_Ns2Ms(int64 ns)
+{
+  return (double)ns/(double)1000000;
+}
+
+qword CT_Ms2Ns(word ms)
+{
+  return (qword)ms*(qword)1000000;
+}
+// ==============================================================================================================
+// word wrapping helper...
+void CT_WordWrap(char text[], dword linesize, byte sentences)
+{
+  int index;
+  int curlinelen;  
+  index=0;
+  curlinelen=0;
+
+  // 2018-10-29: Too simple. Produces unwanted output when using "e.g." or other shorts.
+  // if (sentences) str_replace(text, ". ", ".\n");
+  
+  while( (text[index] != '\0') && (index<strlen(text)) )
+  {
+    if(text[index] == '\n')
+    {
+      curlinelen=0;
+    }
+    else if(text[index] == ' ')
+    {
+      if(curlinelen >= linesize)
+      {
+        text[index] = '\n';
+        curlinelen = 0;
+      }
+    }
+    curlinelen++;
+    index++;
+  }
+}
+
+// ==============================================================================================================
+// check if given pgn is a bc pgn (type2)
+byte CT_IsPdu2(dword pgn)
+{
+  return (pgn&0xF000) == 0xF000;
+}
+// ==============================================================================================================
+// check if given pgn is a bc pgn (type1)
+byte CT_IsPdu1(dword pgn)
+{
+  return (pgn&0xF000) <= 0xE000;
+}
+// ==============================================================================================================
+// check given pg to be an positive ACK
+byte CT_IsAckPos(pg* p)
+{
+  return ( (p.pgn == gc_PGN_NACK) && (p.byte(0)==gc_ACK_CTRL_WORD_ACK) );
+}
+// ==============================================================================================================
+// check given pg to be a NACK
+byte CT_IsNACK(pg* p)
+{
+  return ( (p.pgn == gc_PGN_NACK) && (p.byte(0)==gc_ACK_CTRL_WORD_NACK) );
+}
+// ==============================================================================================================
+// check given pg to be a NACK
+byte CT_IsAckNeg(pg* p)
+{
+  return CT_IsNACK(p);
+}
+
+
+// ==============================================================================================================
+// get id out of the given pg. (masks out the extended high-bits)
+dword CT_GetId(pg* pv)
+{
+  return pv.id & 0x1FFFFFFF;
+}
+
+// ==============================================================================================================
+// get id out of the given message. (masks out the extended high-bits)
+dword CT_GetId(message* m)
+{
+  return m.id & 0x1FFFFFFF;
+}
+
+
+// ==============================================================================================================
+// get source address out of given CAN-ID
+byte CT_GetSrc(dword CANId)
+{
+  return (CANId&0xFF);
+}
+// ==============================================================================================================
+// get source address out of message m
+byte CT_GetSrc(message * m)
+{
+  return CT_GetSrc(CT_GetId(m));
+}
+// ==============================================================================================================
+// get destination address out of given CAN-ID
+byte CT_GetDst(dword CANId)
+{
+  return (CANId&0xFF00)>>8;
+}
+// ==============================================================================================================
+// get destination address out of message m
+byte CT_GetDst(message * m)
+{
+  return CT_GetDst(CT_GetId(m));
+}
+
+// ==============================================================================================================
+// get pgn out of the given id.
+dword CT_GetPGN(dword CANId)
+{
+  dword result;
+  result = (CANId & gc_CANID_BITMASK_EPGN_DST) >> 8;
+  if (!CT_IsPdu2(result)) result &= (gc_CANID_BITMASK_EPGN>>8);
+  //write("PGN of ID=%x", result);
+  return result;
+}
+
+// ==============================================================================================================
+// get pgn out of the given pg.
+dword CT_GetPGN(pg* pv)
+{
+  return CT_GetPGN(CT_GetId(pv));
+}
+// ==============================================================================================================
+// get pgn out of the given message
+dword CT_GetPGN(message* m)
+{
+  return CT_GetPGN(CT_GetId(m));
+}
+// ==============================================================================================================
+// get prio out of the given id.
+dword CT_GetPrio(dword CANId)
+{
+  dword result;
+  result = (CANId & gc_CANID_BITMASK_PRIO) >> 26;
+  //write("PRIO of ID=%x", result);
+  return result;
+}
+// ==============================================================================================================
+// get prio out of the given pg.
+dword CT_GetPrio(pg* pv)
+{
+  return CT_GetPrio(CT_GetId(pv));
+}
+// ==============================================================================================================
+// get prio out of the given message
+dword CT_GetPrio(message* m)
+{
+  return CT_GetPrio(CT_GetId(m));
+}
+// ==============================================================================================================
+// get EDP out of the given id.
+dword CT_GetEDP(dword CANId)
+{
+  dword result;
+  result = (CANId & gc_CANID_BITMASK_EDP) >> 25;
+  //write("EDP of ID=%x", result);
+  return result;
+}
+// ==============================================================================================================
+// get EDP out of the given pg.
+dword CT_GetEDP(pg* pv)
+{
+  return CT_GetEDP(CT_GetId(pv));
+}
+// ==============================================================================================================
+// get EDP out of the given message
+dword CT_GetEDP(message* m)
+{
+  return CT_GetEDP(CT_GetId(m));
+}
+// ==============================================================================================================
+// get DP out of the given id.
+dword CT_GetDP(dword CANId)
+{
+  dword result;
+  result = (CANId & gc_CANID_BITMASK_DP) >> 24;
+  //write("DP of ID=%x", result);
+  return result;
+}
+// ==============================================================================================================
+// get DP out of the given pg.
+dword CT_GetDP(pg* pv)
+{
+  return CT_GetDP(CT_GetId(pv));
+}
+// ==============================================================================================================
+// get DP out of the given message
+dword CT_GetDP(message* m)
+{
+  return CT_GetDP(CT_GetId(m));
+}
+
+
+// ==============================================================================================================
+// check value is in range.
+byte CT_InRange(byte x, byte a, byte b)
+{
+  return (x>=a) && (x<=b);
+}
+
+// ==============================================================================================================
+// check value is in range.
+byte CT_InRange(word x, word a, word b)
+{
+  return (x>=a) && (x<=b);
+}
+
+// ==============================================================================================================
+// check value is in range.
+byte CT_InRange(dword x, dword a, dword b)
+{
+  return (x>=a) && (x<=b);
+}
+
+// ==============================================================================================================
+// check value is in range.
+byte CT_InRange(qword x, qword a, qword b)
+{
+  return (x>=a) && (x<=b);
+}
+
+// ==============================================================================================================
+// check value is in range.
+byte CT_InRange(int64 x, int64 a, int64 b)
+{
+  return (x>=a) && (x<=b);
+}
+
+// ==============================================================================================================
+// check value is in range.
+byte CT_InRange(float x, float a, float b)
+{
+  return (x>=a) && (x<=b);
+}
+
+// ==============================================================================================================
+// check if given time is within given abs-tolerance
+byte CT_TimeInAbsTolerance(dword time, dword refTime, dword absTol)
+{
+  return CT_InRange(time, refTime-absTol, refTime+absTol);
+}
+// ==============================================================================================================
+// check if given time is within given rel-tolerance
+byte CT_TimeInRelTolerance(dword time, dword refTime, float relTol)
+{
+  return CT_TimeInAbsTolerance(time, refTime, (dword)_ceil(refTime*relTol));
+}
+// ==============================================================================================================
+// check if given time is within given abs-tolerance
+byte CT_TimeInAbsToleranceUpper(dword time, dword refTime, dword absTol)
+{
+  return CT_InRange(time, (dword)0, refTime+absTol);
+}
+// ==============================================================================================================
+// check if given time is within given rel-tolerance
+byte CT_TimeInRelToleranceUpper(dword time, dword refTime, float relTol)
+{
+  return CT_TimeInAbsToleranceUpper(time, refTime, (dword)_ceil(refTime*relTol));
+}
+
+
+
+// ==============================================================================================================
+// get n-th data byte of given message
+byte CT_GetDataByte( byte n, message* m)
+{
+  if (n < 8)
+  {
+    return m.byte(n);
+  }
+  return 0;
+}
+// ==============================================================================================================
+// get n-th data byte of given pg
+byte CT_GetDataByte( byte n, pg* p)
+{
+  if (n < p.dlc)
+  {
+    return p.byte(n);
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get n-th data word of given message
+word CT_GetDataWord( byte n, message* m)
+{
+  if (n < 8)
+  {
+    return m.word(n);
+  }
+  return 0;
+}
+// ==============================================================================================================
+// get n-th data word of given pg
+word CT_GetDataWord( byte n, pg* p)
+{
+  if (n < p.dlc)
+  {
+    return p.word(n);
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get n-th data dword of given message
+dword CT_GetDataDWord( byte n, message* m)
+{
+  if (n < 8)
+  {
+    return m.dword(n);
+  }
+  return 0;
+}
+// ==============================================================================================================
+// get n-th data dword of given pg
+dword CT_GetDataDWord( byte n, pg* p)
+{
+  if (n < p.dlc)
+  {
+    return p.dword(n);
+  }
+  return 0;
+}
+// ==============================================================================================================
+// get n-th data qword of given message
+qword CT_GetDataQWord( byte n, message* m)
+{
+  if (n < 8)
+  {
+    return m.qword(n);
+  }
+  return 0;
+}
+// ==============================================================================================================
+// get n-th data qword of given pg
+qword CT_GetDataQWord( byte n, pg* p)
+{
+  if (n < p.dlc)
+  {
+    return p.qword(n);
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get TPCM ctrl word out of a given pg
+// if given entry is not a TPCM, 0 is returned.
+byte CT_GetTPCMCtrlByte(pg* p)
+{
+  if (CT_GetPgn(p) == gc_PGN_TPCM)
+  {
+    return CT_GetDataByte(0, p);
+  }
+  return 0;
+}
+// ==============================================================================================================
+// get TPCM ctrl word out of a given message
+// if given entry is not a TPCM, 0 is returned.
+byte CT_GetTPCMCtrlByte(message* m)
+{
+  if (CT_GetPgn(m) == gc_PGN_TPCM)
+  {
+    return CT_GetDataByte(0, m);
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get TPCM pgn out of a given pg
+// if given entry is not a TPCM, invalid pgn is returned.
+dword CT_GetTPCMPgn(pg* p)
+{
+  if (CT_GetPgn(p) == gc_PGN_TPCM)
+  {
+    pg J1939::J1939_CT_RT::TPCMxx tmp;
+    tmp=p;
+    return tmp.PGNumber;
+  }
+  return gc_PGN_INVALID;
+}
+// ==============================================================================================================
+// get TPCM pgn out of a given message
+// if given entry is not a TPCM, invalid pgn is returned.
+dword CT_GetTPCMPgn(message* m)
+{
+  if (CT_GetPgn(m) == gc_PGN_TPCM)
+  {
+    return (CT_GetDataDWord(4, m) & 0xFFFFFF00)>>8;
+  }
+  return gc_PGN_INVALID;
+}
+
+// ==============================================================================================================
+// get TPCM package count out of a given pg
+// if given entry is not a TPCM, 0 is returned.
+byte CT_GetTPCMRTSPkgCount(pg* p)
+{
+  if (CT_GetPgn(p) == gc_PGN_TPCM)
+  {
+    pg J1939::J1939_CT_RT::TPCMxx tmp;
+    tmp=p;
+    return tmp.TotalNumberOfPackets;
+  }
+  return 0;
+}
+// ==============================================================================================================
+// get TPCM package count out of a given message
+// if given entry is not a TPCM, 0 is returned.
+byte CT_GetTPCMRTSPkgCount(message* m)
+{
+  if (CT_GetPgn(m) == gc_PGN_TPCM)
+  {
+    return CT_GetDataByte(3, m);
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get TPCM package count out of a given pg
+// if given entry is not a TPCM, 0 is returned.
+byte CT_GetTPCMCTSPkgCount(pg* p)
+{
+  if (CT_GetPgn(p) == gc_PGN_TPCM)
+  {
+    pg J1939::J1939_CT_RT::TPCMxx tmp;
+    tmp=p;
+    return tmp.NumberOfPacketsThatCanBeSent;
+  }
+  return 0;
+}
+// ==============================================================================================================
+// get TPCM package count out of a given message
+// if given entry is not a TPCM, 0 is returned.
+byte CT_GetTPCMCTSPkgCount(message* m)
+{
+  if (CT_GetPgn(m) == gc_PGN_TPCM)
+  {
+    return CT_GetDataByte(1, m);
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get TPCM max packages out of a given pg
+// if given entry is not a TPCM, 0 is returned.
+byte CT_GetTPCMRTSMaxPkgs(pg* p)
+{
+  if (CT_GetPgn(p) == gc_PGN_TPCM)
+  {
+    pg J1939::J1939_CT_RT::TPCMxx tmp;
+    tmp=p;
+    return tmp.MaximumNumberOfPackets;
+  }
+  return 0;
+}
+// ==============================================================================================================
+// get TPCM max packages out of a given message
+// if given entry is not a TPCM, 0 is returned.
+byte CT_GetTPCMRTSMaxPkgs(message* m)
+{
+  if (CT_GetPgn(m) == gc_PGN_TPCM)
+  {
+    return CT_GetDataByte(4, m);
+  }
+  return 0;
+}
+
+// ==============================================================================================================
+// get TPCM max packages out of a given pg
+// if given entry is not a TPCM, 0 is returned.
+byte CT_GetTPCMCTSNextPkg(pg* p)
+{
+  if (CT_GetPgn(p) == gc_PGN_TPCM)
+  {
+    pg J1939::J1939_CT_RT::TPCMxx tmp;
+    tmp=p;
+    return tmp.NextPacketNumberToBeSent;
+  }
+  return 0;
+}
+// ==============================================================================================================
+// get TPCM max packages out of a given message
+// if given entry is not a TPCM, 0 is returned.
+byte CT_GetTPCMCTSNextPkg(message* m)
+{
+  if (CT_GetPgn(m) == gc_PGN_TPCM)
+  {
+    return CT_GetDataByte(2, m);
+  }
+  return 0;
+}
+// ==============================================================================================================
+byte CT_NMChkSum(qword devName)
+{
+  byte i,result;
+  word buf;
+  byte debug=0;
+  result = 0;
+  buf = 0;
+  if (debug) write("Calculating NMChecksum for 0x%llX...", devName);
+  for(i=0; i<8; i++) 
+  {
+    byte b;
+    b=devName>>i*8;
+    if (debug) write("Result = 0x%04X + Byte 0x%02X = 0x%02X", buf, b, buf+b);
+    buf+=b;
+  }
+  result = buf&0xFF;
+  if (debug) write("Least significant byte of Result = 0x%02X => Checksum", result);
+  
+  return result;
+}

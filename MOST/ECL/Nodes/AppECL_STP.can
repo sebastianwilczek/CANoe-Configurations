@@ -1,0 +1,238 @@
+/*@!Encoding:1252*/
+includes
+{
+#include "ECL.cin"
+#if CANALYZER
+  // forward all messages to next node in CANalyzer node chain 
+  #include "PassAll.cin"
+#endif
+}
+
+//
+// AppECL_STP.can:
+//  Simulation of a MOST150 Electrical Control Line (ECL) System Test Participant (STP).
+//
+//  This program is connected to the "ECL SystemTestParticipant [B]"-Panels and registers two
+//  System-Test device classes. Incoming System-Test requests will be processed and EWU
+//  signals will be detected.
+//
+//
+variables
+{
+  msTimer _tAfterStart;
+
+  long STP_ShowSignalOnLED = 0;
+  enum STP_LEDState
+  {
+    LEDState_Working = 0, // red/orange
+    LEDState_Ok = 1, // green
+    LEDState_Waiting = 2 // yellow
+  };
+}
+
+on preStart
+{
+#if CANALYZER
+  // set the MOST channel manually for the intitiator when using CANalyzer
+  ECL_SetMostChannel(2);
+#endif
+
+  ECL_SetECLVerbose(@sysvar::DoSetECLVerbose ? ECL_Verbose_Default : ECL_Verbose_Off);
+
+  // this node represents two participants ...
+  ECL_STP_Start(@sysvar::ECL_ST_Participant::ParticipantID);
+  ECL_STP_Start(@sysvar::ECL_ST_ParticipantB::ParticipantID);
+
+  ECL_SetSysVarNamesSpace("ECL_ST_Participant");
+  ECL_SetSignalLevelSysVarName("ECLSignalLevel");
+
+  // receive wakeups ...
+  ECL_WP_Start();
+
+  // reset panel
+  @sysvar::ECL_ST_Participant::TestParameter = 0;
+  @sysvar::ECL_ST_ParticipantB::TestParameter = 0;
+}
+
+void ECL_STI_CB_OnSystemTestResultsReceived(long testParameter, long electricalStates[], long opticalStates[], long numResults)
+{
+  write("%FILE_NAME%: ECL_STI_CB_OnSystemTestResultsReceived: Error: this callback should not be called for system test participant!");
+}
+
+void ECL_STI_CB_OnSystemTestStartupError(char msg[])
+{
+  write("%FILE_NAME%: ECL_STI_CB_OnSystemTestStartupError: Error: this callback should not be called for system test participant!");
+}
+
+void ECL_STP_CB_OnStartupSequenceReceived()
+{
+  write("%FILE_NAME%: ECL_STP_CB_OnStartupSequenceReceived");
+
+  STP_ShowSignalOnLED = 1;
+}
+
+void ECL_STP_CB_OnSystemTestParameterReceived(long testParameter)
+{
+  long elState, optState;
+
+  write("%FILE_NAME%: ECL_STP_CB_OnSystemTestParameterReceived: testParameter: %d", testParameter);
+
+
+  /*** first participant ***/
+
+  // set parameter ...
+  @sysvar::ECL_ST_Participant::TestParameter = testParameter;
+  elState = (@sysvar::ECL_ST_Participant::TestDeviceAlive ? 0 : 1);
+
+  // bit 1: depends on test parameter value ...
+  switch(_gECLPTestParamValue) {
+  case ECL_TR_MOSTSignRes_RBD: // 00000 - MOST signal result, RBD result
+    optState = @sysvar::ECL_ST_Participant::TestStableLock ? 0 : 1;
+    break;
+  case ECL_TR_MOSTSignRes_Threshold: // 01000 - MOST signal result, threshold
+    optState = @sysvar::ECL_ST_Participant::TestSignalQualityOk ? 0 : 1;
+    break;
+  case ECL_TR_OnlyAlive: // 10000 - Only alive result
+  default:
+    // only alive / or all other cases: second test bit will be ignored
+    break;
+  case ECL_TR_MOSTSignRes_SSO_CU: // 11000 - MOST signal result, SSO/CU result (0 -> "no result available" or "no fault saved")
+    optState = @sysvar::ECL_ST_Participant::TestSSOorCU ? 1 : 0;
+    break;
+  }
+
+  ECL_STP_SetElectricalState(elState, @sysvar::ECL_ST_Participant::ParticipantID);
+  ECL_STP_SetOpticalState(optState, @sysvar::ECL_ST_Participant::ParticipantID);
+
+
+  /*** second participant (B) ***/
+
+  @sysvar::ECL_ST_ParticipantB::TestParameter = testParameter;
+  elState = (@sysvar::ECL_ST_ParticipantB::TestDeviceAlive ? 0 : 1);
+
+  // bit 1: depends on test parameter value ...
+  switch(_gECLPTestParamValue) {
+  case ECL_TR_MOSTSignRes_RBD: // 00000 - MOST signal result, RBD result
+    optState = @sysvar::ECL_ST_ParticipantB::TestStableLock ? 0 : 1;
+    break;
+  case ECL_TR_MOSTSignRes_Threshold: // 01000 - MOST signal result, threshold
+    optState = @sysvar::ECL_ST_ParticipantB::TestSignalQualityOk ? 0 : 1;
+    break;
+  case ECL_TR_OnlyAlive: // 10000 - Only alive result
+  default:
+    // only alive / or all other cases: second test bit will be ignored
+    break;
+  case ECL_TR_MOSTSignRes_SSO_CU: // 11000 - MOST signal result, SSO/CU result (0 -> "no result available" or "no fault saved")
+    optState = @sysvar::ECL_ST_ParticipantB::TestSSOorCU ? 1 : 0;
+    break;
+  }
+
+  ECL_STP_SetElectricalState(elState, @sysvar::ECL_ST_ParticipantB::ParticipantID);
+  ECL_STP_SetOpticalState(optState, @sysvar::ECL_ST_ParticipantB::ParticipantID);
+}
+
+void ECL_WP_CB_OnElectricalWakeupReceived()
+{
+  write("%FILE_NAME%: ECL_WP_CB_OnElectricalWakeupReceived");
+}
+
+on start
+{
+  // init correct ECL termination state from device (using a timer)
+  setTimer(_tAfterStart, cECL_DEVICE_STARTUP);
+
+  Reset_LED();
+}
+
+on sysvar ECL_ST_ParticipantB::ParticipantID
+{
+  Reset_Participant_IDs();
+}
+
+on sysvar ECL_ST_Participant::DoSetEclTermination
+{
+  mostSetEclTermination(ECL_GetMostChannel(), @this);
+  if (gECL_Verbose >= ECL_Verbose_Default)
+    write("%FILE_NAME% ECL_ST_Participant::DoSetEclTermination: %d", @this);
+}
+
+on sysvar ECL_ST_Participant::ParticipantID
+{
+  Reset_Participant_IDs();
+}
+
+// Helper for sysvars XXX::ParticipantID
+void Reset_Participant_IDs()
+{
+  // stop the ECL system test participant and restart it using new IDs...
+  ECL_STP_Stop();
+  ECL_STP_Start(@sysvar::ECL_ST_Participant::ParticipantID);
+  ECL_STP_Start(@sysvar::ECL_ST_ParticipantB::ParticipantID);
+}
+
+on timer _tAfterStart
+{
+  @sysvar::ECL_ST_Participant::DoSetEclTermination = mostGetEclTermination(ECL_GetMostChannel());
+}
+
+on sysvar DoSetECLVerbose
+{
+  ECL_SetECLVerbose(/*(enum eECL_VerboseLevel)(@this)*/ @this ? ECL_Verbose_Default : ECL_Verbose_Off);
+}
+
+void ECL_CB_OnECLError (char msg[])
+{
+  write("%FILE_NAME%: ECL_CB_OnECLError: %s", msg);
+
+  Reset_LED();
+}
+
+void ECL_CB_OnECLStateChanged (long newState)
+{
+  // this callback indicates every state change of the ecl 
+  //write("%FILE_NAME%: ECL_CB_OnECLStateChanged: new state %d", newState);
+}
+
+void Reset_LED ()
+{
+  /* reset LED */
+  STP_ShowSignalOnLED = 0;
+
+  @sysvar::ECL_ST_Participant::ECLSignalLevelLED = LEDState_Ok;
+  @sysvar::ECL_ST_ParticipantB::ECLSignalLevelLED = LEDState_Ok;
+}
+
+void Reset_LED (long classID)
+{
+  /* reset LED */
+  STP_ShowSignalOnLED = 0;
+
+  if (classID == @sysvar::ECL_ST_Participant::ParticipantID)
+    @sysvar::ECL_ST_Participant::ECLSignalLevelLED = LEDState_Ok;
+
+  if (classID == @sysvar::ECL_ST_ParticipantB::ParticipantID)
+    @sysvar::ECL_ST_ParticipantB::ECLSignalLevelLED = LEDState_Ok;
+}
+
+// we use the signal level variable to flash the LED
+on sysvar ECL_ST_Participant::ECLSignalLevel
+{
+  if (STP_ShowSignalOnLED)
+  {
+    long ledState;
+    if (@this == 0)
+      ledState = LEDState_Working;
+    else
+      ledState = LEDState_Waiting;
+
+    @sysvar::ECL_ST_Participant::ECLSignalLevelLED = ledState;
+    @sysvar::ECL_ST_ParticipantB::ECLSignalLevelLED = ledState;
+  }
+}
+
+void ECL_STP_CB_OnSystemTestSendResults(long testParameter, long classID)
+{
+  Reset_LED(classID);
+}
+
+

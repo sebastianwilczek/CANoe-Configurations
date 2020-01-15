@@ -1,0 +1,73 @@
+/*@!Encoding:1252*/
+variables
+{ 
+  const dword kMediaClock_MaxBuffers = 1024;
+  const dword kMediaClock_TimerDeviationNs = 2000000;
+  
+  msTimer gMediaClock_Timer;
+  
+  qword gMediaClock_PtpTime,
+        gMediaClock_Count,
+        gMediaClock_Rate100Hz;
+}
+
+on timer gMediaClock_Timer
+{
+  qword ptpTime[kMediaClock_MaxBuffers];
+  qword ptpTimeNow, ptpTimerTime;
+
+  dword i;
+  
+  i = 0;
+  ptpTimeNow = PtpTimeNow() + kMediaClock_TimerDeviationNs;
+
+  do
+  {
+    ptpTimerTime = gMediaClock_PtpTime + (qword)gMediaClock_Count * 10000000 / gMediaClock_Rate100Hz;  
+       
+    if (ptpTimerTime <= ptpTimeNow)
+    {
+      ++gMediaClock_Count;
+      
+      if ((((qword)gMediaClock_Count) * 10000000) % gMediaClock_Rate100Hz == 0)
+      {
+        gMediaClock_PtpTime += (qword)gMediaClock_Count * 10000000 / gMediaClock_Rate100Hz;
+        gMediaClock_Count = 0;
+      }
+      
+      ptpTime[i++] = ptpTimerTime;
+      
+      if (i >= kMediaClock_MaxBuffers)
+      {
+        write("i (%d) >= kMaxBuf!", i);
+        Stop();
+      }
+    }
+    else break;
+    
+  } while (1);
+  
+  if (i > 0)
+  {
+    OnMediaClockTimer(ptpTime, i);
+  }
+}
+
+void MediaClock_Start(word clockRate100Hz)
+{  
+  if (isTimerActive(gMediaClock_Timer))
+  {
+    return;
+  }
+  
+  gMediaClock_Rate100Hz = clockRate100Hz;
+  gMediaClock_PtpTime = PtpTimeNow();
+  gMediaClock_Count = 0;
+    
+  setTimerCyclic(gMediaClock_Timer, 0, _max(1, 10 / clockRate100Hz));
+}
+
+void MediaClock_Stop()
+{
+  cancelTimer(gMediaClock_Timer);
+}

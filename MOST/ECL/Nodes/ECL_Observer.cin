@@ -1,0 +1,290 @@
+/*@!Encoding:1252*/
+includes
+{
+#include "ECL_Constants.cin"
+}
+
+//
+// ECL_Observer.cin:
+//  Common include file for MOST150 ECL System-Test and Electrical-Wakeup passive observation
+//  Version 1.0
+//
+// This file provides the ABI for:
+//  System-Test Observer: ECL_O_*
+//
+// Note: when using this file, the following callbacks must to be implemented:
+//  void ECL_CB_OnECLError(char msg[])
+//  void ECL_O_CB_OnElectricalWakeupReceived()
+//  void ECL_O_CB_OnStartupSequenceReceived ()
+//  void ECL_O_CB_OnSystemTestParameterReceived(long testParameter)
+//  void ECL_O_CB_OnSystemTestResultsReceived(long testParameter, long electricalStates[], long opticalStates[], long numResults)
+//
+//
+variables
+{
+  long _gECLOSignalLevel;
+  long _gECLOTestParamValue;
+  long _gECLOLastChange, _gECLOLastLow, _gECLOLastLowInterval, _gECLOLastHigh, _gECLOLastHighInterval;
+
+  enum ECLOarticipantState { ECLOStateOff = 0, ECLOStateError = -1,
+    ECLOStateStartSeqRead = 1, ECLOStateReadParameterSequence, ECLOStateReadResultSeq, ECLOStateIdle } _gECLOState;
+
+  long _gECLOListenToChanneNo = 1;
+  char _gECLOSysVarNamesSpace[256] = "ECL_Observer";
+
+  long _gECLONumPartitiants = cECL_MAX_PARTICIPANTS;
+
+  msTimer _tObsrvReceiveParamSeq;
+  long _gObsrvReadParamSeqBitTimeSlot;
+
+  msTimer _tObsrvReceiveTestResults;
+  long _gECLOReceiveTestTimeSlot;
+  long _gECLIOeceivedTestResultsEl[cECL_MAX_PARTICIPANTS];
+  long _gECLIOeceivedTestResultsOpt[cECL_MAX_PARTICIPANTS];
+
+  msTimer _tCheckECLInactiveTestSeparator;
+}
+
+OnMostEcl(long eclState)
+{
+  long timeNowInMS;
+
+  timeNowInMS = /*timeNowNS*/ timeNowInt64() / 1000000;
+
+  // ignore events from other channels!
+  if(mostEventChannel() != _gECLOListenToChanneNo)
+    return;
+
+  if (_gECLOSignalLevel != eclState) {
+    _gECLOLastChange = timeNowInMS;
+  } else
+    return; // only react on level/pegel change
+
+  if (eclState == 0) {
+    /* ECL signal change from 1 to 0 */
+    _gECLOLastHighInterval = timeNowInMS - _gECLOLastHigh;
+    _gECLOLastLow = timeNowInMS;
+  } else if (eclState == 1) {
+    /* ECL signal change from 0 to 1 */
+    _gECLOLastLowInterval = timeNowInMS - _gECLOLastLow;
+    _gECLOLastHigh = timeNowInMS;
+  }
+
+  if (gECL_Verbose >= ECL_Verbose_Default)
+    write("%s: timeNowInMS: %d, eclState: %d -> %d", _gECLOSysVarNamesSpace, timeNowInMS, _gECLOSignalLevel, eclState);
+
+  _gECLOSignalLevel = eclState;
+
+  switch(_gECLOState) {
+  case ECLOStateError:
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s: OnMostEcl: ECLOStateError", _gECLOSysVarNamesSpace);
+  //  break;
+  case ECLOStateOff:
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s: OnMostEcl: ECLOStateOff. _gECLOLastLowInterval: %d", _gECLOSysVarNamesSpace, _gECLOLastLowInterval);
+    if (eclState == 1 &&
+        (timeNowInMS-_gECLOLastLow) >= (cECL_tTSI-cECL_TOLERANCE) &&
+        (timeNowInMS-_gECLOLastLow) <= (cECL_tTSI+cECL_TOLERANCE)  ) {
+      _gECLOState = ECLOStateStartSeqRead;
+      if (gECL_Verbose >= ECL_Verbose_Default)
+        write("%s: system test start impulse received!", _gECLOSysVarNamesSpace);
+
+      // IMPLEMENT THIS CALLBACK: ECL system test startup sequence received
+      ECL_O_CB_OnStartupSequenceReceived();
+    }
+    if (eclState == 1 &&
+        (timeNowInMS-_gECLOLastLow) >= (cECL_tEWU_Min) &&
+        (timeNowInMS-_gECLOLastLow) <= (cECL_tEWU_Max)  ) {
+
+      // IMPLEMENT THIS CALLBACK: ECL electrical wakeup received
+      ECL_O_CB_OnElectricalWakeupReceived();
+    }
+    break;
+  case ECLOStateStartSeqRead:
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s: OnMostEcl: ECLOStateStartSeqRead", _gECLOSysVarNamesSpace);
+    // check until we get the startup time (4000 to 10000 ms)
+    if (eclState == 0 && (timeNowInMS-_gECLOLastHigh)>=(cECL_tStartUp-cECL_TOLERANCE)
+          /* && (timeNowInMS-_gECLOLastHigh)<=(cECL_tStartUpMax+cECL_TOLERANCE) ?? */ ) {
+      _gECLOState = ECLOStateReadParameterSequence;
+      _gObsrvReadParamSeqBitTimeSlot = 0;
+      _gECLOTestParamValue = 0;
+      setTimer(_tObsrvReceiveParamSeq, cECL_tTestStart + cECL_tTestParam/2);
+    }
+    break;
+  case ECLOStateReadParameterSequence:
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s: OnMostEcl: ECLOStateReadParameterSequence", _gECLOSysVarNamesSpace);
+    break;
+  case ECLOStateReadResultSeq:
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s: OnMostEcl: ECLOStateReadResultSeq. _gECLOLastHighInterval: %d, _gECLOLastLowInterval: %d",
+            _gECLOSysVarNamesSpace, _gECLOLastHighInterval, _gECLOLastLowInterval);
+    if (eclState == 1) {
+      /* start of tTestPause or test result synchronization - range from 100ms up to 7s ?! */
+      /* test for sync interval */
+      if ( abs(_gECLOLastLowInterval-cECL_tTestSync) <= cECL_TOLERANCE) {
+        if (gECL_Verbose >= ECL_Verbose_Default)
+          write("%s >>>>>>>>>>> setTimer!", _gECLOSysVarNamesSpace);
+        _gECLOReceiveTestTimeSlot = -1;
+        setTimer(_tObsrvReceiveTestResults, /*2*cECL_tTestSep*/ 0);
+        //_gECLOTS_BitNo = 0;
+        _gECLOState = ECLOStateIdle;
+      }
+    } else if (eclState == 0 &&
+        _gECLOLastHighInterval >= (cECL_tTestPause-cECL_TOLERANCE)
+     /*   && _gECLOLastHighInterval <= (cECL_tTestPause+cECL_TOLERANCE)*/ ) {
+       // ignore this section
+    } else {
+      _gECLOState = ECLOStateError;
+    }
+    break;
+  default:
+    if (gECL_Verbose >= ECL_Verbose_Default)
+      write("%s: OnMostEcl: invalid state?", _gECLOSysVarNamesSpace);
+    break;
+  }
+}
+
+void ECL_O_SetListenToChanneNo (long channel)
+{
+  _gECLOListenToChanneNo = channel;
+}
+
+on timer _tObsrvReceiveTestResults
+{
+  long deviceNum, currentECLBit, electricalState, opticalState;
+
+  currentECLBit = _gECLOSignalLevel; // mostGetEcl();
+
+  if (gECL_Verbose >= ECL_Verbose_Default)
+    write("on _tObsrvReceiveTestResults: timeNow in ms: %d", (timeNowInt64() / 1000000) );
+
+  if (_gECLOReceiveTestTimeSlot < 0) {
+    _gECLOReceiveTestTimeSlot = 0;
+    setTimer(_tObsrvReceiveTestResults, 2*cECL_tTestSep + cECL_tTestResult/2);
+
+    // check if the ECL is inactive between test results (the signal stays high)
+    setTimerCyclic(_tCheckECLInactiveTestSeparator, 2*cECL_tTestSep + 2*cECL_tTestResult - cECL_TOLERANCE, 2*cECL_tTestResult + cECL_tTestSep);
+  } else if (_gECLOReceiveTestTimeSlot < 2*_gECLONumPartitiants) {
+    deviceNum = _gECLOReceiveTestTimeSlot/2;
+
+    // read 2 bits (Ex and Ox) for every ECL device 
+    if ( (_gECLOReceiveTestTimeSlot % 2) == 0) {
+      setTimer(_tObsrvReceiveTestResults, cECL_tTestResult);
+      if (gECL_Verbose >= ECL_Verbose_Default)
+        write("_tObsrvReceiveTestResults E%d: %d", deviceNum, currentECLBit);
+
+      _gECLIOeceivedTestResultsEl[deviceNum] = (currentECLBit ? 1 : 0); /* electrical state */
+    } else {
+      setTimer(_tObsrvReceiveTestResults, cECL_tTestSep + cECL_tTestResult);
+      if (gECL_Verbose >= ECL_Verbose_Default)
+        write("_tObsrvReceiveTestResults O%d: %d", deviceNum, currentECLBit);
+
+      _gECLIOeceivedTestResultsOpt[deviceNum] = (currentECLBit ? 1 : 0); /* optical state */
+
+      // IMPLEMENT THIS CALLBACK: ECL test result output
+      //ECL_O_CB_OnSystemTestResultReceived(deviceNum+1, _gECLOTestParamValue, electricalState, opticalState);
+    }
+
+    _gECLOReceiveTestTimeSlot++;
+
+    // stop checking of test pause if we reach the last test result
+    if (_gECLOReceiveTestTimeSlot >= 2*_gECLONumPartitiants)
+      cancelTimer(_tCheckECLInactiveTestSeparator);
+  } else {
+    /* results received */
+
+    // IMPLEMENT THIS CALLBACK: ECL test result output
+    ECL_O_CB_OnSystemTestResultsReceived(_gECLOTestParamValue, _gECLIOeceivedTestResultsEl, _gECLIOeceivedTestResultsOpt, _gECLONumPartitiants);
+
+    /* reset state */
+    _gECLOState = ECLOStateOff;
+  }
+}
+
+on timer _tObsrvReceiveParamSeq
+{
+  long readBit;
+
+  // read current ECL level
+  readBit = _gECLOSignalLevel; // MostGetEcl(mostGetChannel());
+
+  if (readBit < 0) {
+    write("%s: got ECL error: %d!", readBit, _gECLOSysVarNamesSpace);
+    _gECLOState = ECLOStateError;
+    return;
+  }
+
+  if (_gECLOState == ECLOStateReadParameterSequence) {
+
+    // read bits P1..P5
+    if (_gObsrvReadParamSeqBitTimeSlot < 5) {
+
+      _gECLOTestParamValue |= (readBit << (4-_gObsrvReadParamSeqBitTimeSlot));
+
+      // set timer to read the next bit
+      _gObsrvReadParamSeqBitTimeSlot++;
+      setTimer(_tObsrvReceiveParamSeq, cECL_tTestParam);
+    } else if (_gObsrvReadParamSeqBitTimeSlot == 5) {
+      // bit after parameter sequence has to be 0
+      if (readBit != 0) {
+        write("%s: parameter synchronization bit not zero! going invalid ...", _gECLOSysVarNamesSpace);
+        _gECLOState = ECLOStateError;
+      } else {
+        // parameter reading finished -> go to 'read results' state
+        _gECLOState = ECLOStateReadResultSeq;
+
+        // IMPLEMENT THIS CALLBACK: ECL system test parameter received
+        ECL_O_CB_OnSystemTestParameterReceived(_gECLOTestParamValue);
+      }
+    }
+  }
+
+  if (gECL_Verbose >= ECL_Verbose_Default)
+    write("on timer _tObsrvReceiveParamSeq: _gECLOTestParamValue %d", _gECLOTestParamValue);
+}
+
+on preStart
+{
+  _gECLOTestParamValue = 0;
+
+  // default namespace if not set
+  if (_gECLOSysVarNamesSpace[0] == 0)
+    strncpy(_gECLOSysVarNamesSpace, "ECL_Observer", elCount(_gECLOSysVarNamesSpace));
+}
+
+void ECL_O_SetNumParticipants (long value)
+{
+  _gECLONumPartitiants = value;
+}
+
+on timer _tCheckECLInactiveTestSeparator
+{
+  char errorString[256];
+  long timeNowInMS;
+  errorString[0] = 0; // reset static buffer!
+
+  timeNowInMS = timeNowInt64() / 1000000;
+
+  if (gECL_Verbose >= ECL_Verbose_Default)
+  {
+    write(">>>>>>>>>>>> _tCheckECLInactiveTestSeparator: _gECLOSignalLevel: %d, timeNowInMS: %d, _gECLOLastChange: %d, _gECLOLastLow %d",
+      _gECLOSignalLevel, timeNowInMS, _gECLOLastChange, _gECLOLastLow);
+  }
+
+  if (_gECLOSignalLevel != 1 || (timeNowInMS-_gECLOLastChange) < (cECL_tTestSep - 4*cECL_TOLERANCE))
+  {
+    snprintf(errorString, elCount(errorString), "ERROR detected: ECL signal level was not inactive during test separator - wrong number of participants?!");
+  }
+
+  if (errorString[0] != 0)
+  {
+    write("%s: _tCheckECLInactiveTestSeparator: %s", _gECLOSysVarNamesSpace, errorString);
+
+    // IMPLEMENT THIS CALLBACK: general ECL error
+    ECL_CB_OnECLError(errorString);
+  }
+}
+

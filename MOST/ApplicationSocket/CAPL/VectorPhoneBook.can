@@ -1,0 +1,212 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  // Simulation of FBlock VectorPhoneBook
+
+  // Phone book data
+  const int kDatabaseSize = 7;
+  char gDatabase[kDatabaseSize][2][100] = {
+   {"555-1234", "Zeus"},
+   {"555-5678", "Dionysos"},
+   {"555-4321", "Aphrodite"},
+   {"555-8765", "Morpheus"},
+   {"555-2233", "Proteus"},
+   {"555-0815", "Apollo"},
+   {"555-1122", "Helene"}
+   };
+}
+/*@@end*/
+
+/*@@mostAmsMsg:VectorPhoneBook.SearchByNumber.StartResult (0xC1C0A2):*/
+on mostAMSMessage VectorPhoneBook.SearchByNumber.StartResult
+{
+  long result;
+  char numberstr[100];
+
+  if(!CheckValidReception(this))
+    return;
+
+  // get string parameter from message
+  
+  result = mostParamGetString(this, "NumberStr", numberstr, elcount(numberstr));
+  if(result <= 0)
+  {
+    mostSendError_CodeByte(this, kErrParamWrong, 1); // first parameter wrong
+    return;
+  }
+
+  // search person info
+  result = PersonByNumber(numberstr);
+  if(result < 0)
+  { 
+    mostSendError_CodeByte(this, kErrParamNotAvailable, 1); // first parameter not available
+    return;
+  }
+
+  // send search result
+  SendSearchResult(this.sa, gDatabase[result][1]);
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // React on node messages from connected channel only; ignore spy messages
+  mostApplicationNode();
+
+  // Enable function service
+  // The function service implements FktIds.Get/Status and
+  // provides automatic error reply on commands to non-registred
+  // functions of this FBlock.
+  mostAsFsEnable();
+
+  // Enable all functions and all operations defined in the function catalog
+  // for this FBlock. 
+  mostAsFsFunctionEnable(kFctAllInFCat, kOpTFAllInFCat);
+}
+/*@@end*/
+
+/*@@caplFunc:ShowDatabase():*/
+ShowDatabase()
+{
+  // copies the phonebook database into an 
+  // environment variable of type string
+
+  char buffer[1000];
+  int  i,j;
+  char c;
+  int  kRowWidth = 10;
+
+  for(j = 0; j < kDatabaseSize; ++j)
+  {
+    if(gDatabase[j][0][0] == 0)
+      break;
+
+    // copy number
+    for(i = 0; i < kRowWidth; ++i)
+    {
+      c = gDatabase[j][0][i];
+      if(c != 0)
+        buffer[j * (2 * kRowWidth + 1) + i] = c;
+      else
+        buffer[j * (2 * kRowWidth + 1) + i] = ' ';
+    }
+    buffer[j * (2 * kRowWidth + 1) + kRowWidth] = ' ';
+
+    // copy name
+    for(i = 0; i < kRowWidth; ++i)
+    {
+      c = gDatabase[j][1][i];
+      if(c != 0)
+        buffer[j * (2 * kRowWidth + 1) + i + kRowWidth + 1] = c;
+      else
+        buffer[j * (2 * kRowWidth + 1) + i + kRowWidth + 1] = ' ';
+    }
+    buffer[j * (2 * kRowWidth + 1) + 2 * kRowWidth + 1] = ' ';
+
+    sysSetVariableString(sysvar::PhoneBook::Database, buffer);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:PersonByNumber(char[]):*/
+long PersonByNumber(char numberstr[])
+{
+  // lookup a person in the phonebook
+  int i;
+  for(i = 0; i < kDatabaseSize; ++i)
+  {
+    if(strncmp(numberstr, gDatabase[i][0], elcount(numberstr)) == 0)
+    {
+      // person found
+      return i;
+    }
+  }
+
+  // person not found
+  return -1;
+}
+/*@@end*/
+
+/*@@caplFunc:SendSearchResult(long,char[]):*/
+SendSearchResult(long destadr, char personstr[])
+{
+  mostAMSMessage VectorPhoneBook.SearchByNumber.Result msgResult;
+
+  msgResult.InstanceId = mostApGetInstId(); 
+
+  // fill result string
+  mostParamSetString(msgResult, "InfoText", personstr);
+  
+  // fill destination
+  msgResult.da = destadr;
+
+  // send result
+  output(msgResult);
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  @sysvar::PhoneBook::FBlockID = MostApGetFBlockID();
+  @sysvar::PhoneBook::InstID = MostApGetInstID();
+  @sysvar::PhoneBook::IsRegistered = MostApIsRegistered();
+
+  // show the database in the panel
+  ShowDatabase();
+}
+/*@@end*/
+
+/*@@sysvarChange:PhoneBook::Register:*/
+on sysvar PhoneBook::Register
+{
+  if(@this != 1)
+    return;
+ 
+  MostApRegister();
+}
+/*@@end*/
+
+/*@@sysvarChange:PhoneBook::Unregister:*/
+on sysvar PhoneBook::Unregister
+{
+  if(@this != 1)
+    return;
+ 
+  MostApUnregister();
+}
+/*@@end*/
+
+/*@@mostApInstID:OnMostApInstID():*/
+OnMostApInstID()
+{
+  @sysvar::PhoneBook::InstID = MostApGetInstID();
+}
+/*@@end*/
+
+/*@@mostAsRegistry:OnMostAsRegistry(long):*/
+OnMostAsRegistry(long rgtype)
+{
+  // local registry changed
+  if(rgtype == kLocalFBlockList)
+  {
+    @sysvar::PhoneBook::IsRegistered = MostApIsRegistered();
+  }
+}
+/*@@end*/
+
+/*@@mostNodeAdr:OnMostNodeAdr(long):*/
+OnMostNodeAdr(long nodeadr)
+{
+  @sysvar::PhoneBook::NodeAdr = nodeadr;
+}
+/*@@end*/
+

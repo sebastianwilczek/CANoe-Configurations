@@ -1,0 +1,250 @@
+/*@!Encoding:1252*/
+includes
+{
+  
+}
+
+variables
+{
+  int doInitData = 1;
+  int doneInitialization = 0;
+  mstimer PSI5SendDeferedTimer;
+  timer PSI5CommunicationRestartTimer;
+  const int kSendQueueSize = 64;
+}
+
+on preStart
+{
+  if (@PSI_Communication::SendInitSequenceWhenStarting)
+  {
+    SendInitSequence();
+  }
+  else
+  {
+    // stop communication by sending empty frame
+    SendEmptyFrame();
+  }
+}
+
+on start
+{
+}
+
+enum sensorPsi5CrcMode LongToCRCMode(long mode)
+{
+  switch (mode)
+  {
+    case 0: return ePsi5AutoCrc;
+    case 1: return ePsi5ManualCrc;
+    case 2: return ePsi5WrongCrc;
+    default: return ePsi5AutoCrc;
+  }
+}
+
+void SendInitSequence()
+{
+  int sensorReadyCount;
+  if (doInitData)
+  {
+    SendInitData();
+  }
+  for (sensorReadyCount=0;sensorReadyCount<@PSI_Communication::SensorReadyCount; sensorReadyCount++)
+  {
+    SendSensorReady();
+  }
+  SendCurrentFrame();
+  doneInitialization = 1;
+}
+
+void SendInitData()
+{
+  int numInitDataNibbles = 9; // is it really used on receiver side?
+  SendInitBlock(0, @PSI_Communication::ProtocolRevision);     // protocol version
+  SendInitBlockByte(1, numInitDataNibbles);                   // number of init blocks
+  SendInitBlockByte(3, @PSI_Communication::ManufacturerCode); // vendor id
+  SendInitBlockByte(5, @PSI_Communication::SensorType);       // sensor type
+  SendInitBlockByte(7, @PSI_Communication::SensorParameter);  // sensor parameter
+}
+
+void SendInitBlockByte(byte Id, byte Data)
+{
+  SendInitBlock(Id,   (Data & 0xf0) >> 4); // high data nibble
+  SendInitBlock(Id+1, (Data & 0x0f));      // low data nibble
+}
+
+void SendInitBlock(byte Id, byte Data)
+{
+  Psi5SensorFrameStruct frame;
+  frame.Frametype = (1 << 1);
+
+  frame.StartDelayUs = @PSI_Communication::CycleTime;
+
+
+  // Fill the frame with data
+  frame.StartBits = 0; // Binary 11
+  frame.StartBitsCount = 2;
+  frame.DataRegionABitsCount = @PSI_Communication::DataRegionABitsCount;
+  frame.CrcMode = LongToCRCMode(@PSI_Communication::CRCMode);
+  frame.CrcBits = 0; // Will be set automatically
+  frame.CrcBitsCount = @PSI_Communication::CRCBitsCount;
+  
+  frame.DataRegionABits = 0x200|Id;
+  sysvar::SENSOR::PSI5::Sensor.QueuePsi5Frame(frame);
+  frame.DataRegionABits = 0x210|Data;
+  sysvar::SENSOR::PSI5::Sensor.QueuePsi5Frame(frame);
+}
+
+void SendSensorReady()
+{
+  Psi5SensorFrameStruct frame;
+  frame.Frametype = (1 << 1);
+
+  // The frame will be sent 30µs after the sync pulse
+  frame.StartDelayUs = @PSI_Communication::CycleTime;
+
+  // Fill the frame with data
+  frame.StartBits = 0; // Binary 11
+  frame.StartBitsCount = 2;
+  frame.DataRegionABits = 0x1E7;
+  frame.DataRegionABitsCount = 10;
+  // Use CRC mode from panel
+  frame.CrcMode = LongToCRCMode(@PSI_Communication::CRCMode);
+  frame.CrcBitsCount = @PSI_Communication::CRCBitsCount;
+  frame.CrcBits = @PSI_Communication::CRCBits; // Will be set automatically
+  
+  sysvar::SENSOR::PSI5::Sensor.QueuePsi5Frame(frame);
+
+}
+
+void SendFrameWithData()
+{
+  Psi5SensorFrameStruct frame;
+  int result;
+  frame.Frametype = (1 << 1);
+
+  frame.StartDelayUs = @PSI_Communication::CycleTime;
+
+
+  // Fill the frame with data
+  frame.StartBitsCount = @PSI_Communication::StartBitsCount;
+  frame.StartBits = @PSI_Communication::StartBitsValue; // Binary 11
+//  frame.StartBitsCount = 3;
+//  frame.StartBits = 1; // Binary 11
+  frame.DataRegionABitsCount = @PSI_Communication::DataRegionABitsCount;
+  frame.DataRegionABits = @PSI_Communication::DataRegionABitsValue;
+
+  // Use CRC mode from panel
+  frame.CrcMode = LongToCRCMode(@PSI_Communication::CRCMode);
+  frame.CrcBitsCount = @PSI_Communication::CRCBitsCount;
+  frame.CrcBits = @PSI_Communication::CRCBits; // Will be set automatically
+
+  result = sysvar::SENSOR::PSI5::Sensor.QueuePsi5Frame(frame);
+  write("data frame sent at %f, rc=%d", timeNowNS() * 1e-9, result);
+  if (result == eSensorSendBufferFull)
+  {
+    setTimer(PSI5SendDeferedTimer, 10);
+  }
+}
+
+void SendEmptyFrame()
+{
+  Psi5SensorFrameStruct frame;
+  int result;
+  frame.Frametype = 3;
+//  frame.StartDelayUs = @PSI_Communication::CycleTime;
+
+  // Use automatic CRC calculation
+//  frame.CrcMode = ePsi5AutoCrc;
+
+  // Fill the frame with data
+//  frame.StartBitsCount = @PSI_Communication::StartBitsCount;
+//  frame.StartBits = @PSI_Communication::StartBitsValue; // Binary 11
+//  frame.DataRegionABitsCount = @PSI_Communication::DataRegionABitsCount;
+//  frame.DataRegionABits = @PSI_Communication::DataRegionABitsValue;
+//  frame.CrcBits = 0; // Will be set automatically
+//  frame.CrcBitsCount = 1;
+  result = sysvar::SENSOR::PSI5::Sensor.QueuePsi5Frame(frame);
+  write("empty frame sent at %f, rc=%d", timeNowNS() * 1e-9, result);
+  if (result == eSensorSendBufferFull)
+  {
+    setTimer(PSI5SendDeferedTimer, 10);
+  }
+}
+
+void SendCurrentFrame()
+{
+  int result;
+  if (@PSI_Communication::Running)
+  {
+    SendFrameWithData();
+  }
+  else
+  {
+    SendEmptyFrame();
+  }
+}
+
+void SendDefered()
+{
+  setTimer(PSI5SendDeferedTimer, 10);
+}
+
+on timer PSI5SendDeferedTimer
+{
+  SendCurrentFrame();
+}
+
+on sysvar_update PSI_Communication::DataRegionABitsValue
+{
+  SendDefered();
+}
+
+on sysvar_update (PSI_Communication::DataRegionABitsCount
+  | PSI_Communication::CycleTime
+  | PSI_Communication::StartBitsCount
+  | PSI_Communication::StartBitsValue
+  | PSI_Communication::CRCMode
+  | PSI_Communication::CRCBitsCount
+  | PSI_Communication::CRCBits
+  | PSI_Communication::Running)
+  
+{
+  SendCurrentFrame();
+}
+
+on sysvar PSI_Communication::SendInitSequenceNow
+{
+  if (@this == 1)
+  {
+    SendInitSequence();
+  }
+}
+
+on sysvar_update SENSOR::PSI5::ECU::Sensor1::TimeSlot1::SensorFrame
+{
+//  write("%d 0x%x",
+//  (int)@SENSOR::PSI5::ECU::Sensor1::TimeSlot1::SensorFrame.FrameLength,
+//  @SENSOR::PSI5::ECU::Sensor1::TimeSlot1::SensorFrame.DataRegionA & 0x3ff);
+}
+
+void StopCANoe()
+{
+  stop();
+}
+
+on timer PSI5CommunicationRestartTimer
+{
+  SendFrameWithData();
+}
+
+on sysvar PSI_Communication::Interrupting
+{
+  if (@this == 1)
+  {
+    long timeoutMicroSeconds;
+    timeoutMicroSeconds = (@PSI_Communication::InterruptCount * @PSI_Communication::CycleTime);
+    SendEmptyFrame();
+    write("timeout=%d us", timeoutMicroSeconds);
+    setTimer(PSI5CommunicationRestartTimer, 0, timeoutMicroSeconds * 1000);
+  }
+}

@@ -1,0 +1,347 @@
+/*@@includes:*/
+includes
+{
+  #include "..\Nodes\DiagTester_SessionManagement.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  char gECU[20] = "TC SetSN";
+
+
+  // ------- Variant Coding ---------
+  byte  gCountryType;
+  byte  gVehicleType;
+  word  gSpecialSetting;
+}
+/*@@end*/
+
+/*@@testcase:SetSN():*/
+testcase SetSN ()
+{
+  DiagRequest "Sessions::ExtendedDiagnosticSession::Start" reqStartExtendedSession;
+  DiagRequest "SecurityAccess::SeedLevel1::Request"        reqGetSeed;
+  DiagRequest "SecurityAccess::KeyLevel1::Send"            reqSendKey;
+  DiagRequest "Sessions::ProgrammingSession::Start"        reqStartProgrammingSession;
+  DiagRequest "Identification::SerialNumber::Write"        reqWriteSerial;
+  DiagRequest "Sessions::DefaultSession::Start"            reqStartDefaultSession;
+
+  double param[1];
+  long resultSetSN;
+  DWORD seedValue, sn;
+  int testerPresentBackup;
+
+  setWriteDbgLevel( 0);
+
+  StartSessionManagement();
+
+  DiagSetTarget("Door"); // this enables this CAPL Prg to act as the tester
+  diagStopTesterPresent();
+  testerPresentBackup = @sysvar::DiagTester::EnableTesterPresent;
+  @sysvar::DiagTester::EnableTesterPresent = 0;
+
+  resultSetSN = 1;
+
+  if (resultSetSN == 1)
+  {
+    // start step 1
+    GotoExtendedSession();
+
+    resultSetSN = WaitForResponse(reqStartExtendedSession, "Start Extended Session", "", param);
+
+    if (resultSetSN == 1)
+    {
+      // start step 2
+      OnRespExtendedSession();
+
+      resultSetSN = WaitForResponse(reqGetSeed, "Request Security Seed", "SecuritySeed", param);
+
+      if (resultSetSN == 1)
+      {
+        // start step 3
+        seedValue = param[0];
+        OnRespSeedLevel1(seedValue);
+
+        resultSetSN = WaitForResponse(reqSendKey, "Send Security Key", "", param);
+
+        if (resultSetSN == 1)
+        {
+          // start step 4
+          OnRespKeyLevel1();
+
+          GotoProgrammingSession();
+
+          resultSetSN = WaitForResponse(reqStartProgrammingSession, "Start Programming Session", "", param);
+
+          if (resultSetSN == 1)
+          {
+            // start step 5
+            OnRespExtendedSession();
+
+            resultSetSN = WaitForResponse(reqGetSeed, "Request Security Seed", "SecuritySeed", param);
+
+            if (resultSetSN == 1)
+            {
+              // start step 6
+              seedValue = param[0];
+              OnRespSeedLevel1(seedValue);
+
+              resultSetSN = WaitForResponse(reqSendKey, "Send Security Key", "", param);
+
+              if (resultSetSN == 1)
+              {
+                // start step 7
+                OnRespKeyLevel1();
+
+                sn = @sysvar::DiagTester::SerialNumberOut;
+                @sysvar::DiagTester::SerialNumberOut += 1;
+
+                resultSetSN = WriteSerial(reqWriteSerial, sn);
+
+                if (resultSetSN == 1)
+                  TestStepPass("Write Serial Number", "Request was sent");    
+                else
+                  TestStepFail("Write Serial Number", "Request could not be sent");    
+
+                resultSetSN = WaitForResponse(reqWriteSerial, "Write Serial Number", "", param);
+
+              } // end step 7
+            } // end step 6
+          } // end step 5
+        } // end step 4
+      } // end step 3
+
+      GotoDefaultSession();
+
+      resultSetSN = WaitForResponse(reqStartDefaultSession, "Start Default Session", "", param);
+
+      if (resultSetSN == 1)
+      {
+        OnRespDefaultSession();
+      }
+    } // end step 2
+  } // end step 1
+
+  @sysvar::DiagTester::EnableTesterPresent = testerPresentBackup;
+
+  TestWaitForTimeout(10);
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  InitializeSessionManagement();
+}
+/*@@end*/
+
+/*@@caplFunc:WaitForResponse(diagRequest,char[],char[],float[]):*///function
+int WaitForResponse (DiagRequest * idReq, char label[], char paramName[], double param[])
+{
+  int waitResult;
+  
+  waitResult = 0;
+
+  switch( TestWaitForDiagResponse(idReq, 250))  
+  { 
+    case 0: // Timeout: The ECU did not respond within 250 ms.    
+            TestStepFail(label, "No answer from ECU!");    
+            break;  
+
+    case 1: // response received    
+            TestReportWriteDiagResponse(idReq);  // write response to report    
+            if( DiagGetLastResponseCode(idReq) == -1)    
+            { // A positive response was received      
+              TestStepPass(label, "Positive response received");    
+              waitResult = 1;
+              if (strlen(paramName) > 0)
+              {
+                DiagGetRespParameter(idReq, 0, paramName, param);  
+              }
+            }    
+            else  
+            { // A negative response was received  
+              TestStepFail(label, "Negative response received");    
+            }    
+            break;  
+
+    default: // internal or setup error    
+            TestStepFail(label, "Error in TestCase! Verdict unreliable.");  
+
+  } // end switch
+
+  if (waitResult == 1)
+    SetRequestResult(cOk);
+  else
+    SetRequestResult(cBad);
+
+  return waitResult;
+}
+/*@@end*/
+
+/*@@caplFunc:WriteSerial(diagRequest,dword):*///function
+int WriteSerial (DiagRequest * request, DWORD sn)
+{
+  int result;
+
+  request.SetParameter("SerialNumber", sn);
+  result = request.SendRequest();
+
+  SetRequestResult(cUnknown);
+
+  snprintf( text, elcount(text), "CAPL: %s: Identification::SerialNumber::Write result %d", gECU, result);
+  writeDbgLevel( gDiagDbgLevel, text);
+
+  return (result) ? 0 : 1;
+}
+/*@@end*/
+
+/*@@testcase:SetVariant():*/
+testcase SetVariant ()
+{
+  DiagRequest "Sessions::ExtendedDiagnosticSession::Start" reqStartExtendedSession;
+  DiagRequest "SecurityAccess::SeedLevel1::Request"        reqGetSeed;
+  DiagRequest "SecurityAccess::KeyLevel1::Send"            reqSendKey;
+  DiagRequest "Sessions::ProgrammingSession::Start"        reqStartProgrammingSession;
+  DiagRequest "VariantCoding::Coding::Write"               reqWriteVariant;
+  DiagRequest "Sessions::DefaultSession::Start"            reqStartDefaultSession;
+
+  double param[1];
+  long result;
+  DWORD seedValue, sn;
+  int testerPresentBackup;
+
+  setWriteDbgLevel( 0);
+
+  StartSessionManagement();
+
+  DiagSetTarget("Door"); // this enables this CAPL Prg to act as the tester
+  diagStopTesterPresent();
+  testerPresentBackup = @sysvar::DiagTester::EnableTesterPresent;
+  @sysvar::DiagTester::EnableTesterPresent = 0;
+
+  result = 1;
+
+  if (result == 1)
+  {
+    // start step 1
+    GotoExtendedSession();
+
+    result = WaitForResponse(reqStartExtendedSession, "Start Extended Session", "", param);
+
+    if (result == 1)
+    {
+      // start step 2
+      OnRespExtendedSession();
+
+      result = WaitForResponse(reqGetSeed, "Request Security Seed", "SecuritySeed", param);
+
+      if (result == 1)
+      {
+        // start step 3
+        seedValue = param[0];
+        OnRespSeedLevel1(seedValue);
+
+        result = WaitForResponse(reqSendKey, "Send Security Key", "", param);
+
+        if (result == 1)
+        {
+          // start step 4
+          OnRespKeyLevel1();
+
+          GotoProgrammingSession();
+
+          result = WaitForResponse(reqStartProgrammingSession, "Start Programming Session", "", param);
+
+          if (result == 1)
+          {
+            // start step 5
+            OnRespExtendedSession();
+
+            result = WaitForResponse(reqGetSeed, "Request Security Seed", "SecuritySeed", param);
+
+            if (result == 1)
+            {
+              // start step 6
+              seedValue = param[0];
+              OnRespSeedLevel1(seedValue);
+
+              result = WaitForResponse(reqSendKey, "Send Security Key", "", param);
+
+              if (result == 1)
+              {
+                // start step 7
+                OnRespKeyLevel1();
+
+                CreateVariantCoding();
+
+                result = WriteVariant(reqWriteVariant);
+
+                if (result == 1)
+                  TestStepPass("Write Variant Coding", "Request was sent");    
+                else
+                  TestStepFail("Write Variant Coding", "Request could not be sent");    
+
+                result = WaitForResponse(reqWriteVariant, "Write Variant Coding", "", param);
+
+              } // end step 7
+            } // end step 6
+          } // end step 5
+        } // end step 4
+      } // end step 3
+
+      GotoDefaultSession();
+
+      result = WaitForResponse(reqStartDefaultSession, "Start Default Session", "", param);
+
+      if (result == 1)
+      {
+        OnRespDefaultSession();
+      }
+    } // end step 2
+  } // end step 1
+
+  @sysvar::DiagTester::EnableTesterPresent = testerPresentBackup;
+
+  TestWaitForTimeout(10);
+}
+/*@@end*/
+
+/*@@caplFunc:CreateVariantCoding():*///function
+CreateVariantCoding ()
+{
+  gCountryType       = @sysvar::DiagTester::CountryType;
+  gVehicleType       = @sysvar::DiagTester::VehicleType;
+  gSpecialSetting    = @sysvar::DiagTester::SpecialSetting;
+
+  gCountryType       = random(3)+1;
+  gVehicleType       = random(3)+1;
+  gSpecialSetting    += 1;
+
+  @sysvar::DiagTester::CountryType    = gCountryType;
+  @sysvar::DiagTester::VehicleType    = gVehicleType;
+  @sysvar::DiagTester::SpecialSetting = gSpecialSetting;
+}
+/*@@end*/
+
+/*@@caplFunc:WriteVariant(diagRequest):*///function
+int WriteVariant (DiagRequest * request)
+{
+  int result;
+
+  request.SetParameter( "Codingstring.CountryType", gCountryType);
+  request.SetParameter( "Codingstring.VehicleType", gVehicleType);
+  request.SetParameter( "Codingstring.SpecialAdjustment", gSpecialSetting);
+  result = request.SendRequest();
+
+  SetRequestResult(cUnknown);
+
+  snprintf( text, elcount(text), "CAPL: %s: VariantCoding::Coding::Write result %d", gECU, result);
+  writeDbgLevel( gDiagDbgLevel, text);
+
+  return (result) ? 0 : 1;
+}
+/*@@end*/
+

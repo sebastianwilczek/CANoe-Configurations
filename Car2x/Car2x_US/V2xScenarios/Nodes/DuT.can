@@ -1,0 +1,82 @@
+/*@!Encoding:1252*/
+includes
+{
+  
+}
+
+variables
+{
+  char scenarioFilePath[200] = "V2xScenarioTriggerDuT_2.scn";
+  
+  msTimer scenarioDurationTimer;
+  long    scenarioDurationTimeSeconds = 0;
+  
+  int isScenarioStarted = 0;
+  int isScenarioLoaded = -2;
+}
+
+on start
+{
+  setTimerCyclic(scenarioDurationTimer, 1000);
+}
+
+// Callback function called if the state of the scenario has changed
+void OnScenarioStateChanged(long newState)
+{
+  switch(newState) // loaded
+  {
+    case 0: //loaded
+    {
+      write("Scenario loaded");      
+      break;
+    }
+    case 1: // started
+    {
+      write("Scenario started");
+      break;
+    }
+    case 2: //stopped
+    {
+      write("Scenario stopped");
+      
+      if(isScenarioLoaded != 1)
+      {
+        isScenarioLoaded = C2xLoadScenario(scenarioFilePath);
+        write("Load Scenario...");
+      }
+      
+      break;
+    }
+  }
+}
+
+on timer scenarioDurationTimer
+{
+  scenarioDurationTimeSeconds ++;
+  
+  if(scenarioDurationTimeSeconds == 45) // stop scenario after 45 seconds
+  {
+    C2xStopScenario();
+  }
+  
+  isScenarioStarted = C2xIsScenarioStarted();
+  
+  if(isScenarioStarted == 0)  // Scenario has been stopped
+  {
+    // Restart the scenario
+    C2xStartScenario();
+    scenarioDurationTimeSeconds = 0;
+  }
+}
+
+// Callback function reacting on all triggerable attributes of all stations in the scenario
+void OnStationAttributeTriggerAll(char stationName[], char attributeName[])
+{  
+  // Search for the attribute "Events" from the station "EU_ApplMsg::Sender_EEBL"
+  if (strncmp(stationName,"SAEJ2735_MsgSet::Sender_HardBraking",strlen(stationName)) == 0 &&
+      strncmp(attributeName,"Events",strlen(attributeName)) == 0)
+  {
+    // Set the value of the attribute to the systemvariable (this systemvariable is used to show the status of EEBL in the "DuT Head Unit" panel
+    @sysvar::DuT::isEvent= C2xGetStationAttributeInt64(stationName, attributeName);
+  }
+}

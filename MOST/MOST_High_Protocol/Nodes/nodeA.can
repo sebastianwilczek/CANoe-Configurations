@@ -1,0 +1,1974 @@
+/*@@includes:*/
+includes
+{
+#include "MOST_MHP.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables {
+
+  char gECU[10] = "Node_A";
+
+  // set this flag to 0 if you want minimum output to the write window
+  int gDebugLevel= 5;
+
+  dword gTxPortHandle;  // port handle for DSO instance (sender)
+  dword gRxPortHandle;  // port handle for DSI instance (receiver)
+
+  // DSO buffer
+  const long cTxSize = 131072;
+  byte gTxDataBuffer[cTxSize];
+
+  // DSI buffer
+  const long cRxSize = 65536;
+  byte gRxDataBuffer[cRxSize];
+  long gRxBufferPos = 0;
+  
+  // Address of own DSI: FBlockID.InstID.FctID.OpType
+  dword gMyFBlockID;
+  dword gMyInstID;
+  dword gMyFktID;
+  dword gMyOpTypeID;
+
+  // Address of destination DSI: FBlockID.InstID.FctID.OpType + Device adr.
+  dword gDestFBlockID;
+  dword gDestInstID;
+  dword gDestFktID;
+  dword gDestOpTypeID;
+
+  dword gDestDev; 
+  
+  // dummy must be used for sysSetVariableData(sysvar::SendData_1,..)
+  byte gClearData[10];
+
+  // Timer for hold of connection
+  mstimer gTimerRxHold; 
+
+  // constants for error identification
+  const int cSender = 0;
+  const int cReceiver = 1;
+
+  char gPanATxFI[32] = "Sender_A FI";
+  char gPanARxFI[32] = "Receiver_A FI";
+
+  const long cDefaultAir = 5000;
+  const long cDefaultPrio = 1;
+
+  long gDefaultPacketSize = cDefaultUsrDataSize_Packet;
+  long gDefaultNOfFrames = cRxSize / cDefaultUsrDataSize_Packet;
+  byte gAppendToFile;
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  long myDevAdr; 
+  int fktID, nOfFrames, isStreaming, isBlockAck;
+
+  setWriteDbgLevel(gDebugLevel);
+  writeDbgLevel(1,"DebugLevel: %d", gDebugLevel);
+  ResetTxCounters();
+  ResetRxCounters();
+  
+  @sysvar::RxSysVar::IsStream_1 = 0;
+  @sysvar::TxSysVar::IsStream_1 = 0;
+  @sysvar::EnableFI_1 = 1;
+  @sysvar::EnableFI_1 = 0;
+  @sysvar::TxSysVar::FrameSize_1 = gDefaultPacketSize;
+  @sysvar::RxSysVar::FrameSize_1 = gDefaultPacketSize;
+  @sysvar::NOfFramesPerBl_1 = gDefaultNOfFrames;
+
+  /////////////////////////////////////////////////////////////////////////
+  // Get receiver address from panel and register it for appliction node
+  gMyFBlockID = @sysvar::RxSysVar::FBlockID_1; 
+  gMyInstID   = @sysvar::RxSysVar::InstID_1;
+  gMyFktID    = @sysvar::RxSysVar::FktID_1; 
+  gMyOpTypeID = @sysvar::RxSysVar::OpType_1;  
+  MostApRegisterEx(gMyFBlockID, gMyInstID);
+}
+/*@@end*/
+
+/*@@sysvarChange:ClearData_1:*/
+on sysvar ClearData_1
+{
+  if (@this)
+  {
+    sysSetVariableData(sysvar::ReceiveData_1, gClearData, 0);
+    ResetRxCounters();
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:FillData_1:*/
+on sysvar FillData_1
+{
+  long txCount,i;
+  long destDev;
+
+  // No action if button is released
+  if (@this==0)
+      return;
+
+  // Filling Tx Buffer with arbitrary data
+  txCount = @sysvar::TxSysVar::FillSize_1;
+  if(txCount > cTxSize)
+    return;
+  for( i=0; i<txCount; i++ )
+  {
+    gTxDataBuffer[i] = 0x30+i;
+  }
+  // Show data in panel
+  sysSetVariableData(sysvar::SendData_1, gTxDataBuffer, txCount);
+  @sysvar::TxSysVar::DataSize_1 = txCount;
+  // Request transmission
+  RequestTransmission();
+}
+/*@@end*/
+
+/*@@sysvarChange:MsgSend_1:*/
+on sysvar MsgSend_1
+{
+  int isStreaming;
+  long txArraySize;          // message data
+  char sourceFilepath[1024];
+  
+  // Prevent from sending when button is released
+  if(@this == 0)
+    return;
+
+  // determine type of transmission (stream or single packet)
+  isStreaming = @sysvar::TxSysVar::IsStream_1;
+  if(isStreaming == 1)
+  {
+    sysGetVariableString(sysvar::TxSysVar::SrcFilePath_1, sourceFilepath, elCount(sourceFilepath));
+    if(MH_CheckTxFile(sourceFilepath) == 0)
+    {
+      writeDbgLevel(0,"CAPL: %s: Error: No data to send", gECU);
+      return;
+    }
+  }
+  else
+  {
+    // get the message data from the panel control's edit box
+    sysGetVariableData(sysvar::SendData_1, gTxDataBuffer, txArraySize);
+
+    if(txArraySize == 0)
+    {
+      writeDbgLevel(0,"CAPL: %s: Error: No data to send", gECU);
+      return;        // nothing to send
+    }
+
+    if (txArraySize >= cTxSize)
+        txArraySize = cTxSize;
+  }
+  // Ok, data is available => initialize transmission 
+  RequestTransmission();
+}
+/*@@end*/
+
+/*@@sysvarChange:RxSysVar::Hold_1:*/
+on sysvar RxSysVar::Hold_1
+{
+  if (@this == 1)
+  {
+    if(MH_SetRxOnHold(gRxPortHandle, 1, cRxHoldEvent) != 0)    // function successfully executed
+    {
+      @sysvar::RxSysVar::IsHoldCon_1 = 1;
+    }
+    else
+    {
+      writeDbgLevel(3, "CAPL: %s: Attempt to activate cyclic send of HOLD CONNECTION failed", gECU);
+    }
+  }
+  else
+  {
+    MH_SetRxOnHold(gRxPortHandle, 0, 0);
+    @sysvar::RxSysVar::IsHoldCon_1 = 0;                // ... send HOLD deactivated
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ResetTxCounters():*/
+ResetTxCounters ()
+{
+  // reset Tx counter environment variables
+  @sysvar::TxSysVar::Data_1 = 0;
+  @sysvar::IsSend_1 = 0;     // switch off LED
+}
+/*@@end*/
+
+/*@@sysvarChange:RxSysVar::FBlockID_1:*/
+on sysvar RxSysVar::FBlockID_1
+{
+  // re-register the node for the FBlock given in the DSI address 
+  MostApUnregisterEx(gMyFBlockID, gMyInstID);
+  gMyFBlockID = @this; 
+  MostApRegisterEx(gMyFBlockID, gMyInstID);
+}
+/*@@end*/
+
+/*@@sysvarChange:RxSysVar::InstID_1:*/
+on sysvar RxSysVar::InstID_1
+{
+  // re-register the node for the FBlock given in the DSI address 
+  MostApUnregisterEx(gMyFBlockID, gMyInstID);
+  gMyInstID = @this; 
+  MostApRegisterEx(gMyFBlockID, gMyInstID);
+}
+/*@@end*/
+
+/*@@sysvarChange:RxSysVar::FktID_1:*/
+on sysvar RxSysVar::FktID_1
+{
+  gMyFktID = @this;
+}
+/*@@end*/
+
+/*@@sysvarChange:RxSysVar::OpType_1:*/
+on sysvar RxSysVar::OpType_1
+{
+  gMyOpTypeID = @this;
+}
+/*@@end*/
+
+/*@@sysvarChange:IsBlockAck_1:*/
+on sysvar IsBlockAck_1
+{
+  int isBlockAck;
+
+  isBlockAck = @this;
+
+  if(isBlockAck == 1)
+  {
+    MH_SetTxBlockAck(gTxPortHandle, 1);    // block
+    writeDbgLevel(2, "CAPL: %s: Switched to block acknowledge.", gECU);
+  }
+  else
+  {
+    MH_SetTxBlockAck(gTxPortHandle, 0);    // frame
+    writeDbgLevel(2, "CAPL: %s: Switched to frame acknowledge.", gECU);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::SrcFilePath_1:*/
+on sysvar TxSysVar::SrcFilePath_1
+{
+  char srcFilepath[4096];
+  long fileSize = 0;
+
+  sysGetVariableString(this, srcFilepath, elCount(srcFilepath));
+  if(strlen(srcFilepath) > 0)
+  {
+    fileSize = MH_CheckTxFile(srcFilepath);
+    if (fileSize > 0)
+    {
+      @sysvar::TxSysVar::IsStream_1 = 1;
+    }
+  }
+  @sysvar::TxSysVar::DataSize_1 = fileSize;
+
+  writeDbgLevel(2, "CAPL: %s: Filepath is : %s ", gECU, srcFilepath);
+}
+/*@@end*/
+
+/*@@sysvarChange:SendData_1:*/
+on sysvar SendData_1
+{
+  long txArraySize;
+
+  // if data is entered in the hex editor, set the transmission type to single packet
+  @sysvar::TxSysVar::IsStream_1 = 0;
+
+  txArraySize = sysGetVariableArrayLength(this);
+  @sysvar::TxSysVar::DataSize_1 = txArraySize;
+}
+/*@@end*/
+
+/*@@sysvarChange:TransportMode_1:*/
+on sysvar TransportMode_1
+{
+  int mode;
+
+  mode = @this;
+
+  if(mode == cTransportMode_Control)
+  {
+    // reset capacity values
+    @sysvar::TxSysVar::FrameSize_1 = cMaxUsrDataSize_Control;
+    EnableControl("Settings_A", "SysVar:TxSysVar::FrameSize_1", 0); // disable edit box
+    MH_SetTxFrameSize(gTxPortHandle, cMaxUsrDataSize_Control);
+    MH_SetTxTranspMode(gTxPortHandle, cTransportMode_Control);
+    writeDbgLevel(2, "CAPL: %s: Using control channel.", gECU);
+  }
+  else // (mode == cTransportMode_Packet)
+  {
+    @sysvar::TxSysVar::FrameSize_1 = gDefaultPacketSize; 
+    EnableControl("Settings_A", "SysVar:TxSysVar::FrameSize_1", 1); // enable edit box
+    MH_SetTxFrameSize(gTxPortHandle, gDefaultPacketSize);
+    MH_SetTxTranspMode(gTxPortHandle, cTransportMode_Packet); 
+    writeDbgLevel(2, "CAPL: %s: Using asynchonous channel.", gECU);
+  }  
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::Priority_1:*/
+on sysvar TxSysVar::Priority_1
+{
+  MH_SetTxPriority(gTxPortHandle, @this);
+  writeDbgLevel(2, "CAPL: %s: Priority is set to %d", gECU, @this);
+}
+/*@@end*/
+
+/*@@sysvarChange:SetRxCapacity_1:*/
+on sysvar SetRxCapacity_1
+{    
+  dword framesPerBlock;
+  dword bytesPerFrame;
+  dword priority; 
+  dword air;     
+ 
+  // No action if button is released
+  if (@this==0)
+      return;
+
+  framesPerBlock = @sysvar::NOfFramesPerBl_1;
+  bytesPerFrame  = @sysvar::RxSysVar::FrameSize_1;
+  priority       = @sysvar::RxSysVar::Priority_1;
+  air            = @sysvar::RxSysVar::AIR_1;
+  
+  if(MH_SetRxCapacity(gRxPortHandle, framesPerBlock, bytesPerFrame, air, priority) == 0)
+  {
+    writeDbgLevel(2, "CAPL: %s: Rx capacity set: %d frames per block, %d bytes per frame, AIR = %d microsecs, priority = %d.", 
+        gECU, framesPerBlock, bytesPerFrame, air, priority);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::FrameSize_1:*/
+on sysvar TxSysVar::FrameSize_1
+{
+
+  MH_SetTxFrameSize(gTxPortHandle, @this);
+  writeDbgLevel(2, "CAPL: %s: Frame size is set to %d", gECU, @this);
+}
+/*@@end*/
+
+/*@@timer:gTimerRxHold:*/
+on timer gTimerRxHold
+{
+  // timeout of t_hold deactivates cyclic sending of HOLD CONNECTION 
+  @sysvar::TxSysVar::IsHoldCon_1 = 0; // ...from this node 
+  @sysvar::RxSysVar::IsHoldCon_1 = 0; // ...from the other side
+}
+/*@@end*/
+
+/*@@mostNodeAdr:OnMostNodeAdr(long):*/
+OnMostNodeAdr(long nodeadr)
+{
+  @sysvar::MyDevAdr_1 = nodeadr;
+  writeDbgLevel(3,"NodeAdr: %04X",nodeadr);
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndTxBlockFinished(dword,long,long,long):*///callback
+MH_IndTxBlockFinished(dword handle, long blockSize, long segId, long blockCnt)
+{
+  long size, isStreaming;
+  
+  size = @sysvar::TxSysVar::Data_1;
+  size += blockSize;
+
+  @sysvar::TxSysVar::Data_1 = size;  // total user data bytes sent
+  writeDbgLevel(3, "CAPL: %s: Transmission of block %d with %d bytes finished", gECU, blockCnt, blockSize);
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndTxConnectionClosed(dword,long):*///callback
+MH_IndTxConnectionClosed(dword handle, long res)
+{
+  @sysvar::IsSend_1 = 0;
+  @sysvar::TxSysVar::Hold_1 = 0;
+
+  ReportErrorsToWrite(res, cSender);
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRxConnectionClosed(dword,long):*///callback
+MH_IndRxConnectionClosed(dword handle, long res)
+{
+  @sysvar::IsReceive_1 = 0;
+  @sysvar::RxSysVar::Hold_1 = 0;
+  ReportErrorsToWrite(res, cReceiver);
+  // Overwrite file during next connection
+  gAppendToFile = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndHoldRcvd(dword,long):*///callback
+MH_IndHoldRcvd(dword handle, long event)
+{
+  // Indicate hold connection from other side in panel
+  // This function will be called whenever a hold connection frame is received
+  @sysvar::RxSysVar::IsHoldCon_1 = 1; // from a sender 
+  @sysvar::TxSysVar::IsHoldCon_1 = 1; // from a receiver
+  // The timer will reset the indication as soon as no hold connection messages 
+  // are received within cTimeoutHold any more
+  cancelTimer(gTimerRxHold);
+  setTimer(gTimerRxHold, cTimeoutHold);
+  writeDbgLevel(0, "CAPL: %s: Received HOLD CONNECTION with event=%X", gECU, event);
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndTxPktFinished(dword,long):*///callback
+MH_IndTxPktFinished (dword handle, long packetSize)
+{
+  ////////////////////////////////////////////////////////////////////
+  // HINT: Place 
+  //         MH_SetTxBuffer(byteArray, longSize);
+  //       here, to continue transmission without closing the
+  //       connection. Don't forget to set up a counter because otherwise
+  //       an endless loop will be the result.
+  ////////////////////////////////////////////////////////////////////
+
+  @sysvar::IsSend_1 = 0;    // reset send status => deactivate LED
+  writeDbgLevel(3, "CAPL: %s: Transmission of packet with %d bytes finished", gECU, packetSize);
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRxBufferFinished(dword,long,long):*///callback
+MH_IndRxBufferFinished (dword handle, long filledSize, long reason)
+{
+  writeDbgLevel(3, "CAPL: %s: Written receive buffer with %d bytes", gECU, filledSize);
+  ///////////////////////////////////////////////////////////////////////////////////
+  // This function is called whenever the receiver buffer is full and the application 
+  // has to handle the received data. Additionally it is called when the connection 
+  // is closed to provide the remaining application data
+  // In this demo, processing of the received data takes place in the block handler
+  // (MH_IndRxBlckFinished) in order to update the panel controls a soon as possible. 
+  // In a normal application, this callback here is the place to save and process the 
+  // received data. 
+
+  @sysvar::IsReceive_1 = 0;        // reset send status => deactivate LED
+  if(reason == cReasonRxBuff_Packet)
+    writeDbgLevel(3, "CAPL: %s: Reception of packet completed. %d bytes in buffer.", gECU, filledSize);
+  else
+    writeDbgLevel(3, "CAPL: %s: Reception of %d bytes finished. Buffer is full.", gECU, filledSize);
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRxBufferRequested(dword,long):*///callback
+MH_IndRxBufferRequested (dword handle, long isPacketBegin)
+{
+  /////////////////////////////////////////////////////////////////////////////////////
+  // This callback is triggered as soon as the data sink receives (another) zero frame
+  // announcing the transmission of another block which will not fit into the remaining
+  // rx buffer provided by the previous call to MH_IndRxBufferRequested, if there was 
+  // already one.
+  //
+  // WARNING: With MOST_MHP.DLL version 1.0.10 and newer this callback is also triggered
+  // when streaming to file is active and a new packet is observed. This allows writing of
+  // packets into different files even if the packets are transmitted within one connection.
+  // If the filename should not be changed, it must be assured that the file content
+  // is not overwritten after each packet (see comment at MH_SetRxBuffer below).
+
+  int isStreaming, i;
+  char destFilepath[4096];
+
+  gRxBufferPos = 0;
+  if(isPacketBegin == 1)
+  {
+    writeDbgLevel(3, "CAPL: %s: New rx buffer requested for new packet", gECU);
+    ResetRxCounters();                // reset counters
+    sysSetVariableData(sysvar::ReceiveData_1, gRxDataBuffer, 0);
+  }
+  else
+    writeDbgLevel(3, "CAPL: %s: New rx buffer requested for next part of packet", gECU);  
+
+  sysGetVariableString(sysvar::RxSysVar::DestFilePath_1, destFilepath, elCount(destFilepath));  
+
+  isStreaming = @sysvar::RxSysVar::IsStream_1;
+  if(isStreaming == 1) 
+  {
+    /////////////////////////////////////////////////////////////////////////////
+    // HINT: Set a new filename here to change the file after each packet:
+    //  snprintf(destFilepath,4096,"%s.%03d",destFilepath,i++ % 100);
+    //
+    // If the filename should not be changed, the appendToFile parameter should be
+    // 0 during the first call and 1 for all following calls. This is done here
+    // with the global variable gAppendToFile which is reset in MH_IndRxBufferRequest.
+    if(MH_SetRxBuffer(gRxPortHandle, gAppendToFile, destFilepath) == cAPIResult_Ok)
+      writeDbgLevel(0, "CAPL: %s: Streaming into file %s", gECU, destFilepath);
+    else
+    {
+      writeDbgLevel(0, "CAPL: %s: Couldn't open file %s for output", gECU, destFilepath);
+      // cannot stream, so use static buffer
+      @sysvar::RxSysVar::IsStream_1 = 0;
+      if(MH_SetRxBuffer(gRxPortHandle, gRxDataBuffer, cRxSize) != cAPIResult_Ok)
+        writeDbgLevel(0, "CAPL: %s: Could not set Buffer !", gECU);
+    }
+
+    /////////////////////////////////////////////////////////////////////////////
+    // HINT: Remove this line if multiple files are used (see hint above).
+    gAppendToFile = 1;
+  }
+  else
+  {
+    if(MH_SetRxBuffer(gRxPortHandle, gRxDataBuffer, cRxSize) != cAPIResult_Ok)
+      writeDbgLevel(0, "CAPL: %s: Could not set Buffer !", gECU);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndTxZeroFrame(dword,long,long,long,long):*///callback
+MH_IndTxZeroFrame (dword handle, long nOfFrames, long segId, long options, long blockCnt)
+{
+  @sysvar::IsSend_1 = 1;               // set send status => activate LED
+  @sysvar::TxSysVar::BlockCnt_1 = blockCnt;
+  writeDbgLevel(3, "CAPL: %s: Transmission of block %d started for %d frames", gECU, blockCnt, nOfFrames);
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndWrongMsg(dword):*///callback
+MH_IndWrongMsg(dword handle)
+{
+  writeDbgLevel(5, "CAPL: %s: Warning: Wrong message received.", gECU);
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRxZeroFrame(dword,long,long,long,long):*///callback
+MH_IndRxZeroFrame(dword handle, long nOfFrames, long segId, long options, long blockCnt)
+{
+  @sysvar::IsReceive_1 = 1;  // set receive status => activate LED
+  @sysvar::RxSysVar::BlockCnt_1 = blockCnt;
+  writeDbgLevel(3, "CAPL: %s: Received 0-Frame: %d Frames in Block Nr. %d expected", gECU, nOfFrames, blockCnt);  
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{  
+  mostApplicationNode();
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  // initialize default transmission parameters for all ports to be created (handle = 0)
+  MH_SetTxTranspMode(0, @sysvar::TransportMode_1);
+  MH_SetTxFrameSize(0, @sysvar::TxSysVar::FrameSize_1);
+  MH_SetTxPriority(0, @sysvar::TxSysVar::Priority_1);
+  MH_SetTxBlockAck(0, @sysvar::IsBlockAck_1);
+
+  if (mostGetSpeedGrade(mostGetChannel()) == 3)
+  {
+    MH_UseProtocolRev(0, 3);
+    gDefaultPacketSize = cDefaultUsrDataSize_Packet;
+    if ((cRxSize / gDefaultPacketSize) > cMaxNOfFrames_Packet)
+    {
+      gDefaultNOfFrames = cMaxNOfFrames_Packet;
+    }
+    else
+    {
+      gDefaultNOfFrames = cRxSize / gDefaultPacketSize;
+    }
+    MH_SetRxCapacity(gRxPortHandle, gDefaultNOfFrames, gDefaultPacketSize, cDefaultAir, cDefaultPrio);
+  }
+
+  // register a MHP tx port for accessing a DSO instance 
+  gTxPortHandle = MH_CreateTxPort("");  // empty prefix is used, since only a single port is created
+  // register a MHP rx port for accessing a DSI instance
+  gRxPortHandle = MH_CreateRxPort("");  // empty prefix is used, since only a single port is created
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::Hold_1:*/
+on sysvar TxSysVar::Hold_1
+{
+  if (@this == 1)
+  {
+    if(MH_SetTxOnHold(gTxPortHandle, 1, cTxHoldEvent) != 0)    // function successfully executed
+    {
+      @sysvar::TxSysVar::IsHoldCon_1 = 1;
+    }
+     else
+    {
+      writeDbgLevel(3, "CAPL: %s: Attempt to activate cyclic send of HOLD CONNECTION failed", gECU);
+    }
+  }
+  else
+  {
+    MH_SetTxOnHold(gTxPortHandle, 0, 0);
+    @sysvar::TxSysVar::IsHoldCon_1 = 0;                // ... send HOLD deactivated
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRxBlockFinished(dword,long,long,long):*///callback
+MH_IndRxBlockFinished (dword handle, long blockSize, long segId, long blockCnt)
+{
+  long size, isStreaming;
+  byte data[cRxSize];
+  long dataSize, i, maxSize;
+  size = @sysvar::RxSysVar::Data_1;
+  size += blockSize;
+
+  // update the hex editor content
+  isStreaming = @sysvar::RxSysVar::IsStream_1;
+  if(isStreaming == 0)
+  {
+    sysGetVariableData(sysvar::ReceiveData_1, data, dataSize);
+    maxSize = (dataSize + blockSize < cRxSize) ? dataSize + blockSize : cRxSize;
+    for (i = dataSize; i < maxSize; i++)
+    {
+      data[i] = gRxDataBuffer[gRxBufferPos];
+      gRxBufferPos++;
+    }
+    sysSetVariableData(sysvar::ReceiveData_1, data, i);
+  }
+
+  // Visualization only
+  @sysvar::RxSysVar::Data_1 = size;  // total user data bytes received
+  writeDbgLevel(3, "CAPL: %s: Reception of block %d with %d bytes finished", gECU, blockCnt, blockSize);
+}
+/*@@end*/
+
+/*@@caplFunc:ReportErrorsToWrite(long,int):*///function
+ReportErrorsToWrite (long res, int nodeType)
+{
+  char sNodeType[15];
+  if (cSender == nodeType)
+  {
+    snprintf(sNodeType, elcount(sNodeType), "Sender");
+  }
+  else
+  {
+    snprintf(sNodeType, elcount(sNodeType), "Receiver");
+  }
+  switch (res)
+  {
+    case 0:     writeDbgLevel(0, "CAPL: %s: %s Result (%d): OK", gECU, sNodeType, res);     break;
+    case 1:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Send retries exceeded", gECU, sNodeType, res);          break;
+    case 2:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Trans retries exceeded", gECU, sNodeType, res);         break;
+    case 3:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of End retries exceeded", gECU, sNodeType, res);           break;
+    case 4:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Ready retries exceeded", gECU, sNodeType, res);         break;
+    case 5:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Frame Retries exceeded", gECU, sNodeType, res);         break;
+    case 6:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Receive retries execeeded", gECU, sNodeType, res);      break;
+    case 10:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Receive buffer could not be provided", gECU, sNodeType, res);     break;
+    case 11:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Connection rejected via higher priority", gECU, sNodeType, res);  break;
+    case 13:    writeDbgLevel(0, "CAPL: %s: %s Result (%d): Transmission terminated by receiver", gECU, sNodeType, res);     break;
+    case 14:    writeDbgLevel(0, "CAPL: %s: %s Result (%d): Transmission terminated by sender", gECU, sNodeType, res);       break;
+    case 15:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Transmission killed by sender", gECU, sNodeType, res);            break;
+    case 16:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Parameter out of range", gECU, sNodeType, res);                   break;
+    default:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Unknown error", gECU, sNodeType, res);                            break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndHoldSent(dword,long):*///callback
+MH_IndHoldSent(dword handle, long event)
+{
+  // Indicate hold connection from user request in panel
+  // This function will be called whenever MH_SetTxOnHold was called by the sender application
+  // and the transport layer sent a hold message to the receiver...
+  @sysvar::TxSysVar::IsHoldCon_1 = 1;
+  // ...or whenever MH_SetRxOnHold was called by the receiver application
+  // and the transport layer sent a hold message to the sender
+  @sysvar::RxSysVar::IsHoldCon_1 = 1;
+ 
+  // The timer will reset the indication as soon as no hold connection messages 
+  // are transmitted within cTimeoutHold any more
+  cancelTimer(gTimerRxHold);
+  setTimer(gTimerRxHold, cTimeoutHold);
+  writeDbgLevel(0, "CAPL: %s: Sent HOLD CONNECTION with event=%X", gECU, event);
+}
+/*@@end*/
+
+/*@@caplFunc:ResetRxCounters():*///function
+ResetRxCounters ()
+{
+  // reset Rx counter environment variables
+  @sysvar::RxSysVar::Data_1 = 0;
+  @sysvar::IsReceive_1 = 0; // switch off LED
+}
+/*@@end*/
+
+/*@@sysvarChange:RxSysVar::DestFilePath_1:*/
+on sysvar RxSysVar::DestFilePath_1
+{
+  char destFilepath[4096];
+  int  len;
+  // Check if file is selected
+  sysGetVariableString(sysvar::RxSysVar::DestFilePath_1, destFilepath, len);
+  if (len > 0)
+  {
+    @sysvar::RxSysVar::IsStream_1 = 1;
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::Stop_1:*/
+on sysvar TxSysVar::Stop_1
+{
+  if (MH_TxStopTrans(gTxPortHandle))
+  {
+    @sysvar::IsSend_1 = 0;
+    @sysvar::TxSysVar::Hold_1 = 0;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:MH_FI_IndTxPreSend(dword):*///callback
+long MH_FI_IndTxPreSend(dword handle)
+{
+  long highCmd;
+  long frAckLo;
+  long frAckHi;
+  long blockCnt;
+
+  long msgLen; 
+  long pos;
+  long i;
+  byte inputBytes[cMaxUsrDataSize_PacketMax+2];
+  long inputLen;
+  float timestamp_s;
+  long nOfMsgs;
+
+  blockCnt = MH_FI_GetBlockCnt();
+  highCmd  = MH_FI_GetHighCmd();
+  frAckLo  = MH_FI_GetFrAckLow();
+  frAckHi  = MH_FI_GetFrAckHigh();
+  timestamp_s = timeNowFloat() / 100000.0;
+
+  if(highCmd == cFIRetValDataFrame)
+  {
+    if(blockCnt < 0) //  no blockCnt field in message => data frame
+    {
+      /////////////////////////////////////////
+      /// match message
+      if(@sysvar::TxPreSnd::DataMsg == 0)
+        return 1;
+        
+      if(@sysvar::TxPreSnd::DataMsg_HasBlCnt != @sysvar::TxSysVar::BlockCnt_1)
+        return 1;
+
+      switch(@sysvar::TxPreSnd::DataMsg_HasFrAck)
+      {
+      case 0:    // FrAckHi only
+        if(@sysvar::TxPreSnd::DataMsg_HasFrAHi != frAckHi)
+          return 1;
+        break;
+
+      case 1:    // FrAckHi and FrAckLo
+        if((@sysvar::TxPreSnd::DataMsg_HasFrAHi != frAckHi) ||
+           (@sysvar::TxPreSnd::DataMsg_HasFrALo != frAckLo))
+          return 1;
+         break;
+      case 2:   // FrAckLo only
+         if((@sysvar::TxPreSnd::DataMsg_HasFrALo) != frAckLo)
+          return 1;
+         break;
+      default:
+        return 1;
+      }
+      ////////////////////////////////////////////
+      // process replacement
+      if(@sysvar::TxPreSnd::DataMsg_bRepFrAHi == 1)
+        MH_FI_SetFrAckHigh((@sysvar::TxPreSnd::DataMsg_RepFrAHi));
+
+      if(@sysvar::TxPreSnd::DataMsg_bRepFrALo == 1)
+        MH_FI_SetFrAckLow((@sysvar::TxPreSnd::DataMsg_RepFrALo));
+
+      if(@sysvar::TxPreSnd::DataMsg_bRepVal == 1)
+      {
+        msgLen = MH_FI_GetLen();
+        pos = (@sysvar::TxPreSnd::DataMsg_RepPos);
+        if(pos < msgLen)
+        {
+          sysGetVariableData(sysvar::TxPreSnd::DataMsg_RepVal, inputBytes, inputLen);
+          for(i = 0; i < inputLen; ++i)
+          {
+            if((pos + i) < msgLen)
+              MH_FI_SetByte(pos + i, inputBytes[i]);
+            else
+              break; 
+          }
+        }  
+      }
+      //////////////////////////////////////////////////
+      /// return specified number of messages to be sent     
+      nOfMsgs = (@sysvar::TxPreSnd::DataMsg_Num);
+      Write("TxPreSend at %fs: %s sent %d time(s)", timestamp_s, 
+                                                    cMsgNameDataFrame, 
+                                                    nOfMsgs);
+      return nOfMsgs;                  
+    }
+    else
+    {
+      /////////////////////////////////////////
+      /// match message
+      if((@sysvar::TxPreSnd::ZeroMsg) != 1)
+        return 1;
+
+      if((@sysvar::TxPreSnd::ZeroMsg_HasBlCnt) != blockCnt)
+        return 1;
+
+      if(((@sysvar::TxPreSnd::ZeroMsg_HasFrAck) == 1) &&
+         ((@sysvar::TxPreSnd::ZeroMsg_HasFrALo) != frAckLo))
+        return 1;
+      ////////////////////////////////////////////
+      // process replacement
+      if((@sysvar::TxPreSnd::ZeroMsg_bRepFrALo) == 1)
+        MH_FI_SetFrAckLow((@sysvar::TxPreSnd::ZeroMsg_RepFrALo));
+
+      if((@sysvar::TxPreSnd::ZeroMsg_bRepBlCnt) == 1)
+        MH_FI_SetBlockCnt((@sysvar::TxPreSnd::ZeroMsg_RepBlCnt));
+
+      if((@sysvar::TxPreSnd::ZeroMsg_bRepVal) == 1)
+      {
+        msgLen = MH_FI_GetLen();
+        pos = (@sysvar::TxPreSnd::ZeroMsg_RepPos);
+        
+        if(pos < msgLen)
+        {
+          sysGetVariableData(sysvar::TxPreSnd::ZeroMsg_RepVal, inputBytes, inputLen);
+          for(i = 0; i < inputLen; ++i)
+          {
+            if((pos + i) < msgLen)
+              MH_FI_SetByte(pos + i, inputBytes[i]);
+            else
+              break; 
+          }
+        }  // if(pos < msgLen)        
+      }
+      ///////////////////////////////////////////////////
+      /// return specified number of messages to be sent
+      nOfMsgs = (@sysvar::TxPreSnd::ZeroMsg_Num);
+      Write("TxPreSend at %fs: %s sent %d time(s)", timestamp_s, 
+                                                    cMsgNameZeroFrame, 
+                                                    nOfMsgs);
+
+      return nOfMsgs;
+    }
+  }
+  else
+  {
+    switch(highCmd)
+    {
+
+    case cHighCmdReqCon:
+      /////////////////////////////////////////
+      /// match message
+      if((@sysvar::TxPreSnd::ReqCon) != 1)
+        return 1;
+
+      /////////////////////////////////////////
+      /// process replacement
+      if((@sysvar::TxPreSnd::ReqCon_bRepVal) == 1)
+      {
+        msgLen = MH_FI_GetLen();
+        pos = (@sysvar::TxPreSnd::ReqCon_RepPos);
+        
+        if(pos < msgLen)
+        {
+          sysGetVariableData(sysvar::TxPreSnd::ReqCon_RepVal, inputBytes, inputLen);
+          for(i = 0; i < inputLen; ++i)
+          {
+            if((pos + i) < msgLen)
+              MH_FI_SetByte(pos + i, inputBytes[i]);
+            else
+              break; 
+          }
+        }  // if(pos < msgLen)        
+      }
+      ///////////////////////////////////////////////////
+      /// return specified number of messages to be sent
+      nOfMsgs = (@sysvar::TxPreSnd::ReqCon_Num);
+      Write("TxPreSend at %fs: %s sent %d time(s)", timestamp_s, 
+                                                    cMsgNameReqCon,
+                                                    nOfMsgs);
+
+      return nOfMsgs;
+      break;
+
+    case cHighCmdReady:
+      /////////////////////////////////////////////////////////////////
+      /// if activated, return specified number of messages to be sent
+      if((@sysvar::TxPreSnd::Ready) == 1)
+      {
+        nOfMsgs = (@sysvar::TxPreSnd::Ready_Num);
+        Write("TxPreSend at %fs: %s sent %d time(s)", timestamp_s,
+                                                      cMsgNameReady, 
+                                                      nOfMsgs);
+
+        return nOfMsgs;
+      }
+      else
+        return 1;
+      break;
+
+    case cHighCmdHoldTx:
+      /////////////////////////////////////////////////////////////////
+      /// if activated, return specified number of messages to be sent
+      if((@sysvar::TxPreSnd::HoldTx) == 1)
+      {
+        nOfMsgs = (@sysvar::TxPreSnd::HoldTx_Num);
+        Write("TxPreSend at %fs: %s sent %d time(s)", timestamp_s,
+                                                      cMsgNameHoldTx,
+                                                      nOfMsgs);
+
+        return nOfMsgs;
+      }
+      else
+        return 1;
+      break;
+
+    case cHighCmdEndTx:
+      /////////////////////////////////////////////////////////////////
+      /// if activated, return specified number of messages to be sent
+      if((@sysvar::TxPreSnd::EndTx) == 1)
+      {
+        nOfMsgs = (@sysvar::TxPreSnd::EndTx_Num);
+        Write("TxPreSend at %fs: %s sent %d time(s)", timestamp_s,
+                                                      cMsgNameEndTx,
+                                                      nOfMsgs);
+
+        return nOfMsgs;
+      }
+      else
+        return 1;
+      break;
+
+    default:
+      break;
+
+    }
+  }
+  return 1;
+}
+/*@@end*/
+
+/*@@caplFunc:MH_FI_IndTxPreRcv(dword):*///callback
+long MH_FI_IndTxPreRcv(dword handle)
+{
+  long highCmd;
+  long frAckLo;
+  long frAckHi;
+  long blockCnt;
+
+  long msgLen; 
+  long pos;
+  long i;
+  byte inputBytes[cMaxUsrDataSize_PacketMax+2];
+  long inputLen;
+  float timestamp_s;
+  int isReceived;
+  long air;
+ 
+  blockCnt = MH_FI_GetBlockCnt();
+  highCmd  = MH_FI_GetHighCmd();
+  frAckLo  = MH_FI_GetFrAckLow();
+  frAckHi  = MH_FI_GetFrAckHigh();
+  timestamp_s = timeNowFloat() / 100000.0;
+
+  if(highCmd == cFIRetValDataFrame)
+  {
+    Write("TxPreRcv: DSO can't receive data frames!");  
+  }
+  else
+  {
+    switch(highCmd)
+    {
+    case cHighCmdFrameAck:
+      /////////////////////////////////////////
+      /// match message
+      if((@sysvar::TxPreRcv::FrAck) != 1)
+        return 1;
+
+      if(((@sysvar::TxPreRcv::FrAck_bHasBlCnt) == 1) &&
+         ((@sysvar::TxPreRcv::FrAck_HasBlCnt) != blockCnt))
+        return 1;
+
+      switch((@sysvar::TxPreRcv::FrAck_HasFrAck))
+      {
+      case 0:
+        break; // any FrAck value matches
+      case 1:
+        if((@sysvar::TxPreRcv::FrAck_HasFrAHi) != frAckHi)
+          return 1;
+        break;
+
+      case 2: 
+        if(((@sysvar::TxPreRcv::FrAck_HasFrAHi) != frAckHi) ||
+           ((@sysvar::TxPreRcv::FrAck_HasFrALo) != frAckLo))
+          return 1;
+        break;
+
+      case 3:
+        if((@sysvar::TxPreRcv::FrAck_HasFrALo) != frAckLo)
+          return 1;
+        break;
+      default:
+        return 1;
+      }
+      ////////////////////////////////////////////
+      // process replacement
+      if((@sysvar::TxPreRcv::FrAck_bRepFrAHi) == 1)
+        MH_FI_SetFrAckHigh((@sysvar::TxPreRcv::FrAck_RepFrAHi)); 
+
+      if((@sysvar::TxPreRcv::FrAck_bRepFrALo) == 1)
+        MH_FI_SetFrAckLow((@sysvar::TxPreRcv::FrAck_RepFrALo));
+
+      if((@sysvar::TxPreRcv::FrAck_bRepBlCnt) == 1)
+        MH_FI_SetBlockCnt((@sysvar::TxPreRcv::FrAck_RepBlCnt)); 
+
+      ////////////////////////////////////////
+      // receive message?
+      isReceived = (@sysvar::TxPreRcv::FrAck_bRcv);
+      if(isReceived == 1)
+        Write("TxPreRcv at %fs: %s received", timestamp_s, cMsgNameFrameAck);
+      else
+        Write("TxPreRcv at %fs: %s blocked", timestamp_s, cMsgNameFrameAck);
+
+      return isReceived;
+      break;
+
+    case cHighCmdStartCon:
+      /////////////////////////////////////////
+      /// match message
+      if((@sysvar::TxPreRcv::StrtCon) != 1)
+        return 1;
+
+      ////////////////////////////////////////////
+      // process replacement
+      if((@sysvar::TxPreRcv::StrtCon_bRepVal) == 1)
+      {
+        msgLen = MH_FI_GetLen();
+        pos = (@sysvar::TxPreRcv::StrtCon_RepPos);
+        if(pos < msgLen)
+        {
+          sysGetVariableData(sysvar::TxPreRcv::StrtCon_RepVal, inputBytes, inputLen);
+          for(i = 0; i < inputLen; ++i)
+          {
+            if((pos + i) < msgLen)
+              MH_FI_SetByte(pos + i, inputBytes[i]);
+            else
+              break; 
+          }
+        }  
+      }
+      if((@sysvar::TxPreRcv::StrtCon_bAir) == 1)
+      {
+        msgLen = MH_FI_GetLen();
+        if(7 < msgLen)
+        {
+          air = @sysvar::TxPreRcv::StrtCon_Air;
+          MH_FI_SetByte(6, air >> 8);
+          MH_FI_SetByte(7, air & 0xFF);
+        }  
+      }
+      ////////////////////////////////////////
+      // receive message?
+      isReceived = (@sysvar::TxPreRcv::StrtCon_bRcv);
+      if(isReceived == 1)
+        Write("TxPreRcv at %fs: %s received", timestamp_s, cMsgNameStartCon);
+      else
+        Write("TxPreRcv at %fs: %s blocked", timestamp_s, cMsgNameStartCon);
+
+      return isReceived;
+      break;
+
+    case cHighCmdFrmReq:
+      /////////////////////////////////////////
+      /// match message
+      if((@sysvar::TxPreRcv::SFrmReq) != 1)
+        return 1;
+
+      ////////////////////////////////////////////
+      // process replacement
+      if((@sysvar::TxPreRcv::SFrmReq_bRepVal) == 1)
+      {
+        msgLen = MH_FI_GetLen();
+        pos = (@sysvar::TxPreRcv::SFrmReq_RepPos);
+        if(pos < msgLen)
+        {
+          sysGetVariableData(sysvar::TxPreRcv::SFrmReq_RepVal, inputBytes, inputLen);
+          for(i = 0; i < inputLen; ++i)
+          {
+            if((pos + i) < msgLen)
+              MH_FI_SetByte(pos + i, inputBytes[i]);
+            else
+              break; 
+          }
+        }  
+      }
+      ////////////////////////////////////////
+      // receive message?
+      isReceived = (@sysvar::TxPreRcv::SFrmReq_bRcv);
+      if(isReceived == 1)
+        Write("TxPreRcv at %fs: %s received", timestamp_s, cMsgNameFrmReq);
+      else
+        Write("TxPreRcv at %fs: %s blocked", timestamp_s, cMsgNameFrmReq);
+
+      return isReceived;
+      break;
+
+    case cHighCmdMultiFrmReq:
+      /////////////////////////////////////////
+      /// match message
+      if((@sysvar::TxPreRcv::MFrmReq) != 1)
+        return 1;
+
+      ////////////////////////////////////////////
+      // process replacement
+      if((@sysvar::TxPreRcv::MFrmReq_bRepVal) == 1)
+      {
+        msgLen = MH_FI_GetLen();
+        pos = (@sysvar::TxPreRcv::MFrmReq_RepPos);
+        if(pos < msgLen)
+        {
+          sysGetVariableData(sysvar::TxPreRcv::MFrmReq_RepVal, inputBytes, inputLen);
+          for(i = 0; i < inputLen; ++i)
+          {
+            if((pos + i) < msgLen)
+              MH_FI_SetByte(pos + i, inputBytes[i]);
+            else
+              break; 
+          }
+        }  
+      }
+      ////////////////////////////////////////
+      // receive message?
+      isReceived = (@sysvar::TxPreRcv::MFrmReq_bRcv);
+      if(isReceived == 1)
+        Write("TxPreRcv at %fs: %s received", timestamp_s, cMsgNameMultiFrmReq);
+      else
+        Write("TxPreRcv at %fs: %s blocked", timestamp_s, cMsgNameMultiFrmReq);
+       
+      return isReceived;
+      break;
+
+    case cHighCmdHoldRx:
+      /////////////////////////////////////////////////////////////////
+      /// if activated, return whether message is to be received
+      if((@sysvar::TxPreRcv::HoldRx) == 1)
+      {
+        isReceived = (@sysvar::TxPreRcv::HoldRx_bRcv);
+        if(isReceived == 1)
+          Write("TxPreRcv at %fs: %s received", timestamp_s, cMsgNameHoldRx);
+        else
+          Write("TxPreRcv at %fs: %s blocked", timestamp_s, cMsgNameHoldRx);
+
+        return isReceived;
+      }
+      else
+        return 1;
+      break;
+
+    case cHighCmdEndRx:
+      /////////////////////////////////////////////////////////////////
+      /// if activated, return whether message is to be received
+      if((@sysvar::TxPreRcv::EndRx) == 1)
+      {
+        isReceived = (@sysvar::TxPreRcv::EndRx_bRcv);
+        if(isReceived == 1)
+          Write("TxPreRcv at %fs: %s received", timestamp_s, cMsgNameEndRx);
+        else
+          Write("TxPreRcv at %fs: %s blocked", timestamp_s, cMsgNameEndRx);
+
+        return isReceived;
+      }
+      else
+        return 1;
+      break;
+
+    default:
+      break;
+    }
+  }
+  return 1;
+}
+/*@@end*/
+
+/*@@caplFunc:MH_FI_IndRxPreSend(dword):*///callback
+long MH_FI_IndRxPreSend(dword handle)
+{
+  long highCmd;
+  long frAckLo;
+  long frAckHi;
+  long blockCnt;
+
+  long msgLen; 
+  long pos;
+  long i;
+  byte inputBytes[cMaxUsrDataSize_PacketMax+2];
+  long inputLen;
+  float timestamp_s;
+  long nOfMsgs;
+ 
+  blockCnt = MH_FI_GetBlockCnt();
+  highCmd  = MH_FI_GetHighCmd();
+  frAckLo  = MH_FI_GetFrAckLow();
+  frAckHi  = MH_FI_GetFrAckHigh();
+  timestamp_s = timeNowFloat() / 100000.0;
+
+  if(highCmd == cFIRetValDataFrame)
+  {
+    write("RxPreSnd: DSI can't send data frames!");
+  }
+  else
+  {
+    switch(highCmd)
+    {
+    case cHighCmdFrameAck:
+      /////////////////////////////////////////
+      /// match message
+      if((@sysvar::RxPreSnd::FrAck) != 1)
+        return 1;
+
+      if(((@sysvar::RxPreSnd::FrAck_bHasBlCnt) == 1) &&
+         ((@sysvar::RxPreSnd::FrAck_HasBlCnt) != blockCnt))
+        return 1;
+
+      switch((@sysvar::RxPreSnd::FrAck_HasFrAck))
+      {
+      case 0:
+        break; // any FrAck value matches
+      case 1:
+        if((@sysvar::RxPreSnd::FrAck_HasFrAHi) != frAckHi)
+          return 1;
+        break;
+
+      case 2: 
+        if(((@sysvar::RxPreSnd::FrAck_HasFrAHi) != frAckHi) ||
+           ((@sysvar::RxPreSnd::FrAck_HasFrALo) != frAckLo))
+          return 1;
+        break;
+
+      case 3:
+        if((@sysvar::RxPreSnd::FrAck_HasFrALo) != frAckLo)
+          return 1;
+        break;
+      default:
+        return 1;
+      }
+      ////////////////////////////////////////////
+      // process replacement
+      if((@sysvar::RxPreSnd::FrAck_bRepFrAHi) == 1)
+        MH_FI_SetFrAckHigh((@sysvar::RxPreSnd::FrAck_RepFrAHi)); 
+
+      if((@sysvar::RxPreSnd::FrAck_bRepFrALo) == 1)
+        MH_FI_SetFrAckLow((@sysvar::RxPreSnd::FrAck_RepFrALo));
+
+      if((@sysvar::RxPreSnd::FrAck_bRepBlCnt) == 1)
+        MH_FI_SetBlockCnt((@sysvar::RxPreSnd::FrAck_RepBlCnt)); 
+
+      //////////////////////////////////////////////////
+      // send additional message?          
+      if((@sysvar::RxPreSnd::FrAck_bSndAMsg) == 1)
+        FI_SendAdditionalMsg();
+
+      //////////////////////////////////////////////////
+      // return specified number of messages to be sent
+      nOfMsgs = (@sysvar::RxPreSnd::FrAck_Num);
+      Write("RxPreSnd at %fs: %s sent %d time(s)", timestamp_s,
+                                                   cMsgNameFrameAck, 
+                                                   nOfMsgs);
+      return nOfMsgs;
+      break;
+
+    case cHighCmdStartCon:
+      /////////////////////////////////////////
+      /// match message
+      if((@sysvar::RxPreSnd::StrtCon) != 1)
+        return 1;
+
+      ////////////////////////////////////////////
+      // process replacement
+      if((@sysvar::RxPreSnd::StrtCon_bRepVal) == 1)
+      {
+        msgLen = MH_FI_GetLen();
+        pos = (@sysvar::RxPreSnd::StrtCon_RepPos);
+        if(pos < msgLen)
+        {
+          sysGetVariableData(sysvar::RxPreSnd::StrtCon_RepVal, inputBytes, inputLen);
+          for(i = 0; i < inputLen; ++i)
+          {
+            if((pos + i) < msgLen)
+              MH_FI_SetByte(pos + i, inputBytes[i]);
+            else
+              break; 
+          }
+        }  
+      }
+      //////////////////////////////////////////////////
+      // return specified number of message to sent
+      nOfMsgs = (@sysvar::RxPreSnd::StrtCon_Num);
+      Write("RxPreSnd at %fs: %s sent %d time(s)", timestamp_s, 
+                                                   cMsgNameStartCon,
+                                                   nOfMsgs);
+      return nOfMsgs;
+      break;
+
+    case cHighCmdFrmReq:
+      /////////////////////////////////////////
+      /// match message
+      if((@sysvar::RxPreSnd::SFrmReq) != 1)
+        return 1;
+
+      ////////////////////////////////////////////
+      // process replacement
+      if((@sysvar::RxPreSnd::SFrmReq_bRepVal) == 1)
+      {
+        msgLen = MH_FI_GetLen();
+        pos = (@sysvar::RxPreSnd::SFrmReq_RepPos);
+        if(pos < msgLen)
+        {
+          sysGetVariableData(sysvar::RxPreSnd::SFrmReq_RepVal, inputBytes, inputLen);
+          for(i = 0; i < inputLen; ++i)
+          {
+            if((pos + i) < msgLen)
+              MH_FI_SetByte(pos + i, inputBytes[i]);
+            else
+              break; 
+          }
+        }  
+      }
+      /////////////////////////////////////////////////
+      // return specified number of messages to be sent
+      nOfMsgs = (@sysvar::RxPreSnd::SFrmReq_Num);
+      Write("RxPreSnd at %fs: %s sent %d time(s)", timestamp_s, 
+                                                   cMsgNameFrmReq,
+                                                   nOfMsgs);
+      return nOfMsgs;
+      break;
+
+    case cHighCmdMultiFrmReq:
+      /////////////////////////////////////////
+      /// match message
+      if((@sysvar::RxPreSnd::MFrmReq) != 1)
+        return 1;
+
+      ////////////////////////////////////////////
+      // process replacement
+      if((@sysvar::RxPreSnd::MFrmReq_bRepVal) == 1)
+      {
+        msgLen = MH_FI_GetLen();
+        pos = (@sysvar::RxPreSnd::MFrmReq_RepPos);
+        if(pos < msgLen)
+        {
+          sysGetVariableData(sysvar::RxPreSnd::MFrmReq_RepVal, inputBytes, inputLen);
+          for(i = 0; i < inputLen; ++i)
+          {
+            if((pos + i) < msgLen)
+              MH_FI_SetByte(pos + i, inputBytes[i]);
+            else
+              break; 
+          }
+        }  
+      }
+      /////////////////////////////////////////////////
+      // return specified number of messages to be sent
+      nOfMsgs = (@sysvar::RxPreSnd::MFrmReq_Num);
+      Write("RxPreSnd at %fs: %s sent %d time(s)", timestamp_s, 
+                                                   cMsgNameMultiFrmReq,
+                                                   nOfMsgs);
+      return nOfMsgs;
+      break;
+
+    case cHighCmdHoldRx:
+      /////////////////////////////////////////////////////////////////
+      /// if activated, return specified number of messages to be sent
+      if((@sysvar::RxPreSnd::HoldRx) == 1)
+      {
+        nOfMsgs = (@sysvar::RxPreSnd::HoldRx_Num);
+        Write("RxPreSnd at %fs: %s sent %d time(s)", timestamp_s, 
+                                                     cMsgNameHoldRx,
+                                                     nOfMsgs);
+        return nOfMsgs;
+      }
+      else
+        return 1;
+      break;
+
+    default:
+      break;
+    }
+  }
+  return 1;
+}
+/*@@end*/
+
+/*@@caplFunc:MH_FI_IndRxPreRcv(dword):*///callback
+long MH_FI_IndRxPreRcv(dword handle)
+{
+  long highCmd;
+  long frAckLo;
+  long frAckHi;
+  long blockCnt;
+  byte frameList[3];
+
+  long msgLen; 
+  long pos;
+  long i;
+  byte inputBytes[cMaxUsrDataSize_PacketMax+2];
+  long inputLen;
+  float timestamp_s;
+  int isReceived;
+ 
+  blockCnt = MH_FI_GetBlockCnt();
+  highCmd  = MH_FI_GetHighCmd();
+  frAckLo  = MH_FI_GetFrAckLow();
+  frAckHi  = MH_FI_GetFrAckHigh();
+  timestamp_s = timeNowFloat() / 100000.0;
+
+  if(highCmd == cFIRetValDataFrame)
+  {
+    if(blockCnt < 0)  // no blockCnt field in message => data frame
+    {
+      /////////////////////////////////////////
+      // match message
+      if((@sysvar::RxPreRcv::DataMsg) == 0)
+        return 1;
+        
+      if((@sysvar::RxPreRcv::DataMsg_HasBlCnt) != @sysvar::RxSysVar::BlockCnt_1)
+        return 1;
+
+      switch((@sysvar::RxPreRcv::DataMsg_HasFrAck))
+      {
+      case 0:    // FrAckHi only
+        if((@sysvar::RxPreRcv::DataMsg_HasFrAHi) != frAckHi)
+          return 1;
+        break;
+
+      case 1:    // FrAckHi and FrAckLo
+        if(((@sysvar::RxPreRcv::DataMsg_HasFrAHi) != frAckHi) ||
+           ((@sysvar::RxPreRcv::DataMsg_HasFrALo) != frAckLo))
+          return 1;
+         break;
+      case 2:   // FrAckLo only
+         if((@sysvar::RxPreRcv::DataMsg_HasFrALo) != frAckLo)
+          return 1;
+         break;
+      default:
+        return 1;
+      }
+      ////////////////////////////////////////////
+      // process replacement
+      if((@sysvar::RxPreRcv::DataMsg_bRepFrAHi) == 1)
+        MH_FI_SetFrAckHigh((@sysvar::RxPreRcv::DataMsg_RepFrAHi));
+
+      if((@sysvar::RxPreRcv::DataMsg_bRepFrALo) == 1)
+        MH_FI_SetFrAckLow((@sysvar::RxPreRcv::DataMsg_RepFrALo));
+
+      if((@sysvar::RxPreRcv::DataMsg_bRepVal) == 1)
+      {
+        msgLen = MH_FI_GetLen();
+        pos = (@sysvar::RxPreRcv::DataMsg_RepPos);
+        if(pos < msgLen)
+        {
+          sysGetVariableData(sysvar::RxPreRcv::DataMsg_RepVal, inputBytes, inputLen);
+          for(i = 0; i < inputLen; ++i)
+          {
+            if((pos + i) < msgLen)
+              MH_FI_SetByte(pos + i, inputBytes[i]);
+            else
+              break; 
+          }
+        }  
+      }
+
+      //////////////////////////////////////////////////
+      // send additional message?          
+      if((@sysvar::RxPreRcv::DataMsg_bSndAMsg) == 1)
+        FI_SendAdditionalMsg();
+
+      //////////////////////////////////////////////////
+      // receive message?    
+      isReceived = (@sysvar::RxPreRcv::DataMsg_bRcv);
+      if(isReceived == 1)
+        Write("RxPreRcv at %fs: %s received", timestamp_s, cMsgNameDataFrame); 
+      else
+        Write("RxPreRcv at %fs: %s blocked", timestamp_s, cMsgNameDataFrame); 
+
+      return isReceived;                        
+    }
+    else
+    {
+      /////////////////////////////////////////
+      /// match message
+      if((@sysvar::RxPreRcv::ZeroMsg) != 1)
+        return 1;
+
+      if((@sysvar::RxPreRcv::ZeroMsg_HasBlCnt) != blockCnt)
+        return 1;
+
+      if(((@sysvar::RxPreRcv::ZeroMsg_HasFrAck) == 1) &&
+         ((@sysvar::RxPreRcv::ZeroMsg_HasFrALo) != frAckLo))
+        return 1;
+      ////////////////////////////////////////////
+      // process replacement
+      if((@sysvar::RxPreRcv::ZeroMsg_bRepFrALo) == 1)
+        MH_FI_SetFrAckLow((@sysvar::RxPreRcv::ZeroMsg_RepFrALo));
+
+      if((@sysvar::RxPreRcv::ZeroMsg_bRepBlCnt) == 1)
+        MH_FI_SetBlockCnt((@sysvar::RxPreRcv::ZeroMsg_RepBlCnt));
+
+      if((@sysvar::RxPreRcv::ZeroMsg_bRepVal) == 1)
+      {
+        msgLen = MH_FI_GetLen();
+        pos = (@sysvar::RxPreRcv::ZeroMsg_RepPos);
+        
+        if(pos < msgLen)
+        {
+          sysGetVariableData(sysvar::RxPreRcv::ZeroMsg_RepVal, inputBytes, inputLen);
+          for(i = 0; i < inputLen; ++i)
+          {
+            if((pos + i) < msgLen)
+              MH_FI_SetByte(pos + i, inputBytes[i]);
+            else
+              break; 
+          }
+        }  // if(pos < msgLen)        
+      }
+      //////////////////////////////////////////////////
+      // send additional message?          
+      if((@sysvar::RxPreRcv::ZeroMsg_bSndAMsg) == 1)
+        FI_SendAdditionalMsg();
+
+      //////////////////////////////////////////
+      /// receive message?
+      isReceived = (@sysvar::RxPreRcv::ZeroMsg_bRcv);
+      if(isReceived == 1)
+        Write("RxPreRcv at %fs: %s received", timestamp_s, cMsgNameZeroFrame);
+      else
+        Write("RxPreRcv at %fs: %s blocked", timestamp_s, cMsgNameZeroFrame);
+
+      return isReceived;
+    }
+  }
+  else
+  {
+    switch(highCmd)
+    {
+    case cHighCmdReqCon:
+      /////////////////////////////////////////
+      /// match message
+      if((@sysvar::RxPreRcv::ReqCon) != 1)
+        return 1;
+
+      /////////////////////////////////////////
+      /// process replacement
+      if((@sysvar::RxPreRcv::ReqCon_bRepVal) == 1)
+      {
+        msgLen = MH_FI_GetLen();
+        pos = (@sysvar::RxPreRcv::ReqCon_RepPos);
+        
+        if(pos < msgLen)
+        {
+          sysGetVariableData(sysvar::RxPreRcv::ReqCon_RepVal, inputBytes, inputLen);
+          for(i = 0; i < inputLen; ++i)
+          {
+            if((pos + i) < msgLen)
+              MH_FI_SetByte(pos + i, inputBytes[i]);
+            else
+              break; 
+          }
+        }  // if(pos < msgLen)        
+      }
+      ////////////////////////////////////////
+      // receive message?
+      isReceived = (@sysvar::RxPreRcv::ReqCon_bRcv);
+      if(isReceived == 1)
+        Write("RxPreRcv at %fs: %s reveived", timestamp_s, cMsgNameReqCon);
+      else
+        Write("RxPreRcv at %fs: %s blocked", timestamp_s, cMsgNameReqCon);
+
+      return isReceived;
+      break;
+
+    case cHighCmdReady:
+      //////////////////////////////////////////////////////////
+      // if activated, return whether message is to be received
+      if((@sysvar::RxPreRcv::Ready) == 1)
+      {
+        isReceived = (@sysvar::RxPreRcv::Ready_bRcv);
+        if(isReceived == 1)
+          Write("RxPreRcv at %fs: %s received", timestamp_s, cMsgNameReady);
+        else
+          Write("RxPreRcv at %fs: %s blocked", timestamp_s, cMsgNameReady);
+
+        return isReceived;
+      }
+      else
+        return 1;
+      break;
+
+
+    case cHighCmdHoldTx:
+      //////////////////////////////////////////////////////////
+      // if activated, return whether message is to be received
+      if((@sysvar::RxPreRcv::HoldTx) == 1)
+      {
+        isReceived = (@sysvar::RxPreRcv::HoldTx_bRcv);
+        if(isReceived == 1)
+          Write("RxPreRcv at %fs: %s received", timestamp_s, cMsgNameHoldTx);
+        else
+          Write("RxPreRcv at %fs: %s blocked", timestamp_s, cMsgNameHoldTx);
+
+        return isReceived;
+      }
+      else
+        return 1;
+      break;
+
+
+    case cHighCmdEndTx:
+      //////////////////////////////////////////////////////////
+      // if activated, return whether message is to be received
+      if((@sysvar::RxPreRcv::EndTx) == 1)
+      {
+        isReceived = (@sysvar::RxPreRcv::EndTx_bRcv);
+        if(isReceived == 1) 
+          Write("RxPreRcv at %fs: %s received", timestamp_s, cMsgNameEndTx);
+        else
+          Write("RxPreRcv at %fs: %s blocked", timestamp_s, cMsgNameEndTx);
+        
+        return isReceived;
+      }
+      else
+        return 1;
+      break;
+
+    default:
+      break;
+
+    }
+  }
+
+  return 1;
+}
+/*@@end*/
+
+/*@@sysvarChange:RxSysVar::Stop_1:*/
+on sysvar RxSysVar::Stop_1
+{
+  if (MH_RxStopTrans(gRxPortHandle))
+  {
+    @sysvar::IsReceive_1 = 0;
+    @sysvar::RxSysVar::Hold_1 = 0;
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:EnableFI_1:*/
+on sysvar EnableFI_1
+{
+  
+  
+  ////////////////////////////////////////////
+  // Activate/Deactivate error injection
+  MH_FI_Active(@this);
+
+  if (!@this)
+  {
+    @sysvar::TxSysVar::BurstMode_1 = 0;
+    @sysvar::TxSysVar::OverwriteAIR_1 = 0;
+    EnableControl(gPanATxFI, "AIR_1", 0);
+  }
+  
+  EnableControl(gPanATxFI, "OpenPanelTxPreSnd", @this);
+  EnableControl(gPanATxFI, "OpenPanelTxPreRcv", @this);
+  EnableControl(gPanATxFI, "BurstMode", @this);
+  EnableControl(gPanATxFI, "OverwriteAIR", @this);
+  EnableControl(gPanARxFI, "OpenPanelRxPreSnd", @this);
+  EnableControl(gPanARxFI, "OpenPanelRxPreRcv", @this);
+
+}
+/*@@end*/
+
+/*@@caplFunc:FI_SendAdditionalMsg():*///function
+FI_SendAdditionalMsg ()
+{
+  byte frameList[42];
+  long frameListLen;
+  
+  switch((@sysvar::RxSndMsg::Type))
+  {
+  case 0:
+    MH_FI_SendFrameAck((@sysvar::RxSndMsg::FrAck_FrAHi), 
+                        (@sysvar::RxSndMsg::FrAck_FrALo), 
+                        (@sysvar::RxSndMsg::FrAck_BlCnt));
+    break;
+  case 1:
+    MH_FI_SendFrameReq((@sysvar::RxSndMsg::SFrmReq_FrmID));
+    break;
+  case 2:
+    sysGetVariableData(sysvar::RxSndMsg::MFrmReq_FrmIDs, frameList, frameListLen);
+    MH_FI_SendFrameReq(frameList, frameListLen);
+    break;
+  case 3:
+    MH_FI_SendAdTmRate((@sysvar::RxSndMsg::AdjRate_Op));
+    break;
+  default:
+    break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndTxBufferRequested(dword,long):*///callback
+MH_IndTxBufferRequested(dword handle, long isPacketBegin)
+{
+  //////////////////////////////////////////////////////////////////////////////////////////////////////
+  // main callback of DSO after a connection is requested and DSI accepts it by sending START CONNECTION
+  byte isStreaming;
+  char srcFilepath[1024];    // filename
+  long bufferSize;
+  int  isToBeContinued;      
+
+  // specifies, if MH_IndTxBufferRequested should be called again after complete transmssion of buffer 
+  isToBeContinued = 0; // 0 : MH_IndTxBufferRequested is not called again 
+                       // 1 : MH_IndTxBufferRequested is called again
+ 
+  // is this the first time a buffer is requested for the packet to be transmitted?  
+  if(isPacketBegin == 1)  
+  {
+    isStreaming = @sysvar::TxSysVar::IsStream_1;
+    if(isStreaming == 1) // is packet data a file ?
+    {
+      // check if there's a file path
+      sysGetVariableString(sysvar::TxSysVar::SrcFilePath_1, srcFilepath, elCount(srcFilepath));
+      if(strlen(srcFilepath) == 0)
+      {
+        writeDbgLevel(0,"CAPL: %s: Error: No source file path set", gECU);
+        return;
+      }
+      // try to set file as input buffer
+      if(MH_SetTxBuffer(handle, srcFilepath, isToBeContinued) <= 0)
+      {
+        writeDbgLevel(0,"CAPL: %s: Error: File %s doesn't exist or is empty.", gECU, srcFilepath);
+        return;
+      }
+      writeDbgLevel(3,"CAPL: %s: Transmission of file %s started.", gECU, srcFilepath);                 
+    }
+    else                 // or simple byte buffer in hex edit control?
+    {
+      bufferSize = @sysvar::TxSysVar::DataSize_1;
+      MH_SetTxBuffer(handle, gTxDataBuffer, bufferSize, isToBeContinued);  
+      writeDbgLevel(3,"CAPL: %s: Transmission of buffer with %d bytes started.", gECU, bufferSize);
+    }
+    ResetTxCounters(); // transmission of new packet started
+  }
+  else
+  {
+    //////////////////////////////////////////////////////////////////////
+    // continuous sending on existing connection could take place here, if
+    // initial calls of MH_SetTxBuffer and MH_SetTxBufferFile had set the 
+    // "toBeContinued" parameter to 1
+
+    if(isStreaming)  // If one wishes to send several files in a row
+    {
+      //////////////////////////////////////////////////////////
+      // Insert code to set the next file to be transmitted here
+
+      // check if there's a (new) file path
+      sysGetVariableString(sysvar::TxSysVar::SrcFilePath_1, srcFilepath, elCount(srcFilepath));
+      if(strlen(srcFilepath)==0)
+      {
+        writeDbgLevel(0,"CAPL: %s: Error: No source file path set", gECU);
+        return;
+      }
+      // try to set file as input buffer
+      if(MH_SetTxBuffer(handle, srcFilepath, 0 /* or 1 to continue */) <= 0) 
+      {
+        writeDbgLevel(0,"CAPL: %s: Error: File %s doesn't exist or is empty.", gECU, srcFilepath);
+        return;
+      }                 
+    }
+    else             // ...or if the buffer data is updated by an application meanwhile
+    {
+      ///////////////////////////////////////////////////////////////////////
+      // Insert code to write next packet of application data in buffer here
+
+      bufferSize = @sysvar::TxSysVar::DataSize_1;
+      MH_SetTxBuffer(handle, gTxDataBuffer, bufferSize, 0 /* or 1 to continue */); 
+    }
+  }
+  @sysvar::IsSend_1 = 1;
+}
+/*@@end*/
+
+/*@@caplFunc:RequestTransmission():*///function
+RequestTransmission ()
+{
+  dword destDev;
+  dword fblockID;
+  dword instID;
+  dword fktID;
+  dword opTypeID;
+  int portState;
+  int isStreaming; 
+  long bufferSize;
+  char srcFilepath[1024];
+  long result;
+
+  portState = MH_GetTxPortState(gTxPortHandle);
+  if(portState == cPortState_Inactive)
+  {
+    // a new connection can only be invoked on the port, if there's not already a running connection
+    gDestDev      = @sysvar::DestDevAdr_1;
+    gDestFBlockID = @sysvar::TxSysVar::FBlockID_1;
+    gDestInstID   = @sysvar::TxSysVar::InstID_1;
+    gDestFktID    = @sysvar::TxSysVar::FktID_1;
+    gDestOpTypeID = @sysvar::TxSysVar::OpType_1;
+    
+    ////////////////////////////////////////////////////////////////////////////////
+    // This function requests a transmission for the current address parameters set
+    // A DSO instance is invoked and waits for a START CONNECTION from the DSI side
+    // If transmission parameters are acknowledged, the callback 
+    // MHP_IndTxBufferRequested will be called with the assigned port handle to 
+    // provide the data to be transmitted
+    bufferSize = @sysvar::TxSysVar::DataSize_1;
+    
+    if(MH_ReqTrans(gTxPortHandle, gDestDev, gDestFBlockID, gDestInstID, gDestFktID, gDestOpTypeID) < 0)
+    {
+      writeDbgLevel(5,"CAPL: %s: Failed request connection for %02X.%02X.%03X.%01X in device %04X on port %d", 
+        gECU, gDestFBlockID, gDestInstID, gDestFktID, gDestOpTypeID, gDestDev, gTxPortHandle);
+    }
+    else
+    {
+      writeDbgLevel(5,"CAPL: %s: Request connection for %02X.%02X.%03X.%01X in device %04X on port %d", 
+        gECU, gDestFBlockID, gDestInstID, gDestFktID, gDestOpTypeID, gDestDev, gTxPortHandle);
+    }
+  }
+  else if(portState == cPortState_Ready)
+  {
+    /////////////////////////////////////////////////////////////////////////////////////
+    // if a connection is already running on the port and is ready to transmit more data
+    // and the destination address wasn't changed by the user in the meantime, this
+    // connection can be reused to send the next packet by simply setting a new tx buffer
+    
+    destDev  = @sysvar::DestDevAdr_1;
+    fblockID = @sysvar::TxSysVar::FBlockID_1;
+    instID   = @sysvar::TxSysVar::InstID_1;
+    fktID    = @sysvar::TxSysVar::FktID_1;
+    opTypeID = @sysvar::TxSysVar::OpType_1;
+
+    if((destDev      == gDestDev) &&
+       (fblockID     == gDestFBlockID) &&
+       (instID       == gDestInstID) &&
+       (fktID        == gDestFktID) &&
+       (opTypeID     == gDestOpTypeID))
+    {
+      isStreaming = @sysvar::TxSysVar::IsStream_1;
+      if(isStreaming == 1) // is packet data a file ?
+      {
+        // check if there's a file path
+        sysGetVariableString(sysvar::TxSysVar::SrcFilePath_1, srcFilepath, elCount(srcFilepath));
+        if(strlen(srcFilepath) == 0)
+        {
+          writeDbgLevel(0,"CAPL: %s: Error: No source file path set", gECU);
+          return;
+        }
+        // try to set file as input buffer
+        if(MH_SetTxBuffer(gTxPortHandle, srcFilepath, 0) <= 0)
+        {
+          writeDbgLevel(0,"CAPL: %s: Error: File %s doesn't exist or is empty.", gECU, srcFilepath);
+          return;
+        }                 
+      }
+      else                 // or simple byte buffer in hex edit control?
+      {
+        bufferSize = @sysvar::TxSysVar::DataSize_1;
+        MH_SetTxBuffer(gTxPortHandle, gTxDataBuffer, bufferSize, 0);
+      }
+      writeDbgLevel(5,"CAPL: %s: Continue to send new packet over existing connection on port %d", 
+        gECU, gTxPortHandle);
+      ResetTxCounters(); // transmission of new packet started
+    }
+    else
+    {
+      writeDbgLevel(0,"CAPL: %s: Error. Unable to send new packet over port %d, since running connection uses a different address", 
+        gECU, gTxPortHandle);
+    }
+  }
+  else
+  {
+    writeDbgLevel(0,"CAPL: %s: Error. Unable to request new connection on port %d, since it is currently used by running connection", 
+      gECU, gTxPortHandle);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRequestConnection(dword,dword,dword,dword,dword,dword,dword):*///callback
+MH_IndRequestConnection(dword dsoDevice, dword fblockID, dword instanceID, dword fktID, dword opTypeID, dword prio, dword frameSize)
+{
+  ///////////////////////////////////////////////////////////////////////////////////
+  // This callback is called whenever the node receives a REQUEST CONNECTION message
+  // and is used for accepting a connection by assigning it to a rx port or denying
+  // it in case no rx port is available or the functional address doesn't fit
+ 
+  if((gMyFBlockID == fblockID) &&
+     (gMyInstID   == instanceID) &&
+     (gMyFktID    == fktID) &&
+     (gMyOpTypeID == opTypeID) &&
+     (MH_GetRxPortState(gRxPortHandle) == cPortState_Inactive))
+  {
+    MH_AcceptConnection(gRxPortHandle);
+    writeDbgLevel(0, "CAPL: %s: Accepted connection for %02X.%02X.%03X.%01X with priority of %d and frame size of %d bytes.", gECU, fblockID, instanceID, fktID, opTypeID, prio, frameSize);
+    return;
+  }
+  //////////////////////////////////////////////////////////////////////////
+  // Connection is ignored if neither MH_AcceptConnection nor MH_DenyConnection
+  // is called within this callback.
+  // Explicit denial of connection is done by a calling MH_DenyConnection, e.g. 
+  // MH_DenyConnection(prio + 1). Then START CONNECTION with given priority is
+  // sent to the DSO.
+  // MH_DenyConnection(prio + 1);
+  // writeDbgLevel(0, "CAPL: %s: Denied connection for %02X.%02X.%03X.%01X with priority of %d and frame size of %d bytes.", gECU, fblockID, instanceID, fktID, opTypeID, prio, frameSize);
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::OverwriteAIR_1:*/
+on sysvar TxSysVar::OverwriteAIR_1
+{
+  EnableControl(gPanATxFI, "AIR_1", @this);
+
+  if (@this)
+  {
+    MH_SetTAir(gTxPortHandle, @sysvar::TxSysVar::AIR_1);
+  }
+  else
+  {
+    MH_SetTAir(gTxPortHandle, -1);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::BurstMode_1:*/
+on sysvar TxSysVar::BurstMode_1
+{
+  MH_FI_TxBurstMode(gTxPortHandle, @this);
+}
+/*@@end*/
+
+/*@@sysvarChange:TxSysVar::AIR_1:*/
+on sysvar TxSysVar::AIR_1
+{
+  if (@sysvar::TxSysVar::OverwriteAIR_1)
+  {
+    MH_SetTAir(gTxPortHandle, @this);
+  }
+}
+/*@@end*/
+
+/*@@mostNetState:OnMostNetState(long,long):*/
+OnMostNetState(long oldstate, long newstate)
+{
+  if(newstate == 4)
+  {
+    MH_TxStopTrans(gTxPortHandle);
+    MH_RxStopTrans(gTxPortHandle);
+  }
+}
+/*@@end*/
+

@@ -1,0 +1,873 @@
+/*@!Encoding:1252*/
+/*
+ * J1939DTC - Diagnostic Trouble Code CAPL Library Version 1.1
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * This CAPL Library provides function for DM1, DM2, DM4, DM24
+ * and DM25. It needs the J1939 Interaction layer.
+ *
+ * History:
+ * 1.0 (Jr)  Created 
+ * 1.1 (Jr)  Send DM1 always with dtcActivate(1)
+ * 1.2 (Wfk) dtcActivate and dtcCopyToPgBuffer extended by parameter 'node'
+ * 1.3 (Gw)  Correct flags of DM24
+ */
+variables
+{
+  // Diagnostics
+  const int kExtFreezeFrameSize = 17;  // max. number of entries in extended freeze frame
+  const int kExtFreezeFrameSizeTPMS = 17; // number of entries in extended freeze frame for TPMS
+  const int kTableSize = 40;           // max. number of entries in gDTCActiveTable and gDTCPreviousTable
+  BYTE   gDTCActive;                   // 1 = send DM1, if one ore more DTC is  active, 2 = send DM1 always
+  DWORD  gDTCActiveTable[kTableSize];  // Table with active DTCs
+  DWORD  gDTCPreviousTable[kTableSize];// Table with previously active DTCs
+  DWORD  gDTCActiveEmTable[kTableSize];// Table with active emmision related DTCs
+  DWORD  gDTCPendingTable[kTableSize]; // Table with pending DTCs
+  BYTE   gFreezeFrame[kTableSize][kExtFreezeFrameSize]; // Extended Freeze frames, each previously active entry has a freeze frame
+  BYTE   gFreezeFrameEntry[kExtFreezeFrameSize];        // Extended Freeze frame data to copy into gFreezeFrame[Entry][17]
+
+  // Constants for diagnostics
+  const BYTE kFMI_AboveNormalCritical = 0;    // DATA VALID BUT ABOVE NORMAL OPERATIONAL RANGE
+  const BYTE kFMI_BelowNormalCritical = 1;    // DATA VALID BUT BELOW NORMAL OPERATIONAL RANGE
+  const BYTE kFMI_AboveNormalWarn     = 0x0f; // DATA VALID BUT ABOVE NORMAL OPERATIONAL RANGE
+  const BYTE kFMI_BelowNormalWarn     = 0x11; // DATA VALID BUT BELOW NORMAL OPERATIONAL RANGE
+  const BYTE kFMI_DataErratic         = 2;    // DATA ERRATIC, INTERMITTENT OR INCORRECT
+  const BYTE kFMI_CauseUnknown        = 11;   // ROOT CAUSE NOT KNOWN
+
+  // Constants for nodes
+  const BYTE k_Node_TPMS =0x51;
+}
+
+/*
+ * Activate a DTC (diagnostic trouble code)
+ *
+ * spn - Suspect Parameter Number
+ * fmi - Failure Mode Indentifier
+ */
+void dtcActivate( DWORD spn, DWORD fmi )
+{
+  int entry;
+
+  dtcUpdateTable( gDTCActiveTable, 0, spn, fmi );
+  entry = dtcUpdateTable( gDTCPreviousTable, 0, spn, fmi );
+
+  if (dtcIsEmmisionRelated( spn )) {
+    dtcUpdateTable( gDTCActiveEmTable, 0, spn, fmi );
+    dtcUpdateTable( gDTCPendingTable , 0, spn, fmi );
+  }
+
+  // fill extended freeze frame
+  if (entry >= 0) {
+    gFreezeFrame[entry][0] = 0; // engine percentage load at current speed
+    gFreezeFrame[entry][1] = 0; // engine coolant temperature
+    gFreezeFrame[entry][2] = 0; // engine speed (Lo)
+    gFreezeFrame[entry][3] = 0; // engine speed (Hi)
+    gFreezeFrame[entry][4] = 0; // wheel based speed (Lo)
+    gFreezeFrame[entry][5] = 0; // wheel based speed (Hi)
+
+  }
+
+  // set timer
+  if (gDTCActive == 0) {
+    gDTCActive = 1;
+    J1939ILSetMsgCycleTime( DM1, 1000 );
+  }
+}
+
+/*
+ * Clear a single SPN or the whole table of SPNs.
+ *
+ * table - Clear this table
+ */
+void dtcClear( DWORD table[] )
+{
+  int i;
+  for( i = 0; i < elCount(table); i++ ) {
+    table[i] = 0;
+  }
+}
+
+/*
+ * Count number of active DTCs in a table (diagnostic trouble code)
+ *
+ * return - Number of active DTCs
+ * table  - the table to update
+ */
+int dtcCountTable( DWORD table[] )
+{
+  DWORD i, count;
+
+  count = 0;
+  for( i = 0; i < elCount(table); i++ ) {
+    if (table[i] > 0) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
+/*
+ * Deactivate a DTC (diagnostic trouble code)
+ *
+ * spn - Suspect Parameter Number
+ * fmi - Failure Mode Indentifier
+ */
+void dtcDeactivate( DWORD spn, DWORD fmi )
+{
+  dtcUpdateTable( gDTCActiveTable     , 1, spn, fmi );
+  dtcUpdateTable( gDTCActiveEmTable   , 1, spn, fmi );
+}
+
+/*
+ * Update a DTC table (diagnostic trouble code)
+ *
+ * return - index of entry
+ * table  - the table to update
+ * remove - 1=remove DTC, 0=set DTC
+ * spn    - Suspect Parameter Number
+ * fmi    - Failure Mode Indentifier
+ */
+int dtcUpdateTable( DWORD table[], int remove, DWORD spn, DWORD fmi )
+{
+  DWORD oc, i;
+  int  found;
+
+  found = -1;
+
+  if (remove == 1) {
+    // search for SPN and FMI in gDTCActiveTable
+    for( i = 0; i < elCount(table); i++ ) {
+      if ((table[i] & 0xffffff) == ((spn & 0xffff) | ((spn & 0x70000) << 5) | ((fmi & 0x1f) << 16))) {
+        // we found the entry, now we set the entry to 0
+        table[i] = 0;
+        found    = i;
+        break;
+      }
+    }
+  }
+  else {
+    // search for SPN and FMI in gDTCActiveTable
+    for( i = 0; i < elCount(table); i++ ) {
+      if ((table[i] & 0xffffff) == ((spn & 0xffff) | ((spn & 0x70000) << 5) | ((fmi & 0x1f) << 16))) {
+        // we found the entry, now we increase the occurence counter
+        oc = ((table[i] >> 24) & 0x7f);
+        if (oc < 0x7E) 
+        {
+          oc++;
+        }
+        table[i] &= 0x80ffffff;
+        table[i] |= (oc << 24);
+        found = i;
+        break;
+      }
+    }
+
+    // if SPN and FMI was not found add a new entry to the table
+    if (found < 0) {
+      for( i = 0; i < elCount(table); i++ ) {
+        if (table[i] == 0) {
+          oc = 1;
+          table[i] = (spn & 0xffff) | ((spn & 0x70000) << 5) | ((fmi & 0x1f) << 16) | ((oc & 0x7f) << 24);
+          found = i;
+          break;
+        }
+      }
+    }
+  }
+ 
+  return found;
+}
+
+/*
+ * Individual clear/reset of active or previsouly active DTC
+ */
+on pg DM22
+{
+  DWORD   spn;
+  DWORD   fmi;
+  pg DM22 dm22;
+
+  if (!J1939ILAcceptRxPG( this )) return;
+
+  spn = this.SPN1;
+  fmi = this.FailureModeIdentifier1;
+
+  switch(this.IndividualDTCClearControlByte) {
+    case 1:  // Request to clear previously active DTC
+      dtcUpdateTable( gDTCPreviousTable     , 1, spn, fmi );
+      break;
+    case 17: // Request to clear active DTC
+      dtcUpdateTable( gDTCActiveTable  , 1, spn, fmi );
+      break;
+  }
+}
+
+/*
+ * Returns the lamp state for DM messages
+ */
+WORD dtcGetLampState()
+{
+  int   i;
+  WORD  result;
+  DWORD fmi;
+
+  result = 0xff00;
+  for( i = 0; i < elCount(gDTCActiveTable); i++ ) {
+    if (gDTCActiveTable[i] != 0) {
+      fmi = (gDTCActiveTable[i] >> 16) & 0x1f;
+
+      switch(fmi) {
+        case kFMI_AboveNormalCritical:
+        case kFMI_BelowNormalCritical:
+          result |= 0x0010; // enable red stop lamp
+          result &= 0xffdf;
+          break;
+        case kFMI_AboveNormalWarn:
+        case kFMI_BelowNormalWarn:
+          result |= 0x0004; // enable malfunction indicator lamp
+          result &= 0xfff7;
+          break;
+        case kFMI_CauseUnknown:
+        default:
+          result |= 0x0040; // enable malfunction indicator lamp
+          break;
+      }
+    }
+  }
+
+  return result;
+}
+
+/*
+ * Returns 1, if SPN is emmission related
+ */
+BYTE dtcIsEmmisionRelated( DWORD spn )
+{
+  switch(spn) {
+    case 110:  // Engine coolant temp.
+    case 190:  // EngSpeed
+    case 1119: // Engine Actual Exhaust Oxygen
+      return 1;
+  }
+  return 0;
+}
+
+int dtcCopyToPgBuffer( pg CAPL_MSG txPG )
+{
+  int result;
+  int count, i, j, pos;
+
+  switch( txPG.PGN ) {
+    //
+    // DM5 - Diagnostic readiness
+    //
+    case 0xfece:
+      ((pg DM5)txPG).ActiveTroubleCodes           = dtcCountTable( gDTCActiveTable );
+      ((pg DM5)txPG).PreviouslyActiveTroubleCodes = dtcCountTable( gDTCPreviousTable );
+      ((pg DM5)txPG).OBDCompliance                = 3;      // OBD and OBD II
+      txPG.byte(3)                                = 0x00;   // Continuously Monitored Systems NOT Support
+      txPG.word(4)                                = 0x0000; // Non-continuously Monitored Systems NOT Support
+      txPG.word(6)                                = 0x0000; // Non-continuously Monitored Systems Status NOT Support
+      result = 1;
+      break;
+    //
+    // DM1 - Active diagnostic trouble codes
+    //
+    case 0xfeca:
+      txPG.WORD(0) = dtcGetLampState();
+
+      // copy active DTCs to dm1
+      count    = 0;
+      txPG.DLC = 1785;
+
+      for( i = 0; i < elCount(gDTCActiveTable); i++ ) {
+        if (gDTCActiveTable[i] != 0) {
+          txPG.byte(2+count*4)   = (gDTCActiveTable[i]      ) & 0xff;
+          txPG.byte(2+count*4+1) = (gDTCActiveTable[i] >>  8) & 0xff;
+          txPG.byte(2+count*4+2) = (gDTCActiveTable[i] >> 16) & 0xff;
+          txPG.byte(2+count*4+3) = (gDTCActiveTable[i] >> 24) & 0xff;
+          count++;
+        }
+      }
+
+
+      if (count == 0) {
+        txPG.DLC      = 8;
+        txPG.DWORD(2) = 0;
+        txPG.WORD(6)  = 0xffff;
+        if (gDTCActive == 1) {
+          gDTCActive = 0;
+          J1939ILSetMsgCycleTime( DM1, 0 );
+        }
+      }
+      else if (count == 1) {
+        txPG.DLC      = 8;
+        txPG.WORD(6)  = 0xffff;
+      }
+      else {
+        txPG.DLC = 2 + count * 4;
+      }
+      result = 1;
+
+      break;
+    //
+    // DM2 - Previously active diagnostic trouble codes
+    //
+    case 0xfecb:
+      txPG.WORD(0) = dtcGetLampState();
+
+      // copy active DTCs to dm2
+      count    = 0;
+      txPG.DLC = 1785;
+
+      for( i = 0; i < elCount(gDTCPreviousTable); i++ ) {
+        if (gDTCPreviousTable[i] != 0) {
+          txPG.byte(2+count*4)   = (gDTCPreviousTable[i]      ) & 0xff;
+          txPG.byte(2+count*4+1) = (gDTCPreviousTable[i] >>  8) & 0xff;
+          txPG.byte(2+count*4+2) = (gDTCPreviousTable[i] >> 16) & 0xff;
+          txPG.byte(2+count*4+3) = (gDTCPreviousTable[i] >> 24) & 0xff;
+          count++;
+        }
+      }
+
+      if (count == 0) {
+        txPG.DLC      = 8;
+        txPG.DWORD(2) = 0;
+        txPG.WORD(6)  = 0xffff;
+      }
+      else if (count == 1) {
+        txPG.DLC      = 8;
+        txPG.WORD(6)  = 0xffff;
+      }
+      else {
+        txPG.DLC = 2 + count * 4;
+      }
+      result = 1;
+      break;
+    //
+    // DM6 - Pending diagnostic trouble codes
+    //
+    case 0xfecf:
+      txPG.WORD(0) = dtcGetLampState();
+
+      // copy active DTCs to dm2
+      count    = 0;
+      txPG.DLC = 1785;
+
+      for( i = 0; i < elCount(gDTCPendingTable); i++ ) {
+        if (gDTCPendingTable[i] != 0) {
+          txPG.byte(2+count*4)   = (gDTCPendingTable[i]      ) & 0xff;
+          txPG.byte(2+count*4+1) = (gDTCPendingTable[i] >>  8) & 0xff;
+          txPG.byte(2+count*4+2) = (gDTCPendingTable[i] >> 16) & 0xff;
+          txPG.byte(2+count*4+3) = (gDTCPendingTable[i] >> 24) & 0xff;
+          count++;
+        }
+      }
+
+      if (count == 0) {
+        txPG.DLC      = 8;
+        txPG.DWORD(2) = 0;
+        txPG.WORD(6)  = 0xffff;
+      }
+      else if (count == 1) {
+        txPG.DLC      = 8;
+        txPG.WORD(6)  = 0xffff;
+      }
+      else {
+        txPG.DLC = 2 + count * 4;
+      }
+      result = 1;
+      break;
+    //
+    // DM12 - Active emission related diagnostic trouble codes
+    //
+    case 0xfed4:
+      txPG.WORD(0) = dtcGetLampState();
+
+      // copy active DTCs to dm2
+      count    = 0;
+      txPG.DLC = 1785;
+
+      for( i = 0; i < elCount(gDTCActiveEmTable); i++ ) {
+        if (gDTCActiveEmTable[i] != 0) {
+          txPG.byte(2+count*4)   = (gDTCActiveEmTable[i]      ) & 0xff;
+          txPG.byte(2+count*4+1) = (gDTCActiveEmTable[i] >>  8) & 0xff;
+          txPG.byte(2+count*4+2) = (gDTCActiveEmTable[i] >> 16) & 0xff;
+          txPG.byte(2+count*4+3) = (gDTCActiveEmTable[i] >> 24) & 0xff;
+          count++;
+        }
+      }
+
+      if (count == 0) {
+        txPG.DLC      = 8;
+        txPG.DWORD(2) = 0;
+        txPG.WORD(6)  = 0xffff;
+      }
+      else if (count == 1) {
+        txPG.DLC      = 8;
+        txPG.WORD(6)  = 0xffff;
+      }
+      else {
+        txPG.DLC = 2 + count * 4;
+      }
+      result = 1;
+      break;
+    //
+    // DM4 - Freeze Frame
+    //
+    case 0xfecd:
+      pos = 0;
+      for( i = 0; i < kTableSize; i++ ) {
+        if (gDTCPreviousTable[i] != 0) {
+          // copy freeze frame DTC
+          txPG.byte(pos++) = 12; // frame size
+          txPG.byte(pos++) = (gDTCPreviousTable[i]      ) & 0xff;
+          txPG.byte(pos++) = (gDTCPreviousTable[i] >>  8) & 0xff;
+          txPG.byte(pos++) = (gDTCPreviousTable[i] >> 16) & 0xff;
+          txPG.byte(pos++) = (gDTCPreviousTable[i] >> 24) & 0xff;
+          // copy freeze frame data
+          for( j = 0; j < 8; j++ ) {
+            txPG.byte(pos++) = 0;
+          }
+        }
+      }
+      if (pos > 8) {
+        txPG.dlc = pos;
+      }
+      else {
+        txPG.DWORD(4) = 0xFFFFFFFF;
+        txPG.DWORD(1) = 0x00000000;
+        txPG.dlc = 8;
+      }
+      result = 1;
+      break;
+    //
+    // DM24 - Supported SPN
+    //
+    case 0xfdb6:
+      txPG.WORD(0)  = 92;   // engine percentage load at current speed
+      txPG.BYTE(2)  = 0x1E; // supported in freeze frame
+      txPG.BYTE(3)  = 1;    // length
+      txPG.WORD(4)  = 110;  // engine coolant temperature
+      txPG.BYTE(6)  = 0x1E; // supported in freeze frame
+      txPG.BYTE(7)  = 1;    // length
+      txPG.WORD(8)  = 190;  // engine speed
+      txPG.BYTE(10) = 0x1E; // supported in freeze frame
+      txPG.BYTE(11) = 2;    // length
+      txPG.WORD(12) = 84;   // wheel based speed
+      txPG.BYTE(14) = 0x1E; // supported in freeze frame
+      txPG.BYTE(15) = 2;    // length
+      txPG.DLC = 16;
+      result = 1;
+      break;
+    //
+    // DM25 - Extended Freeze Frame
+    //
+    case 0xfdb7:
+      pos = 0;
+      for( i = 0; i < kTableSize; i++ ) {
+        if (gDTCPreviousTable[i] != 0) {
+          // copy freeze frame DTC
+          txPG.byte(pos++) = 8; // frame size
+          txPG.byte(pos++) = (gDTCPreviousTable[i]      ) & 0xff;
+          txPG.byte(pos++) = (gDTCPreviousTable[i] >>  8) & 0xff;
+          txPG.byte(pos++) = (gDTCPreviousTable[i] >> 16) & 0xff;
+          txPG.byte(pos++) = (gDTCPreviousTable[i] >> 24) & 0xff;
+          // copy freeze frame data
+          for( j = 0; j < 4; j++ ) {
+            txPG.byte(pos++) = gFreezeFrame[i][j];
+          }
+        }
+      }
+      if (pos > 8) {
+        txPG.dlc = pos;
+      }
+      else {
+        txPG.DWORD(4) = 0xFFFFFFFF;
+        txPG.DWORD(1) = 0x00000000;
+        txPG.dlc = 8;
+      }
+      result = 1;
+      break;
+    //
+    //
+    //
+    default:
+      result = 0;
+
+  }
+
+  return result;
+}
+
+/*
+ * Activate DM1
+ *
+ * enable - 1=send DM1 always, 0=send DM1, if one ore more DTCs are active
+ * 
+ */
+void dtcActivate( BYTE enable )
+{
+  if (enable) {
+    gDTCActive = 2;
+    J1939ILSetMsgCycleTime( DM1, 1000 );
+  }
+  else {
+    gDTCActive = 0;
+    J1939ILSetMsgCycleTime( DM1, 0 );
+  }
+}
+
+/*
+ * Activate a DTC (diagnostic trouble code)
+ *
+ * spn - Suspect Parameter Number
+ * fmi - Failure Mode Indentifier
+ */
+void dtcActivate( DWORD spn, DWORD fmi, BYTE node )
+{
+  int entry;
+  BYTE i;
+
+  dtcUpdateTable( gDTCActiveTable, 0, spn, fmi );
+  entry = dtcUpdateTable( gDTCPreviousTable, 0, spn, fmi );
+
+  if (dtcIsEmmisionRelated( spn )) {
+    dtcUpdateTable( gDTCActiveEmTable, 0, spn, fmi );
+    dtcUpdateTable( gDTCPendingTable , 0, spn, fmi );
+  }
+
+  // fill extended freeze frame
+  if (entry >= 0) {
+    switch(node){
+	  case k_Node_TPMS:
+		// copy extended freeze frame data of TPMS
+		for (i=0;i<kExtFreezeFrameSizeTPMS;i++) {
+		  gFreezeFrame[entry][i] = gFreezeFrameEntry[i];
+		}
+		break;
+	  default:
+	    gFreezeFrame[entry][0] = 0; // engine percentage load at current speed
+    	gFreezeFrame[entry][1] = 0; // engine coolant temperature
+    	gFreezeFrame[entry][2] = 0; // engine speed (Lo)
+	    gFreezeFrame[entry][3] = 0; // engine speed (Hi)
+    	gFreezeFrame[entry][4] = 0; // wheel based speed (Lo)
+    	gFreezeFrame[entry][5] = 0; // wheel based speed (Hi)
+		break;
+	}
+  }
+
+  // set timer
+  if (gDTCActive == 0) {
+    gDTCActive = 1;
+    J1939ILSetMsgCycleTime( DM1, 1000 );
+  }
+}
+
+int dtcCopyToPgBuffer( pg CAPL_MSG txPG , BYTE node )
+{
+  int result;
+  int count, i, j, pos;
+
+  switch( txPG.PGN ) {
+    //
+    // DM5 - Diagnostic readiness
+    //
+    case 0xfece:
+      ((pg DM5)txPG).ActiveTroubleCodes           = dtcCountTable( gDTCActiveTable );
+      ((pg DM5)txPG).PreviouslyActiveTroubleCodes = dtcCountTable( gDTCPreviousTable );
+      ((pg DM5)txPG).OBDCompliance                = 3;      // OBD and OBD II
+      txPG.byte(3)                                = 0x00;   // Continuously Monitored Systems NOT Support
+      txPG.word(4)                                = 0x0000; // Non-continuously Monitored Systems NOT Support
+      txPG.word(6)                                = 0x0000; // Non-continuously Monitored Systems Status NOT Support
+      result = 1;
+      break;
+    //
+    // DM1 - Active diagnostic trouble codes
+    //
+    case 0xfeca:
+      txPG.WORD(0) = dtcGetLampState();
+
+      // copy active DTCs to dm1
+      count    = 0;
+      txPG.DLC = 1785;
+
+      for( i = 0; i < elCount(gDTCActiveTable); i++ ) {
+        if (gDTCActiveTable[i] != 0) {
+          txPG.byte(2+count*4)   = (gDTCActiveTable[i]      ) & 0xff;
+          txPG.byte(2+count*4+1) = (gDTCActiveTable[i] >>  8) & 0xff;
+          txPG.byte(2+count*4+2) = (gDTCActiveTable[i] >> 16) & 0xff;
+          txPG.byte(2+count*4+3) = (gDTCActiveTable[i] >> 24) & 0xff;
+          count++;
+        }
+      }
+
+
+      if (count == 0) {
+        txPG.DLC      = 8;
+        txPG.DWORD(2) = 0;
+        txPG.WORD(6)  = 0xffff;
+        if (gDTCActive == 1) {
+          gDTCActive = 0;
+          J1939ILSetMsgCycleTime( DM1, 0 );
+        }
+      }
+      else if (count == 1) {
+        txPG.DLC      = 8;
+        txPG.WORD(6)  = 0xffff;
+      }
+      else {
+        txPG.DLC = 2 + count * 4;
+      }
+      result = 1;
+
+      break;
+    //
+    // DM2 - Previously active diagnostic trouble codes
+    //
+    case 0xfecb:
+      txPG.WORD(0) = dtcGetLampState();
+
+      // copy active DTCs to dm2
+      count    = 0;
+      txPG.DLC = 1785;
+
+      for( i = 0; i < elCount(gDTCPreviousTable); i++ ) {
+        if (gDTCPreviousTable[i] != 0) {
+          txPG.byte(2+count*4)   = (gDTCPreviousTable[i]      ) & 0xff;
+          txPG.byte(2+count*4+1) = (gDTCPreviousTable[i] >>  8) & 0xff;
+          txPG.byte(2+count*4+2) = (gDTCPreviousTable[i] >> 16) & 0xff;
+          txPG.byte(2+count*4+3) = (gDTCPreviousTable[i] >> 24) & 0xff;
+          count++;
+        }
+      }
+
+      if (count == 0) {
+        txPG.DLC      = 8;
+        txPG.DWORD(2) = 0;
+        txPG.WORD(6)  = 0xffff;
+      }
+      else if (count == 1) {
+        txPG.DLC      = 8;
+        txPG.WORD(6)  = 0xffff;
+      }
+      else {
+        txPG.DLC = 2 + count * 4;
+      }
+      result = 1;
+      break;
+    //
+    // DM6 - Pending diagnostic trouble codes
+    //
+    case 0xfecf:
+      txPG.WORD(0) = dtcGetLampState();
+
+      // copy active DTCs to dm2
+      count    = 0;
+      txPG.DLC = 1785;
+
+      for( i = 0; i < elCount(gDTCPendingTable); i++ ) {
+        if (gDTCPendingTable[i] != 0) {
+          txPG.byte(2+count*4)   = (gDTCPendingTable[i]      ) & 0xff;
+          txPG.byte(2+count*4+1) = (gDTCPendingTable[i] >>  8) & 0xff;
+          txPG.byte(2+count*4+2) = (gDTCPendingTable[i] >> 16) & 0xff;
+          txPG.byte(2+count*4+3) = (gDTCPendingTable[i] >> 24) & 0xff;
+          count++;
+        }
+      }
+
+      if (count == 0) {
+        txPG.DLC      = 8;
+        txPG.DWORD(2) = 0;
+        txPG.WORD(6)  = 0xffff;
+      }
+      else if (count == 1) {
+        txPG.DLC      = 8;
+        txPG.WORD(6)  = 0xffff;
+      }
+      else {
+        txPG.DLC = 2 + count * 4;
+      }
+      result = 1;
+      break;
+    //
+    // DM12 - Active emission related diagnostic trouble codes
+    //
+    case 0xfed4:
+      txPG.WORD(0) = dtcGetLampState();
+
+      // copy active DTCs to dm2
+      count    = 0;
+      txPG.DLC = 1785;
+
+      for( i = 0; i < elCount(gDTCActiveEmTable); i++ ) {
+        if (gDTCActiveEmTable[i] != 0) {
+          txPG.byte(2+count*4)   = (gDTCActiveEmTable[i]      ) & 0xff;
+          txPG.byte(2+count*4+1) = (gDTCActiveEmTable[i] >>  8) & 0xff;
+          txPG.byte(2+count*4+2) = (gDTCActiveEmTable[i] >> 16) & 0xff;
+          txPG.byte(2+count*4+3) = (gDTCActiveEmTable[i] >> 24) & 0xff;
+          count++;
+        }
+      }
+
+      if (count == 0) {
+        txPG.DLC      = 8;
+        txPG.DWORD(2) = 0;
+        txPG.WORD(6)  = 0xffff;
+      }
+      else if (count == 1) {
+        txPG.DLC      = 8;
+        txPG.WORD(6)  = 0xffff;
+      }
+      else {
+        txPG.DLC = 2 + count * 4;
+      }
+      result = 1;
+      break;
+    //
+    // DM4 - Freeze Frame
+    //
+    case 0xfecd:
+      pos = 0;
+      for( i = 0; i < kTableSize; i++ ) {
+        if (gDTCPreviousTable[i] != 0) {
+          // copy freeze frame DTC
+          txPG.byte(pos++) = 12; // frame size
+          txPG.byte(pos++) = (gDTCPreviousTable[i]      ) & 0xff;
+          txPG.byte(pos++) = (gDTCPreviousTable[i] >>  8) & 0xff;
+          txPG.byte(pos++) = (gDTCPreviousTable[i] >> 16) & 0xff;
+          txPG.byte(pos++) = (gDTCPreviousTable[i] >> 24) & 0xff;
+          // copy freeze frame data
+          for( j = 0; j < 8; j++ ) {
+   	        txPG.byte(pos++) = 0;
+		  }
+        }
+      }
+      if (pos > 8) {
+        txPG.dlc = pos;
+      }
+      else {
+        txPG.DWORD(4) = 0xFFFFFFFF;
+        txPG.DWORD(1) = 0x00000000;
+        txPG.dlc = 8;
+      }
+      result = 1;
+      break;
+    //
+    // DM24 - Supported SPN
+    //
+    case 0xfdb6:
+	  switch(node) {
+	    case k_Node_TPMS:
+	      txPG.WORD(0)  = 245;  // total vehicle distance
+    	  txPG.BYTE(2)  = 0x1E; // supported in expanded freeze frame
+	      txPG.BYTE(3)  = 4;    // length
+	      txPG.WORD(4)  = 960;  // minutes
+	      txPG.BYTE(6)  = 0x1E; // supported in expanded freeze frame
+	      txPG.BYTE(7)  = 1;    // length
+	      txPG.WORD(8)  = 961;  // hours
+	      txPG.BYTE(10) = 0x1E; // supported in expanded freeze frame
+	      txPG.BYTE(11) = 1;    // length
+	      txPG.WORD(12) = 962;  // month
+	      txPG.BYTE(14) = 0x1E; // supported in expanded freeze frame
+	      txPG.BYTE(15) = 1;    // length
+	      txPG.WORD(16) = 963;  // day
+	      txPG.BYTE(18) = 0x1E; // supported in expanded freeze frame
+	      txPG.BYTE(19) = 1;    // length
+	      txPG.WORD(20) = 964;  // year
+	      txPG.BYTE(22) = 0x1E; // supported in expanded freeze frame
+	      txPG.BYTE(23) = 1;    // length
+	      txPG.WORD(24) = 84;   // wheel based speed
+	      txPG.BYTE(26) = 0x1E; // supported in expanded freeze frame
+	      txPG.BYTE(27) = 2;    // length
+	      txPG.WORD(28) = 241;  // tire pressure
+	      txPG.BYTE(30) = 0x1E; // supported in expanded freeze frame
+	      txPG.BYTE(31) = 1;    // length
+	      txPG.WORD(32) = 242;  // tire temperature
+	      txPG.BYTE(34) = 0x1E; // supported in expanded freeze frame
+	      txPG.BYTE(35) = 2;    // length
+	      txPG.WORD(36) = 3191; // reference tire pressure
+	      txPG.BYTE(38) = 0x1E; // supported in expanded freeze frame
+	      txPG.BYTE(39) = 1;    // length
+	      txPG.WORD(40) = 171;  // ambient air temperature
+	      txPG.BYTE(42) = 0x1E; // supported in expanded freeze frame
+	      txPG.BYTE(43) = 2;    // length
+	      txPG.DLC = 44;
+	      result = 1;
+		  break;
+		default:
+	      txPG.WORD(0)  = 92;   // engine percentage load at current speed
+	      txPG.BYTE(2)  = 0x1E; // supported in freeze frame
+	      txPG.BYTE(3)  = 1;    // length
+	      txPG.WORD(4)  = 110;  // engine coolant temperature
+	      txPG.BYTE(6)  = 0x1E; // supported in freeze frame
+	      txPG.BYTE(7)  = 1;    // length
+	      txPG.WORD(8)  = 190;  // engine speed
+	      txPG.BYTE(10) = 0x1E; // supported in freeze frame
+	      txPG.BYTE(11) = 2;    // length
+	      txPG.WORD(12) = 84;   // wheel based speed
+	      txPG.BYTE(14) = 0x1E; // supported in freeze frame
+	      txPG.BYTE(15) = 2;    // length
+	      txPG.DLC = 16;
+	      result = 1;
+		  break;
+		}
+      break;
+    //
+    // DM25 - Extended Freeze Frame
+    //
+    case 0xfdb7:
+      pos = 0;
+      for( i = 0; i < kTableSize; i++ ) {
+        if (gDTCPreviousTable[i] != 0) {
+          // copy freeze frame DTC
+		  switch(node) {  // frame size
+		    case k_Node_TPMS:
+          	  txPG.byte(pos++) = 21;
+			  break;
+			default:
+          	  txPG.byte(pos++) = 10;
+			  break;
+          }
+          txPG.byte(pos++) = (gDTCPreviousTable[i]      ) & 0xff;
+          txPG.byte(pos++) = (gDTCPreviousTable[i] >>  8) & 0xff;
+          txPG.byte(pos++) = (gDTCPreviousTable[i] >> 16) & 0xff;
+          txPG.byte(pos++) = (gDTCPreviousTable[i] >> 24) & 0xff;
+          // copy freeze frame data
+		  switch(node) {
+		    case k_Node_TPMS:
+	          for( j = 0; j < kExtFreezeFrameSizeTPMS; j++ ) {
+    	        txPG.byte(pos++) = gFreezeFrame[i][j];
+			  }
+			  break;
+			default:
+	          for( j = 0; j < 4; j++ ) {
+    	        txPG.byte(pos++) = gFreezeFrame[i][j];
+			  }
+			  break;
+          }
+        }
+      }
+      if (pos > 8) {
+        txPG.dlc = pos;
+      }
+      else {
+        txPG.DWORD(4) = 0xFFFFFFFF;
+        txPG.DWORD(1) = 0x00000000;
+        txPG.dlc = 8;
+      }
+      result = 1;
+      break;
+    //
+    //
+    //
+    default:
+      result = 0;
+
+  }
+
+  return result;
+}
+

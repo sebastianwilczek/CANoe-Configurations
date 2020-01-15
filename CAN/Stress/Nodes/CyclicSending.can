@@ -1,0 +1,204 @@
+/*@@var:*/
+variables
+{
+  msTimer t1;
+
+  int count = 0; 
+
+  long kCycleTime = 10;
+
+  dword mCycCheckId = 0;                // cycle time violation check-handle
+
+  float gTransmitMsgTime;
+  float gReceivedMsgTime;
+
+  message CAN2.ResponseMessage msgResponse;
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  setTimer(t1, kCycleTime);
+}
+/*@@end*/
+
+/*@@timer:t1:*/
+on timer t1
+{
+  long counter  =  0;
+  message CAN1.CyclicMessage msg;
+
+  counter++;
+  msg.SendCount = counter;
+  
+  output(msg);
+  setTimer(this, kCycleTime);
+}
+/*@@end*/
+
+/*@@msg:CAN2.CycleAndResponse::CyclicMessage (0x100):*/
+on message CAN2.CyclicMessage
+{ 
+  if(this.Dir == Rx)  
+  {
+    gReceivedMsgTime = MessageTimeNS(this);
+    switch(@sysvar::CycleAndResponse::TimeFactor)
+    {
+      case 1:  // Sec.
+              @sysvar::CycleAndResponse::ReceivedMsgTime = gReceivedMsgTime/1000000000;
+      break;
+      case 2:  // mSec.
+              @sysvar::CycleAndResponse::ReceivedMsgTime = (gReceivedMsgTime/1000000000)/0.001;
+      break;
+      case 3: // nSec.
+              @sysvar::CycleAndResponse::ReceivedMsgTime = gReceivedMsgTime;
+      break;
+    }
+    output(msgResponse);
+  }
+}
+/*@@end*/
+
+/*@@msg:CAN2.CycleAndResponse::ResponseMessage (0x102):*/
+on message CAN2.ResponseMessage
+{
+  if(this.Dir == Tx)  
+  {
+    gTransmitMsgTime = MessageTimeNS(this);
+    switch(@sysvar::CycleAndResponse::TimeFactor)
+    {
+      case 1:  // Sec.
+              @sysvar::CycleAndResponse::TransmitMsgTime = gTransmitMsgTime/1000000000;
+      break;
+      case 2:  // mSec.
+              @sysvar::CycleAndResponse::TransmitMsgTime = (gTransmitMsgTime/1000000000)/0.001;
+      break;
+      case 3: // nSec.
+              @sysvar::CycleAndResponse::TransmitMsgTime = gTransmitMsgTime;
+      break;
+    }
+  }
+  CalcTimeDiff();
+}
+/*@@end*/
+
+/*@@caplFunc:CalcTimeDiff():*///function
+CalcTimeDiff ()
+{
+  float currentTimeDifference;
+  float currentTimeDiffSec;
+  float currentTimeDiffmSec;
+
+  currentTimeDifference = (gTransmitMsgTime - gReceivedMsgTime);
+  currentTimeDiffSec = (currentTimeDifference / 1000000000); 
+  currentTimeDiffmSec = (currentTimeDiffSec / 0.001);   
+
+  switch(@sysvar::CycleAndResponse::TimeFactor)
+  {
+    case 1:  // Sec.
+            @sysvar::CycleAndResponse::CurrentTimeDiff = currentTimeDiffSec;
+    break;
+    case 2:  // mSec.
+            @sysvar::CycleAndResponse::CurrentTimeDiff = currentTimeDiffmSec;
+    break;
+    case 3: // nSec.
+            @sysvar::CycleAndResponse::CurrentTimeDiff = currentTimeDifference;
+    break;
+  }
+
+  @sysvar::CycleAndResponse::CurrentTimeDiff_Dsp = currentTimeDiffmSec;
+
+  CalcTimeDiffMax();
+  CalcTimeDiffMin();
+}
+/*@@end*/
+
+/*@@caplFunc:CalcTimeDiffMax():*///function
+CalcTimeDiffMax ()
+{
+  float newCurrentTimeDifference;
+  float oldCurrentTimeDiff;
+  float currentTimeDiffMax;
+  float currentTimeDiffMaxSec;
+  float currentTimeDiffmMaxSec;
+
+  newCurrentTimeDifference = (gTransmitMsgTime - gReceivedMsgTime);
+
+  if(oldCurrentTimeDiff < newCurrentTimeDifference)  
+  {
+    currentTimeDiffMax = newCurrentTimeDifference; 
+    currentTimeDiffMaxSec = (currentTimeDiffMax / 1000000000); 
+    currentTimeDiffmMaxSec = (currentTimeDiffMaxSec / 0.001);   
+    oldCurrentTimeDiff = newCurrentTimeDifference;
+  }
+
+  switch(@sysvar::CycleAndResponse::TimeFactor)
+  {
+    case 1:  // Sec.
+            @sysvar::CycleAndResponse::CurrentTimeDiffMax = currentTimeDiffMaxSec;
+    break;
+    case 2:  // mSec.
+            @sysvar::CycleAndResponse::CurrentTimeDiffMax = currentTimeDiffmMaxSec;
+    break;
+    case 3: // nSec.
+            @sysvar::CycleAndResponse::CurrentTimeDiffMax = currentTimeDiffMax;
+    break;
+  }
+
+  @sysvar::CycleAndResponse::CurrentTimeDiffMax_Dsp = currentTimeDiffmMaxSec;
+}
+/*@@end*/
+
+/*@@caplFunc:CalcTimeDiffMin():*///function
+CalcTimeDiffMin ()
+{
+  float newCurrentTimeDifference;
+  float oldCurrentTimeDiff;
+  float currentTimeDiffMin;
+  float currentTimeDiffMinSec;
+  float currentTimeDiffmMinSec;
+
+  newCurrentTimeDifference = (gTransmitMsgTime - gReceivedMsgTime);
+
+  if(count == 0) 
+  {
+    oldCurrentTimeDiff = newCurrentTimeDifference;
+    count = 1;
+  }
+
+  if(oldCurrentTimeDiff >= newCurrentTimeDifference)  
+  {
+    currentTimeDiffMin = newCurrentTimeDifference; 
+    currentTimeDiffMinSec = (currentTimeDiffMin / 1000000000); 
+    currentTimeDiffmMinSec = (currentTimeDiffMinSec / 0.001);   
+    oldCurrentTimeDiff = newCurrentTimeDifference;
+  }
+
+  switch(@sysvar::CycleAndResponse::TimeFactor)
+  {
+    case 1:  // Sec.
+            @sysvar::CycleAndResponse::CurrentTimeDiffMin = currentTimeDiffMinSec;
+    break;
+    case 2:  // mSec.
+            @sysvar::CycleAndResponse::CurrentTimeDiffMin = currentTimeDiffmMinSec;
+    break;
+    case 3: // nSec.
+            @sysvar::CycleAndResponse::CurrentTimeDiffMin = currentTimeDiffMin;
+    break;
+  }
+  @sysvar::CycleAndResponse::CurrentTimeDiffMin_Dsp = currentTimeDiffmMinSec;
+}
+/*@@end*/
+
+/*@@envVar:EnvTimeFactor:*/
+/*@@end*/
+
+/*@@sysvarUpdate:CycleAndResponse::SetJitterPercent:*/
+on sysvar_update sysvar::CycleAndResponse::SetJitterPercent
+{
+  if(@this == 0)  setJitter(0,0);
+  else  setJitter(0,@this*100);
+}
+/*@@end*/
+

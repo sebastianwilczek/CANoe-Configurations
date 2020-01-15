@@ -1,0 +1,563 @@
+/*@@var:*/
+variables {
+
+  // For testing parallel TX on two connections sharing same PDUs:
+
+  int gTestNo; // number of currently running test case (1 - 6)
+  int gPDUPool = 0; // Use PDU pool 1 or 2
+  int gAddressMode = 1; // 0: 1 Byte Addresses; 1: 2 Byte Addresses
+
+  msTimer resetTrigger;
+  msTimer delayedTrigger_A1;
+  msTimer delayedTrigger_A3;
+  msTimer delayedTrigger_B1;
+  msTimer resetClear;
+
+  // The gResetTriggerTimeout must be greater than gDelayTime and all transmissions have finished!
+  dword gResetTriggerTimeout = 500; // [ms]
+  dword gDelayTime           = 50; // [ms]
+}
+/*@@end*/
+
+/*@@sysvarChange:TP_Test_Triggering::StartTest4:*/
+on sysvar sysvar::TP_Test_Triggering::StartTest4
+{
+  // Works!
+
+  if (@this == 1)
+  {
+    @sysvar::Panel_A1::TxDataLength = 400;
+    @sysvar::Panel_A3::TxDataLength = 400;
+
+    write("*** sending immed.  %4d bytes from A to B", @sysvar::Panel_A1::TxDataLength);
+    write("*** sending immed.  %4d bytes from A to C", @sysvar::Panel_A3::TxDataLength);
+
+    gTestNo = 4;
+  }
+  else
+  {
+    gTestNo = 0;
+  }
+
+  // start/reset trigger the transmission of node A1 and A3:
+  @sysvar::Panel_A1::FillSendData = @this;
+  @sysvar::Panel_A3::FillSendData = @this;
+}
+/*@@end*/
+
+/*@@key:'1':*/
+on key '1'
+{
+  setDebugOutputLevel();
+
+  @sysvar::TP_Test_Triggering::StartTest1 = 1;
+  resetTrigger.set(gResetTriggerTimeout);
+}
+/*@@end*/
+
+/*@@timer:resetTrigger:*/
+on timer resetTrigger
+{
+  // reset the trigger of all possibly started tests:
+  if (gTestNo == 1)
+  {
+    @sysvar::TP_Test_Triggering::StartTest1 = 0;
+  }
+  else if (gTestNo == 2)
+  {
+    @sysvar::TP_Test_Triggering::StartTest2 = 0;
+  }
+  else if (gTestNo == 3)
+  {
+    @sysvar::TP_Test_Triggering::StartTest3 = 0;
+  }
+  else if (gTestNo == 4)
+  {
+    @sysvar::TP_Test_Triggering::StartTest4 = 0;
+  }
+  else if (gTestNo == 5)
+  {
+    @sysvar::TP_Test_Triggering::StartTest5 = 0;
+    @sysvar::TP_A1::TxPriority = 32768; // set again to default
+    @sysvar::TP_A3::TxPriority = 32768; // set again to default
+  }
+  else if (gTestNo == 6)
+  {
+    @sysvar::TP_Test_Triggering::StartTest6 = 0;
+    @sysvar::TP_A1::ExclusiveTxUsage = 0; // set again to default
+    @sysvar::TP_A3::ExclusiveTxUsage = 0; // set again to default
+  }
+}
+/*@@end*/
+
+/*@@key:'2':*/
+on key '2'
+{
+  setDebugOutputLevel();
+
+  @sysvar::TP_Test_Triggering::StartTest2 = 1;
+  resetTrigger.set(gResetTriggerTimeout);
+}
+/*@@end*/
+
+/*@@timer:delayedTrigger_A3:*/
+on timer delayedTrigger_A3
+{
+  // start the transmission of node A3:
+  @sysvar::Panel_A3::FillSendData = 1;
+}
+/*@@end*/
+
+/*@@key:'3':*/
+on key '3'
+{
+  setDebugOutputLevel();
+
+  @sysvar::TP_Test_Triggering::StartTest3 = 1;
+  resetTrigger.set(gResetTriggerTimeout);
+}
+/*@@end*/
+
+/*@@key:'4':*/
+on key '4'
+{
+  setDebugOutputLevel();
+
+  @sysvar::TP_Test_Triggering::StartTest4 = 1;
+  resetTrigger.set(gResetTriggerTimeout);
+}
+/*@@end*/
+
+/*@@sysvarChange:TP_Test_Triggering::StartTest2:*/
+on sysvar sysvar::TP_Test_Triggering::StartTest2
+{
+  // Works!
+
+  if (@this == 1)
+  {
+    @sysvar::Panel_A1::TxDataLength = 800;
+    @sysvar::Panel_A3::TxDataLength = 400;
+
+    write("*** sending immed.  %4d bytes from A to B", @sysvar::Panel_A1::TxDataLength);
+    write("*** sending delayed %4d bytes from A to C", @sysvar::Panel_A3::TxDataLength);
+
+    gTestNo = 2;
+  }
+  else
+  {
+    gTestNo = 0;
+  }
+
+  // start/reset trigger the transmission of node A1:
+  @sysvar::Panel_A1::FillSendData = @this;
+
+  if (@this == 1)
+  {
+    // start the transmission of node A3 delayed:
+    delayedTrigger_A3.set(gDelayTime);
+  }
+  else
+  {
+    // reset the transmission trigger of node A3:
+    @sysvar::Panel_A3::FillSendData = @this;
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:TP_Test_Triggering::StartTest3:*/
+on sysvar sysvar::TP_Test_Triggering::StartTest3
+{
+  if (@this == 1)
+  {
+    @sysvar::Panel_A1::TxDataLength = 400;
+    @sysvar::Panel_B1::TxDataLength = 400;
+
+    write("*** sending immed.  %4d bytes from A to B", @sysvar::Panel_A1::TxDataLength);
+    write("*** sending immed.  %4d bytes from B to A", @sysvar::Panel_B1::TxDataLength);
+
+    gTestNo = 3;
+  }
+  else
+  {
+    gTestNo = 0;
+  }
+
+  // start/reset trigger the transmission of node A1 and A3:
+  @sysvar::Panel_A1::FillSendData = @this;
+  @sysvar::Panel_B1::FillSendData = @this;
+}
+/*@@end*/
+
+/*@@sysvarChange:TP_Test_Triggering::StartTest1:*/
+on sysvar sysvar::TP_Test_Triggering::StartTest1
+{
+  if (@this == 1)
+  {
+    @sysvar::Panel_A1::TxDataLength = 800;
+    @sysvar::Panel_B1::TxDataLength = 400;
+
+    write("*** sending immed.  %4d bytes from A to B", @sysvar::Panel_A1::TxDataLength);
+    write("*** sending delayed %4d bytes from B to A", @sysvar::Panel_B1::TxDataLength);
+
+    gTestNo = 1;
+  }
+  else
+  {
+    gTestNo = 0;
+  }
+
+  // start/reset trigger the transmission of node A1:
+  @sysvar::Panel_A1::FillSendData = @this;
+
+  if (@this == 1)
+  {
+    // start the transmission of node B1 delayed:
+    delayedTrigger_B1.set(gDelayTime);
+  }
+  else
+  {
+    // reset the transmission trigger of node B1:
+    @sysvar::Panel_B1::FillSendData = @this;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:showAllNodePanels():*///function
+showAllNodePanels ()
+{
+  openPanel("Tester -> ESP");
+  openPanel("Tester -> ECM");
+  openPanel("ESP");
+  openPanel("ECM");
+}
+/*@@end*/
+
+/*@@key:' ':*/
+on key ' '
+{
+  showAllNodePanels();
+}
+/*@@end*/
+
+/*@@key:'x':*/
+on key 'x'
+{
+  @sysvar::Panel_A1::ClearData = 1;
+  @sysvar::Panel_A3::ClearData = 1;
+  @sysvar::Panel_B1::ClearData = 1;
+  @sysvar::Panel_C1::ClearData = 1;
+  resetClear.set(1);
+}
+/*@@end*/
+
+/*@@timer:resetClear:*/
+on timer resetClear
+{
+  @sysvar::Panel_A1::ClearData = 0;
+  @sysvar::Panel_A3::ClearData = 0;
+  @sysvar::Panel_B1::ClearData = 0;
+  @sysvar::Panel_C1::ClearData = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:setDebugOutputLevel():*///function
+setDebugOutputLevel ()
+{
+  return; // use defaults from CANdb
+
+  @sysvar::TP_A1::VerbosityLevel = 2;
+  @sysvar::TP_A3::VerbosityLevel = 2;
+  @sysvar::TP_B1::VerbosityLevel = 2;
+  @sysvar::TP_C1::VerbosityLevel = 2;
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  SetPDUPool(gPDUPool);
+}
+/*@@end*/
+
+/*@@caplFunc:hideAllNodePanels():*///function
+hideAllNodePanels ()
+{
+  closePanel("Tester -> ESP");
+  closePanel("Tester -> ECM");
+  closePanel("ESP");
+  closePanel("ECM");
+
+  closePanel("Control Tester -> ESP Diagnostics");
+  closePanel("Control Tester -> ESP Flash");
+  closePanel("Control Tester -> ECM Diagnostics");
+  closePanel("Control Tester -> ECM Flash");
+  closePanel("Control ESP Diagnostics");
+  closePanel("Control ESP Flash");
+  closePanel("Control ECM Diagnostics");
+  closePanel("Control ECM Flash");
+}
+/*@@end*/
+
+/*@@key:'h':*/
+on key 'h'
+{
+  hideAllNodePanels();
+} 
+/*@@end*/
+
+/*@@sysvarChange:TP_Test_Triggering::StartTest5:*/
+on sysvar sysvar::TP_Test_Triggering::StartTest5
+{
+  if (@this == 1)
+  {
+    @sysvar::Panel_A1::TxDataLength = 400;
+    @sysvar::Panel_A3::TxDataLength = 400;
+    @sysvar::TP_A3::TxPriority = 500;
+
+    write("*** sending delayed %4d bytes from A to B", @sysvar::Panel_A1::TxDataLength);
+    write("*** sending delayed %4d bytes from A to C with TX priority 500", @sysvar::Panel_A3::TxDataLength);
+
+    gTestNo = 5;
+  }
+  else
+  {
+    gTestNo = 0;
+  }
+
+  if (@this == 1)
+  {
+    // start the transmission of node A1 and A3 delayed:
+    delayedTrigger_A1.set(gDelayTime);
+    delayedTrigger_A3.set(gDelayTime);
+  }
+  else
+  {
+    // reset the transmission trigger of node A1 and A3:
+    @sysvar::Panel_A1::FillSendData = @this;
+    @sysvar::Panel_A3::FillSendData = @this;
+  }
+}
+/*@@end*/
+
+/*@@timer:delayedTrigger_A1:*/
+on timer delayedTrigger_A1
+{
+  // start the transmission of node A1:
+  @sysvar::Panel_A1::FillSendData = 1;
+}
+/*@@end*/
+
+/*@@key:'5':*/
+on key '5'
+{
+  setDebugOutputLevel();
+
+  @sysvar::TP_Test_Triggering::StartTest5 = 1;
+  resetTrigger.set(gResetTriggerTimeout);
+}
+/*@@end*/
+
+/*@@sysvarChange:TP_Test_Triggering::StartTest6:*/
+on sysvar sysvar::TP_Test_Triggering::StartTest6
+{
+  if (@this == 1)
+  {
+    @sysvar::Panel_A1::TxDataLength = 400;
+    @sysvar::Panel_A3::TxDataLength = 400;
+    @sysvar::TP_A3::ExclusiveTxUsage = 1;
+
+    write("*** sending delayed %4d bytes from A to B", @sysvar::Panel_A1::TxDataLength);
+    write("*** sending delayed %4d bytes from A to C with exclusive TX usage", @sysvar::Panel_A3::TxDataLength);
+
+    gTestNo = 6;
+  }
+  else
+  {
+    gTestNo = 0;
+  }
+
+  if (@this == 1)
+  {
+    // start the transmission of node A1 and A3 delayed:
+    delayedTrigger_A1.set(gDelayTime);
+    delayedTrigger_A3.set(gDelayTime);
+  }
+  else
+  {
+    // reset the transmission trigger of node A1 and A3:
+    @sysvar::Panel_A1::FillSendData = @this;
+    @sysvar::Panel_A3::FillSendData = @this;
+  }
+}
+/*@@end*/
+
+/*@@key:'6':*/
+on key '6'
+{
+  setDebugOutputLevel();
+
+  @sysvar::TP_Test_Triggering::StartTest6 = 1;
+  resetTrigger.set(gResetTriggerTimeout);
+}
+/*@@end*/
+
+/*@@caplFunc:SetAddressMode(int):*///function
+SetAddressMode (int mode)
+{
+  @sysvar::TP_A1::AddrType = mode;
+  @sysvar::TP_A2::AddrType = mode;
+  @sysvar::TP_A3::AddrType = mode;
+  @sysvar::TP_A4::AddrType = mode;
+  @sysvar::TP_B1::AddrType = mode;
+  @sysvar::TP_B2::AddrType = mode;
+  @sysvar::TP_C1::AddrType = mode;
+  @sysvar::TP_C2::AddrType = mode;
+
+  if (mode == 2)
+  {
+    write("*** Using 2 Byte addresses");
+  }
+  else
+  {
+    write("*** Using 1 Byte addresses");
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:SetLengthMode(int):*///function
+SetLengthMode (int lengthMode)
+{
+  @sysvar::TP_A1::LengthModeTx = lengthMode;
+  @sysvar::TP_A2::LengthModeTx = lengthMode;
+  @sysvar::TP_A3::LengthModeTx = lengthMode;
+  @sysvar::TP_A4::LengthModeTx = lengthMode;
+  @sysvar::TP_B1::LengthModeTx = lengthMode;
+  @sysvar::TP_B2::LengthModeTx = lengthMode;
+  @sysvar::TP_C1::LengthModeTx = lengthMode;
+  @sysvar::TP_C2::LengthModeTx = lengthMode;
+
+  @sysvar::TP_A1::LengthModeRx = lengthMode;
+  @sysvar::TP_A2::LengthModeRx = lengthMode;
+  @sysvar::TP_A3::LengthModeRx = lengthMode;
+  @sysvar::TP_A4::LengthModeRx = lengthMode;
+  @sysvar::TP_B1::LengthModeRx = lengthMode;
+  @sysvar::TP_B2::LengthModeRx = lengthMode;
+  @sysvar::TP_C1::LengthModeRx = lengthMode;
+  @sysvar::TP_C2::LengthModeRx = lengthMode;
+
+  switch (lengthMode)
+  {
+    case 1 : 
+     {
+        write("*** Set length mode FRTP_ISO");
+     }
+    break;
+    case 2 : 
+     {
+        write("*** Set length mode FRTP_ISO6"); 
+     }
+    break;
+    case 3 : 
+     {
+        write("*** Set length mode FRTP_L16M"); 
+     }
+    break;
+    case 4 : 
+     {
+        write("*** Set length mode FRTP_4G"); 
+     }
+    break;
+    default: 
+     {
+        write("*** Error: Unknown length mode %d!", lengthMode); 
+     }
+    break;
+  }
+}
+/*@@end*/
+
+/*@@key:'p':*/
+on key 'p'
+{
+  gPDUPool = 1 - gPDUPool; // toggle
+
+  SetPDUPool(gPDUPool);
+}
+/*@@end*/
+
+/*@@caplFunc:SetPDUPool(int):*///function
+SetPDUPool (int pool)
+{
+  @sysvar::Panel_A1::UsedPDUPool = pool;
+  @sysvar::Panel_A3::UsedPDUPool = pool;
+  @sysvar::Panel_B1::UsedPDUPool = pool;
+  @sysvar::Panel_C1::UsedPDUPool = pool;
+
+  if (pool == 1)
+  {
+    write("*** Using PDUs of flash channel.");
+  }
+  else
+  {
+    write("*** Using PDUs of diagnostics channel.");
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:Panel_A1::RxIndication:*/
+on sysvar sysvar::Panel_A1::RxIndication
+{
+  if (@this == 1)
+  {
+    write("*** A received from ACC2 %d bytes", @sysvar::Panel_A1::RxDataLength);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:Panel_A3::RxIndication:*/
+on sysvar sysvar::Panel_A3::RxIndication
+{
+  if (@this == 1)
+  {
+    write("*** A received from ESP %d bytes", @sysvar::Panel_A3::RxDataLength);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:Panel_B1::RxIndication:*/
+on sysvar sysvar::Panel_B1::RxIndication
+{
+  if (@this == 1)
+  {
+    write("*** B received %d bytes", @sysvar::Panel_B1::RxDataLength);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:Panel_C1::RxIndication:*/
+on sysvar sysvar::Panel_C1::RxIndication
+{
+  if (@this == 1)
+  {
+    write("*** C received %d bytes", @sysvar::Panel_C1::RxDataLength);
+  }
+}
+/*@@end*/
+
+/*@@timer:delayedTrigger_B1:*/
+on timer delayedTrigger_B1
+{
+  // start the transmission of node B1:
+  @sysvar::Panel_B1::FillSendData = 1;
+}
+/*@@end*/
+
+/*@@key:'a':*/
+on key 'a'
+{
+  gAddressMode = 1 - gAddressMode; // toggle
+
+  SetAddressMode(gAddressMode + 1);
+}
+/*@@end*/
+

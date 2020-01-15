@@ -1,0 +1,220 @@
+/*@@var:*/
+/*
+ * Node1                                           Version 1.0
+ *
+ * This node demonstrates the usage of the J1939 transport
+ * protocols (BAM and CMDT).
+ *
+ * Copyright 2005, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Jr) Created 
+ */
+variables
+{
+  // Constants
+  const int  kNullAddr    = 0xfe;   // Null address
+  const int  kGlobalAddr  = 0xff;   // Global address
+  const int  kSuccess     = 0;      // Nodelayer function returns 0 on success
+
+  char gNodeName[32]      = "Node1"; // Name of the node, is used for output to write window
+
+  // communication variables
+  pg ProprietaryB_Node1 TX_BAM  = { DLC = 1785 }; // TX Buffer: Message for BAM, DLC is initialized with max. needed size.
+  pg ProprietaryA_Node1 TX_CMDT = { DLC = 1785 }; // TX Buffer: Message for BAM, DLC is initialized with max. needed size.
+  
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel         = kDbgWarning; // Set debug level for output to write window
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  setWriteDbgLevel( gDbgLevel );
+}
+/*@@end*/
+
+/*@@envVar:EvNode1_TX_BAM:*/
+/*
+ * Send parameter group with BAM transport protocol.
+ */
+on envVar EvNode1_TX_BAM
+{
+  LONG size;
+  LONG i;
+
+  if (getValue(this) == 1) {
+    size = getValue( EvNode1_TX_BAM_DLC );
+    if ((size > 8) && (size <= 1785)) {
+      // disable send button during transmission
+      enableControl( gNodeName, "TxBAM_Button", 0 );
+
+      TX_BAM.DLC = size;
+      TX_BAM.N1PropB_Counter++;
+
+      // fill data
+      for( i = 1; i < size; i++ ) {
+        TX_BAM.BYTE(i) = (i & 0xff);
+      }
+
+      output( TX_BAM );
+    }
+    else {
+      writeDbgLevel( kDbgError, "<%s> Size for BAM must be > 8 and <= 1785 !", gNodeName );
+    }
+  }
+}
+/*@@end*/
+
+/*@@pg:CAN1.Nodes::ProprietaryB_Node1 (0xFF0101X):*/
+on pg ProprietaryB_Node1
+{
+  if (this.DIR) {
+    enableControl( gNodeName, "TxBAM_Button", 1 );
+  }
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  // enable transmit buttons
+  enableControl( gNodeName, "TxBAM_Button" , 1 );
+  enableControl( gNodeName, "TxCMDT_Button", 1 );
+}
+/*@@end*/
+
+/*@@envVar:EvNode1_TX_CMDT:*/
+/*
+ * Send parameter group with CMDT transport protocol.
+ */
+on envVar EvNode1_TX_CMDT
+{
+  LONG size;
+  LONG i;
+
+  if (getValue(this) == 1) {
+    size = getValue( EvNode1_TX_CMDT_DLC );
+    if ((size > 8) && (size <= 1785)) {
+      // disable send button during transmission
+      enableControl( gNodeName, "TxCMDT_Button", 0 );
+
+      TX_CMDT.DLC = size;
+      TX_CMDT.N1PropA_Counter++;
+
+      // fill data
+      for( i = 1; i < size; i++ ) {
+        TX_CMDT.BYTE(i) = (i & 0xff);
+      }
+
+      output( TX_CMDT );
+    }
+    else {
+      writeDbgLevel( kDbgError, "<%s> Size for CMDT must be > 8 and <= 1785 !", gNodeName );
+    }
+  }
+}
+/*@@end*/
+
+/*@@pg:CAN1.Nodes::ProprietaryA_Node1 (0xEF0201X):*/
+on pg ProprietaryA_Node1
+{
+  if (this.DIR) {
+    enableControl( gNodeName, "TxCMDT_Button", 1 );
+  }
+}
+/*@@end*/
+
+/*@@pg:CAN1.Nodes::ProprietaryB_Node2 (0xFF0202X):*/
+on pg ProprietaryB_Node2
+{
+  putValue( EvNode1_RX_BAM_DLC, this.DLC );
+}
+/*@@end*/
+
+/*@@pg:CAN1.Nodes::ProprietaryA_Node2 (0xEF0102X):*/
+on pg ProprietaryA_Node2
+{
+  putValue( EvNode1_RX_CMDT_DLC, this.DLC );
+}
+/*@@end*/
+
+/*@@pg:CAN1.J1939::TPCM (0xECFEFEX),J1939::TPDT (0xEBFEFEX):*/
+//
+// Flow control for the CMDT transport protocol
+//
+// Because CANoe is a passive tool we have to transmit
+// the CTS and EoMA message for the transport sessions
+// which we receive.
+//
+on pg TPCM, TPDT
+{
+  BYTE  sessionAddress[1]  = { kNullAddr };
+  BYTE  sessionsPackets[1] = { 0 };
+  WORD  sessionsBytes[1]   = { 0 };
+  DWORD sessionPGN[1]      = { 0x0000 };
+  int   i;
+  pg    TPCM cmPG;
+
+  if (this.DIR != RX) return;
+
+  cmPG.SA  = Node1.NmStationAddress;
+  cmPG.DA  = this.SA;
+  cmPG.CAN = this.CAN;
+  cmPG.dword(0) = cmPG.dword(4) = 0xffffffff;
+
+  if (this.PF == 0xec) { // Command
+    if (this.byte(0) == 0x10) { // RTS
+      // new session
+      for( i = 0; i < elCount(sessionAddress); i++ ) {
+        if ((sessionAddress[i] == this.SA) || (sessionAddress[i] == kNullAddr)) {
+          sessionAddress[i]  = this.SA;
+          sessionsPackets[i] = this.byte(3); 
+          sessionsBytes[i]   = this.word(1);
+          sessionPGN[i]      = (this.byte(7)) | (this.byte(6) << 8) | (this.byte(5) << 16);
+          // send CTS
+          cmPG.ControlByte   = cmPG.ControlByte::CTS;
+          cmPG.NumberOfPacketsThatCanBeSent = 1;
+          cmPG.NextPacketNumberToBeSent     = 1;
+          cmPG.PGNumber      = sessionPGN[i];
+          output( cmPG );
+          break;
+        }
+      }
+    }
+  }
+  else if (this.PF == 0xeb) { // Data
+    // find session
+    for( i = 0; i < elCount(sessionAddress); i++ ) {
+      if (sessionAddress[i] == this.SA) {
+        if (this.byte(0) < sessionsPackets[i]) {
+          // send CTS
+          cmPG.ControlByte   = cmPG.ControlByte::CTS;
+          cmPG.NumberOfPacketsThatCanBeSent = 1;
+          cmPG.NextPacketNumberToBeSent     = this.byte(0) + 1;
+          cmPG.PGNumber      = sessionPGN[i];
+          output( cmPG );
+        }
+        else { // last packet
+          // send CTS
+          cmPG.ControlByte          = cmPG.ControlByte::EoMA;
+          cmPG.TotalMessageSize     = sessionsBytes[i];
+          cmPG.TotalNumberOfPackets = sessionsPackets[i];
+          cmPG.PGNumber             = sessionPGN[i];
+          output( cmPG );
+          sessionAddress[i]  = kNullAddr; // close session
+        }
+        break;
+      }
+    }
+  }
+}
+/*@@end*/
+

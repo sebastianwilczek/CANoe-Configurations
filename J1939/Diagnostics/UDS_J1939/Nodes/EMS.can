@@ -1,0 +1,1250 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "J1939.can"
+  #include "Diagnostics\CCI_CanTP.cin"
+}
+
+/*
+ * EMS - Engine Management System                  Version 2.0
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Jr)  Created 
+ * 1.1 (Jr)  Use J1939 Interaction Layer now
+ * 1.2 (Jr)  Send DM1 always
+ * 1.3 (Wfk) Calculate and send VD_EMS::TotalVehicleDistance/TripDistance
+ * 1.4 (Wfk) ACKM with reserved bytes set to 0xFF
+ *           Ignore TSC1 with EngOverrideCtrlMode == 0 (Override disabled)
+ *           J1939ILControlStop(1) suppresses 'Cannot Claim Address'
+ * 2.0 (Gw)  Replace J1939 diagnostics by UDS diagnositcs
+ */
+variables
+{
+  // Constants
+  const int  cCtrlModePedal  = 0;   // Engine is controller by Accelerator Pedal
+  const int  cCtrlModeSpeed  = 1;   // Engine is controlled by speed from another ECU
+  const int  cCtrlModeTorque = 2;   // Eninge is controlled by torque from another ECU
+
+  const int  cStateIgnitionOff = 0;  // Ignition is off
+  const int  cStateIgnitionOn  = 1;  // Ignition is on
+  const int  cStateStarting    = 2;  // Engine is starting, starter active
+  const int  cStateRunning     = 3;  // Engine is running
+
+  char gNodeName[32]     = "EMS"; // Name of the node, is used for output to write window
+  char gECU[10]          = "EMS";
+  char gECUID[70]        = "V-EMS06-04*PON0607001*POWERTRAIN*EMS*Vector Informatik*";
+  char gSOFT[32]         = "\003V1.0*REV-A-CAPL*2006-04-28*";
+  char gVI[32]           = "VECTOR2006-07-11X*";
+
+  // communication variables
+  pg TSC1  RX_TSC1;                       // RX Buffer: Torque Speed Control
+
+  // simulation constants
+  const float cPI             = 3.1415;
+  const float cMaxSpeed       = 2400.0; // Max. engine speed [rpm]
+  const float cMaxTorqueSpeed = 1800.0; // Max. torque at this speed [rpm]
+  const float cIdleSpeed      =  250.0; // Idle speed [rpm]
+  const float cMaxTorque      = 1650.0; // Max. engine torque [Nm]
+
+  // simulation variables
+  int   gState              = cStateIgnitionOff; // Engine state
+  float gActualCoolantTemp  = 20.0;      // Coolant Temperature in [°C]
+  float gActualPercentTorque= 0.0;       // Engine Torque in [%]
+  BYTE  gCalcSpeed          = 1;         // 1 = calc speed, 0 = speed is set by transmission
+
+  int   gControlMode      = cCtrlModePedal;
+  float gSpeedLimit       = cIdleSpeed; // Speed limit in mode kCtrlModeSpeed
+  float gTorqueLimit      = 0;          // Torque limit in mode kCtrlModeTorque
+  float gExhaustOxygen    = 100;        // %
+
+  float totalVehicleDistance = 1939; // [km]
+  float tripDistance = 0; // [km]
+  float deltaDistance = 0; // [km]
+  // 
+  const int   cSystemTime    = 100;                  // System time in [ms]
+  const float cSystemTimeSec = cSystemTime / 1000.0; // System time in [sec]
+  msTimer     SystemTimer;                           // System timer
+
+  //  
+  // ---------- UDS diagnostics ------------
+  //
+
+  BYTE cIsTester = 0; // used in CCI_Implementation.cin
+  
+  // Session Handling
+  byte gCurrentSession        = 0; // 0 default, 1 extended, 2 programming
+  byte gUnlocked              = 0; // 0 ECU is locked, 1 ECU is unlocked
+  mstimer SessionTimer;
+  const word cSessionTimeout  = 15000; // Fall into default session if no request was received for this duration.
+  
+  // Security Access
+  const DWORD cSecurityAccessMaxNumberOfTries = 3; // Allow only 3 tries when sending key
+  WORD  gSecurityAccessTries;
+  DWORD gSecurityAccessSeed;    
+  byte  gSeedArray[2];
+  int   gSeedArraySize      = 2;
+  byte  gKeyArray[255];
+  int   gMaxKeyArraySize    = 255; 
+  int   gSecurityLevel      = 0x20;
+  char  gVariant[200]       = "Common";
+  char  gOption[200]        = "";  
+  DWORD gActualSize         = 0;
+
+  // Fault Memory (which can be manipulated via diagnostic requests (e.g. cleared))
+  const word  cDTCSupportedCount       = 2;
+  const dword cDTCoffset               = 1;
+  const byte  cDTCSupportedStatusBits  = 0x79; // Support 5 of the 8 bits
+  const word  cDTCMaxNumberOfSnapshots = 10;   // The fault memory is limited to 10 snapshots
+  struct SnapShot {
+    dword dtcNumber;
+    byte  dtcStatus;
+    dword dtcEnvData;
+  } ;
+  struct SnapShot gSnapShots[cDTCMaxNumberOfSnapshots]; // The fault memory consists of some snapshots
+
+  // DTC Status Flags
+  enum {
+    cTestFailed                         = 0x01,
+    cTestFailedThisOpCycle              = 0x02,
+    cPendingDTCs                        = 0x04,
+    cConfirmedDTCs                      = 0x08,
+    cTestNotCompletedSinceLastClear     = 0x10,
+    cTestFailedSinceLastClear           = 0x20,
+    cTestNotCompletedThisOperationCycle = 0x40,
+    cWarningIndicator                   = 0x80
+  } VDtcStatusFlags;
+}
+
+/*
+ * Start up EMS
+ *
+ * Begin address claiming. After successfully claiming
+ * an address, start sending cyclic messages.
+ */
+void EMSStartUp()
+{
+  @sysvar::Powertrain::EMS::ILEnable = 1;
+
+  HardReset();
+
+  gState = cStateIgnitionOn;
+ 
+  J1939ILControlStart();
+
+  J1939ILSetMsgRawData( ECUID , strlen(gECUID), gECUID );
+  //J1939ILSetMsgRawData( SOFT  , strlen(gSOFT) , gSOFT );
+  J1939ILSetMsgRawData( VI_EMS, strlen(gVI)   , gVI );
+
+  UpdateControls();
+
+  setTimer( SystemTimer, cSystemTime );
+}
+
+on start
+{
+  if ((@sysvar::Powertrain::EMS::ILEnable == 1) && (getValue(EnvIgnitionSwitch) >= 1)) {
+    EMSStartUp();
+  }
+}
+
+/*
+ * Shut down EMS
+ *
+ * Send cannot claim address and stop sending messages
+ */
+void EMSShutDown()
+{
+  J1939ILControlStop(1);
+
+  cancelTimer( SystemTimer );
+
+  gState = cStateIgnitionOff;
+  @sysvar::Powertrain::EMS::ILEnable = 0;
+}
+
+on SysVar sysvar::Powertrain::EMS::ILEnable
+{
+  if (@this == 1) {
+    EMSStartUp();
+  }
+  else {
+    EMSShutDown();
+  }
+}
+
+/*
+ * This system timer calculates the simulated values..
+ *
+ * Note: This is not a physically correct calcluation of an
+ *       Engine. It just calculates some realistic looking values.
+ */
+on timer SystemTimer
+{
+  float targetSpeed;
+  int   starter = 0;
+  float actualSpeed      = 0.0;       // Actual engine speed in [rpm]
+  float actualTorque     = 0.0;       // Actual engine torque [Nm]
+  float pedalPosition    = 0.0;       // Accelerator pedal position in [%]
+  float torqueTakeOff    = 0.0;
+  float h1, accel;
+
+  if (getValue(EnvEMS_SimulationMode) == EnvEMS_SimulationMode::SimulateValues) {
+    switch(gState) {
+        //
+        // Engine is not running
+        //
+      case cStateIgnitionOn:
+        actualSpeed      = 0.0;       // Actual engine speed in [rpm]
+        actualTorque     = 0.0;       // Actual engine torque [Nm]
+        starter          = 0;
+        setSignal( EEC1_EMS::EngStarterMode, 0 );   // start not requested
+        if (getValue(EnvIgnitionSwitch) == 2) {
+          setSignal( EEC1_EMS::EngStarterMode, 1 ); // start active, gear not engaged
+          gState = cStateStarting;
+        }
+        break;
+        //
+        // Starter active
+        //
+      case cStateStarting:
+        actualSpeed      = cIdleSpeed; // Actual engine speed in [rpm]
+        actualTorque     =   0.0;      // Actual engine torque [Nm]
+        starter++;
+        if (starter > 15) {
+          gState  = cStateRunning;
+          putValue( EnvIgnitionSwitch, 1 );
+          setSignal( EEC1_EMS::EngStarterMode, 3 ); // start finished
+        } 
+        break;
+      case cStateRunning:
+        if (starter > 0) {
+          starter = 0;
+          setSignal( EEC1_EMS::EngStarterMode, 0 ); // start not requested
+        }
+
+        //
+        // Process received TSC message
+        //
+        if ((gControlMode != cCtrlModePedal) && (RX_TSC1.time + 20000 < timeNow())) {
+          // if a TSC1 message is not recieved for more than 200ms
+          // switch back to kCtrlModePedal.
+          gControlMode = cCtrlModePedal;
+          RX_TSC1.SA   = kNullAddr;
+        }
+        else if (RX_TSC1.SA != kNullAddr) {
+          if (RX_TSC1.EngOverrideCtrlMode == 2/*torque control*/) {
+            gControlMode = cCtrlModeTorque;
+            gTorqueLimit = RX_TSC1.EngRqedTorque_TorqueLimit.phys;
+          }
+          else if (RX_TSC1.EngOverrideCtrlMode == 1/*speed controle*/) {
+            gControlMode = cCtrlModeSpeed;
+            gSpeedLimit  = RX_TSC1.EngRqedSpeed_SpeedLimit.phys;
+          }
+          else {
+            gControlMode = cCtrlModePedal;
+            RX_TSC1.SA   = kNullAddr;
+          }
+        }
+
+        // get input values
+        actualSpeed   = getValue( EnvEMS_EngineSpeed );
+        pedalPosition = getValue( EnvEMS_Accelerator ) * 10;
+        torqueTakeOff = getValue( EnvEMS_TorqueTakeoff );
+
+        //
+        // calculate speed and torque
+        //
+        switch(gControlMode) {
+          //
+          // Pedal controlled
+          //
+          case cCtrlModePedal:
+            accel = pedalPosition;
+            break;
+          //
+          // Speed controlled
+          //
+          case cCtrlModeSpeed:
+            if (actualSpeed > gSpeedLimit) {
+              accel = 0;
+            }
+            else {
+              accel = 1.0;
+            }
+            break;
+          //
+          // Torque controlled
+          //
+          case cCtrlModeTorque:
+            if (actualTorque > gTorqueLimit) {
+              accel = 0;
+            }
+            else {
+              accel = 1.0;
+            }
+            break;
+        }
+
+        // calculate new torque values
+        actualTorque  = CalcTorque( actualSpeed, accel );
+        actualTorque -= (1 + sin( (actualSpeed / cMaxSpeed) * (cPI/2.0) - (cPI/2.0))) * cMaxTorque * 3.0 * (1.0 - (accel / 100.0));
+        actualTorque = utilRange( actualTorque, -cMaxTorque, cMaxTorque);
+
+        // calculate new speed
+        h1 = (actualTorque - torqueTakeOff) / cMaxTorque;
+        actualSpeed = utilRange( actualSpeed + h1 * cMaxSpeed * 0.05, cIdleSpeed, cMaxSpeed );
+        break;
+    }
+
+    // calculate percent torque
+    gActualPercentTorque = actualTorque / cMaxTorque * 100.0; 
+    
+    // calculate ECU Temperature
+    gActualCoolantTemp = utilRange( gActualCoolantTemp + (actualSpeed - cIdleSpeed * 3 / 2) * 0.0001, 20, 120 );
+
+    // update envVars
+    putValue( EnvEMS_Torque, actualTorque );
+    putValue( EnvEMS_EngineSpeed, actualSpeed );
+    putValue( EnvEMS_EngineCoolantTemp, gActualCoolantTemp );
+
+    // update TX signals
+    setSignal( EEC1_EMS::EngSpeed                , actualSpeed);
+
+    setSignal( EEC1_EMS::ActualEngPercentTorque  , gActualPercentTorque);
+    setSignal( EEC2_EMS::AccelPedalPos1          , pedalPosition);
+    setSignal( EEC2_EMS::AccelPedal1LowIdleSwitch, (pedalPosition <  5.0) ? 1 : 0);
+    setSignal( EEC2_EMS::AccelPedalKickdownSwitch, (pedalPosition > 95.0) ? 1 : 0);
+    setSignal( ET1_EMS::EngCoolantTemp           , gActualCoolantTemp);
+    setSignal( CCVS_EMS::WheelBasedVehicleSpeed  , getValue( EnvVehicleSpeed ) );
+    deltaDistance += getValue( EnvVehicleSpeed );
+    setSignal( VD_EMS::TotalVehicleDistance, totalVehicleDistance + (deltaDistance / 36000));
+    setSignal( VD_EMS::TripDistance, tripDistance + (deltaDistance / 36000));
+  }
+  else {
+    // manual mode
+    gActualCoolantTemp   = getSignal( ET1_EMS::EngCoolantTemp );
+    gActualPercentTorque = getSignal( EEC1_EMS::ActualEngPercentTorque  );
+  }
+
+  setTimer( SystemTimer, cSystemTime );
+}
+
+/*
+ * Handle TSC1 message
+ */
+on pg TSC1
+{
+  pg ACKM  TX_ACKM;                       // TX Buffer: Acknowledge
+  int  i = 0;
+  
+  TX_ACKM.DWORD(0) = TX_ACKM.DWORD(4) = 0xFFFFFFFF; //init datafield
+
+  // initialize PG with 0xFF
+  for (i=0; i<8; i++) TX_ACKM.Byte(i) = 0xFF;
+
+  if (!J1939ILAcceptRxPG(this)) return;
+
+  if (this.EngOverrideCtrlMode == 0 /* Override disabled */) {
+    // do nothing
+  }
+  else if ((RX_TSC1.SA == kNullAddr) || (RX_TSC1.SA == this.SA)) {
+    // copy data to RX buffer
+    RX_TSC1.SA   = this.SA;
+    RX_TSC1.DA   = this.DA;
+    RX_TSC1.time = this.time;
+    RX_TSC1.DWORD(0) = this.DWORD(0);
+    RX_TSC1.DWORD(4) = this.DWORD(4);
+  }
+  else {
+    // send negative ACK, because EMS is already controlled
+    // by another ECU.
+    TX_ACKM.SA          = J1939ILGetAddress();
+    TX_ACKM.DA          = kGlobalAddr;
+    TX_ACKM.ControlByte = 1;
+    TX_ACKM.AddressNegativeAcknowledgement = this.SA;
+    TX_ACKM.ParameterGroupNumber           = this.PGN;
+    output( TX_ACKM );
+  }
+}
+
+/*
+ * Clip the value to the range of min and max
+ */
+float utilRange( float value, float min, float max )
+{
+  if (value < min) return min;
+  if (value > max) return max;
+
+  return value;
+}
+
+/*
+ * Calculate the torque at a given speed.
+ *
+ * Note: This is not a physically correct calcluation of an
+ *       Engine. It just calculates some realistic looking values.
+ */
+/*
+ * Calculate the current engine torque
+ */
+float CalcTorque( float speed, float accel )
+{
+  float h;
+
+  if ((speed >= cIdleSpeed) && (speed <= cMaxTorqueSpeed)) {
+    h = ((speed - cIdleSpeed) / (cMaxTorqueSpeed - cIdleSpeed));
+    h = (1 - sin( cPI/2.0 + h * cPI )) / 2.0 * cMaxTorque;
+    return ((cMaxTorque * 0.2) + (h * 0.8)) * (accel / 100.0);
+  }
+  else if ((speed > cMaxTorqueSpeed) && (speed < cMaxSpeed)) {
+    h = 1 - ((speed - cMaxTorqueSpeed) / (cMaxSpeed - cMaxTorqueSpeed));
+    h = (1 - sin( cPI/2.0 + h * cPI )) / 2.0 * cMaxTorque * (accel / 100.0);
+    return h;
+  }
+  else {
+    return 0.0;
+  }
+}
+
+/*
+ * IL will send a message
+ *
+ * Use this callback to update the data of the message
+ */
+LONG J1939ILOnTxPrepare( pg CAPL_MSG txPG )
+{
+  long i, pos;
+
+  switch( txPG.pf ) {
+    //
+    // XFER - Transfer
+    //
+    case 0xCA:
+      switch(((pg XFER)txPG).PGNofRequstedInformation) {
+        case 0xFEEC: // VI
+          pos = 3;
+          txPG.BYTE(pos++) = 4 + strlen(gVI);
+          txPG.DWORD(pos)  = utilECUIdentity();
+          pos += 4;
+          for( i = 0; i < strlen(gVI); i++ ) {
+            txPG.BYTE(pos++) = gVI[i];
+          }
+          txPG.DLC = pos;
+          break;
+        case 0xFDC5: // ECUID
+          pos = 3;
+          write("xxx");
+          txPG.BYTE(pos++) = 4 + strlen(gECUID);
+          txPG.DWORD(pos)  = utilECUIdentity();
+          pos += 4;
+          for( i = 0; i < strlen(gECUID); i++ ) {
+            txPG.BYTE(pos++) = gECUID[i];
+          }
+          txPG.DLC = pos;
+          break;
+        case 0xFEDA: // SOFT
+          pos = 3;
+          txPG.BYTE(pos++) = 4 + strlen(gSOFT);
+          txPG.DWORD(pos)  = utilECUIdentity();
+          pos += 4;
+          for( i = 0; i < strlen(gSOFT); i++ ) {
+            txPG.BYTE(pos++) = gSOFT[i];
+          }
+          txPG.DLC = pos;
+          break;
+      }
+      break;
+    default:
+      break;
+  }
+
+  return 1; // 1=send message, 0=suppress message
+}
+
+/*
+ * IL has sent a message
+ */
+void J1939ILOnTxMessage( pg * txPG )
+{
+  switch( txPG.PGN ) {
+  }
+}
+
+/*
+ * IL has sent received a request
+ *
+ * return 0 - do not respond
+ *        1 - answer the request
+ *        2 - answer with a NACK
+ *        3 - answer with positive ACK
+ *
+ *     _pgn - requested PGN
+ *     _sa  - sender address of the request
+ */
+LONG J1939ILOnRequest( LONG _pgn, LONG _sa )
+{
+  return 1; // send response
+}
+
+/*
+ * IL has sent a message
+ */
+void J1939ILOnError( LONG errorCode, LONG additionalParam )
+{
+  write( "<%s> Error %d, additional %d", gECU, errorCode, additionalParam );
+}
+
+/*
+ * IL has changed its state
+ *
+ * state - 0 = Initialized
+ *         1 = Claiming
+ *         2 = Active
+ *         3 = Stopped
+ *         4 = Suspended
+ */
+void J1939ILOnChangedState( LONG state )
+{
+  switch( state ) {
+    case 1: // Claiming
+//      write( "<%s> Claiming", gECU );
+      break;
+    case 2: // Active
+//      write( "<%s> Active", gECU );
+      break;
+    case 3: // Stopped
+//      write( "<%s> Stopped", gECU );
+      break;
+    case 4: // Suspended
+//      write( "<%s> Suspended", gECU );
+      break;
+  }
+}
+
+/*
+ * Returns the identity for XFER
+ */
+DWORD utilECUIdentity()
+{
+  DWORD identity;
+
+  identity  = (EMS.NmJ1939ECUInstance & 0x07);
+  identity |= (EMS.NmJ1939FunctionInstance & 0x31) << 3;
+  identity |= EMS.NmJ1939Function << 8;
+  identity |= (EMS.NmJ1939System & 0x7f) << 17;
+  identity |= (EMS.NmJ1939SystemInstance & 0x0f) << 24;
+  identity |= (EMS.NmJ1939IndustryGroup & 0x0f) << 28;
+  identity |= (EMS.NmJ1939AAC & 0x01) << 31;
+
+  return identity;
+}
+
+/*
+ * Update panel controls
+ */
+void UpdateControls()
+{
+  int enable;
+  long bkColor;
+
+  enable  = (getValue(EnvEMS_SimulationMode) != EnvEMS_SimulationMode::SimulateValues) ? 1 : 0;
+  bkColor = (enable == 1) ? MakeRGB(255,255,255) : MakeRGB(229,229,229);
+
+  enableControl      ( "EMS", "EngineSpeedSlider" , enable );
+  enableControl      ( "EMS", "EngineSpeedEdit"   , enable );
+  setControlBackColor( "EMS", "EngineSpeedEdit"   , bkColor);
+  enableControl      ( "EMS", "EngineTorqueSlider", enable );
+  enableControl      ( "EMS", "EngineTorqueEdit"  , enable );
+  setControlBackColor( "EMS", "EngineTorqueEdit"  , bkColor);
+  enableControl      ( "EMS", "EngineTempSlider"  , enable );
+  enableControl      ( "EMS", "EngineTempEdit"    , enable );
+  setControlBackColor( "EMS", "EngineTempEdit"    , bkColor);
+  
+}
+
+on envVar EnvEMS_SimulationMode
+{
+  UpdateControls();
+}
+
+on envVar EnvIgnitionSwitch
+{
+  if ((getValue(this) == 1) && (gState == cStateIgnitionOff)) {
+    EMSStartUp(); 
+  }
+  else if (getValue(this) == 2) {
+    if (gState == cStateIgnitionOff) {
+      EMSStartUp(); 
+    }
+    gState = cStateStarting;
+  }
+  else if ((getValue(this) == 0) && (gState > cStateIgnitionOff)) {
+    EMSShutDown();
+  }
+}
+
+on preStart
+{
+  J1939ILControlInit();  
+}
+
+//
+// activate Engine Coolant Temperatur
+//
+on envVar EnvEMS_FaultTemperature
+{
+  word status;
+
+  status  = cTestFailed;
+  status |= cConfirmedDTCs;
+
+  if (getValue( this ) > 0) {
+    gActualCoolantTemp = 90.0;
+    AddSnapshot( 0x00000001, status );
+    putValue( EnvEMS_EngineCoolantTemp, gActualCoolantTemp );
+  }
+  else {
+    gActualCoolantTemp = 20.0;
+    putValue( EnvEMS_EngineCoolantTemp, gActualCoolantTemp );  
+  }
+}
+
+on envVar EnvEMS_FaultOxygen
+{
+  word status;
+
+  status  = cTestFailed;
+  status |= cTestNotCompletedSinceLastClear;
+
+  if (getValue( this ) > 0) {
+    gExhaustOxygen = 80.0;
+    AddSnapshot( 0x00000002, status );
+  }
+  else {
+    gExhaustOxygen = 100.0; 
+  }
+}
+
+on diagRequest TesterPresent_Send
+{
+  diagResponse this resp;
+
+  // Note: the session timeout is handled in the TP layer callback!
+
+  if( 1 == DiagGetSuppressResp( this)) return; // Do NOT respond to this request.
+
+  resp.SendResponse();
+}
+
+on diagRequest DefaultSession_Start
+{
+  diagResponse this resp;
+
+  cancelTimer( SessionTimer);
+  gCurrentSession = 0; // Default session
+  gUnlocked       = 0; // New session starts locked
+
+  if( 1 == DiagGetSuppressResp( this)) return; // Do NOT respond to this request.
+
+  // Set the parameters in the response.
+  resp.SendResponse();
+}
+
+/*
+ * This timer is called when a tester present is missing 
+ */
+on timer SessionTimer
+{
+  writeDbgLevel(0, "%s: Session timed out, falling back to default.", gECU);
+
+  gCurrentSession = 0;
+  gUnlocked = 0;
+}
+
+on diagRequest ExtendedDiagnosticSession_Start
+{
+  diagResponse this resp;
+
+  // It is only possible to go into this session from the default session!
+  if( gCurrentSession > 1)
+  {
+    resp.SendNegativeResponse( 0x7e);
+    return;
+  }
+
+  gCurrentSession = 1;
+  gUnlocked = 0;  // New session starts locked
+
+  cancelTimer( SessionTimer);
+  setTimer( SessionTimer, cSessionTimeout);
+
+  if( 1 == DiagGetSuppressResp( this)) return; // Do NOT respond to this request.
+
+  // Set the parameters in the response.
+  resp.SendResponse();
+}
+
+on diagRequest ProgrammingSession_Start
+{
+  diagResponse this resp;
+
+  if( !gUnlocked)
+  {
+    // The ECU was not unlocked, so deny access.
+    resp.SendNegativeResponse( 0x33);
+    return;
+  }
+
+  gCurrentSession = 2; // Programming session
+  gUnlocked       = 0; // New session starts locked
+
+  cancelTimer( SessionTimer);
+  setTimer( SessionTimer, cSessionTimeout);
+
+  if( 1 == DiagGetSuppressResp( this)) return; // Do NOT respond to this request.
+
+  // Set the parameters in the response.
+  resp.SendResponse();
+}
+
+on diagRequest HardReset_Reset
+{
+  diagResponse this resp;
+
+  HardReset();
+  gCurrentSession = 0;
+
+  EMSShutDown();
+  EMSStartUp(); 
+
+  resp.SendResponse();
+}
+
+/*
+ * Perform a hard reset
+ */
+void HardReset()
+{
+  int i;
+
+  gCurrentSession       = 0; // default seesion
+  gUnlocked             = 0; // locked
+  gSecurityAccessSeed   = 0;
+  gSecurityAccessTries  = 0;
+
+  gState                = cStateIgnitionOff; // Engine state
+  gActualCoolantTemp    = 20.0;       // Coolant Temperature in [°C]
+
+  gControlMode      = cCtrlModePedal;
+  gSpeedLimit       = cIdleSpeed; 
+  gTorqueLimit      = 0;    
+
+  totalVehicleDistance  = 1939;
+  tripDistance          = 0;
+  deltaDistance         = 0;
+}
+
+on diagRequest SoftReset_Reset
+{
+  diagResponse this resp;
+
+  // Reset some basic parameters.
+  gCurrentSession       = 0;
+  gUnlocked             = 0;
+  gSecurityAccessSeed   = 0;
+  gSecurityAccessTries  = 0;
+
+  resp.SendResponse();
+}
+
+on diagRequest KeyLevel1_Send
+{
+  DWORD SecurityKey;
+  DWORD CorrectKey;
+  diagResponse this resp;
+
+ 
+  if ( gCurrentSession < 1) {
+    // Not in default session!
+    resp.SendNegativeResponse( 0x7e);
+    return;    
+  }
+
+  if( gSecurityAccessTries > cSecurityAccessMaxNumberOfTries)
+  {
+    // Too many tries
+    resp.SendNegativeResponse( 0x36);
+    return;    
+  }
+
+  // Retrieve the parameters from the request.
+  SecurityKey = this.GetParameter( "SecurityKey" );
+  CorrectKey  = ComputeKey( gSecurityAccessSeed);
+
+  if( CorrectKey != SecurityKey)
+  {
+    write( "%s: received %x instead of %x", gECU, SecurityKey, CorrectKey);
+    ++gSecurityAccessTries;
+    DiagSendNegativeResponse( this, 0x35);
+    return;
+  }
+
+  gSecurityAccessSeed = CorrectKey;
+  gUnlocked = 1;
+
+  gSecurityAccessTries = 0;
+
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    return; // Do NOT respond to this request.
+  }
+
+  DiagSendResponse( resp);
+}
+
+/*
+ * Compute a key via SeednKey.Dll and a specified seed
+ *
+ */
+dword ComputeKey( dword seed)
+{
+  dword genKey;
+  int   ret;
+  // Note: in order to make the entering of the key in the console
+  //       easier, this function uses only 16 bit of the value.
+  gSeedArray[0] = seed >> 8;
+  gSeedArray[1] = seed & 0xff;
+
+  // Calculation of the SecurityKey via SeednKey.Dll
+  ret = DiagGenerateKeyFromSeed (gSeedArray, gSeedArraySize, gSecurityLevel, gVariant, gOption, gKeyArray, gMaxKeyArraySize, gActualSize);
+
+  // Check if the KeyGeneration result == okay
+  genKey = 0;
+
+  if(ret == 0)
+  { 
+    // Put into the correct value 
+    genKey = gKeyArray[0] << 8;       // High Byte 
+    genKey = genKey | gKeyArray[1];   // Low  Byte 
+    genKey = genKey & 0x0000FFFF;
+  }
+  
+  return genKey;
+}
+
+on diagRequest SeedLevel1_Request
+{
+  diagResponse this resp;
+
+  // Not in default session!
+  if( gCurrentSession < 1)
+  {
+    resp.SendNegativeResponse( 0x7E);
+    return;
+  }
+
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    return; // Do NOT respond to this request.
+  }
+  
+  // To get a series of seed values, reuse the same algorithm here.
+  gSecurityAccessSeed = ComputeKey( gSecurityAccessSeed);
+
+  // Set the parameters in the response.
+  resp.SetParameter("SecuritySeed", gSecurityAccessSeed);
+  resp.SendResponse();
+}
+
+on diagRequest FaultMemory_ReadNumber
+{
+  BYTE dtcStatusbyte;
+  diagResponse this resp;
+
+  // Retrieve the parameters from the request.
+  dtcStatusbyte = this.GetParameter( "DtcStatusbyte");
+
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    return; // Do NOT respond to this request.
+  }
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "DtcStatusbyte", dtcStatusbyte);
+  DiagSetParameter( resp, "DtcFormatIdentifier", 1);
+  DiagSetParameter( resp, "DtcCount", CountDTC( dtcStatusbyte));
+  DiagSendResponse( resp);
+}
+
+/*
+ * Count the found snapshots which match the specified status byte
+ */
+word CountDTC( byte dtcStatusbyte)
+{
+  int i;
+  word count;
+
+  count = 0;
+  for( i = 0; i < cDTCMaxNumberOfSnapshots; ++i)
+  {
+    // If any of the requested bits is set, the DTC is active.
+    if( utilMatchStatusBits( dtcStatusbyte, gSnapShots[i].dtcStatus) ) 
+    {
+      ++count;
+    }
+  }
+  return count;
+}
+
+/*
+ *  Return !0 if the mask selects the given dtcStatus, 0 otherwise.
+ *  mask == 0 means that no DTC is selected (does not make sense!) 
+ *  otherwise ANY bit set in the mask must be set in the status too.
+ */
+int utilMatchStatusBits( BYTE mask, BYTE dtcStatus)
+{
+  return (mask & dtcStatus);
+}
+
+on diagRequest FaultMemory_Clear
+{
+  int i;
+  DWORD groupOfDtc;
+  diagResponse this resp;
+
+  // Retrieve the parameters from the request.
+  groupOfDtc = this.GetParameter( "GroupOfDtc");
+  ClearSnapshot( groupOfDtc );
+
+  DiagSendResponse( resp);
+}
+
+/*
+ * Clear a snapshots with the specified DTC 
+ * (clear all if DTC 0xFFFFFF is used)
+ */
+void ClearSnapshot( dword groupOfDtc )
+{
+  word index;
+
+  for( index = 0; index < cDTCMaxNumberOfSnapshots; ++index)
+  {
+    if ((groupOfDtc == 0xFFFFFF                    ) || // all DTCs
+        (groupOfDtc)== gSnapShots[index].dtcNumber )
+    {
+      write("clear");
+      gSnapShots[index].dtcNumber  = 0;
+      gSnapShots[index].dtcStatus  = 0;
+      gSnapShots[index].dtcEnvData = 0;
+    }
+  }
+
+}
+
+/*
+ * Add a new snapshot to the fault memory
+ */
+void AddSnapshot( DWORD dtc, byte status )
+{
+  int  oldestEntry;
+  word i;
+
+  oldestEntry = -1;
+
+  if( !status)
+  {
+    writeDbgLevel( 1, "%s: Invalid DTC Status!\r\nPlease set some flags.", gECU );
+    return;
+  }
+
+  for( i=0; i < cDTCMaxNumberOfSnapshots; ++i)
+  {
+    if( 0 == gSnapShots[i].dtcNumber)
+    {
+      break;
+    } 
+    else
+    {
+      if( (oldestEntry < 0) || 
+          (GetOdometerValue( gSnapShots[i].dtcEnvData ) < GetOdometerValue(gSnapShots[oldestEntry].dtcEnvData) ) )
+      {
+        oldestEntry = i;
+      }
+    }
+  }
+
+  if( i >= cDTCMaxNumberOfSnapshots)
+  {
+    writeDbgLevel( 1, "%s: Overwriting Snapshot #%d with %06x", gECU, oldestEntry, dtc);
+    i = oldestEntry;
+  } else
+  {
+    writeDbgLevel( 2, "%s: Adding Snapshot #%d (%06x)", gECU, i, dtc);
+  }
+  gSnapShots[i].dtcNumber = dtc;
+  gSnapShots[i].dtcStatus = status;
+  gSnapShots[i].dtcEnvData= CreateEnvData();
+}
+
+on diagRequest FaultMemory_ReadAllSupported
+{
+  word index;
+  diagResponse this resp;
+
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    return; // Do NOT respond to this request.
+  }
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "DtcStatusbyte", cDTCSupportedStatusBits);
+
+  DiagResize( resp, 3 + 4 * cDTCSupportedCount);
+
+  for( index = 0; index < cDTCSupportedCount; ++index)
+  {
+    DiagSetComplexParameter( resp, "ListOfDTCAndStatus", index, "DTC", cDTCoffset + index);
+    DiagSetComplexParameter( resp, "ListOfDTCAndStatus", index, "DtcStatusbyte", cDTCSupportedStatusBits);
+  }
+
+  DiagSendResponse( resp);
+}
+
+on diagRequest FaultMemory_ReadAllIdentified
+{
+  BYTE dtcStatusbyte;
+  word i, index;
+  diagResponse this resp;
+
+
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    return; // Do NOT respond to this request.
+  }
+  
+  // Retrieve the parameters from the request.
+  dtcStatusbyte = this.GetParameter( "DtcStatusbyte");
+
+  // Set the parameters in the response.
+  resp.SetParameter( "DtcStatusbyte", dtcStatusbyte);
+
+  DiagResize( resp, 3 + 4 * CountDTC( dtcStatusbyte));
+  index = 0;
+
+  for( i = 0; i < cDTCMaxNumberOfSnapshots; ++i)
+  {
+    if( !utilMatchStatusBits( dtcStatusbyte, gSnapShots[i].dtcStatus))
+      continue;
+
+    DiagSetComplexParameter( resp, "ListOfDTC", index, "DTC"          , gSnapShots[i].dtcNumber);
+    DiagSetComplexParameter( resp, "ListOfDTC", index, "DtcStatusbyte", gSnapShots[i].dtcStatus);
+    ++index;
+  }
+  DiagSendResponse( resp);
+}
+
+on diagRequest FaultMemory_ReadEnvironmentData
+{
+  DWORD DTC;
+  WORD index;
+  WORD i;
+  BYTE DtcSnapshotRecordNumber;
+  BYTE DtcCombinedStatus;
+
+  diagResponse this resp;
+
+  // Retrieve the parameters from the request.
+  DTC = DiagGetParameter( this, "DTC");
+  DtcSnapshotRecordNumber = DiagGetParameter( this, "DtcSnapshotRecordNumber");
+
+  if( DTC - cDTCoffset > cDTCSupportedCount
+   || DtcSnapshotRecordNumber != 0)
+  {
+    DiagSendNegativeResponse( this, 0x31);
+    return;
+  }
+
+  if( 1 == DiagGetSuppressResp( this))
+  {
+    return; // Do NOT respond to this request.
+  }
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "DTC", DTC);
+  DtcCombinedStatus = 0;
+  DiagSetParameter( resp, "DtcStatusbyte", DtcCombinedStatus);  // Must be set to resize successfully
+
+  // Make room for potentially _all_ snapshots
+  DiagResize( resp, 6 + 6 * cDTCMaxNumberOfSnapshots);
+
+  index = 0;
+  for( i = 0; i < cDTCMaxNumberOfSnapshots; ++i)
+  {
+    if( gSnapShots[i].dtcNumber != DTC)
+      continue;
+
+    DtcCombinedStatus |= gSnapShots[i].dtcStatus;
+    DiagSetComplexParameter( resp, "ListOfDTC", index, "DtcSnapshotRecordNumber", 1);
+    DiagSetComplexParameter( resp, "ListOfDTC", index, "DtcSnapshotRecordNumberOfIdentifiers", 3);
+    DiagSetComplexParameter( resp, "ListOfDTC", index, "Operation_Cycle_Counter", (gSnapShots[i].dtcEnvData >> 24)       );
+    DiagSetComplexParameter( resp, "ListOfDTC", index, "Frequency_Counter"      , (gSnapShots[i].dtcEnvData >> 16) & 0xFF);
+    DiagSetComplexParameter( resp, "ListOfDTC", index, "Odometer_Value"         , GetOdometerValue(gSnapShots[i].dtcEnvData) );
+    ++index;
+  }
+  DiagSetParameter( resp, "DtcStatusbyte", DtcCombinedStatus);  // Must be set to resize successfully
+
+  // Cut response to actual length depending on the number of DTCs found.
+  DiagResize( resp, 6 + 6 * index);
+
+  DiagSendResponse( resp);
+}
+
+/*
+ *
+ */
+/*
+ * Create environment data for a fault memory snapshot
+ */
+word CreateEnvData()
+{
+  byte sOperationCycleCounter = 0;
+  byte frequency;
+  word odometer;
+
+  ++sOperationCycleCounter;
+  frequency = 1;  // Every snapshot appears only once.
+
+  // In order to get some interesting values here,
+  // assume car is driving along at a speed of 3600 km/h
+  // Parameter factor is 16
+  // => every 16s the odometer value will increase
+  odometer = (timeNowFloat() / 100000.0) / 16; // from 10µs to 1 km/s, /16
+  odometer += 1320; // start value
+
+  return (sOperationCycleCounter << 24) | (frequency << 16) | odometer;
+}
+
+on diagRequest Engine_Status_Read
+{
+  diagResponse this resp;
+  resp.SetParameter( "Engine_Actual_Exhaust_Oxygen", gExhaustOxygen );
+  resp.SetParameter( "Engine_Actual_Coolant_Temperature", gActualCoolantTemp );
+  resp.SetParameter( "Actual_Engine_Percent_Torque", gActualPercentTorque );
+  resp.SendResponse();
+}
+
+/*
+ * Return the odometer value of the current snapshot environment data
+ */
+dword GetOdometerValue( DWORD envData)
+{
+  return envData & 0xFFFF;
+}
+
+on diagRequest ADValues_Read
+{
+  diagResponse this resp;
+
+  double voltage;
+  word   resistance = 20; // Ohm
+
+  voltage = 12.0 + sin( timenow()/100000.0);
+
+  // Set the parameters in the response.
+  resp.SetParameter("Voltage", voltage * 10);
+  resp.SetParameter("Current", (voltage / resistance) * 10);
+  resp.SetParameter("Resistance", (resistance + 5)/ 10);
+  resp.SendResponse();
+}
+
+on diagRequest ECU_Part_Number_Read
+{
+  char buf[100];
+  diagResponse this resp;
+
+  if (utilGetSubString( gECUID, buf, elcount(buf), 0 ) == 0)
+  {
+    resp.SetParameter("Part_Number", buf );
+  }
+  resp.SendResponse();
+}
+
+on diagRequest ECU_Loacation_Read
+{
+  char buf[100];
+  diagResponse this resp;
+
+  if (utilGetSubString( gECUID, buf, elcount(buf), 2 ) == 0)
+  {
+    resp.SetParameter("Location", buf );
+  }
+  resp.SendResponse();
+}
+
+on diagRequest ECU_Manufacturer_Name_Read
+{
+  char buf[100];
+  diagResponse this resp;
+
+  if (utilGetSubString( gECUID, buf, elcount(buf), 4 ) == 0)
+  {
+    resp.SetParameter("Manufacturer_Name", buf );
+  }
+  resp.SendResponse();
+}
+
+on diagRequest ECU_Serial_Number_Read
+{
+  char buf[100];
+  diagResponse this resp;
+
+  if (utilGetSubString( gECUID, buf, elcount(buf), 1 ) == 0)
+  {
+    resp.SetParameter("Serial_Number", buf );
+  }
+  resp.SendResponse();
+}
+
+on diagRequest ECU_Type_Read
+{
+  char buf[100];
+  diagResponse this resp;
+
+  if (utilGetSubString( gECUID, buf, elcount(buf), 3 ) == 0)
+  {
+    resp.SetParameter("Type", buf );
+  }
+  resp.SendResponse();
+}
+
+/*
+ * Get one of the substrings which are by a '*'
+ */
+long utilGetSubString( char src[], char dst[], dword maxLen, byte subStrIndex )
+{
+  long offset, pos, subStrStart, subStrEnd, index;
+  
+  offset = 0;
+  subStrStart = 0;
+
+  index = 0;
+  while (index <= subStrIndex) 
+  {
+    pos = strstr_off( gECUID, subStrStart+1, "*");
+    if (pos > 0) {
+      subStrEnd = pos;
+      if (index == subStrIndex) 
+      {
+        substr_cpy( dst, gECUID, subStrStart, subStrEnd - subStrStart, elcount(dst) );
+        return 0;
+      }
+      index += 1;
+      subStrStart = subStrEnd + 1;
+    }
+  }
+
+  return -1;
+}
+

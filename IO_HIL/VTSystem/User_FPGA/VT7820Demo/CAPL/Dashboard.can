@@ -1,0 +1,82 @@
+/*@!Encoding:1252*/
+includes
+{
+}
+
+variables
+{
+  msTimer DashboardTimer;
+  double TimerValueDashboard = 100;
+    
+  const double RelationRotationToSpeed = 96;
+  
+  const double BatteryDrainFactor = 0.0000002;
+  msTimer BatteryTimer;
+  double TimerValueBattery = 10;
+}
+
+
+on start
+{
+  setTimerCyclic(DashboardTimer, TimerValueDashboard);
+}
+
+
+on timer DashboardTimer
+{
+  double CurrentSpeed;
+  
+  CurrentSpeed = _max(@sysvarMember::Demo::FrontLeftWheel.CurrentSpeed, @sysvarMember::Demo::FrontRightWheel.CurrentSpeed);
+  
+  // m/s -> km/h
+  @sysvarMember::Demo::Dashboard.CurrentSpeed    = CurrentSpeed * 3.6;
+  @sysvarMember::Demo::Dashboard.RotationalSpeed = CurrentSpeed * RelationRotationToSpeed;
+  
+  @sysvarMember::Demo::Dashboard.DirectionAngle = @sysvarMember::Demo::VehicleSpeed.DirectionAngle;
+  
+  // brake pedal
+  if(CurrentSpeed > @sysvarMember::Demo::VehicleSpeed.IntendedSpeed)
+  {
+    @sysvarMember::Demo::Dashboard.GasPedal   = 0;
+    @sysvarMember::Demo::Dashboard.BrakePedal = 1;
+  }
+  // neither pedal
+  else if(CurrentSpeed == 0)
+  {
+    @sysvarMember::Demo::Dashboard.GasPedal   = 0;
+    @sysvarMember::Demo::Dashboard.BrakePedal = 0;
+  }
+  // gas pedal
+  else
+  {
+    @sysvarMember::Demo::Dashboard.GasPedal   = 1;
+    @sysvarMember::Demo::Dashboard.BrakePedal = 0;
+  }
+  
+  // steering behavior
+  @sysvarMember::Demo::Dashboard.SteeringBehavior = @sysvarMember::Demo::VehicleSpeed.SteeringBehavior;
+}
+
+
+on sysvar sysvarMember::Demo::Dashboard.EngineActive
+{
+  setTimer(BatteryTimer, TimerValueDashboard);
+  
+  @sysvarMember::Demo::Dashboard.Ignition = @this;
+  setControlVisibility("Dashboard", "BatteryPower", @this);
+  setControlVisibility("Dashboard", "EngineSpeed", @this);
+  setControlVisibility("Dashboard", "EngineSpeedUnit", @this);
+  setControlVisibility("Dashboard", "CarSpeed", @this);
+  setControlVisibility("Dashboard", "CarSpeedUnit", @this);
+  setControlVisibility("Dashboard", "ClockControl", @this);
+  setControlVisibility("Dashboard", "SteeringBehavior", @this);
+}
+
+
+on timer BatteryTimer
+{
+  @sysvarMember::Demo::Dashboard.BatteryPower -= BatteryDrainFactor * _pow(@sysvarMember::Demo::Dashboard.CurrentSpeed, 2);
+  
+  if(@sysvarMember::Demo::Dashboard.EngineActive == 1)
+    setTimer(BatteryTimer, TimerValueBattery);
+}

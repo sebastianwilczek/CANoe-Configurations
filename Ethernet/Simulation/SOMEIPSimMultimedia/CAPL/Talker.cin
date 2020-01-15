@@ -1,0 +1,184 @@
+/*@!Encoding:1252*/
+variables
+{
+  const byte kMaxBuffers = 2;
+  const dword kBufLength = 100000;
+  
+  byte gBuffer[kMaxBuffers][kBufLength];
+  
+  dword gClientHandle[long],
+        gFileHandle[long];
+  
+  msTimer gRestartTimer;
+  dword   gRestartTalkerHandle;
+  
+  char gWavFileName[1024];
+}
+
+on timer gRestartTimer
+{
+  Talker_StopRead(gRestartTalkerHandle);
+  Talker_StartRead(gRestartTalkerHandle);
+  
+  Talker_Read(gRestartTalkerHandle, gBuffer[0]);
+  Talker_Read(gRestartTalkerHandle, gBuffer[1]);
+  
+  gRestartTalkerHandle = kInvalidHandle;
+}
+
+void OnAvbSend(dword talkerHandle, dword result, byte buffer[], dword length)
+{
+  if (result != kAvbOK)
+  {
+    WriteErrorAndStop(result, "OnAvbSend");
+    return;
+  }
+    
+  Talker_Read(talkerHandle, buffer);
+}
+
+void OnMediaRead(dword sourceReaderHandle, long result, dword streamIndex, dword streamFlags, int64 timestamp, byte buffer[], dword length)
+{
+  byte endReached;
+  
+  if (result != 0)
+  {
+    WriteErrorAndStop(result, "OnMediaRead");
+    return;
+  }
+  
+  if (streamFlags == 2)
+  {
+    // End of file -> repeat
+    
+    if (++endReached == kMaxBuffers)
+    {
+      endReached = 0;
+      gRestartTalkerHandle = gClientHandle[sourceReaderHandle];
+      setTimer(gRestartTimer, 0);
+    }
+    
+    return;
+  }
+  
+  Talker_Send(gClientHandle[sourceReaderHandle], buffer, length);
+}
+
+long Talker_StartRead(long talkerHandle)
+{
+  long ret;
+  dword sourceReaderHandle;
+  
+  sourceReaderHandle = MediaCreateSourceReaderFromUrl(gWavFileName);
+
+  gFileHandle[talkerHandle] = sourceReaderHandle;
+  
+  if (sourceReaderHandle != kInvalidHandle)
+  {
+    gClientHandle[sourceReaderHandle] = talkerHandle;
+  }
+  
+  return kAvbOK;
+}
+
+void Talker_StopRead(long talkerHandle)
+{
+  long ret;
+  
+  if (gFileHandle[talkerHandle] != 0)
+  {
+    ret = MediaReleaseSourceReader(gFileHandle[talkerHandle]);
+    
+    if (StopIfError(ret, "MediaReleaseSourceReader") != 0)
+    {
+      return;
+    }
+  }
+}
+
+void Talker_Read(dword talkerHandle, byte buffer[])
+{
+  dword ret, length;
+    
+  length = elCount(buffer);
+  
+  if (gFileHandle[talkerHandle] != kInvalidHandle)
+  {
+    ret = MediaRead(gFileHandle[talkerHandle], 0, buffer, length, "OnMediaRead");
+     
+    if (StopIfError(ret, "MediaRead") != 0)
+    {
+      return;
+    }
+  }
+}
+
+dword Talker_Start(byte destinationAddress[], char wavFileName[], dword& talkerHandle, char onConnectCallback[])
+{
+  long ret;
+  
+  ret = AvbSetProperty("StreamReservation", 0);
+    
+  if (StopIfError(ret, "AvbSetProperty") != 0)
+  {
+    return ret;
+  }
+  
+  talkerHandle = AvbOpenTalker();
+    
+  if (CheckHandleAndStopIfError(talkerHandle, "AvbOpenTalker") != 0)
+  {
+    return -1;
+  }
+  
+  strncpy(gWavFileName, wavFileName, elCount(gWavFileName) - 1);
+  
+  ret = Talker_StartRead(talkerHandle);
+  
+  if (StopIfError(ret, "Talker_StartRead") != 0)
+  {
+    return ret;
+  }
+  
+  ret = AvbConnect(talkerHandle, destinationAddress, onConnectCallback);
+  
+  if (StopIfError(ret, "AvbConnect") != 0)
+  {
+    return ret;
+  }
+  
+  return ret;
+}
+
+void Talker_Stop(dword talkerHandle)
+{
+  long ret;
+  
+  Talker_StopRead(talkerHandle);
+    
+  if (talkerHandle != 0)
+  {
+    ret = AvbCloseTalker(talkerHandle);
+    
+    if (StopIfError(ret, "AvbCloseTalker") != 0)
+    {
+      return;
+    }
+  }
+}
+
+void Talker_Send(dword talkerHandle, byte buffer[], dword length)
+{
+  long ret;
+  
+  ret = AvbSend(talkerHandle, buffer, length, "OnAvbSend");
+  
+  if (ret == kAvbDataOmmitted)
+  {
+    Write("Samples ommitted (delivered too late to AvbSend)");
+  }
+  else if (StopIfError(ret, "AvbSend") != 0)
+  {
+    return;
+  }
+}

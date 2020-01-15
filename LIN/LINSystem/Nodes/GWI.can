@@ -1,0 +1,193 @@
+/*@!Encoding:1252*/
+variables
+{
+  const long kCHANNEL     = 4;
+  const long kACTIVE      = 1;
+  const long kINACTIVE    = 0;
+  const long kDOOR_OPEN   = 4;
+  const long kOPEN        = 1;
+  const long kCLOSE       = 0;
+  const long kLOCKED      = 0;
+  const long kUNLOCKED    = 1;
+  const long kLEFT        = 1;
+  const long kRIGHT       = 0;
+
+  dword gDoor_context         = 0; 
+  dword gRoofUnit_context     = 0;   
+  dword gRCInterface_context  = 0;   
+
+  char gDoor[32]        = "Door";
+  char gRoofUnit[32]    = "RoofUnit";
+  char gRCInterface[32] = "RCInterface";
+  
+  msTimer tSleep;
+
+  const long kSLEEP_TIME = 2000;  // in ms
+  
+  long gSleepIsActivated = kINACTIVE;
+}
+
+on preStart
+{
+  // Get the bus context of both busses
+
+  gDoor_context         = GetBusNameContext(gDoor);
+  gRoofUnit_context     = GetBusNameContext(gRoofUnit);
+  gRCInterface_context  = GetBusNameContext(gRCInterface);
+  
+  if(0 == gDoor_context)
+    writeex( 0, 3, "%NODE_NAME% Error: Cannot determine context for bus: %s", gDoor);
+
+  if(0 == gRoofUnit_context)
+    writeex( 0, 3, "%NODE_NAME% Error: Cannot determine context for bus: %s", gRoofUnit);
+
+  if(0 == gRCInterface_context)
+    writeex( 0, 3, "%NODE_NAME% Error: Cannot determine context for bus: %s", gRCInterface);
+}
+
+on start
+{
+  SendLINClustersInSleepMode();
+}
+
+on linWakeupFrame
+{
+  if(this.MsgChannel == kCHANNEL)
+  {
+    SetBusContext(gDoor_context);
+    linSendWakeup();
+    LINChangeSchedtable(1);
+
+    SetBusContext(gRCInterface_context);
+    LINChangeSchedtable(1);
+  
+    SetBusContext(gRoofUnit_context);
+    linSendWakeup();
+    LINChangeSchedtable(1); 
+    
+    @sysvar::GWE::WakeUpGWE = kACTIVE;
+  }
+}
+
+on linFrame RCR_01
+{
+  if(this.MsgChannel == kCHANNEL)
+  {
+    if($RCR_01::RCR_CentralLockingSystem == kCLOSE)
+    {
+      $Door::GWI::GWI_02::CLSStatusLeft = kCLOSE;
+      $Door::GWI::GWI_02::CLSStatusRight = kCLOSE;
+
+      if(gSleepIsActivated == kINACTIVE)  
+      {
+        @sysvar::GWE::WakeUpGWE = kINACTIVE;
+      
+        if($RUF_01::RUF_Brightness == 0)
+        { 
+          gSleepIsActivated = kACTIVE;
+          cancelTimer(tSleep);
+          SetTimer(tSleep,kSLEEP_TIME);
+        }
+      
+      }
+    }
+    else if($RCR_01::RCR_CentralLockingSystem == kOPEN)  
+    {
+      $Door::GWI_02::CLSStatusLeft = kOPEN;
+      $Door::GWI_02::CLSStatusRight = kOPEN;      
+      
+      @sysvar::GWE::WakeUpGWE = kACTIVE;
+
+      if(gSleepIsActivated == kACTIVE)  
+      {
+        gSleepIsActivated = kINACTIVE;
+        cancelTimer(tSleep);
+      }
+    }
+  }
+}
+
+on timer tSleep
+{
+  SendLINClustersInSleepMode();
+  gSleepIsActivated = kINACTIVE;
+}
+
+SendLINClustersInSleepMode ()
+{
+  SetBusContext(gDoor_context);
+  LINSendSleepModFrm(0, 0 , 0xFF); 
+
+  SetBusContext(gRCInterface_context);
+  LINSendSleepModFrm(0, 0 , 0xFF); 
+
+  SetBusContext(gRoofUnit_context);
+  LINSendSleepModFrm(0, 0 , 0xFF); 
+}
+
+on sysvar sysvar::Door::OpenDoorLeft
+{
+  if($RCR_01::RCR_CentralLockingSystem == kCLOSE)  return;
+ 
+  if(@sysvar::Door::OpenDoorLeft == kOPEN) 
+  {
+    @sysvar::Door::DoorDsp = kDOOR_OPEN;
+    SetBusContext(gRCInterface_context);
+    $RCInterface::GWI_01::GWI_DoorState = kOPEN;
+
+    SetBusContext(gRoofUnit_context);
+    $RoofUnit::GWI_01::GWI_DoorState = kOPEN;
+  
+    @sysvar::Door::Up = kOPEN;
+  }
+  else 
+  {
+    @sysvar::Door::DoorDsp = kCLOSE;
+    SetBusContext(gRCInterface_context);
+    $RCInterface::GWI_01::GWI_DoorState = kCLOSE;
+
+    SetBusContext(gRoofUnit_context);
+    $RoofUnit::GWI_01::GWI_DoorState = kCLOSE;
+
+    @sysvar::Door::Up = kCLOSE;
+  }
+}
+
+on signal RCR_CentralLockingSystem
+{
+  if(this == kUNLOCKED) $RoofUnit::GWI_01::GWI_CentralLockingSystem = kUNLOCKED;
+  else if(this == kLOCKED) $RoofUnit::GWI_01::GWI_CentralLockingSystem = kLOCKED;
+}
+
+on sysvar sysvar::Door::Up
+{
+  SetMirrowCommand(@sysvar::Door::Up);
+}
+
+on sysvar sysvar::Door::Down
+{
+  SetMirrowCommand(@sysvar::Door::Down);
+}
+
+on sysvar sysvar::Door::Left
+{
+  SetMirrowCommand(@sysvar::Door::Left);
+}
+
+on sysvar sysvar::Door::Right
+{
+  SetMirrowCommand(@sysvar::Door::Right);
+}
+
+SetMirrowCommand(long direction)
+{
+  if(@sysvar::Door::MirrorSelector == kRIGHT) 
+  {
+    $Door::GWI_03::GWI_MirrorCommandRight = direction;
+  }
+  else if(@sysvar::Door::MirrorSelector == kLEFT)  
+  {
+    $Door::GWI_03::GWI_MirrorCommandLeft = direction;
+  }
+}
+

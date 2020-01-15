@@ -1,0 +1,221 @@
+variables
+{
+  // GLOBAL
+  const int kBUFFER_SIZE = 1000;
+  const int kINFO        = 1;
+  const int kWARN        = 2;
+  const int kERROR       = 3;
+
+  const int kHANDSHAKE_DISABLED = 0;
+  const int kHANDSHAKE_RTSCTS   = 33;
+
+  // data is copied from callback buffer to gReceiverBuffer (collects data)
+  byte gReceiverCallbackBuffer[kBUFFER_SIZE];
+
+  byte gReceiverBuffer[kBUFFER_SIZE];
+  byte gEmptyBuffer   [kBUFFER_SIZE];
+  long gNumberOfReceivedBytes = 0;
+
+  // state variable
+  byte gSending = 0;
+
+  // timer for indication of data reception 
+  msTimer tBytesReceived;
+}
+
+on preStart
+{
+  InitSerialPort();
+}
+
+InitSerialPort()
+{
+  // close serial port (port may have changed, former port shall not remain open)
+  if(Rs232Close(getValue(EnvPortB))==1)
+    writeLineEx(0,kINFO, "Serial port %d successfully closed.", getValue(EnvPortB));    
+  else
+    writeLineEx(0,kERROR,"An error occurred during closing of the serial port %d.", getValue(EnvPortB));    
+
+  // set state (close aborts all open requests)
+  gSending = 0;
+
+  // open the serial port (comes up with Windows defaults)
+  if(Rs232Open(getValue(EnvPortB))==1)
+    writeLineEx(0,kINFO, "Serial port %d successfully opened.", getValue(EnvPortB));    
+  else
+    writeLineEx(0,kERROR,"An error occurred during opening of the serial port %d.", getValue(EnvPortB));    
+
+  // configure the serial port
+  // - just take the panel content
+  if(Rs232Configure(getValue(EnvPortB),getValue(EnvBitPerSecondsPortB),getValue(EnvDataBitsPortB),getValue(EnvStopbitsPortB),getValue(EnvParityPortB))==1)
+    writeLineEx(0,kINFO, "Serial port %d successfully initialized.", getValue(EnvPortB));    
+  else
+    writeLineEx(0,kERROR,"An error occurred during initialization of the serial port %d.", getValue(EnvPortB));    
+  
+  // port, handshake, xonLim, xoffLim, xonChar, xoffChar, writeTimeout
+  // without last timeout parameter: use default timeout
+  // for transmission of small amounts of data one may not need to use handshake ! 
+  // e.g. 33 for RTS/CTS as second parameter for large volumes of data, 0 for small volumes
+  if(Rs232SetHandshake(getValue(EnvPortB), kHANDSHAKE_DISABLED, 0, 0, 0, 0))
+    writeLineEx(0,kINFO, "Handshake parameters for serial port %d successfully configured.", getValue(EnvPortB));    
+  else
+    writeLineEx(0,kERROR,"An error occurred during the serial port %d configuration of handshake parameters.", getValue(EnvPortB));
+
+  // set buffer for reception (otherwise callback would not work)
+  if(Rs232Receive(getValue(EnvPortB), gReceiverCallbackBuffer, kBUFFER_SIZE))
+    writeLineEx(0,kINFO, "Receiver buffer for serial port %d successfully set.", getValue(EnvPortB));    
+  else
+    writeLineEx(0,kERROR,"An error occurred during setting the receiver buffer for serial port %d.", getValue(EnvPortB));
+}
+
+on envVar EnvSendDataPortB
+{
+  long numberOfBytes;
+  byte buffer[kBUFFER_SIZE];
+
+  if ( gSending )
+  {
+    writeLineEx(0,kWARN,"Ongoing transmission, please wait for completion of previous one !");
+    return;
+  }
+
+  if(getValue(this)!=1)
+    return;
+
+  numberOfBytes = getValue(EnvTransmissionPortB, buffer);
+  if( numberOfBytes<=0 )
+  {
+    writeLineEx(0,kWARN,"Only more than one byte can be transmitted ! Please fill in some characters to send !");
+    return;
+  } 
+
+  if(0==Rs232Send(getValue(EnvPortB), buffer, numberOfBytes))
+  {
+    writeLineEx(0,kERROR,"An error occurred during write of block of data to the serial port %d.", getValue(EnvPortB));
+    return;
+  } else {
+    writeLineEx(0,kINFO, "Write block of bytes to serial port %d worked well.", getValue(EnvPortB));    
+  }
+
+  // set state
+  gSending = 1;
+}
+
+on timer tBytesReceived
+{
+  putValue(EnvReceptionPortB, gReceiverBuffer, gNumberOfReceivedBytes);
+
+  // reset buffer
+  gNumberOfReceivedBytes = 0;
+
+  // reset data indication
+  putValue(EnvReceptionIndicationPortB,0);
+}
+
+on envVar EnvClearDataPortB
+{
+  if(getValue(this)!=1)
+    return;
+
+  // clear reception and transmission display
+  putValue(EnvReceptionPortB,    gEmptyBuffer, 0);
+  putValue(EnvTransmissionPortB, gEmptyBuffer, 0);
+
+  gNumberOfReceivedBytes = 0;
+}
+
+on envVar EnvBitPerSecondsPortB
+{
+  InitSerialPort();
+}
+
+on envVar EnvDataBitsPortB
+{
+  InitSerialPort();
+}
+
+on envVar EnvParityPortB
+{
+  InitSerialPort();
+}
+
+on envVar EnvPortB
+{
+  InitSerialPort();
+}
+
+on envVar EnvStopbitsPortB
+{
+  InitSerialPort();
+}
+
+CopyBuffer( byte destBuffer[], dword destOffset, byte srcBuffer[], dword srcNumber )
+{
+  dword i;
+
+  for (i=0; i<srcNumber; i++)
+  {
+    destBuffer[destOffset+i] = srcBuffer[i];
+  }
+}
+
+RS232OnReceive( dword port, byte buffer[], dword number )
+{
+  dword numberOfBytesToCopy;
+
+  // collect data as long as buffer has space for it
+  if ( (gNumberOfReceivedBytes+number)>kBUFFER_SIZE )
+  {
+    numberOfBytesToCopy = kBUFFER_SIZE-gNumberOfReceivedBytes; // no more than that ! it is full now
+  } else {
+    numberOfBytesToCopy = number;
+  }
+
+  if ( numberOfBytesToCopy==0 )
+  {
+    return; // nothing to add
+  }
+
+  CopyBuffer(gReceiverBuffer,gNumberOfReceivedBytes,buffer,numberOfBytesToCopy);
+  gNumberOfReceivedBytes += numberOfBytesToCopy; 
+
+  // indicate data reception
+  putValue(EnvReceptionIndicationPortB,1);
+
+  cancelTimer(tBytesReceived);
+  setTimer(tBytesReceived,500);
+}
+
+RS232OnError( dword port, dword errorFlags )
+{
+  // set state
+  gSending = 0;
+
+  writeLineEx(0,kERROR,"Error handler called with error code %d !", errorFlags);
+
+  if ( errorFlags & 1 )
+    writeLineEx(0,1,"%d informs of send error",errorFlags);
+  if ( errorFlags & 2 )
+    writeLineEx(0,1,"%d informs of receive error",errorFlags);
+  if ( errorFlags & 4 )
+    writeLineEx(0,1,"%d informs of frame error",errorFlags);
+  if ( errorFlags & 8 )
+    writeLineEx(0,1,"%d informs of parity error",errorFlags);
+  if ( errorFlags & 16 )
+    writeLineEx(0,1,"%d informs of overrun error",errorFlags);
+  if ( errorFlags & 32 )
+    writeLineEx(0,1,"%d informs of receiver overrun error",errorFlags);
+  if ( errorFlags & 64 )
+    writeLineEx(0,1,"%d informs of break state",errorFlags);
+  if ( errorFlags & 128 )
+    writeLineEx(0,1,"%d informs of send timeout error",errorFlags);
+}
+
+RS232OnSend( dword port, byte buffer[], dword number )
+{
+  // set state
+  gSending = 0;
+
+  writeLineEx(0,kINFO,"Transmission of %d bytes from port %d completed !", number, port);
+}
+

@@ -1,0 +1,142 @@
+/*@!Encoding:1252*/
+
+variables
+{
+  TcpSocket gListenSocket;
+  TcpSocket gConnectionSocket;
+  char      gRxBuffer[4096];
+}
+
+on sysvar_update sysvar::Server::Listen
+{
+  // On button up...
+  if (@this == 0)
+  {
+    // Open an TCP socket. As source address 0.0.0.0 is used, this means that
+    // the configure address of the TCP/IP stack is used. See TCP/IP stack
+    // configuration dialog in the simulation setup.
+    // Listen on port 40001.
+    gListenSocket = TcpSocket::Open( IP_Endpoint(0.0.0.0:40001) );
+    
+    if (IpGetLastError() != 0)
+    {
+      // if UdpSocket::Open fails, we print a message to the write window
+      write( "<%BASE_FILE_NAME%> TcpSocket::Open failed with result %d", IpGetLastError() );
+    }
+    
+    // Begin listening on TCP port.
+    gListenSocket.Listen();
+    
+    // update panel controls state
+    EnableControl( "Server", "ListenButton", 0 );
+    EnableControl( "Server", "CloseButton", 1 );
+  }
+}
+
+on sysvar_update sysvar::Server::Close
+{
+  // On button up...
+  if (@this == 0)
+  {
+    // Close listening socket and connection socket.
+    gListenSocket.Close();
+    gConnectionSocket.Close();
+
+    // update panel controls state
+    EnableControl( "Server", "ListenButton", 1 );
+    EnableControl( "Server", "CloseButton", 0 );
+  }
+}
+
+on preStop
+{
+  // Close sockets on measurement stop
+  gConnectionSocket.Close();
+  gListenSocket.Close();
+}
+
+on sysvar sysvar::Server::TxButton
+{
+  // on button up...
+  if (@this == 0)
+  {
+    if (gConnectionSocket)
+    {
+      char text[200];
+      
+      // get string from sysvar 
+      sysGetVariableString( sysvar::Server::TxText, text, elcount(text) );
+      
+      // send text to IP address/UDP port of the receiver
+      gConnectionSocket.Send( text, strlen(text) );
+      
+      if (IpGetLastError() != 0)
+      {
+        // if UdpSocket::Open fails, we print a message to the write window
+        write( "<%BASE_FILE_NAME%> TcpSocket::Send failed with result %d", gConnectionSocket.GetLastSocketError() );
+      }
+    }
+  }
+}
+
+//
+// Callback OnTcpListen is called on incomming connect request.
+//
+void OnTcpListen( dword socket, long result)
+{
+  if (result == 0)
+  {
+    if (gConnectionSocket)
+    {
+      dword socket;
+      
+      // if there is already a client connected, close immediatelly.
+      socket = TcpAccept( socket );
+      TcpClose( socket );
+    }
+    else
+    {
+      // Accept connection request and setup gConnectionSocket
+      gConnectionSocket = TcpSocket::Accept(gListenSocket);
+      
+      // to recieve data from the socket, we have to call TCPReceive.
+      gConnectionSocket.Receive( gRxBuffer, elcount(gRxBuffer) );
+      
+      // if ReceiveFrom does not immediatelly copy to to gRxBuffer, it returns 997 to
+      // indicate it will call the callback function OnUdpReceiveFrom later.
+      if ((gConnectionSocket.GetLastSocketError() != 0) && (gConnectionSocket.GetLastSocketError() != 997))
+      {
+        char errorString[100];
+        // if ReceiveFrom fails, we print a message to the write window
+        gConnectionSocket.GetLastSocketErrorAsString( errorString, elcount(errorString) );
+        write( "<%BASE_FILE_NAME%> ReceiveFrom failed with result %d (%s)", gConnectionSocket.GetLastSocketError(), errorString );
+      }
+    }
+  }
+}
+
+//
+// Callback function, which is called if a TCP data is received
+//
+void OnTcpReceive( dword socket, long result, IP_Endpoint remoteEndpoint, char buffer[], dword size)
+{
+  if (result == 0)
+  {
+    // Handle receive data here. In this example, we ignore the received data.
+  }
+
+  // To receive more data, we have to call ReceiveFrom again.
+  gConnectionSocket.Receive( gRxBuffer, elcount(gRxBuffer) );
+}
+
+//
+// OnTcpClose is called, when the client close the connection.
+//
+void OnTcpClose( dword socket, long result)
+{
+  if (result == 0)
+  {
+    // Client has close the socket, so we can relase our gConnectionSocket object.
+    gConnectionSocket.Close();
+  }
+}

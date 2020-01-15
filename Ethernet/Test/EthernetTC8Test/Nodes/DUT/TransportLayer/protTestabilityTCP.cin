@@ -1,0 +1,1603 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "TCPSocket.cin"
+}
+
+variables
+{
+  byte gbListenAndAcceptEvtFlag;    // send evt of LISTEN_AND_ACCEPT flag 0: don't send  1:send
+  struct _SEND_DATA gSendDataQueue; // queue for when receive "SEND_DATA" during socket is opening
+}
+
+/// <Services>
+int closeSocketTCP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  int iRet = 0;
+  dword dwSocketHandle;
+  struct _CLOSE_SOCKET closeSocket;
+  enum TcpStateId _state;
+  
+  //get parameters
+  getCloseSocketParamsTCP(closeSocket, recvData.TestabilityMsg.bParameters);
+  
+  //get socket handle
+  dwSocketHandle = getTCPSocketHandle(closeSocket.wSocketId);
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    sendData.TestabilityMsg.Header.rid = RID_E_TCP_CNE;
+    return iRet;
+  }
+  
+  // get socket state
+  _state = getTcpState(closeSocket.wSocketId);
+  
+  // close
+  if(closeSocket.bAbort == 0)
+    iRet = tcpClose(dwSocketHandle);
+  else
+    iRet = tcpAbort(dwSocketHandle);    
+  
+  initTCPSocketInfo(closeSocket.wSocketId);
+
+  if (_state == TcpStateIdClosed)
+  {
+    sendData.TestabilityMsg.Header.rid = RID_E_TCP_CNE; // return "error:connection does not exist"
+    return 0;
+  }
+  
+  // close TCP socket
+  if(closeSocket.bAbort == 0)
+  {    
+    switch(_state)
+    {
+      // socket is closing
+      case TcpStateIdClosing:
+      case TcpStateIdFinWait1:
+      case TcpStateIdFinWait2:
+      case TcpStateIdTimeWait:
+      {
+        sendData.TestabilityMsg.Header.rid = RID_E_TCP_COC; // return "error:connection closing"
+        return 0;
+      }  
+      
+      case TcpStateIdSynReceived: // for TCP_BASICS_08
+      {
+        // force to send FIN
+        gSendTcpPacket.tcp.flags = TcpFlagFinAck;  // FIN/ACK
+        gSendTcpPacket.CompletePacket();
+        sendTcpRaw(gSendTcpPacket);
+        break;
+      }      
+    }
+
+  }
+  
+  writeLineEx(1, 1, "<%FILE_NAME%> [%0.6f] [ TestAbility:CLOSE_SOCKET ret:%d. Index[%d] socketHandle[%d] ]", timeNow()/100000.0, iRet, closeSocket.wSocketId, dwSocketHandle);
+      
+  // close failed
+  if(iRet != 0)
+  {
+    outputSocketErrorInfoTcp(dwSocketHandle);
+    sendData.TestabilityMsg.Header.rid = RID_E_ISD;
+    return 0;
+  }
+  
+  // close succeed
+  sendData.TestabilityMsg.Header.rid = RID_E_OK;
+      
+  return 1;  
+}
+
+/// <Services>
+// Return value - 1: Success, 0: Fail 
+int createAndBindTCP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  int iRet = 0;
+  dword dwSocketHandle;
+  word wSocketIdx;
+  struct _CREATE_AND_BIND createAndBind;
+  
+  //get available Socket Handle index
+  wSocketIdx = getTCPBlankSocketId();
+  if(wSocketIdx == kINVALID_TCP_SOCKET_INDEX)
+  {
+    sendData.TestabilityMsg.Header.rid = RID_E_UCS;
+    return kFalse; //NG
+  }
+  
+  // Get create and bind parameters
+  getCreateAndBindParams(createAndBind, recvData.TestabilityMsg.bParameters);
+  
+  // Create and open TCP socket
+  switch(createAndBind.localAddr.wAddrLength)
+  {
+    case kIPv6_ADDRESS_LENGTH_SIZE:
+      dwSocketHandle = openTCPSocketIPv6(createAndBind.bDoBind, createAndBind.localAddr.ipv6Addr, createAndBind.wLocalPort);
+      break;
+    case kIPv4_ADDRESS_LENGTH_SIZE:
+      dwSocketHandle = openTCPSocketIPv4(createAndBind.bDoBind, createAndBind.localAddr.dwIpv4Addr, createAndBind.wLocalPort);      
+      break;
+    default:
+      sendData.TestabilityMsg.Header.rid = RID_E_INV;
+      return iRet; //NG
+      break;
+  }
+  // check result
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    outputSocketErrorInfoTcp(dwSocketHandle);
+    sendData.TestabilityMsg.Header.rid = RID_E_UBS;
+    return iRet; //NG
+  }
+  
+  // save to socket info after success to open TCP socket
+  iRet = saveTCPSocketHandle(wSocketIdx, dwSocketHandle);
+  
+  // set socket index to response parameter
+  AddMessageParamsUint16(sendData.TestabilityMsg, wSocketIdx);
+  
+  // set result ID, OK
+  sendData.TestabilityMsg.Header.rid = RID_E_OK;
+  
+  writeLineEx(1, 1, "<%FILE_NAME%> [%0.6f] [ TestAbility:Create_And_Bind succeed. Index[%d] socketHandle[%d] ]", timeNow()/100000.0, wSocketIdx, dwSocketHandle);
+      
+  return 1;
+}
+
+/// <Socket>
+// open TCP socket, IPv4
+dword openTCPSocketIPv4(byte bind, dword ipv4, word port)
+{
+  dword dwPort;  
+  dword dwSocketHandle;
+
+  dwSocketHandle = kINVALID_SOCKET;
+  dwPort = (port == 0xFFFF )? 0: port;
+  
+  //bind
+  if(bind == kTrue)
+  {
+    dwSocketHandle = TcpOpen(ipv4, dwPort);
+  }
+  //no bind
+  else
+  {
+    dwSocketHandle = TcpOpen(0, 0);
+  }
+  return dwSocketHandle;  
+}
+
+/// <Socket>
+// open TCP socket, IPv6
+dword openTCPSocketIPv6(byte bind, byte ipv6[], word port)
+{
+  dword dwPort;  
+  dword dwSocketHandle;
+  byte bIPv6Addr[kIPv6_ADDRESS_LENGTH_SIZE];
+
+  dwSocketHandle = kINVALID_SOCKET;
+  dwPort = (port == 0xFFFF )? 0: port;
+  
+  //bind
+  if(bind == kTrue)
+  {
+    dwSocketHandle = TcpOpen(ipv6, dwPort);
+  }
+  //no bind
+  else
+  {
+    IpGetAddressAsArray("::", bIPv6Addr);
+    dwSocketHandle = TcpOpen(bIPv6Addr, 0);    
+  }
+  return dwSocketHandle;  
+}
+
+/// <Services>
+int sendDataTCP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  long lSendResult = 0;
+  dword dwSocketHandle;
+  struct _SEND_DATA sendDataInfo;
+  enum TcpStateId _state;
+  
+  // Get send data parameters
+  getSendDataParamsTcp(sendDataInfo, recvData.TestabilityMsg.bParameters);
+    
+  //check socket handle  
+  dwSocketHandle = getTCPSocketHandle(sendDataInfo.wSocketId);
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    // enqueue send data info
+    enqueueSendData(sendDataInfo);    
+    // set RID code
+    sendData.TestabilityMsg.Header.rid = RID_E_TCP_CNE;
+    return 0;
+  }
+  
+  // get state
+  _state = getTcpState(sendDataInfo.wSocketId);
+  
+  if(_state == TcpStateIdSynSent
+     || _state == TcpStateIdSynReceived)
+  {
+    // enqueue send data info
+    enqueueSendData(sendDataInfo);
+    // set RID code
+    sendData.TestabilityMsg.Header.rid = RID_E_PEN;
+    return 0;
+  }
+  else if (_state == TcpStateIdClosed) // TCP_CALL_SEND_01
+  {
+    // socket is closed
+    sendData.TestabilityMsg.Header.rid = RID_E_TCP_CNE; //  TCP error: ?gconnection does not exist"
+    return 0;
+  }
+  else if(isTCPSocketClosing(sendDataInfo.wSocketId) == 1)
+  {
+    // socket is closingRID_E_TCP_COC
+    sendData.TestabilityMsg.Header.rid = RID_E_TCP_COC; // return "error:connection closing"
+    return 0;
+  }
+  
+  //Send Data
+  lSendResult = sendTCPSocketData(dwSocketHandle, sendDataInfo);
+
+  //Set Result ID
+  sendData.TestabilityMsg.Header.rid = getResultIDFromSocketResultTcp(/*sendDataInfo.wSocketId*/dwSocketHandle, lSendResult);
+    
+  // send error
+  if((IpGetLastSocketError(dwSocketHandle) != 0) && IpGetLastSocketError(dwSocketHandle) != 997)
+  {
+    // enqueue send data info
+    enqueueSendData(sendDataInfo);
+  } 
+  
+  return 1;
+}
+
+/// <Socket>
+long sendTCPSocketData(dword dwSocketHandle, struct _SEND_DATA sendDataInfo)
+{
+  long lRet = -1;  
+
+  // set tcp flags
+  gTcpSetFlags.bEnable = 1;
+  gTcpSetFlags.bFlags = sendDataInfo.bFlags;
+  gTcpSetFlags.wDataLength = sendDataInfo.wTotalLen; 
+  
+  // send tcp data
+  if(elCount(sendDataInfo.data.bData) >= sendDataInfo.wTotalLen)
+  {
+    lRet = tcpSend(dwSocketHandle, sendDataInfo.data.bData, sendDataInfo.wTotalLen);
+  }
+  else
+  {
+    // make send data array
+    word i, j;
+    byte _buff[0xFFFF];
+    j = 0;
+    for(i = 0; (i < sendDataInfo.wTotalLen) && (i < elCount(_buff)); i++)
+    {
+      _buff[i] = sendDataInfo.data.bData[j++];
+      if(j >= sendDataInfo.data.wLength)
+      {
+        j = 0;
+      }
+    }
+    
+    // send tcp data
+    lRet = tcpSend(dwSocketHandle, _buff, sendDataInfo.wTotalLen);
+  }
+  
+  return lRet;
+}
+
+/// <Helpers>
+// get result id from the return value of TCP/IP API functions
+enum Result_ID getResultIDFromSocketResultTcp(dword dwSocket, long lResult)
+{
+  long errorId;
+  
+  errorId = IpGetLastSocketError(dwSocket);
+  
+  // non error
+  if( (lResult == 0) || errorId == 997)
+  {
+    return RID_E_OK;
+  }
+  
+  // output error text
+  outputSocketErrorInfoTcp(dwSocket);
+
+  // invalid
+  if(lResult == kWSA_INIVALID_PARAMETER)
+  {
+    return RID_E_ISD;
+  }
+  
+  // switch error info
+  switch(errorId)
+  {
+    case 10057:
+      return RID_E_TCP_FSU;
+      break;
+    default:
+      return RID_E_NOK;
+      break;
+  }
+  
+  // impossible response
+  return RID_E_NOK;
+}
+
+
+/// <Services>
+int receiveAndForwardTCP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  dword dwSocketHandle;
+  struct _RECEIVE_AND_FORWARD recvAndForward;
+  word wDropCount;
+  enum TcpStateId socketState;
+  long result;
+  
+  // Get receive and forward parameters
+  getReceiveAndForwardParams(recvAndForward, recvData.TestabilityMsg.bParameters);
+
+  //check socket handle
+  dwSocketHandle = getTCPSocketHandle(recvAndForward.wSocketId);
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    // [ERROR] socket handle is invalid
+    sendData.TestabilityMsg.Header.rid = RID_E_ISD;
+    return 0;
+  }
+
+  socketState = getTcpState(recvAndForward.wSocketId);
+  
+  switch(socketState)
+  {
+    case TcpStateIdClosed:
+      sendData.TestabilityMsg.Header.rid = RID_E_TCP_CNE; // return "error: connection does not exist"
+      return 0;
+    
+    // [ERROR] socket is closing
+    case TcpStateIdClosing:
+    case TcpStateIdLastAck:
+    case TcpStateIdTimeWait:
+      sendData.TestabilityMsg.Header.rid = RID_E_TCP_COC; // return "error: connection closing"
+      return 0;
+    
+    case TcpStateIdCloseWait: // requires special handling after tcpReceive, as result has to be checked
+    default:
+      break;
+  }
+  
+  // start to recive
+  result = startTCPReceive(dwSocketHandle);
+  
+  // if socket is in close_wait and there was no pending data, return error: connection closing
+  if(socketState == TcpStateIdCloseWait && result != 0) // TCP_CALL_RECEIVE_05 and TCP_CALL_RECEIVE_06
+  {
+    sendData.TestabilityMsg.Header.rid = RID_E_TCP_COC; // return "error: connection closing"
+    return 0;
+  }
+  
+  // get Result
+  sendData.TestabilityMsg.Header.rid = getResultIDFromSocketResult(dwSocketHandle, 0);
+  if(sendData.TestabilityMsg.Header.rid != (enum Result_ID)RID_E_OK)
+  {
+    // [ERROR] 
+    return 1;
+  }
+  
+  // set drop count to response parameter
+  wDropCount = getTCPSocketInfoDropCnt(recvAndForward.wSocketId);  
+  AddMessageParamsUint16(sendData.TestabilityMsg, wDropCount);
+
+  //set receive and forward information to socket info array
+  //and reset drop counter
+  setTCPSocketInfoRecvFwd(recvAndForward.wSocketId, kTrue, 
+                          recvAndForward.wMaxFwd, recvAndForward.wMaxLen);
+  
+  return 1;
+}
+
+/// <Services>
+int configureSocketTCP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  long lResult;
+  dword dwSocketHandle;  
+  struct _CONFIGURE_SOCKET configSocket;
+  enum Address_Type addrType;
+  word wParam;
+  enum Bool bInvalidParam;
+  byte bSetting;
+  
+  // Get socket configuration parameters
+  getConfigureSocketParams(configSocket, recvData.TestabilityMsg.bParameters);
+
+  //check socket handle
+  dwSocketHandle = getTCPSocketHandle(configSocket.wSocketId);
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    sendData.TestabilityMsg.Header.rid = RID_E_ISD;
+    return 0;
+  }
+  // Get address type
+  addrType = getTCPSocketAddrType(configSocket.wSocketId);
+  
+  lResult = -1;
+  wParam = 0;
+  bInvalidParam = kFalse;
+  bSetting = configSocket.ParamVal.bData[0];
+
+  switch(configSocket.wParamId)
+  {
+    case PARAM_ID_IP_TTL_HOP:
+      lResult = configureSocketTTL_HopLimit(dwSocketHandle, bSetting, addrType);
+      break;
+    case PARAM_ID_IP_PRIORITY:
+      lResult = configureSocketPriority(dwSocketHandle, bSetting, addrType);
+      break;
+    case PARAM_ID_IP_DONT_FLAG:
+      lResult = configureSocketDontFragment(dwSocketHandle, bSetting, addrType);
+      break;
+    case PARAM_ID_IP_TOS:
+      lResult = configureSocketTypeOfService(dwSocketHandle, bSetting, addrType);
+      break;
+    case PARAM_ID_TCP_MSS:
+      lResult = setSocketMSS(dwSocketHandle, swapWord(configSocket.ParamVal.bData.word(0)));
+      break;
+    case PARAM_ID_TCP_NAGLE:
+      lResult = setSocketNagleArg(dwSocketHandle, bSetting);
+      break;
+    case PARAM_ID_TCP_TXBUFF:
+      // configure socket of tx buffer
+      lResult = setSocketTxBuff(dwSocketHandle, swapDWord(configSocket.ParamVal.bData.dword(0)));
+      break;
+    case PARAM_ID_TCP_RXBUFF:
+      // configure socket of tx buffer
+      lResult = setSocketRxBuff(dwSocketHandle, swapDword(configSocket.ParamVal.bData.dword(0)));
+      break;
+      
+    default:
+      sendData.TestabilityMsg.Header.rid = RID_E_INV;
+      bInvalidParam = kTrue;
+      outputErrorMsg("configureSocketTCP() wParamId NG");
+      break;
+  }
+  
+  if(bInvalidParam != kTrue)
+  {
+    sendData.TestabilityMsg.Header.rid = getResultIDFromSocketResult(dwSocketHandle, lResult);
+  }
+
+  return 1;
+}
+
+/// <GetParameters>
+void getCloseSocketParamsTCP(struct _CLOSE_SOCKET data, byte params[])
+{
+  data.wSocketId = getWordData(params, 0);
+  data.bAbort = params[2];
+}
+
+/// <Socket>
+// start to Receive TCP packet 
+long startTCPReceive(dword dwSocketHandle)
+{
+  char cDummyBuffer[1];
+  long lResult;
+  word socketId;
+  
+  // check extract data flag  
+  socketId = getTCPSocketId(dwSocketHandle);
+  if(socketId == kINVALID_TCP_SOCKET_INDEX)
+  {
+    writeLineEx(1, 3, "<%FILE_NAME%> [%f] Socker invalid. Socket ID:%d", timeNow()/100000.0, socketId);
+    return -1;
+  }  
+  
+  // Set size to 0 to enforce reception in callback only
+  lResult = TcpReceive(dwSocketHandle, cDummyBuffer, 0);  
+  if (lResult == -1)
+  {
+    lResult = IpGetLastSocketError(dwSocketHandle);
+    if (lResult != 997)
+    {
+      // failure
+      outputSocketErrorInfoTcp(dwSocketHandle);
+    }
+  }
+  
+  writeLineEx(1, 1, "<%FILE_NAME%> [%f]  Call start receive on socket:%d res:%d", timeNow()/100000.0, dwSocketHandle, lResult);
+  
+  return lResult;
+}
+
+/// <sendTestability/sendEvt>
+//
+// forwarding received data, IPv4 
+//
+long forwardReceivedDataTCPoverIPv4(struct _EVENT_RECV_FWD eventRecvFwd)
+{
+  const kLEN_FORWARD_PARAMS_HEADER = 2 + SIZE_LENGTH;
+                             //fullLen(uint16)+ VINT8 length of payload (2)
+  byte bPacketData[kTESTABILITY_HEADER_SIZE + kMAX_TESTABILITY_PARAM_LENGTH];
+
+  long lResult;
+  struct _Testabilty_Message_Header msgHeader;
+  dword dwLength;
+  
+  lResult = 0;
+  //calculate packet size and check it
+  dwLength = kTESTABILITY_HEADER_SIZE + kLEN_FORWARD_PARAMS_HEADER; //testability header size  
+  dwLength += eventRecvFwd.payload.wLength; //payload length
+  
+  if(dwLength > elcount(bPacketData))
+  {
+    outputErrorMsg("forwardReceivedDataIPv4() Error buffer is short");
+    //make testability message header and write it to buffer
+    InitEventMsgHeader(msgHeader, GID_TCP, PID_RECEIVE_AND_FORWARD, RID_E_ISB);
+    makeTestAbilityHeader(msgHeader, bPacketData);
+
+    //send packet
+    dwLength = kTESTABILITY_HEADER_SIZE;
+    lResult = sendPacketTestabilityUDPSocket(gdwTesterIPv4Addr,  gdwTesterIPv4Port,  bPacketData, dwLength);
+  }
+  else
+  {
+    //make testability message header and write it to buffer
+    InitEventMsgHeader(msgHeader, GID_TCP, PID_RECEIVE_AND_FORWARD, RID_E_OK);
+    SetMsgHeaderLen(msgHeader, kLEN_FORWARD_PARAMS_HEADER + eventRecvFwd.payload.wLength);
+    makeTestAbilityHeader(msgHeader, bPacketData);
+  
+    //write RECEIVE_AND_FORWARD parameters
+    makeTestabilityForwardParams(eventRecvFwd, bPacketData, (dword)kTESTABILITY_HEADER_SIZE, IPv4_Prot_TCP);
+  
+    //send packet
+    lResult = sendPacketTestabilityUDPSocket(gdwTesterIPv4Addr,  gdwTesterIPv4Port,  bPacketData, dwLength);
+  }
+
+  return lResult;
+}
+
+//
+// TCP/IP stack callback function for IPv4
+//
+void OnTcpReceive(dword dwSocket, long lResult, dword dwAddress, dword dwPort, byte bBuffer[], dword dwSize)
+{
+  int wSocketIdx;
+  byte bResult;
+  word wMaxFwdLen;
+  word wFwdLen;
+  word wMaxCount;
+  word wFwdCount;
+  struct _EVENT_RECV_FWD eventRecvFwd;
+  word resCallResLength;
+    
+  writeLineEx(1, 1, "<%FILE_NAME%> [%0.6f] [ OnTcpReceive socketH[0x%x], Address[%x], Port[%x], Size[%d], Result[%d]", timeNow()/100000.0, dwSocket, dwAddress, dwPort, dwSize, lResult);
+  
+  wSocketIdx = kINVALID_TCP_SOCKET_INDEX;
+  
+  // If system valiable TcpRecvEnabledOnlyTstAblty is 1
+  if(@sysvar::TC8_DUT_Config::tcpRecvEnabledOnlyTabit == 1)
+  {
+    return;
+  }
+  
+  // get socket handle
+  wSocketIdx = getTCPSocketId(dwSocket);
+  if(wSocketIdx == kINVALID_TCP_SOCKET_INDEX)
+  {
+    // no socket found
+    startTCPReceive(dwSocket);
+    return;
+  }
+  
+  //socket handle found
+  
+  // send queued CALL_RECEIVE response
+  sendQueuedCallReceiveResTcp(wSocketIdx);
+  
+  //check if forwarding enabled
+  if(isTCPSocketRecvFwdEnabled(wSocketIdx) == kFalse)
+  {
+    //trigger the next reception
+    startTCPReceive(dwSocket);
+    return;
+  }
+    
+  //get - max length/event, max count bytes, current count bytes 
+  wMaxFwdLen = getTCPSocketInfoMaxFwd(wSocketIdx);
+  wMaxCount = getTCPSocketInfoMaxLen(wSocketIdx);
+  wFwdCount = getTCPSocketInfoFwdCount(wSocketIdx);
+  
+  //check max forward length / event
+  wFwdLen = (dwSize > (dword)wMaxFwdLen) ? wMaxFwdLen : (word)dwSize;
+  
+  //check maximum count bytes to receive over all and forwarded count bytes
+  if(wMaxCount != kTESTABILITY_RECV_FWD_CNT_NOLIMIT)
+  {
+    if( (dword)wFwdCount + (dword)wFwdLen > wMaxCount )
+    {
+      wFwdLen = wMaxCount - wFwdCount;
+    }
+  }
+  
+  //set event parameters for RECEIVE_AND_FORWARD event
+  eventRecvFwd.wFullLen = dwSize;
+  eventRecvFwd.wSrcPort = dwPort;
+  eventRecvFwd.ip.wAddrLength = kIPv4_ADDRESS_LENGTH_SIZE;
+  eventRecvFwd.ip.dwIpv4Addr = dwAddress;
+  eventRecvFwd.payload.wLength = wFwdLen;
+  memcpy(eventRecvFwd.payload.bData, bBuffer, wFwdLen); //copy payload data to vint8
+    
+  // forward received packet
+  forwardReceivedDataTCPoverIPv4(eventRecvFwd);
+  //add forwarded count
+  addTCPSocketInfoFwdCount(wSocketIdx, wFwdLen);
+  
+  //trigger the next reception
+  startTCPReceive(dwSocket);
+}
+
+/// <sendTestability/sendEvt>
+//
+// forwarding received data, IPv6 
+//
+long forwardReceivedDataTCPoverIPv6(struct _EVENT_RECV_FWD eventRecvFwd)
+{
+  const kLEN_EVENT_RECV_FWD = 2 + SIZE_LENGTH;
+                             //fullLen(uint16)+ VINT8 length of payload (2)
+  byte bPacketData[kTESTABILITY_HEADER_SIZE + kMAX_TESTABILITY_PARAM_LENGTH];
+
+  long lResult;
+  struct _Testabilty_Message_Header msgHeader;
+  dword dwLength;
+  
+  lResult = 0;
+  //calculate packet size and check it
+  dwLength = kTESTABILITY_HEADER_SIZE + kLEN_EVENT_RECV_FWD; //testability header size  
+  dwLength += eventRecvFwd.payload.wLength; //payload length
+  
+  if(dwLength > elcount(bPacketData))
+  {
+    outputErrorMsg("forwardReceivedDataIPv6() Error buffer is short");
+    //make testability message header and write it to buffer
+    InitEventMsgHeader(msgHeader, GID_TCP, PID_RECEIVE_AND_FORWARD, RID_E_ISB);
+    makeTestAbilityHeader(msgHeader, bPacketData);
+
+    //send packet
+    dwLength = kTESTABILITY_HEADER_SIZE;
+    lResult = sendPacketTestabilityUDPSocket(gbTesterIPv6Addr,  gdwTesterIPv6Port,  bPacketData, dwLength);
+  }
+  else
+  {
+    //make testability message header and write it to buffer
+    InitEventMsgHeader(msgHeader, GID_TCP, PID_RECEIVE_AND_FORWARD, RID_E_OK);
+    SetMsgHeaderLen(msgHeader, kLEN_EVENT_RECV_FWD + eventRecvFwd.payload.wLength);
+    makeTestAbilityHeader(msgHeader, bPacketData);
+  
+    //write RECEIVE_AND_FORWARD parameters
+    makeTestabilityForwardParams(eventRecvFwd, bPacketData, (dword)kTESTABILITY_HEADER_SIZE, IPv4_Prot_TCP);
+  
+    //send packet
+    lResult = sendPacketTestabilityUDPSocket(gbTesterIPv6Addr,  gdwTesterIPv6Port,  bPacketData, dwLength);    
+  }
+
+  return lResult;
+}
+
+//
+// TCP/IP stack callback function for IPv6
+//
+void OnTcpReceive(dword dwSocket, long lResult, byte ipv6Address[], dword dwPort, byte bBuffer[], dword dwSize)
+{
+  int wSocketIdx;
+  byte bResult;
+  word wMaxFwdLen;
+  word wFwdLen;
+  word wMaxCount;
+  word wFwdCount;
+  struct _EVENT_RECV_FWD eventRecvFwd;
+  word resCallResLength;
+  
+  wSocketIdx = kINVALID_TCP_SOCKET_INDEX;
+  
+  // If system valiable TcpRecvEnabledOnlyTstAblty is 1
+  if(@sysvar::TC8_DUT_Config::tcpRecvEnabledOnlyTabit == 1)
+  {
+    return;
+  }
+  
+  // get socket handle
+  wSocketIdx = getTCPSocketId(dwSocket);
+  if(wSocketIdx == kINVALID_TCP_SOCKET_INDEX)
+  {
+    //no socket found
+    startTCPReceive(dwSocket);
+    return;
+  }
+  
+  //socket handle found
+  
+  // send queued CALL_RECEIVE response
+  sendQueuedCallReceiveResTcp(wSocketIdx);
+  
+  //check if forwarding enabled
+  if(isTCPSocketRecvFwdEnabled(wSocketIdx) == kTrue)
+  {
+    //get - max length/event, max count bytes, current count bytes 
+    wMaxFwdLen = getTCPSocketInfoMaxFwd(wSocketIdx);
+    wMaxCount = getTCPSocketInfoMaxLen(wSocketIdx);
+    wFwdCount = getTCPSocketInfoFwdCount(wSocketIdx);
+    //check max forward length / event
+    wFwdLen = (dwSize > (dword)wMaxFwdLen) ? wMaxFwdLen : (word)dwSize;
+    //check maximum count bytes to receive over all and forwarded count bytes
+    if(wMaxCount != kTESTABILITY_RECV_FWD_CNT_NOLIMIT)
+    {
+      if( (dword)wFwdCount + (dword)wFwdLen > wMaxCount )
+      {
+        wFwdLen = wMaxCount - wFwdCount;
+      }
+    }
+    //set event parameters for RECEIVE_AND_FORWARD event
+    eventRecvFwd.wFullLen = dwSize;
+    eventRecvFwd.wSrcPort = dwPort;
+    eventRecvFwd.ip.wAddrLength = kIPv6_ADDRESS_LENGTH_SIZE;
+    memcpy(eventRecvFwd.ip.ipv6Addr, ipv6Address, kIPv6_ADDRESS_LENGTH_SIZE);
+    eventRecvFwd.payload.wLength = wFwdLen;
+    memcpy(eventRecvFwd.payload.bData, bBuffer, wFwdLen); //copy payload data to vint8
+    
+    // forward received packet
+    forwardReceivedDataTCPoverIPv6(eventRecvFwd);
+    //add forwarded count
+    addTCPSocketInfoFwdCount(wSocketIdx, wFwdLen);
+  }
+  else
+  {
+    addTCPSocketInfoDropCount(wSocketIdx, dwSize);
+  }
+  
+  //trigger the next reception
+  startTCPReceive(dwSocket);
+    
+}
+
+/// <Services>
+int listenAndAcceptTCP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  int iRet = 0;
+  dword dwSocketHandle;
+  word wSocketIdx;
+  struct _LISTEN_AND_ACCEPT _listenAndAccept;
+    
+  // Get listen and accept parameters
+  getListenAndAcceptParams(_listenAndAccept, recvData.TestabilityMsg.bParameters);
+  
+  //check socket handle
+  dwSocketHandle = getTCPSocketHandle(_listenAndAccept.wListenSocketId);
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    // socket invalid
+    sendData.TestabilityMsg.Header.rid = RID_E_ISD;
+    return 0;
+  }
+  
+  // check connecting flag
+  if(getTcpState(_listenAndAccept.wListenSocketId) != TcpStateIdClosed)
+  {
+    // If an OPEN call arrives on another state then closed, TCP MUST return \"error: connection already exists\"  
+    sendData.TestabilityMsg.Header.rid = RID_E_TCP_CAE;
+    return 0;
+  }
+  
+  // tcp listen
+  if(TcpListen(dwSocketHandle) != 0)
+  {
+    // listen failedÅc
+    writeLineEx(1, 3, "<%FILE_NAME%>: [ TcpListen: Error listening on socket number %d. Error code: %d ]", dwSocketHandle, IpGetLastSocketError(dwSocketHandle));
+    sendData.TestabilityMsg.Header.rid = RID_E_TCP_ILP;
+    return 0;
+  }
+    
+  // set socket index to response parameter
+  // set result ID, OK
+  sendData.TestabilityMsg.Header.rid = RID_E_OK;
+    
+  // set flag
+  gbListenAndAcceptEvtFlag = 1;
+
+  return 1;
+}
+
+/// <Services>
+// tcp connect
+// return code 1:respond 0:don't respond
+int connectTCP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  dword dwSocketHandle;
+  long lRet;
+  struct _CONNECT connectParams;
+  
+  // Get parameters
+  getConnectParams(connectParams, recvData.TestabilityMsg.bParameters);
+    
+  //check socket handle
+  dwSocketHandle = getTCPSocketHandle(connectParams.wSocketId);
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    // socket doesn't exist
+    sendData.TestabilityMsg.Header.rid = RID_E_ISD;
+    return 1; // send error code
+  }
+  
+  // check connecting flag
+  if(getTcpState(connectParams.wSocketId) != TcpStateIdClosed)
+  {
+    // If an OPEN call arrives on another state then closed, TCP MUST return \"error: connection already exists\"  
+    sendData.TestabilityMsg.Header.rid = RID_E_TCP_CAE;
+    return 1; // send error code
+  }
+  
+  // Connect TCP socket
+  switch(connectParams.destAddr.wAddrLength)
+  {
+    case kIPv6_ADDRESS_LENGTH_SIZE:
+      lRet = tcpConnect(dwSocketHandle, connectParams.destAddr.ipv6Addr, connectParams.wDestPort);
+      break;
+    case kIPv4_ADDRESS_LENGTH_SIZE:
+      lRet = tcpConnect(dwSocketHandle, connectParams.destAddr.dwIpv4Addr, connectParams.wDestPort);
+      break;
+    default:
+      sendData.TestabilityMsg.Header.rid = RID_E_INV;
+      return 1; // send error code
+      break;
+  }
+    
+  // check return code of "tcpConnect" function
+  if(lRet == -1)
+  {    
+    lRet = IpGetLastSocketError(dwSocketHandle);
+    switch(lRet)
+    {
+      case 10049:
+        outputSocketErrorInfoTcp(dwSocketHandle);
+        sendData.TestabilityMsg.Header.rid = RID_E_TCP_FSU;
+        return 1; // send error code
+        break;
+      case 10035:
+        // It is a nonfatal error, and the operation should be retried later.
+        break;
+      case 10048:
+        sendData.TestabilityMsg.Header.rid = RID_E_TCP_COR;
+        return 1; // send error code
+        break;
+      default:
+        outputSocketErrorInfoTcp(dwSocketHandle);
+        sendData.TestabilityMsg.Header.rid = RID_E_INV;
+        return 1; // send error code
+        break;
+    }
+  }
+  
+  // set socket info
+  setTCPSocketDstPort(dwSocketHandle, connectParams.wDestPort);
+  setTCPSocketSrcIpPort(dwSocketHandle);
+  
+  // connect succeed
+  sendData.TestabilityMsg.Header.rid = RID_E_OK;
+  return 1;
+}
+
+/// <GetParameters>
+void getListenAndAcceptParams(struct _LISTEN_AND_ACCEPT data, byte params[])
+{
+  data.wListenSocketId = getWordData(params, 0);
+  data.wMaxCon = getWordData(params, 2);
+}
+
+/// <GetParameters>
+void getConnectParams(struct _CONNECT data, byte params[])
+{
+  data.wSocketId = getWordData(params, 0);
+  data.wDestPort = getWordData(params, 2);
+  getIpxAddr(data.destAddr, params, 4);
+}
+
+// tcp listen event
+void OnTcpListen(dword socket, long result)
+{
+  dword newSocket;
+  struct _EVENT_PARAMS_LISTEN_ACCEPT eventParams;
+  dword port;
+  word wSocketIdx;
+  word ret;
+  
+  // TCP accept
+  newSocket = TcpAccept(socket);
+  if (newSocket == ~0)
+  {
+    // accept failed
+    writeLineEx(1, 3, "<%FILE_NAME%>: [ TcpAccept: Error Accept on socket number %d. Error code: %d ]", socket, IpGetLastSocketError(socket));
+    return;
+  }
+    
+  // Å´accept succeed and listen nowÅ´
+  
+  // set socket index to TCP socket array
+  wSocketIdx = getTCPBlankSocketId();
+  ret = saveTCPSocketHandle(wSocketIdx, newSocket/*, ADDR_IPV4*/);  // save server socket
+    
+  // If system valiable TcpRecvEnabledOnlyTstAblty is 0
+  if(@sysvar::TC8_DUT_Config::tcpRecvEnabledOnlyTabit == 0)
+  {
+    // start tcp receive
+    startTCPReceive(newSocket);
+  }
+    
+  // listen and accept evt response flag check
+  if(gbListenAndAcceptEvtFlag != 1)
+  {
+    return;
+  }
+  
+  // set TcpAccept evt return values
+  eventParams.wListenSocket = getTCPSocketId(socket);
+  eventParams.wNewSocketId = wSocketIdx;
+  
+  // ipv4
+  if(getTCPSocketAddrType(socket) == ADDR_IPV4)
+  {
+    dword ipv4Address;
+    
+    // set ip length
+    eventParams.ip.wAddrLength = kIPv4_ADDRESS_LENGTH_SIZE;
+    // set ip
+    ipGetSocketName(newSocket, ipv4Address, port);  // get IP and port for new socket
+    eventParams.ip.dwIpv4Addr = ipv4Address;
+    // set port
+    eventParams.wPort = port;
+  }
+  // ipv6
+  else if(getTCPSocketAddrType(socket) == ADDR_IPV6)
+  {
+    byte ipv6Address[kIPv6_ADDRESS_LENGTH_SIZE];
+    int i;
+    
+    // set ip length
+    eventParams.ip.wAddrLength = kIPv6_ADDRESS_LENGTH_SIZE;
+    // set ip
+    ipGetSocketName(newSocket, ipv6Address, port);  // get IP and port for new socket
+    for(i = 0; i < elCount(eventParams.ip.ipv6Addr) && i < elCount(ipv6Address); i++)
+    {
+      eventParams.ip.ipv6Addr[i] = ipv6Address[i];
+    }
+    // set port
+    eventParams.wPort = port;
+  }
+  
+  // send testability
+  forwardingTcpListen(eventParams);
+  
+  // flag reset
+  gbListenAndAcceptEvtFlag = 0;  
+  
+  // send queued "SEND_DATA" of TestAbility for TCP_CALL_SEND_07
+  sendQueuedSendDataResTcp(newSocket);
+}
+
+/// <sendTestability/sendEvt>
+word forwardingTcpListen(struct _EVENT_PARAMS_LISTEN_ACCEPT data)
+{
+  const kLEN_FORWARD_PARAMS_HEADER = 4 + SIZE_LENGTH + kIPv4_ADDRESS_LENGTH_SIZE + SIZE_LENGTH;
+                             //fullLen(uint16) + srcPort(uint16) + srcAdr(2+4) + VINT8 length(2)
+  byte bPacketData[kTESTABILITY_HEADER_SIZE + kMAX_TESTABILITY_PARAM_LENGTH];
+
+  word wRet;
+  struct _Testabilty_Message_Header msgHeader;
+  dword dwLength;
+  
+  wRet = 0;
+    
+  //calculate packet size
+  dwLength = kTESTABILITY_HEADER_SIZE + kLEN_FORWARD_PARAMS_HEADER; //testability header size  
+  
+  // check packet size
+  if(dwLength > elcount(bPacketData))
+  {
+    // output error message
+    outputErrorMsg("forwardReceivedDataIPv4() Error buffer is short");
+
+    //make testability message header and write it to buffer
+    InitEventMsgHeader(msgHeader, GID_TCP, PID_LISTEN_AND_ACCEPT, RID_E_ISB);
+    makeTestAbilityHeader(msgHeader, bPacketData);
+
+    //send packet
+    dwLength = kTESTABILITY_HEADER_SIZE;
+    sendPacketTestabilityUDPSocket(gdwTesterIPv4Addr,  gdwTesterIPv4Port,  bPacketData, dwLength);
+    
+    return 0;
+  }
+  
+  //make testability message header and write it to buffer
+  InitEventMsgHeader(msgHeader, GID_TCP, PID_LISTEN_AND_ACCEPT, RID_E_OK);
+  SetMsgHeaderLen(msgHeader, kLEN_FORWARD_PARAMS_HEADER/* + data.payload.wLength*/);
+  makeTestAbilityHeader(msgHeader, bPacketData);
+
+  //write LISTEN_AND_ACCEPT parameters
+  makeTestabilityLisAndAccParams(data, bPacketData, (dword)kTESTABILITY_HEADER_SIZE);
+
+  //send packet
+  wRet = sendPacketTestabilityUDPSocket(gdwTesterIPv4Addr,  gdwTesterIPv4Port,  bPacketData, dwLength);
+  
+  return wRet;
+}
+
+// tcp connect event
+void OnTcpConnect(dword socket, long result)
+{ 
+  dword port;
+  
+  if(result != 0)
+  {
+    // connection failed
+    writeLineEx(1, 3, "<%FILE_NAME%> [%0.6f] [ OnTcpConnect: Connection failed on socket handle %d. Error code: %d ]", timeNow()/100000.0, socket, IpGetLastSocketError(socket));
+    outputSocketErrorInfoTcp(socket);
+  }
+  else
+  {
+    // connection established
+    writeLineEx(1, 1, "<%FILE_NAME%> [%0.6f] [ OnTcpConnect: Connection established on socket handle %d. ]", timeNow()/100000.0, socket);
+  }
+  
+  // for listen and accept
+  // send listen and accept evt
+  if(gbListenAndAcceptEvtFlag == 1)
+  {
+    struct _EVENT_PARAMS_LISTEN_ACCEPT evtListenAcpt;
+    
+    // check socket is valid
+    if(socket == kINVALID_SOCKET || getTCPSocketId(socket) == kINVALID_TCP_SOCKET_INDEX)
+    {
+      return;
+    }
+        
+    // set TcpAccept evt return values
+    evtListenAcpt.wListenSocket = getTCPSocketId(socket);
+    evtListenAcpt.wNewSocketId = getTCPSocketId(socket);
+        
+    // ipv4
+    if (IpGetSocketAddressFamily(socket) == 2)
+    {
+      dword ipv4Address;
+      
+      // set ip length
+      evtListenAcpt.ip.wAddrLength = kIPv4_ADDRESS_LENGTH_SIZE;
+      // set ip
+      ipGetSocketName((dword)socket, ipv4Address, port);  // get IP and port for new socket
+      evtListenAcpt.ip.dwIpv4Addr = ipv4Address;
+      // set port
+      evtListenAcpt.wPort = port;
+    }
+    // ipv6
+    else
+    {
+      byte ipv6Address[kIPv6_ADDRESS_LENGTH_SIZE];
+      int i;
+      
+      // set ip length
+      evtListenAcpt.ip.wAddrLength = kIPv6_ADDRESS_LENGTH_SIZE;
+      // set ip
+      ipGetSocketName((dword)socket, ipv6Address, port);  // get IP and port for new socket
+      for(i = 0; i < elCount(evtListenAcpt.ip.ipv6Addr) && i < elCount(ipv6Address); i++)
+      {
+        evtListenAcpt.ip.ipv6Addr[i] = ipv6Address[i];
+      }
+      // set port
+      evtListenAcpt.wPort = port;
+    }
+  
+    // send listen and accept of testability
+    forwardingTcpListen(evtListenAcpt);    
+  }
+  
+  // connect succeed & system valiable TcpRecvEnabledOnlyTstAblty is 0
+  if (result == 0 && @sysvar::TC8_DUT_Config::tcpRecvEnabledOnlyTabit == 0)
+  { 
+    // start receive event
+    // TODO viswan: Check side effect.
+    // startTCPReceive(socket);
+  }
+    
+  // send queued "SEND_DATA" of TestAbility for TCP_CALL_SEND_08
+  sendQueuedSendDataResTcp(socket);
+}
+
+/// <sendTestability/sendRes>
+// send queued "SEND_DATA" of TestAbility
+void sendQueuedSendDataResTcp(dword socket)
+{
+    dword queHandle;
+    queHandle = getTCPSocketHandle(gSendDataQueue.wSocketId);
+    if(socket == queHandle)
+    {
+      struct _SEND_DATA data;
+      dequeueSendData(data);
+      if(data.wTotalLen > 0)
+      {
+        sendTCPSocketData(socket, data);
+      }
+    }    
+}
+
+OnTcpClose(dword socket, long result)
+{  
+  word socketId;
+  
+  writeLineEx(1, 1, "<%FILE_NAME%> [%0.6f] [ OnTcpClose called. (socket: %d, result: %d) ]", timeNow()/100000.0, socket, result);
+  
+  socketId = getTCPSocketId(socket);
+  
+  //check if forwarding enabled(for TC8 TCP_CLOSING_02)
+  if(isTCPSocketRecvFwdEnabled(socketId) == kTrue)
+  {
+    struct _EVENT_RECV_FWD eventRecvFwd;
+    struct _Testabilty_Message_Header msgHeader;
+    // forward received packet(RID=0xE6)
+    
+    // check if IPv4
+    if(IpGetSocketAddressFamily(socket) == AF_INET)
+    {
+      const kLEN_FORWARD_PARAMS_HEADER = 4 + SIZE_LENGTH + kIPv4_ADDRESS_LENGTH_SIZE + SIZE_LENGTH;
+                                 //fullLen(uint16) + srcPort(uint16) + srcAdr(2+4) + VINT8 length(2)
+      byte bPacketData[kTESTABILITY_HEADER_SIZE + kMAX_TESTABILITY_PARAM_LENGTH];
+      long lResult;
+      dword dwLength;
+            
+      //calculate packet size and check it
+      dwLength = kTESTABILITY_HEADER_SIZE + kLEN_FORWARD_PARAMS_HEADER; //testability header size  
+      dwLength += eventRecvFwd.payload.wLength; //payload length
+      
+      //make testability message header and write it to buffer
+      InitEventMsgHeader(msgHeader, GID_TCP, PID_RECEIVE_AND_FORWARD, RID_E_OK);
+      SetMsgHeaderLen(msgHeader, kLEN_FORWARD_PARAMS_HEADER + eventRecvFwd.payload.wLength);
+      msgHeader.rid = RID_E_TCP_CRE;
+      makeTestAbilityHeader(msgHeader, bPacketData);
+    
+      //write RECEIVE_AND_FORWARD parameters
+      makeTestabilityForwardParams(eventRecvFwd, bPacketData, (dword)kTESTABILITY_HEADER_SIZE, IPv4_Prot_TCP);
+    
+      //send packet
+      lResult = sendPacketTestabilityUDPSocket(gdwTesterIPv4Addr,  gdwTesterIPv4Port,  bPacketData, dwLength);
+    }
+    
+    // ipv6(behavior not checked)
+    else
+    {
+      const kLEN_FORWARD_PARAMS_HEADER = 4 + SIZE_LENGTH + kIPv4_ADDRESS_LENGTH_SIZE + SIZE_LENGTH;
+                                 //fullLen(uint16) + srcPort(uint16) + srcAdr(2+4) + VINT8 length(2)
+      byte bPacketData[kTESTABILITY_HEADER_SIZE + kMAX_TESTABILITY_PARAM_LENGTH];
+      long lResult;
+      dword dwLength;
+            
+      //calculate packet size and check it
+      dwLength = kTESTABILITY_HEADER_SIZE + kLEN_FORWARD_PARAMS_HEADER; //testability header size  
+      dwLength += eventRecvFwd.payload.wLength; //payload length
+      
+      //make testability message header and write it to buffer
+      InitEventMsgHeader(msgHeader, GID_TCP, PID_RECEIVE_AND_FORWARD, RID_E_OK);
+      SetMsgHeaderLen(msgHeader, kLEN_FORWARD_PARAMS_HEADER + eventRecvFwd.payload.wLength);
+      msgHeader.rid = RID_E_TCP_CRE;
+      makeTestAbilityHeader(msgHeader, bPacketData);
+    
+      //write RECEIVE_AND_FORWARD parameters
+      makeTestabilityForwardParams(eventRecvFwd, bPacketData, (dword)kTESTABILITY_HEADER_SIZE, IPv4_Prot_TCP);
+    
+      //send packet
+      lResult = sendPacketTestabilityUDPSocket(gdwTesterIPv4Addr,  gdwTesterIPv4Port,  bPacketData, dwLength);
+//      forwardReceivedDataTCPoverIPv6(eventRecvFwd);    
+    }
+  }
+}
+
+/// <GetParameters>
+// get SEND_DATA parameters(TCP)
+void getSendDataParamsTcp(struct _SEND_DATA sendInfo, byte params[])
+{
+  long offset;
+  long lIdx;
+  long lPos;
+  
+  sendInfo.wSocketId = getWordData(params, 0); //Socket ID
+  sendInfo.wTotalLen = getWordData(params, 2); //totalLen
+  sendInfo.bFlags = params.byte(4);            //Flags
+  
+  offset = 5/* + SIZE_LENGTH + sendInfo.ipxaddr.wAddrLength*/;
+  sendInfo.data.wLength = getWordData(params, offset); //data length
+  memcpy_off(sendInfo.data.bData, 0, params, offset + 2, sendInfo.data.wLength); //data
+  
+  if(sendInfo.wTotalLen < sendInfo.data.wLength)
+  {
+    // see Testability Protocol Specification:In case the value of totalLen is smaller 
+    // than the length of data, the full length of data will be transmitted.    
+    sendInfo.wTotalLen = sendInfo.data.wLength; 
+  }
+  else if(sendInfo.wTotalLen > sendInfo.data.wLength)
+  {
+    lPos=0;
+    for(lIdx = sendInfo.data.wLength; (lIdx < sendInfo.wTotalLen) && (lIdx < elCount(sendInfo.data.bData)); lIdx++)
+    {
+      sendInfo.data.bData[lIdx] = sendInfo.data.bData[lPos++];
+      if(lPos >= sendInfo.data.wLength)
+      {
+        lPos = 0;
+      }
+    }
+  }
+}
+
+/// <Services>
+word getStateTcp(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  dword dwSocketHandle;
+  long lRet;
+  struct _GET_STATE params;
+  
+  // Get parameters
+  getGetStateParams(params, recvData.TestabilityMsg.bParameters);
+    
+  //check socket handle
+  dwSocketHandle = getTCPSocketHandle(params.wSocketId);
+  
+  // check socket handle
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    AddMessageParamsByte(sendData.TestabilityMsg, 0);
+  }
+  // sokcet handle is valid
+  else
+  {
+    // set state code
+    if(isTCPSocketReConnected(params.wSocketId) == 1)
+    {
+      AddMessageParamsByte(sendData.TestabilityMsg, TcpStateIdEstablished);
+    }
+    else
+    {
+      AddMessageParamsByte(sendData.TestabilityMsg, getTcpState(params.wSocketId));
+    }
+  }
+  
+  // set result
+  sendData.TestabilityMsg.Header.rid = RID_E_OK;
+
+  return 1;  
+}
+
+/// <GetParameters>
+void getGetStateParams(struct _GET_STATE data, byte params[])
+{
+  data.wSocketId = getWordData(params, 0);
+}
+
+/// <EthILSend>
+void sendTcpRaw(ethernetPacket * packet)
+{  
+  long lPacketHandle;
+  
+  // create packet
+  lPacketHandle = EthInitPacket("tcp");  
+  if(lPacketHandle == 0)
+  {
+    return;
+  }
+  
+  constructEthHeader(packet.source, packet.destination, lPacketHandle);
+  constructIpv4Header(IPv4GetSrcAddress(packet), IPv4GetDstAddress(packet), lPacketHandle);
+  EthInitProtocol(lPacketHandle, "tcp");
+  EthSetTokenInt(lPacketHandle, "tcp", "source", TCPgetPortSrc(packet));
+  EthSetTokenInt(lPacketHandle, "tcp", "destination", TCPgetPortDst(packet));
+  EthSetTokenInt64(lPacketHandle, "tcp", "sequence", 0, 4, 1, TCPgetSequence(packet)); 
+  EthSetTokenInt64(lPacketHandle, "tcp", "ackNumber", 0, 4, 1, TCPgetAckNumber(packet)); 
+  
+  EthSetTokenInt(lPacketHandle, "tcp", "flags", 0, 1, 0, TCPGetFlags(packet));
+  
+  // complete packet
+  EthCompletePacket(lPacketHandle);
+  
+  // send packet
+  EthOutputPacket(lPacketHandle);
+  
+  // release packet
+  EthReleasePacket(lPacketHandle);    
+}
+
+/// <Helpers>
+void enqueueSendData(struct _SEND_DATA setData)
+{
+  memcpy(gSendDataQueue, setData);
+}
+
+/// <Helpers>
+void dequeueSendData(struct _SEND_DATA outData)
+{
+  struct _SEND_DATA blank;
+  
+  // copy que data to parameter
+  memcpy(outData, gSendDataQueue);
+  
+  // reset data que
+  initSendData(blank);
+  memcpy(gSendDataQueue, blank);
+}
+
+/// <sendTestability/sendRes>
+// send testability "CALL_RECEIVE" response for queued data
+// return code 1:succeed send 0:failed send
+word sendCallReceiveResTcp(enum Result_ID rID, struct _RES_CALL_RECEIVE data)
+{
+  byte bPacketData[kTESTABILITY_HEADER_SIZE+0xFFFF];
+  struct _Testabilty_Message_Header msgHeader;
+  dword dwLength;
+  word wRet;
+  
+  // calculate packet size
+  dwLength = kTESTABILITY_HEADER_SIZE + 2 + 2 + data.data.wLength; //testability header + call receive data(socket + dataLength + data)  
+  
+  // make testability message header
+  initResMsgHeader(msgHeader, GID_TCP, PID_CALL_RECEIVE, rID);
+  
+  // make testability message header and write it to buffer
+  SetMsgHeaderLen(msgHeader, 2 + 2 + data.data.wLength);
+  
+  // write header information to buffer
+  makeTestAbilityHeader(msgHeader, bPacketData);
+  
+  // write parameters
+  makeTestabilityCallReceiveParams(data, bPacketData, (dword)kTESTABILITY_HEADER_SIZE);
+  
+  // send packet
+  wRet = sendPacketTestabilityUDPSocket(gdwTesterIPv4Addr,  gdwTesterIPv4Port,  bPacketData, dwLength);
+  
+  return wRet;
+}
+
+/// <Services>
+// return code 1:respond 0:don't respond
+int callReceiveTCP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  dword dwSocketHandle;
+  struct _CALL_RECEIVE recvDataInfo;
+  struct _vINT8 data;
+  word i;
+  enum TcpStateId _state;
+    
+  // Get parameters
+  getCallReceiveParams(recvDataInfo, recvData.TestabilityMsg.bParameters);
+
+  //check socket handle
+  dwSocketHandle = getTCPSocketHandle(recvDataInfo.wSocketId);
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    // [ERROR] socket handle is invalid
+    sendData.TestabilityMsg.Header.rid = RID_E_ISD; // 0xEF
+    return 1;
+  }
+  
+  // get state
+  _state = getTcpState(recvDataInfo.wSocketId);
+  
+  if(_state == TcpStateIdClosed
+    || _state == TcpStateIdLastAck
+    || _state == TcpStateIdTimeWait)
+  {
+    // [ERROR] socket is closing
+    sendData.TestabilityMsg.Header.rid = RID_E_TCP_COC; // return "error:connection closing" 0xE6
+    return 1;
+  }
+  else if(isTCPSocketConnecting(recvDataInfo.wSocketId) == 1)
+  {
+    // socket is connecting
+    // queue the call receive request
+    enqueueCallReceiveData(recvDataInfo.wSocketId, recvDataInfo.dataLength);
+    return 0; // not send response in this timing
+  }
+    
+  // get received data
+  data.wLength = getTCPCallRecvData(recvDataInfo.wSocketId, data.bData);
+  if(data.wLength == kFalse)
+  {
+    // received data isn't found    
+    // set result ID
+    if(_state == TcpStateIdCloseWait)
+    {
+      sendData.TestabilityMsg.Header.rid = RID_E_TCP_COC; // return "error:connection closing" 0xE6
+    }
+    else
+    {
+      sendData.TestabilityMsg.Header.rid = RID_E_TCP_INR; // 0xE8
+    }    
+    return 1;
+  }
+  
+  // adjust response data length
+  if(data.wLength > recvDataInfo.dataLength)
+  {
+    data.wLength = recvDataInfo.dataLength;
+  }
+  
+  // set Result
+  sendData.TestabilityMsg.Header.rid = RID_E_OK;
+  
+  // set response parameter
+  AddMessageParamsUint16(sendData.TestabilityMsg, recvDataInfo.wSocketId);
+  AddMessageParamsVint8(sendData.TestabilityMsg, data);
+  
+  // clear received data
+  initTCPCallRecvData(recvDataInfo.wSocketId);
+  
+  // success
+  return 1;
+}
+
+
+/// <GetParameters>
+// get RECEIVE_AND_FORWARD parameters
+void getCallReceiveParams(struct _CALL_RECEIVE data, byte params[])
+{
+  data.wSocketId = getWordData(params, 0);  //Socket ID
+  data.dataLength = getWordData(params, 2); // data length
+}
+
+/// <Helpers>
+void AddMessageParamsVint8(struct _Testabilty_Message sendMsg, struct _vInt8 data)
+{
+  word i;
+  word startLen;
+  
+  startLen = sendMsg.Header.dwLen - kTESTABILITY_PARAMETER_SIZE_OFFSET;
+  startLen += 2;
+  
+  // add length
+  AddMessageParamsUint16(sendMsg, data.wLength);
+  
+  // add data
+  for(i=0; i<data.wLength; i++)
+  {
+    AddMessageParamsByte(sendMsg, data.bData[i]);
+  }
+}
+
+/// <Helpers>
+void AddMessageParamsByte(struct _Testabilty_Message sendMsg, byte data)
+{
+  int64 i64Idx;
+  
+  i64Idx = sendMsg.Header.dwLen - kTESTABILITY_PARAMETER_SIZE_OFFSET;
+  
+  if(i64Idx + 1 < kMAX_TESTABILITY_PARAM_LENGTH &&  i64Idx >= 0 )
+  {
+    sendMsg.bParameters[i64Idx] = data;
+    sendMsg.Header.dwLen += 1;
+  }
+}
+
+/// <sendTestability/sendRes>
+word sendQueuedCallReceiveResTcp(word wSocketIdx)
+{  
+  word resCallResLength;
+  struct _RES_CALL_RECEIVE resInfo;
+
+  // check if queued Call_Receive data is valid
+  resCallResLength = dequeueCallReceiveData(wSocketIdx);
+  if(resCallResLength <= 0)
+  {
+    return 0;
+  }
+  
+  // send Call_Receive response
+  
+  resInfo.wSocketId = wSocketIdx; // get socket id
+  resInfo.data.wLength = getTCPCallRecvData(wSocketIdx, resInfo.data.bData);  // get received data
+  if(resInfo.data.wLength == kFalse)
+  {      
+    return 0;
+  }
+
+  // adjust response data length
+  if(resInfo.data.wLength > resCallResLength)
+  {
+    resInfo.data.wLength = resCallResLength;
+  }
+
+  initTCPCallRecvData(wSocketIdx); // init received data
+    
+  return sendCallReceiveResTcp(RID_E_OK, resInfo); // send res
+}
+
+
+/// <Services>
+int shutdownTCP(struct _Token_Testabilty recvData, struct _Token_Testabilty sendData)
+{
+  int iRet = 0;
+  dword dwSocketHandle;
+  struct _SHUTDOWN shutdown;
+  
+  //get parameters
+  getShutdownParams(shutdown, recvData.TestabilityMsg.bParameters);
+  
+  //get socket handle
+  dwSocketHandle = getTCPSocketHandle(shutdown.wSocketId);
+  if(dwSocketHandle == kINVALID_SOCKET)
+  {
+    sendData.TestabilityMsg.Header.rid = RID_E_TCP_CNE;
+    return iRet;
+  }
+  else if(isTCPSocketClosing(shutdown.wSocketId) == 1)
+  {
+    // socket is closing
+    sendData.TestabilityMsg.Header.rid = RID_E_TCP_COC; // return "error:connection closing"
+    return 0;
+  }
+  
+  // shutdown TCP socket
+  switch(shutdown.bTypeId)
+  {
+    case 1:
+      iRet = tcpShutdown(dwSocketHandle);
+      break;
+    case 0:
+    case 2:
+      iRet = tcpClose(dwSocketHandle);
+      break;
+    default:
+      sendData.TestabilityMsg.Header.rid = RID_E_INV; // return "error:connection closing"
+      return 0;
+  }
+  
+  if(iRet != 0)
+  {
+    // close failed
+    outputSocketErrorInfoTcp(dwSocketHandle);
+    sendData.TestabilityMsg.Header.rid = RID_E_ISD;
+    return 0;
+  }
+  
+  // close succeed
+  sendData.TestabilityMsg.Header.rid = RID_E_OK;
+      
+  return 1;  
+}
+
+/// <GetParameters>
+void getShutdownParams(struct _SHUTDOWN data, byte params[])
+{
+  data.wSocketId = getWordData(params, 0);
+  data.bTypeId = params[2];
+}

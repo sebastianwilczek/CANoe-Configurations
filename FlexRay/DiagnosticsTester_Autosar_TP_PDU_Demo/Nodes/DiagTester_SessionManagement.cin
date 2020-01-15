@@ -1,0 +1,302 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "SecurityAccess.cin"
+}
+
+variables
+{
+  long result = -1;
+  long gSession = 0;
+  long gNextSession = -1;
+
+  // Timer:
+  const long cTesterPresentPeriod = 4000; // ms
+  msTimer tTesterPresentTimer;
+
+  // For output and debugging:
+  char text[100];
+  const int gDiagDbgLevel = 1;
+  const int cUnknown = 0;
+  const int cOk = 1;
+  const int cBad = 2;
+}
+
+on timer tTesterPresentTimer
+{
+  if (@sysvar::DiagTester::EnableTesterPresent > 0)
+  {
+    SendTesterPresent();
+  }
+  else
+  {
+    gSession = 0; // assume default session
+    @sysvar::DiagTester::SessionState = gSession;
+  }
+  setTimer(tTesterPresentTimer, cTesterPresentPeriod); // call cyclically this procedure
+}
+
+void SendTesterPresent ()
+{
+  DiagRequest TesterPresent::TesterPresent::Send request;
+  request.SendRequest();
+}
+
+RequestSeed ()
+{
+  DiagRequest SecurityAccess::SeedLevel1::Request request2;
+
+  result = request2.SendRequest();
+
+  snprintf( text, elcount(text), "CAPL: %s: SecurityAccess::SeedLevel1::Request result %d", gECU, result);
+  writeDbgLevel( gDiagDbgLevel, text);
+}
+
+SendKey (DWORD myKey)
+{
+  DiagRequest SecurityAccess::KeyLevel1::Send request3;
+
+  @sysvar::DiagTester::SecurityKey = myKey;
+
+  request3.SetParameter(0, "SecurityKey", myKey);
+  result = request3.SendRequest();
+
+  snprintf( text, elcount(text), "CAPL: %s: SecurityAccess::KeyLevel1::Send result %d", gECU, result);
+  writeDbgLevel( gDiagDbgLevel, text);
+}
+
+IncreaseSession ()
+{
+  if (gSession == 0)
+  {
+    gSession = 1;
+    snprintf( text, elcount(text), "CAPL: %s: entered extended session", gECU);
+  }
+  else if (gSession == 1)
+  {
+    gSession = 2;
+    snprintf( text, elcount(text), "CAPL: %s: entered programming session", gECU);
+  }
+
+  gNextSession = -1;
+
+  @sysvar::DiagTester::SessionState = gSession;
+
+  writeDbgLevel( gDiagDbgLevel, text);
+}
+
+ExpectDefaultSession ()
+{
+  gSession = 0;
+  snprintf( text, elcount(text), "CAPL: %s: expect default session", gECU);
+
+  @sysvar::DiagTester::SessionState = gSession;
+
+  gNextSession = -1;
+
+  writeDbgLevel( gDiagDbgLevel, text);
+}
+
+void SetRequestResult (int result)
+{
+  if (result < 4)
+    @sysvar::DiagTester::RequestResult = result;
+  else
+    @sysvar::DiagTester::RequestResult = 0;
+
+  // restart tester present timer:
+  cancelTimer(tTesterPresentTimer);
+  setTimer(tTesterPresentTimer, cTesterPresentPeriod);
+
+}
+
+GotoExtendedSession ()
+{
+  DiagRequest "Sessions::ExtendedDiagnosticSession::Start" request;
+
+  result = request.SendRequest();
+  SetRequestResult(cUnknown);
+  if (result == 0) gNextSession = 1;
+
+  snprintf( text, elcount(text), "CAPL: %s: Sessions::ExtendedDiagnosticSession::Start result %d", gECU, result);
+  writeDbgLevel( gDiagDbgLevel, text);
+}
+
+GotoProgrammingSession ()
+{
+  DiagRequest "Sessions::ProgrammingSession::Start" request;
+
+  result = request.SendRequest();
+  SetRequestResult(cUnknown);
+  if (result == 0) gNextSession = 2;
+
+  snprintf( text, elcount(text), "CAPL: %s: Sessions::ProgrammingSession::Start result %d", gECU, result);
+  writeDbgLevel( gDiagDbgLevel, text);
+}
+
+GotoDefaultSession ()
+{
+  DiagRequest "Sessions::DefaultSession::Start" request;
+
+  result = request.SendRequest();
+  SetRequestResult(cUnknown);
+
+  snprintf( text, elcount(text), "CAPL: %s: Sessions::DefaultSession::Start result %d", gECU, result);
+  writeDbgLevel( gDiagDbgLevel, text);
+}
+
+DoHardReset ()
+{
+  DiagRequest "EcuReset::HardReset::Reset" request;
+
+  result = request.SendRequest();
+  SetRequestResult(cUnknown);
+
+  snprintf( text, elcount(text), "CAPL: %s: EcuReset::HardReset::Reset result %d", gECU, result);
+  writeDbgLevel( gDiagDbgLevel, text);
+}
+
+DoSoftReset ()
+{
+  DiagRequest "EcuReset::SoftReset::Reset" request;
+
+  result = request.SendRequest();
+  SetRequestResult(cUnknown);
+
+  snprintf( text, elcount(text), "CAPL: %s: EcuReset::SoftReset::Reset result %d", gECU, result);
+  writeDbgLevel( gDiagDbgLevel, text);
+}
+
+InitializeSessionManagement ()
+{
+  /* to be called in "on PreStart"! */
+
+}
+
+StartSessionManagement ()
+{
+  /* to be called in "on Start"! */
+
+  @sysvar::DiagTester::SessionState = gSession;
+  @sysvar::DiagTester::SeedValue = 0;
+
+  setTimer(tTesterPresentTimer, cTesterPresentPeriod);
+}
+
+OnRespHardReset ()
+{
+  if ((result == 0) && (DiagGetLastResponseCode() == -1))
+  {
+    @sysvar::DiagTester::SerialNumberIn = 0;
+    @sysvar::DiagTester::SeedValue = 0;
+    @sysvar::DiagTester::SecurityKey = 0;
+
+    ExpectDefaultSession();
+    SetRequestResult(cOk);
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+
+OnRespSoftReset ()
+{
+  if ((result == 0) && (DiagGetLastResponseCode() == -1))
+  {
+    @sysvar::DiagTester::SerialNumberIn = 0;
+    @sysvar::DiagTester::SeedValue = 0;
+    @sysvar::DiagTester::SecurityKey = 0;
+
+    ExpectDefaultSession();
+    SetRequestResult(cOk);
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+
+OnRespKeyLevel1 ()
+{
+  if ((result == 0) && (DiagGetLastResponseCode() == -1))
+  {
+    if (gNextSession > 0)
+    {
+      IncreaseSession();
+      SetRequestResult(cOk);
+    }
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+
+OnRespSeedLevel1 (DWORD seedValue)
+{
+  DWORD myKey;
+
+  if ((result == 0) && (DiagGetLastResponseCode() == -1))
+  {
+    if (gNextSession > 0)
+    {
+      @sysvar::DiagTester::SeedValue = seedValue;
+
+      myKey = ComputeKey( seedValue);
+
+      SendKey(myKey);
+    }
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+
+OnRespDefaultSession ()
+{
+  if ((result == 0) && (DiagGetLastResponseCode() == -1))
+  {
+    @sysvar::DiagTester::SeedValue = 0;
+
+    ExpectDefaultSession();
+    SetRequestResult(cOk);
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+
+OnRespExtendedSession ()
+{
+  if ((result == 0) && (DiagGetLastResponseCode() == -1))
+  {
+    if (gNextSession > 0)
+      RequestSeed();
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+
+OnRespProgrammingSession ()
+{
+  if ((result == 0) && (DiagGetLastResponseCode() == -1))
+  {
+    if (gNextSession > 0)
+      RequestSeed();
+  }
+  else
+  {
+    SetRequestResult(cBad);
+  }
+}
+
+OnRespTesterPresent ()
+{
+  // do nothing: ignore response
+}
+

@@ -1,0 +1,1225 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "Enum_Definitions.cin"
+  #include "InitAndEndFunctions.cin"
+  #include "Utils.cin"
+  #include "PrepareWaitForMessage.cin"
+  #include "Extracting.cin"
+}
+
+variables
+{
+  enum Bool gReportOnFailure;
+  
+  enum ArpOperation {
+    kRequest	= 1,
+    kResponse = 2
+  };
+  
+  //Represents a token of an ethernet package. It is used to
+  // configure ethernet packages that are received and whose values are checked
+  struct Parameter {
+    char						Protocol[50];
+    char						Token[50];
+    int64						Value;
+    enum CheckType	checkType;
+  };
+
+  //Represents a token of an ethernet package that contains a byte array
+  struct DataParameter {
+    char	Protocol[50];
+    char	Token[50];
+    byte	Value[1500];
+    int		valueLength;  //if this is set to a negative value at an expected parameter, it will be checked if the option exists.
+                        //If it doesn't exist, the check will be successful
+    enum Bool lengthCheck; //If kTrue: Check if the length matches. Else: Only check the first <valueLength> bytes of the data.
+    int offset; //offset from the beginning of the token in byte
+    enum CheckType checkType;
+  };
+
+  //Represents two tokens of an ethernet packet. It can be compared whether this two values have the same
+  //or whether they have a different value
+  struct ParameterPair {
+    char						Protocol1[50];
+    char						Token1[50];
+    char						Protocol2[50];
+    char						Token2[50];
+    enum CheckType	checkType;
+  };
+
+  //Represents a parameter that is extracted from an incoming packet
+  struct ExtractingParameter
+  {
+    char Protocol[50];
+    char Token[50];
+    int64 Value;
+    byte DataValue[1500];
+    long DataValueLength;
+    enum ExtractingType Type;
+  };
+
+  const int kMaxParameterGroups = 10;
+
+  // The parameters of the ethernet package which is received.
+  // Only one group has to match when comparing to an incoming package.
+  struct Parameter gExpectedParameters[kMaxParameterGroups][100]; //The first index refers to the group and the second to the individual parameter
+  int gExpectedParametersIndex[kMaxParameterGroups];
+  int gExpectedParametersMatches[kMaxParameterGroups];
+  int gExpectedParametersChannel[kMaxParameterGroups];
+  
+  //The data parameters of the ethernet package which is received
+  struct DataParameter gExpectedDataParameters[int64];
+  int gExpectedDataParametersIndex;
+
+  //If two parameters of the same packet should be compare
+  struct ParameterPair gExpectedParametersCompareTwo[int64];
+  int gExpectedParametersCompareTwoIndex;
+  
+  //Check that the last byte of a given data parameter has a specific value
+  struct Parameter gExpectedParametersLastByte[int64];
+  int gExpectedParametersLastByteIndex;
+
+  
+
+  enum Bool gObservingEthPackets = kFalse;
+  char gPacketReceivedEventName[20] = "PacketReceivedEvent";
+
+  //This is needed for extracting parameters from incoming messages
+  struct ExtractingParameter gExtractingParameters[int64];
+  int gExtractingParametersCount;
+
+  dword gTimestampsOfIncomingPackets[int64];
+  int64 gTimestampsOfIncomingPacketsIndex;
+  dword gTimeDifferencesOfIncomingPackets[int64];
+
+  // This is needed for logging purposes
+  int gCompareParametersCounter;
+
+  long gMaximumChannelNumber;
+  long gExpectedMessagesPerChannel[long]; // if -1: Don't observe this channel
+  long gReceivedMessagesPerChannel[long];
+  
+  qword gTimestampLastSend; // microseconds
+  
+  // If this is true, arp requests that ask for MAC address of Host1 are answered automatically.
+  // Should be set to false when waiting for an arp message
+  enum Bool gAutoAnswerArpRequests = kTrue;
+}
+
+on prestart
+{
+  SomeIpIlControlInit();
+}
+
+
+
+/**
+ * Clears all parameter lists and resets global variables to their default values
+ * Should be called at the beginning of each testcase and at the end of each WaitFor...Message function
+ */
+void InternalClearAllParameters()
+{
+  int i;
+  
+  for(i = 0; i < elcount(gExpectedParametersIndex); i++)
+  {
+    gExpectedParametersIndex[i] = 0;
+    gExpectedParametersMatches[i] = 0;
+    gExpectedParametersChannel[i] = 0;
+  }
+  gExpectedParametersCompareTwo.Clear();
+  gExpectedParametersCompareTwoIndex = 0;
+  
+  gExpectedParametersLastByte.Clear();
+  gExpectedParametersLastByteIndex = 0;
+  
+  gExpectedDataParameters.Clear();
+  gExpectedDataParametersIndex = 0;
+  
+  for(int64 akey : gExtractingParameters)
+  {
+    gExtractingParameters[akey].Type = kDoNotExtract;
+  }
+  
+  gTimestampsOfIncomingPackets.Clear();
+  gTimestampsOfIncomingPacketsIndex = 0;
+  gTimeDifferencesOfIncomingPackets.Clear();
+  
+  gCompareParametersCounter = 0;
+  
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    gExpectedMessagesPerChannel[i] = -1;
+  }
+  
+  gAutoAnswerArpRequests = kTrue;
+}
+
+/**
+ * Checks if an incomming packet should be processed
+ * returns kFalse if the packet should not be processed, kTrue if it should be processed
+ */
+enum Bool ShouldIncomingPacketBeProcessed(long channel, long dir, long packetHandle)
+{
+  if (gObservingEthPackets == kFalse)
+    return kFalse;
+  
+  if (gExpectedMessagesPerChannel[channel] == -1)
+    return kFalse;
+  
+  if (dir == 0) //0: Rx
+  {
+    if (channel == 1 && 
+        ((EthGetTokenInt64(packetHandle, "eth", "source") != ConvertMacAddressStringToInt64(syspar::DIface0MacAddr)) ||
+        ((syspar::DIface0VLAN >= 0) && (EthGetTokenInt64(packetHandle, "eth", "vlanId") != syspar::DIface0VLAN))))
+      return kFalse;
+    if (channel == 2 && EthGetTokenInt64(packetHandle, "eth", "source") != ConvertMacAddressStringToInt64(syspar::DIface1MacAddr))
+      return kFalse;
+  }
+  else // Tx
+  {
+    if (EthGetTokenInt64(packetHandle, "eth", "destination") != ConvertMacAddressStringToInt64(syspar::DIface0MacAddr))
+      return kFalse;
+  }
+  return kTrue;
+}
+
+/**
+ * Compares whether the parameters of the received ethernet package match with the expected parameters.
+ * @param packetHandle The handle of the packet to compare.
+ * @param reportOnFailure Indicates  whether the comparison result shall be written to the report on failure.
+ * @return Returns kTrue if parameters match, kFalse otherwise.
+ */
+enum Bool CompareParameters(long packetHandle, long channel, enum Bool reportOnFailure)
+{
+  return CompareParameters(packetHandle, 0, channel, reportOnFailure);
+}
+
+/**
+ * Compares whether the parameters of the received ethernet package match with the expected parameters.
+ * @param packetHandle The handle of the packet to compare.
+ * @param someIpHandle The handle of the SOME/IP packet to compare.
+ * @param reportOnFailure Indicates  whether the comparison result shall be written to the report on failure.
+ * @return Returns kTrue if parameters match, kFalse otherwise.
+ */
+enum Bool CompareParameters(long packetHandle, long someIpHandle, long channel, enum Bool reportOnFailure)
+{
+  gCompareParametersCounter++; //this is needed for logging purposes
+  
+  //TODO: If a second packet arrives, before this function is completely processed
+  //the logging won't be correct anymore. Hence, gCompareParametersCounter should be
+  // given as a parameter. The global variable is then incremented outside this function
+  
+  if(!CompareInt64Parameters(packetHandle, someIpHandle, channel, reportOnFailure))
+    return kFalse;
+  if(!CompareDataParameters(packetHandle, someIpHandle, reportOnFailure))
+    return kFalse;
+  if(!CompareParametersCompareTwo(packetHandle, someIpHandle))
+    return kFalse;
+  if(!CompareParametersLastByte(packetHandle))
+    return kFalse;
+  
+  ExtractParameter(packetHandle, someIpHandle);
+  testStep("CompareParameters", "Packet %d matched the conditions.", gCompareParametersCounter);
+  return kTrue;
+}
+
+/**
+ * Compares the parameters which can be accessed via an EthGetTokenInt64
+ */
+enum Bool CompareInt64Parameters(long packetHandle, long someIpHandle, long channel, enum Bool reportOnFailure)
+{
+  enum Bool checkRes;
+  int i,j;
+  char log[256];
+  
+  log[0] = '\0';
+  
+  //Iterate over each parameter group
+  for(i = 0; i < elcount(gExpectedParametersIndex); i++)
+  {
+    if(gExpectedParametersIndex[i] == 0 || (gExpectedParametersChannel[i] != 0 && gExpectedParametersChannel[i] != channel))
+    {
+      break;
+    }
+    write("comparing group %d with %d parameters", i, gExpectedParametersIndex[i]);
+    checkRes = kTrue;
+    for(j = 0; j < gExpectedParametersIndex[i] && checkRes == kTrue; j++)
+    {
+      checkRes = CompareSingleParameter(packetHandle, someIpHandle, gExpectedParameters[i][j], log);
+    }
+    if(checkRes == kTrue)
+    {
+      //Input is matching the group
+      gExpectedParametersMatches[i]++;
+      break;
+    }
+  }
+  
+  if(checkRes == kFalse)
+  {
+    //No expected paramater group matched.
+    if (reportOnFailure == kTrue)
+    {
+    // Only write comparison result to report on failure. Only writing the last comparison.
+      testStep("CompareParameters", log);
+    }
+    return kFalse;
+  }
+  return kTrue;
+}
+
+/**
+ * Compares data parameters (parameters which have to be accessed via EthGetTokenData)
+ */
+enum Bool CompareDataParameters(long packetHandle, long someIpHandle, enum Bool reportOnFailure)
+{
+  long copiedBytes;
+  byte data[1500];
+  int i;
+  char cmpOp[8], log[255];
+  enum Bool checkRes;
+  long errorCode;
+  
+  cmpOp[0] = '\0';
+  
+  for (int64 akey : gExpectedDataParameters)
+  {
+    copiedBytes = GetTokenData(packetHandle,
+                               someIpHandle,
+                               gExpectedDataParameters[akey].Protocol,
+                               gExpectedDataParameters[akey].Token,
+                               gExpectedDataParameters[akey].offset,
+                               elcount(data),
+                               data,
+                               errorCode);
+
+    if (gExpectedDataParameters[akey].valueLength < 0) 
+    {
+      write("check for option not set %s, error=%d", gExpectedDataParameters[akey].Token, EthGetLastError());
+
+      if (errorCode != 460108) 
+      { // token not found
+        testStep("CompareParameters", "Packet %d: %s->%s exists in packet (expected: does not exist)", gCompareParametersCounter, gExpectedDataParameters[akey].Protocol, gExpectedDataParameters[akey].Token);
+        return kFalse;
+      }
+    } 
+    else 
+    {
+      if(errorCode == 460108 && strncmp(gExpectedDataParameters[akey].Protocol, "tcp", elcount(gExpectedDataParameters[akey].Protocol)) == 0 && 
+         strncmp(gExpectedDataParameters[akey].Token, "optionalMss", strlen(gExpectedDataParameters[akey].Token)) == 0)
+      {
+        //the custom token optionalMss compares positively against a missing token or a token with the given value
+        testStep("CompareParameters", "Packet %d: There is no MSS option", gCompareParametersCounter);
+        return kTrue;
+      }
+      
+      if (errorCode != 0) 
+      {
+        write("EthGetLastError()=%d", errorCode);
+        testStep("CompareParameters", "Packet %d: Could not get data from %s->%s", gCompareParametersCounter, gExpectedDataParameters[akey].Protocol, gExpectedDataParameters[akey].Token);
+        return kFalse;
+      }
+      write("Packet %d: Comapre data parameter %s->%s", gCompareParametersCounter, gExpectedDataParameters[akey].Protocol, gExpectedDataParameters[akey].Token);
+      for (i = 0; i < gExpectedDataParameters[akey].valueLength; i++)
+      {
+        write("Byte %d: expected=%2X observed=%2X", i, gExpectedDataParameters[akey].Value[i], data[i]);
+      }
+      
+      if (gExpectedDataParameters[akey].lengthCheck == kTrue && gExpectedDataParameters[akey].valueLength != copiedBytes) 
+      {
+        testStep("CompareParameters", "Packet %d: %s->%s expected length = %d, observed length=%d",
+                 gCompareParametersCounter,
+                 gExpectedDataParameters[akey].Protocol,
+                 gExpectedDataParameters[akey].Token,
+                 gExpectedDataParameters[akey].valueLength,
+                 copiedBytes);
+        return kFalse;
+      }
+      
+      cmpOp[0] = '\0';
+      checkRes = kTrue;
+      /* determine operator symbol for comparison type */
+      switch (gExpectedDataParameters[akey].checkType)
+      {
+        case kEquals:
+          strncpy(cmpOp, "=", elcount(cmpOp));
+          if (memcmp(data, gExpectedDataParameters[akey].Value, gExpectedDataParameters[akey].valueLength) != 0) 
+          {
+            snprintf(log, elcount(log), "Packet %d: Compare %s->%s: Expected: Equals, Observed: Not Equals (see Trace window for details)", gCompareParametersCounter, gExpectedDataParameters[akey].Protocol, gExpectedDataParameters[akey].Token);
+            checkRes = kFalse;
+          } 
+          break;
+        case kNotEquals:
+          strncpy(cmpOp, "!=", elcount(cmpOp));
+          if (memcmp(data, gExpectedDataParameters[akey].Value, gExpectedDataParameters[akey].valueLength) == 0) 
+          {
+            snprintf(log, elcount(log), "Packet %d: Compare %s->%s: Expected: Equals, Observed: Not Equals (see Trace window for details)", gCompareParametersCounter, gExpectedDataParameters[akey].Protocol, gExpectedDataParameters[akey].Token);
+            checkRes = kFalse;
+          } 
+          break;
+        case kNotCheck:
+          break;
+        default:
+          testStepFail("CompareDataParameters", "Checktype not implemented.");
+          break;
+      }
+    
+      if(checkRes == kFalse)
+      {
+        if (reportOnFailure == kTrue)
+        {
+         // Only write comparison result to report on failure. Only writing the last comparison.
+         testStep("CompareParameters", log);
+        }
+        return kFalse;
+      }
+    }
+  }
+  return kTrue;
+}
+
+/**
+ *  Compares parameters where should be checked that two parameters have the same/a different value
+ */
+enum Bool CompareParametersCompareTwo(long packetHandle, long someIpHandle)
+{
+  int64 value, value2;
+  long result;
+  char log[255], cmpOp[3];
+  enum Bool checkRes;
+  
+  log[0] = '\0';
+  cmpOp[0] = '\0';
+  checkRes = kTrue;
+  for (int64 akey : gExpectedParametersCompareTwo)
+  {
+    value = GetTokenInt64(packetHandle, someIpHandle, gExpectedParametersCompareTwo[akey].Protocol1, gExpectedParametersCompareTwo[akey].Token1, result);
+    if (result != 0)
+    {
+      write("Packet %d: Could not get value %s=>%s; error code=%d",
+               gCompareParametersCounter,
+               gExpectedParametersCompareTwo[akey].Protocol1,
+               gExpectedParametersCompareTwo[akey].Token1,
+               result);
+
+      return kFalse;
+    }
+
+    value2 = GetTokenInt64(packetHandle, someIpHandle, gExpectedParametersCompareTwo[akey].Protocol2, gExpectedParametersCompareTwo[akey].Token2, result);
+    if (result != 0)
+    {
+      write("Packet %d: Could not get value %s=>%s; error code=%d",
+               gCompareParametersCounter,
+               gExpectedParametersCompareTwo[akey].Protocol2,
+               gExpectedParametersCompareTwo[akey].Token2,
+               result);
+
+      return kFalse;
+    }
+    
+    
+    if (gExpectedParametersCompareTwo[akey].checkType == kEquals)
+    {
+      strncpy(cmpOp, "=", elcount(cmpOp));
+      if (value != value2)
+      {
+        checkRes = kFalse;
+      }
+    }
+
+    if (gExpectedParametersCompareTwo[akey].checkType == kNotEquals)
+    {
+      strncpy(cmpOp, "!=", elcount(cmpOp));
+      if (value == value2)
+      { 
+        checkRes = kFalse;
+      }
+    }
+    snprintf(
+      log,
+      elcount(log),
+      "Packet %d: Compare %s->%s: Observed: %lld, %s->%s: Observed: %lld, Expected: %s %lld",
+      gCompareParametersCounter,
+      gExpectedParametersCompareTwo[akey].Protocol1,
+      gExpectedParametersCompareTwo[akey].Token1,
+      value,
+      gExpectedParametersCompareTwo[akey].Protocol2,
+      gExpectedParametersCompareTwo[akey].Token2,
+      value2,
+      cmpOp,
+      value
+    );
+    write(log);
+    if(checkRes == kFalse)
+      return kFalse;
+  }
+  
+  return kTrue;
+}
+
+/**
+ * Compares data parameters where only the last byte should be compared
+ */ 
+enum Bool CompareParametersLastByte(long packetHandle)
+{
+  long copiedBytes;
+  byte data[1500];
+  char log[255];
+  
+  for(int64 akey : gExpectedParametersLastByte)
+  {
+    copiedBytes = EthGetTokenData(packetHandle, gExpectedParametersLastByte[akey].Protocol, gExpectedParametersLastByte[akey].Token, elcount(data), data);
+    snprintf(
+    log,
+    elcount(log),
+    "Packet %d: Compare last byte of %s->%s: Expected = %d (0x%X), Observed = %d (0x%X)",
+    gCompareParametersCounter,
+    gExpectedParametersLastByte[akey].Protocol,
+    gExpectedParametersLastByte[akey].Token,
+    gExpectedParametersLastByte[akey].Value,
+    gExpectedParametersLastByte[akey].Value,
+    data[copiedBytes-1],
+    data[copiedBytes-1]);
+    write(log);
+    if(data[copiedBytes-1] != gExpectedParametersLastByte[akey].Value)
+    {
+      return kFalse;
+    } 
+  }
+  return kTrue;
+}
+
+/**
+ * Compares a single int64 parameter against an incoming packet.
+ * @param packetHandle The handle of the incoming packet.
+ * @param someIpHandle The handle of the SOME/IP packet to compare.
+ * @param parameter The parameter.
+ * @param outLog The log message of the comparison.
+ * @return If the parameter matches the packet.
+ */
+enum Bool CompareSingleParameter(long packetHandle, long someIpHandle, struct Parameter parameter, char outLog[])
+{    
+  char cmpOp[32];
+  char suffix[32];
+  byte data[1024];
+  int64 value;
+  int64 value2;
+  long result;
+  int copiedBytes;
+  int64 checksum;
+  int i;
+  word theoreticalChecksum;
+  enum Bool checkRes;
+  dword numberOfOptions, optionType;
+  char tempstr[255], tempstr2[255];
+  long pos;
+  
+  tempstr[0] = '\0';
+  tempstr2[0] = '\0';
+  outLog[0] = '\0';
+  suffix[0] = '\0';
+  cmpOp[0] = '\0';
+
+  checkRes = kTrue;
+  // Check for special tokens
+  if (strncmp(parameter.Protocol, "tcp", strlen(parameter.Protocol)) == 0 && 
+      (strncmp(parameter.Token, "timestamp", strlen(parameter.Token)) == 0 || strncmp(parameter.Token, "timestamp+", strlen(parameter.Token)) == 0))
+  {
+    write("if = true");
+    value = EthGetThisTimeNS() / 1000;      
+    result = EthGetLastError();
+    
+    if (result != 0)
+    {
+      testStep("CompareParameters", "Could not get value %s->%s; error code=%d", parameter.Protocol, "timestamp", result);
+      return kFalse;
+    }
+      
+    if (strncmp(parameter.Token, "timestamp+", 11) == 0)
+    {
+      parameter.Value += gTimestampLastSend;
+    }
+  } 
+  else if (strncmp(parameter.Protocol, "tcp", strlen(parameter.Protocol)) == 0 && 
+           strncmp(parameter.Token, "length", strlen(parameter.Token)) == 0)
+  {
+    value = EthGetTokenLengthBit(packetHandle, parameter.Protocol, "data") / 8;
+    result = EthGetLastError();
+    if (result != 0)
+    {
+      testStep("CompareParameters", "Could not get value %s->%s; error code=%d", parameter.Protocol, "data.length", result);
+      return kFalse;
+    }
+  }
+  //IPv6 Fragmentation header present
+  else if (strncmp(parameter.Protocol, "ipv6", strlen(parameter.Protocol)) == 0 
+        && strncmp(parameter.Token, "fragment.next", strlen(parameter.Token)) == 0)
+  {
+    // In case there is no fragmentation header an error will occur and the value will be set to zero.
+    // Other errors are ignored as a side effect.
+    value = GetTokenInt64(packetHandle, someIpHandle, parameter.Protocol, parameter.Token, result);
+  }
+  else if (strncmp(parameter.Protocol, "ipv4", strlen(parameter.Protocol)) == 0 &&
+           strncmp(parameter.Token, "tos", strlen(parameter.Token)) == 0)
+  {
+    value = EthGetTokenInt64(packetHandle, parameter.Protocol, "dscp");
+    result = EthGetLastError();
+    
+    if (result != 0)
+    {
+      testStep("CompareParameters", "Could not get value %s->%s; error code=%d", parameter.Protocol, "dscp", result);
+      return kFalse;
+    }
+    
+    value2 = EthGetTokenInt64(packetHandle, parameter.Protocol, "ecn");
+    result = EthGetLastError();
+    
+    if (result != 0)
+    {
+      testStep("CompareParameters", "Could not get value %s->%s; error code=%d", parameter.Protocol, "ecn", result);
+      return kFalse;
+    }
+    
+    value = value << 2;
+    value = value | value2;
+  }
+  else if(strncmp(parameter.Protocol, "SOME/IP", strlen(parameter.Protocol)) == 0 &&
+          strncmp(parameter.Token, "Option[x].", strlen("Option[x].")) == 0 &&
+          strncmp_off(parameter.Token, strlen(parameter.Token) - strlen(".Count"), ".Count", 0, strlen(".Count")) == 0)
+  {
+    //Count the number of times the option is used
+    pos = strstr(parameter.Token, ".") + 1;
+    substr_cpy(tempstr, parameter.Token, pos, strstr_off(parameter.Token, pos, ".") - pos, elcount(tempstr));
+    numberOfOptions = SomeIpGetValueDWord(someIpHandle, "Option");
+    value = 0;
+    for(i = 0; i < numberOfOptions; i++)
+    {
+      snprintf(tempstr2, elCount(tempstr2), "Option[%d]", i);
+      optionType = SomeIpGetValueDWord(someIpHandle, tempstr2);
+      switch(optionType)
+      {
+        case 0x04:
+          if(strncmp(tempstr, "IPv4Endpoint", strlen(tempstr)) == 0) value++;
+          break;
+        case 0x14:
+          if(strncmp(tempstr, "IPv4Multicast", strlen(tempstr)) == 0) value++;
+          break;
+      }
+    }
+  }
+  else if(strncmp(parameter.Protocol, "SOME/IP", strlen(parameter.Protocol)) == 0 &&
+          strncmp(parameter.Token, "Entry[x].", strlen("Entry[x].")) == 0 &&
+          strncmp_off(parameter.Token, strlen(parameter.Token) - strlen(".Count"), ".Count", 0, strlen(".Count")) == 0)
+  {
+    pos = strstr(parameter.Token, ".") + 1;
+    substr_cpy(tempstr, parameter.Token, pos, strstr_off(parameter.Token, pos, ".") - pos, elcount(tempstr));
+    numberOfOptions = SomeIpGetValueDWord(someIpHandle, "Entry");
+    value = 0;
+    for(i = 0; i < numberOfOptions; i++)
+    {
+      snprintf(tempstr2, elCount(tempstr2), "Entry[%d]", i);
+      optionType = SomeIpGetValueDWord(someIpHandle, tempstr2);
+      switch(optionType)
+      {
+        case 0x00:
+          if(strncmp(tempstr, "FindService", strlen(tempstr)) == 0) value++;
+          break;
+        case 0x01:
+          if(strncmp(tempstr, "OfferService", strlen(tempstr)) == 0) value++;
+          break;
+      }
+    }
+  }
+  else
+  {
+    value = GetTokenInt64(packetHandle, someIpHandle, parameter.Protocol, parameter.Token, result);
+    if (result != 0)
+    {
+      write("Could not get value %s->%s; error code=%d", parameter.Protocol, parameter.Token, result);
+      if(parameter.checkType != kNotCheck)
+        return kFalse;
+    }
+  }
+
+  /* determine operator symbol for comparison type */
+  switch (parameter.checkType)
+  {
+    case kEquals:
+      strncpy(cmpOp, "=", elcount(cmpOp));
+      if (value != parameter.Value)
+        checkRes = kFalse;
+      break;
+    case kValidChecksum:
+      strncpy(cmpOp, "=", elcount(cmpOp));
+      theoreticalChecksum = CalculateChecksum(packetHandle, parameter.Protocol);
+      if (value != theoreticalChecksum)
+        checkRes = kFalse;
+      break;
+    case kEqualsOrZero:
+      strncpy(cmpOp, "=", elcount(cmpOp));
+      strncpy(suffix, "or 0", elcount(cmpOp));
+      if (value != parameter.Value && value != 0)
+        checkRes = kFalse;
+      break;
+    case kNotEquals:
+      strncpy(cmpOp, "!=", elcount(cmpOp));
+      if (value == parameter.Value)
+        checkRes = kFalse;
+      break;
+    case kGreaterThanOrEqual:
+      strncpy(cmpOp, ">=", elcount(cmpOp));
+      if (value < parameter.Value)
+        checkRes = kFalse;
+      break;
+    case kGreaterThan:
+      strncpy(cmpOp, ">", elcount(cmpOp));
+      if (value <= parameter.Value)
+        checkRes = kFalse;
+      break;
+    case kLessThanOrEqual:
+      strncpy(cmpOp, "<=", elcount(cmpOp));
+      if (value > parameter.Value)
+        checkRes = kFalse;
+      break;
+    case kLessThan:
+      strncpy(cmpOp, "<", elcount(cmpOp));
+      if (value >= parameter.Value)
+        checkRes = kFalse;
+      break;
+    case kMultipleOf:
+      strncpy(cmpOp, "= n *", elcount(cmpOp));
+      if (value % parameter.Value != 0)
+        checkRes = kFalse;
+      break;
+    case kEqualsBitwiseOr:
+      snprintf(cmpOp, elcount(cmpOp), "(%lld | ", value);
+      snprintf(suffix, elcount(suffix), ") == %lld", parameter.Value);
+      if((value | parameter.Value) != parameter.Value)
+        checkRes = kFalse;
+      break;
+    case kBitwiseAndGreatherThanZero:
+      strncpy(cmpOp, "(", elcount(cmpOp));
+      snprintf(suffix, elcount(suffix), "& %lld) > 0", value);
+      if((value & parameter.Value) == 0)
+        checkRes = kFalse;
+      break;
+    case kBitwiseAndEqualsZero:
+      strncpy(cmpOp, "(", elcount(cmpOp));
+      snprintf(suffix, elcount(suffix), "& %lld) == 0", value);
+      if((value & parameter.Value) != 0)
+        checkRes = kFalse;
+      break;
+    case kNotCheck:
+      break;
+    default:
+      write("Checktype not implemented.");
+      break;
+  }
+
+  /* construct log message */
+  snprintf(
+    outLog,
+    elcount(outLog),
+    "Packet %d: Compare %s->%s: Expected %s %lld %s (0x%llX), Observed = %lld (0x%llX)",
+    gCompareParametersCounter,
+    parameter.Protocol,
+    parameter.Token,
+    cmpOp,
+    parameter.checkType == kValidChecksum ?
+    theoreticalChecksum :
+    parameter.Value,
+    suffix,
+    parameter.checkType == kValidChecksum ?
+    theoreticalChecksum :
+    parameter.Value,
+    value,
+    value);
+
+  write(outLog);
+
+  if (checkRes == kFalse)
+  {
+    return checkRes;
+  }
+  return kTrue;
+}
+
+/**
+ * Get the token of an ethernet or SOME/IP packet.
+ * @param packetHandle The handle of the packet.
+ * @param someIpHandle The handle of the SOME/IP packet.
+ * @param protocol The protocol designator.
+ * @param token The token designator.
+ */
+int64 GetTokenInt64(long packetHandle, long someIpHandle, char protocol[], char token[], long& errorCode)
+{
+  int64 result;
+  long pos, numberOfOptions, i;
+  dword optionType;
+  char temp[100], temp2[100];
+  byte buffer[1500];
+  temp[0] = '\0';
+  temp2[0] = '\0';
+  
+  if(strncmp(protocol, "SOME/IP", strlen(protocol)) == 0)
+  {
+    // ****** Non-SOME/IP protocol fields. Ordered alphabetically ****** 
+    if(strncmp(token, "DestinationAddress", strlen(token)) == 0)
+    {
+      result = swapdword(SomeIpGetDestinationAddress(someIpHandle));
+    }
+    else if(strncmp(token, "DestinationPort", strlen(token)) == 0)
+    {
+      result = SomeIpGetDestinationPort(someIpHandle);
+    }
+    else if(strncmp(token, "Protocol", strlen(token)) == 0)
+    {
+      result = SomeIpGetProtocol(someIpHandle);
+    }
+    else if(strncmp(token, "SecurityValidationState", strlen(token)) == 0)
+    {
+      result = SomeIpGetSecurityValidationState(someIpHandle);
+    }
+    else if(strncmp(token, "SourceAddress", strlen(token)) == 0)
+    {
+      result = swapdword(SomeIpGetSourceAddress(someIpHandle));
+    }
+    else if(strncmp(token, "SourcePort", strlen(token)) == 0)
+    {
+      result = SomeIpGetSourcePort(someIpHandle);
+    }
+    
+    // ****** SOME/IP header fields. Ordered by position in header ****** 
+    else if(strncmp(token, "MessageId", strlen(token)) == 0)
+    {
+      result = SomeIpGetMessageId(someIpHandle);
+    }
+    else if(strncmp(token, "ServiceId", strlen(token)) == 0) // First 16 bits of MessageId
+    {
+      result = (SomeIpGetMessageId(someIpHandle) & 0xFFFF0000) >> 16;
+    }
+    else if(strncmp(token, "EventBit", strlen(token)) == 0) //16th bit of messageId
+    {
+      result = (SomeIpGetMessageId(someIpHandle) & 0x00008000) >> 15;
+    }
+    else if(strncmp(token, "MethodId", strlen(token)) == 0) // Last 15 bits of MessageId
+    {
+      result = SomeIpGetMessageId(someIpHandle) & 0x00007FFF;
+    }
+    else if(strncmp(token, "Length", strlen(token)) == 0)
+    {
+      result = SomeIpGetLength(someIpHandle);
+    }
+    else if(strncmp(token, "RequestId", strlen(token)) == 0)
+    {
+      result = SomeIpGetRequestId(someIpHandle);
+    }
+    else if(strncmp(token, "ClientId", strlen(token)) == 0) // First 16 bits of RequestId
+    {
+      result = (SomeIpGetRequestId(someIpHandle) & 0xFFFF0000) >> 16;
+    } 
+    else if(strncmp(token, "SessionId", strlen(token)) == 0) // Last 16 bits of RequestId
+    {
+      result = SomeIpGetRequestId(someIpHandle) & 0x0000FFFF;
+    }
+    else if(strncmp(token, "ProtocolVersion", strlen(token)) == 0)
+    {
+      result = SomeIpGetProtocolVersion(someIpHandle);
+    }
+    else if(strncmp(token, "InterfaceVersion", strlen(token)) == 0)
+    {
+      result = SomeIpGetInterfaceVersion(someIpHandle);
+    }
+    else if(strncmp(token, "MessageType", strlen(token)) == 0)
+    {
+      result = SomeIpGetMessageType(someIpHandle);
+    }
+    else if(strncmp(token, "ReturnCode", strlen(token)) == 0)
+    {
+      result = SomeIpGetReturnCode(someIpHandle);
+    }
+    
+    // ****** SOME/IP Service Discovery Fields ****** 
+    else if(strncmp(token, "Reboot", strlen(token)) == 0) // First bit of Flags field.
+    {
+      result = (SomeIpGetValueInt64(someIpHandle, "Flags") & 0x80) >> 7;
+    }
+    else if(strncmp(token, "Unicast", strlen(token)) == 0) // Second bit of Flags field.
+    {
+      result = (SomeIpGetValueInt64(someIpHandle, "Flags") & 0x40) >> 6;
+    }
+    else if(strncmp(token, "Option[x].", strlen("Option[x].")) == 0)
+    {
+      //Search for the index of the option with the given name and replace the "x" with it
+      pos = strstr(token, ".") + 1;
+      substr_cpy(temp, token, pos, strstr_off(token, pos, ".") - pos, elcount(temp));
+      numberOfOptions = SomeIpGetValueDWord(someIpHandle, "Option");
+      for(i = 0; i < numberOfOptions; i++)
+      {
+        snprintf(temp2, elCount(temp2), "Option[%d]", i);
+        optionType = SomeIpGetValueDWord(someIpHandle, temp2);
+        if(optionType == 0x04 && strncmp(temp, "IPv4Endpoint", strlen(temp)) == 0)
+          break;
+        if(optionType == 0x06 && strncmp(temp, "IPv6Endpoint", strlen(temp)) == 0)
+          break;
+        if(optionType == 0x14 && strncmp(temp, "IPv4Multicast", strlen(temp)) == 0)
+          break;
+        if(optionType == 0x16 && strncmp(temp, "IPv6Multicast", strlen(temp)) == 0)
+          break;
+      }
+      str_replace(token, "Option[x]", temp2);
+      result = SomeIpGetValueInt64(someIpHandle, token);
+    }
+    
+    // ****** Misc SOME/IP Fields
+    else if(strncmp(token, "PayloadLength", strlen(token)) == 0)
+    {
+      result = SomeIpGetData(someIpHandle, elcount(buffer), buffer);
+    }
+    else
+    {
+      //Refer to <Syntax for Predefined Service Discovery (SD) Access Paths> help page. 
+      result = SomeIpGetValueInt64(someIpHandle, token);
+    }
+    
+    errorCode = SomeIpGetLastError();
+  }
+  else // No SOME/IP token, use the normal Ethernet IL library
+  {
+    result = EthGetTokenInt64(packetHandle, protocol, token);
+    errorCode = EthGetLastError();
+  }
+  return result;
+}
+
+/**
+ * Get the token data of an ethernet or SOME/IP packet.
+ * @param packetHandle The handle of the packet.
+ * @param someIpHandle The handle of the SOME/IP packet.
+ * @param protocol The protocol designator.
+ * @param token The token designator.
+ * @param offset The offset at which the data is read.(Ethernet only)
+ * @param bufferSize The length of the resulting data.
+ * @param buffer The resulting data.
+ * @param errorCode The resulting error code.
+ */
+long GetTokenData(long packetHandle, long someIpHandle, char protocol[], char token[], long offset, long bufferSize, byte buffer[], long& errorCode)
+{
+  long copiedBytes;
+
+  // All SOME/IP data parameters excpet data are assumed to represent an IP addresss
+  if(strncmp(protocol, "SOME/IP", elcount(protocol)) == 0)
+  {
+    if(strncmp(token, "data", elcount(token)) == 0)
+    {
+      copiedBytes = SomeIpGetData(someIpHandle, elcount(buffer), buffer);
+    }
+    else if(strncmp(token, "DestinationAddress", strlen(token)) == 0)
+    {
+      if(SomeIpGetDestinationAddress(someIpHandle, buffer) == 0) // Try to get IPv6 Address
+      {
+        copiedBytes = 16;
+      }
+      else
+      {
+        //If the Address was IPv4, get it instead
+        buffer.dword(0) = SomeIpGetDestinationAddress(someIpHandle);
+        copiedBytes = 4;
+      }
+    }
+    else if(strncmp(token, "SourceAddress", strlen(token)) == 0)
+    {
+      if(SomeIpGetSourceAddress(someIpHandle, buffer) == 0) // Try to get IPv6 Address
+      {
+        copiedBytes = 16;
+      }
+      else
+      {
+        //If the Address was IPv4, get it instead
+        buffer.dword(0) = SomeIpGetSourceAddress(someIpHandle);
+        copiedBytes = 4;
+      }
+    }
+    else if(strncmp(token, "Option[x].", strlen("Option[x].")) == 0)
+    {
+      char temp[100], temp2[100], ipAddressString[100];
+      int pos, i, numberOfOptions;
+      dword optionType;
+      //Search for the index of the option with the given name and replace the "x" with it
+      pos = strstr(token, ".") + 1;
+      substr_cpy(temp, token, pos, strstr_off(token, pos, ".") - pos, elcount(temp));
+      numberOfOptions = SomeIpGetValueDWord(someIpHandle, "Option");
+      for(i = 0; i < numberOfOptions; i++)
+      {
+        snprintf(temp2, elCount(temp2), "Option[%d]", i);
+        optionType = SomeIpGetValueDWord(someIpHandle, temp2);
+        if(optionType == 0x04 && strncmp(temp, "IPv4Endpoint", strlen(temp)) == 0)
+          break;
+        if(optionType == 0x06 && strncmp(temp, "IPv6Endpoint", strlen(temp)) == 0)
+          break;
+        if(optionType == 0x14 && strncmp(temp, "IPv4Multicast", strlen(temp)) == 0)
+          break;
+        if(optionType == 0x16 && strncmp(temp, "IPv6Multicast", strlen(temp)) == 0)
+          break;
+      }
+      str_replace(token, "Option[x]", temp2);
+      
+      SomeIpGetValueString(someIpHandle, token, elcount(ipAddressString), ipAddressString);
+      copiedBytes = BytesPerIpVersion(ConvertIpAddressStringToByteArray(ipAddressString, buffer));
+    }
+    else
+    {
+      write("Error: Trying to extract non IP Address data parameter from SOME/IP");
+    }
+      
+    errorCode = SomeIpGetLastError();
+  }
+  else if(strncmp(protocol, "tcp", elcount(protocol)) == 0 && strncmp(token, "optionalMss", strlen(token)) == 0)
+  {
+    copiedBytes = EthGetTokenData(packetHandle, protocol, "option2.data", offset, elcount(buffer), buffer);
+    errorCode = EthGetLastError();
+  }
+  else
+  {
+    copiedBytes = EthGetTokenData(packetHandle, protocol, token, offset, elcount(buffer), buffer);
+    errorCode = EthGetLastError();
+  }
+  return copiedBytes;
+}
+
+
+/**
+* Starts observation of incoming packets on channel 1
+* @param expectedResult The number of expected messages or noCheck.
+*/
+void StartObservationOfIncomingPackets(enum ExpectedResult expectedResult)
+{
+  StartObservationOfIncomingPackets(1, expectedResult);
+}
+
+void StartObservationOfIncomingPackets(long channel, enum ExpectedResult expectedResult)
+{
+  long expectedMessages,i;
+  switch(expectedResult)
+  {
+    case kNoAnswerExpected:
+      gExpectedMessagesPerChannel[channel] = 0;
+      break;
+    case kAnswerExpected:
+      gExpectedMessagesPerChannel[channel] = 1;
+      break;
+    case kTwoAnswersExpected:
+      gExpectedMessagesPerChannel[channel] = 2;
+      break;
+    case kThreeAnswersExpected:
+      gExpectedMessagesPerChannel[channel] = 3;
+      break;
+    case kWaitUntilTimeout:
+      gExpectedMessagesPerChannel[channel] = 0x7FFFFFFF; //maximum value for 4 byte signed integer
+      break;
+  }
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    gReceivedMessagesPerChannel[i] = 0;
+  }
+  gObservingEthPackets = kTrue;
+  gReportOnFailure = expectedResult == kAnswerExpected || expectedResult == kTwoAnswersExpected || expectedResult == kThreeAnswersExpected ?
+                    kTrue : kFalse;
+}
+
+/**
+ * Waits for an incoming packet for a specific amount of time.
+ * @param expectedResult A value indicathing whether the packet is expected or unexpected.
+ * @param timeoutMilliseconds The amount of time in milliseconds to wait for the packet.
+ * @return Returns 0 on success and -1 on failure.
+ */
+long WaitForIncomingPacket(enum ExpectedResult expectedResult, long timeoutMilliseconds)
+{
+  long result;
+  long flag;
+  long i;
+
+  result = -1;
+
+  if (expectedResult == kNoCheck)
+    result = 0;
+
+
+  
+  write("before testWaitForTextEvent, time=%d", timeNow());
+  flag = testWaitForTextEvent(gPacketReceivedEventName, timeoutMilliseconds);
+  write("after testWaitForTextEvent, flag=%d");
+
+  result = 0;
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    write("WaitForIncomingPacket i=%d gExpectedMessagesPerChannel[i]=%d gReceivedMessagesPerChannel[i]=%d", i, gExpectedMessagesPerChannel[i], gReceivedMessagesPerChannel[i]);
+    if(gExpectedMessagesPerChannel[i] != -1 && gReceivedMessagesPerChannel[i] != gExpectedMessagesPerChannel[i])
+    {
+      result = -1;
+      break;
+    }
+  }
+
+  gObservingEthPackets = kFalse;
+  return result;
+}
+
+/**
+ * Waits for several messages and checks that the interval between 3rd last and 2nd last an the interval between
+ * 2nd last and last is inside a given range
+ * @param timeout The timeout
+ * @param lastTimeIntervalMinimum The minimum time interval between the last two messages.
+ * @param lastTimeIntervalMaximum The maximum time interval between the last two messages.
+ * @param secondLastTimeIntervalMinimum The minimum time interval between the second last and last message. Set to zero to ignore.
+ * @param secondLastTimeIntervalMaximum The maximum time interval between the second last and last message. Set to zero to ignore.
+ * @param messageName The message type in string format. e.g. "ARP request"
+ */
+void WaitForSeveralMessages(
+  long timeout,
+  long lastTimeIntervalMinimum,
+  long lastTimeIntervalMaximum,
+  long secondLastTimeIntervalMinimum,
+  long secondLastTimeIntervalMaximum,
+  char messageName[])
+{
+  char output[256], tempstr[256];
+  enum Bool success;
+  dword timediff;
+  
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+  testWaitForTimeout(timeout);
+  gObservingEthPackets = kFalse;
+  
+  snprintf(output, elcount(output), "%d %s messages received. ", gReceivedMessagesPerChannel[1], messageName);
+  success = kTrue;
+  
+  
+  if(! (lastTimeIntervalMinimum == 0 && lastTimeIntervalMaximum == 0))
+  {
+    if(gTimeDifferencesOfIncomingPackets.size() < 1)
+    {
+      success = kFalse;
+      strncat(output, "Not enough packets received to determine time interval between last two messages. ", elcount(output));
+    }
+    else
+     {
+     timediff = gTimeDifferencesOfIncomingPackets[gTimeDifferencesOfIncomingPackets.size()];
+     if(timediff < lastTimeIntervalMinimum || timediff > lastTimeIntervalMaximum)
+     {
+       success = kFalse;
+     }
+     snprintf(tempstr, elcount(tempstr), "Time interval between last two messages was %d ms (expected: between %d and %d ms). ",
+     timediff,
+     lastTimeIntervalMinimum,
+     lastTimeIntervalMaximum);
+     strncat(output, tempstr, elcount(output));
+    }
+  }
+  
+  if(! (secondLastTimeIntervalMinimum == 0 && secondLastTimeIntervalMaximum == 0))
+  {
+    if(gTimeDifferencesOfIncomingPackets.size() < 2)
+    {
+      success = kFalse;
+      strncat(output, "Not enough packets received to determine time interval between third last and second last message. ", elcount(output));
+    }
+    else
+     {
+     timediff = gTimeDifferencesOfIncomingPackets[gTimeDifferencesOfIncomingPackets.size() - 1];
+     if(timediff < secondLastTimeIntervalMinimum || timediff > secondLastTimeIntervalMaximum)
+     {
+       success = kFalse;
+     }
+     snprintf(tempstr, elcount(tempstr), "Time interval between third last and second last message was %d ms (expected: between %d and %d ms). ",
+     timediff,
+     secondLastTimeIntervalMinimum,
+     secondLastTimeIntervalMaximum);
+     strncat(output, tempstr, elcount(output));
+    }
+  }
+  
+  if(success == kTrue)
+  {
+    testStepPass("WaitForSeveralMessages", output);
+  }
+  else
+  {
+    testStepFail("WaitForSeveralMessages", output);
+  }
+  InternalClearAllParameters();
+}
+
+
+/**
+* Should be called when an ethernet packet is received that matches the conditions
+*/
+void EthernetPacketReceived(long channel)
+{
+  long i;
+  enum Bool supplyEvent;
+  
+  gTimestampsOfIncomingPackets[gTimestampsOfIncomingPacketsIndex] = timeNow();
+  if(gTimestampsOfIncomingPacketsIndex >= 1)
+  {
+    gTimeDifferencesOfIncomingPackets[gTimestampsOfIncomingPacketsIndex] = 
+       (gTimestampsOfIncomingPackets[gTimestampsOfIncomingPacketsIndex] - 
+        gTimestampsOfIncomingPackets[gTimestampsOfIncomingPacketsIndex - 1])/100;
+  }
+  gTimestampsOfIncomingPacketsIndex++;
+
+  gReceivedMessagesPerChannel[channel]++;
+  write("EthernetPacketReceived; new value for gReceivedMessagesPerChannel[%d]=%d", channel, gReceivedMessagesPerChannel[channel]);
+  if (AllPacketsReceived())
+    testSupplyTextEvent(gPacketReceivedEventName);
+}
+
+/**
+ * Checks whether all expected packets have been received and waiting can be skipped
+ * @return true if all messages have been received, false otherwise
+ */
+enum Bool AllPacketsReceived()
+{
+  long i;
+  for(i = 1; i <= gMaximumChannelNumber; i++)
+  {
+    write("%d gExpectedMessagesPerChannel[i]=%d gReceivedMessagesPerChannel[i]=%d", i, gExpectedMessagesPerChannel[i], gReceivedMessagesPerChannel[i]);
+    if(gExpectedMessagesPerChannel[i] != -1)
+    {
+      if(gExpectedMessagesPerChannel[i] == 0 && gReceivedMessagesPerChannel[i] == 0)
+      {
+        return kFalse;
+      }
+      if(gExpectedMessagesPerChannel[i] > 0 && gExpectedMessagesPerChannel[i] != gReceivedMessagesPerChannel[i])
+      {
+        return kFalse;
+      }
+    }
+  }
+  return kTrue;
+}

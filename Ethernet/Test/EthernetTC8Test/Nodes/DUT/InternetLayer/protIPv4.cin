@@ -1,0 +1,281 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "protICMPv4.cin"
+  #include "../TransportLayer/protUDP.cin"
+  #include "../TransportLayer/protTCP.cin"
+  #include "../TransportLayer/protTCPIPStackCallback.cin"
+  #include "../ApplicationLayer/protSOMEIP.cin"
+  
+}
+
+variables
+{  
+  enum IPv4_Protocol
+  {
+    IPv4_Prot_ICMPv4 = 1,
+    IPv4_Prot_IGMP = 2,
+    IPv4_Prot_TCP = 6,
+    IPv4_Prot_UDP = 17,
+    
+    IPv4_Prot_Invalid = 0xFF
+  };
+  
+  struct _Token_IPv4
+  {
+    dword dwSource;
+    dword dwDestination;
+    enum IPv4_Protocol protocol;
+    byte bIhl;    // Internet Header length
+    int offset; // bit offset for upper layer
+    byte bflags_MF; // More Fragments of Control Flags
+
+    struct _Token_UDP udp;
+    struct _Token_TCP tcp;
+    struct _Token_ICMPv4 icmpv4;
+  };
+  
+}
+
+/// <initialize>
+// initialization IPv4 Token data from received ethernet packet
+void initIpv4TokenData(struct _Token_IPv4 data)
+{
+  int i;
+  data.dwSource = 0;  
+  data.dwDestination = 0;  
+  data.protocol = IPv4_Prot_Invalid;  
+  data.bIhl = 0;  
+  data.offset = 0;
+  data.bflags_MF = 0;
+  
+  initIcmpv4TokenData(data.icmpv4);
+  initUdpTokenData(data.udp);
+  initTcpTokenData(data.tcp);
+}
+
+/// <getPacketData>
+// get the IPv4 token data 
+int getIpv4Packet(struct _Token_IPv4 data, long handle)
+{
+  int iRet;
+  
+  iRet = 0;
+    
+  getIpv4PacketHeaderData(data, handle);
+  
+  switch(data.protocol)
+  {
+    // ICMPv4
+    case IPv4_Prot_ICMPv4:
+      iRet = getIcmpv4Packet(data.icmpv4, handle);
+      break;
+    // TCP
+    case IPv4_Prot_TCP:
+      iRet = getTcpPacket(data.tcp, handle);
+      break;
+    // UDP
+    case IPv4_Prot_UDP:
+      iRet = getUdpPacket(data.udp, handle);
+      break;
+    // other
+    default:
+      // Send ICMP Destination Unreachable for unknown protocol(e.g.0x8F)
+      // Continue the process if the received frame is not ICMPv4, TCP and UDP
+      iRet = 1;
+      break;
+  }  
+  
+  return iRet;
+}
+
+/// <getPacketData>
+// get IPv4 Packet Header Data
+void getIpv4PacketHeaderData(struct _Token_IPv4 data, long handle)
+{
+  data.bIhl = EthGetTokenInt(handle, "ipv4", "ihl") * 4;  
+  data.protocol = (enum IPv4_Protocol)EthGetTokenInt(handle, "ipv4", "protocol");
+  data.bflags_MF = EthGetTokenInt(handle, "ipv4", "flags") & 0x01;
+  
+  data.dwDestination = EthGetTokenInt(handle, "ipv4", "destination", kBYTE_OFFSET, kBYTE_LENGTH_IP, kBYTE_ORDER_INTEL);
+  data.dwSource = EthGetTokenInt(handle, "ipv4", "source", kBYTE_OFFSET, kBYTE_LENGTH_IP, kBYTE_ORDER_INTEL);
+}
+
+/// <sendPacket/constructHeader>
+// construct IPv4 header packet handle
+void constructIpv4Header(dword srcIpAddr, dword dstIpAddr, long lPacketHandle)
+{
+  EthInitProtocol(lPacketHandle, "ipv4");
+  EthSetTokenInt(lPacketHandle, "ipv4", "source", kBYTE_OFFSET, kBYTE_LENGTH_IP, kBYTE_ORDER_INTEL, srcIpAddr);
+  EthSetTokenInt(lPacketHandle, "ipv4", "destination", kBYTE_OFFSET, kBYTE_LENGTH_IP, kBYTE_ORDER_INTEL, dstIpAddr);
+}
+
+/// <sendPacket>
+// construct IPv4 packet handle
+// ret 1:succeed 0:failed
+int constructIpv4Packet(struct _Token_IPv4 data, long lPacketHandle)
+{
+  int iRet;
+  
+  iRet = 0;
+  
+  constructIpv4Header(data.dwSource, data.dwDestination, lPacketHandle);
+ 
+  // make upper layer packet
+  switch(data.protocol)
+  {
+    // ICMPv4
+    case IPv4_Prot_ICMPv4:
+      iRet = constructIcmpv4Packet(data, lPacketHandle);
+      break;
+    // TCP
+    case IPv4_Prot_TCP:
+      iRet = constructTcpPacket(data.tcp, lPacketHandle);
+      break;
+    // UDP
+    case IPv4_Prot_UDP:
+      iRet = constructUdpPacket(data.udp, lPacketHandle);
+      break;
+      
+    default:
+      break;
+  }
+  
+  return iRet;
+}
+
+/// <makePacketData>
+// make IPv4 packet
+// return 1:receive is nessasary  0:receive is unnecessary
+int makeIpv4Packet(struct _Token_Eth_Packet recvData, struct _Token_IPv4 sendData)
+{
+  int iRet;
+  
+  iRet = 0;
+  
+  sendData.dwSource = recvData.ipv4.dwDestination;
+  sendData.dwDestination = recvData.ipv4.dwSource;
+ 
+  // make upper layer packet
+  switch(recvData.ipv4.protocol)
+  {
+    // ICMPv4
+    case IPv4_Prot_ICMPv4:
+      sendData.protocol = IPv4_Prot_ICMPv4;
+      iRet = makeIcmpv4Packet(recvData, sendData);
+      break;
+    // TCP
+    case IPv4_Prot_TCP:
+      sendData.protocol = IPv4_Prot_TCP;
+      break;
+    // UDP
+    case IPv4_Prot_UDP:
+      sendData.protocol = IPv4_Prot_UDP;
+        iRet = makeUdpPacket(recvData.ipv4.udp, sendData.udp);
+      break;
+      
+    default:
+      // Send ICMP Destination Unreachable for unknown protocol(e.g.0x8F)
+      // Send if the received frame is not ICMPv4, TCP and UDP
+      sendData.protocol = IPv4_Prot_ICMPv4;
+      iRet = makeIcmpv4Packet(recvData, sendData);
+      break;
+  }
+  return iRet;
+}
+
+/// <processPacketData>
+// process when IPv4 protocol received
+// ret 1:succeed 0:failued
+// This function should be removed if TCP/IP stack is used.
+int procIpv4(struct _Token_IPv4 recvData)
+{
+  int iRet;
+  
+  iRet = 0;
+  
+  switch(recvData.protocol)
+  {
+    // ICMPv4
+    case IPv4_Prot_ICMPv4:
+      // now handled in OnIpReceivePrepare callback
+      break;
+    // TCP
+    case IPv4_Prot_TCP:
+      //@@@ remove because TCP/IP stack is used.
+//      iRet = procTcp(recvData.tcp);
+      break;
+    // UDP
+    case IPv4_Prot_UDP:
+      //@@@ remove because TCP/IP stack is used.
+//      iRet = procUdp(recvData.udp);
+      break;
+      
+    default:
+      break;
+  }  
+
+  return iRet;
+}
+
+// initialize IPv4 address
+int initIPv4Address()
+{
+  long lResult;
+  //IpAddAdapterAddress
+  lResult= ipAddAdapterAddress(kdwIPV4_INTERFACE_INDEX,  GetDutIpAsNummer(), GetDutSubnetMask());
+  if(lResult != 0)
+  {
+    write( "IpAddAdapterAddress failed, error code %d, last error %d", lResult, IpGetLastError());
+  }
+  // Open UDP port for Testability
+  initTestabilityUDPSocket();
+  
+  //initialize UDP socket handle array
+  initUDPSocketArray();
+
+  //initialize TCP socket handle array
+  initTCPSocketArray();
+  
+  return lResult;
+}
+
+int remoteIPv4Address()
+{
+  long lResult;
+  
+  // Close UDP port for Testability
+  clsoeTestabilityUDPSocket();
+  
+  //IpAddAdapterAddress
+  lResult= ipRemoveAdapterAddress(kdwIPV4_INTERFACE_INDEX,  GetDutIpAsNummer(), GetDutSubnetMask());
+  if(lResult != 0)
+  {
+    write( "ipRemoveAdapterAddress failed, error code %d, last error %d", lResult, IpGetLastError());
+  }
+  return lResult;
+  
+}

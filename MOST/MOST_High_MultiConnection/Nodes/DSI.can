@@ -1,0 +1,565 @@
+/*@@includes:*/
+includes
+{
+#include "MOST_MHP.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  char gECU[32]  = "DSI";
+  const long cBufferSize = 65536;
+  const long cDefaultFrameSize = cDefaultUsrDataSize_Packet;
+  const long cDefaultFramesPerBlock = 40;
+  const long cDefaultAIR = 5000;
+  const long cDefaultPrio = 0x7F;
+
+  ////////////////////////////////////////////////////////////
+  // Data Sink 1
+  dword gDSI1_FBlockID  = 0x51;     // VectorPhoneBook
+  dword gDSI1_InstID    = 0x01;
+  dword gDSI1_FktID     = 0x400;    // Phonebook
+  dword gDSI1_OpTypeID  = 0xC;      // Status
+  char  gDSI1_Name[100]  = "VectorPhoneBook.Phonebook.Status";
+  ///////////////////////////////////////////////////////////////////////////////////////////
+  // Prefix for callback functions of port is passed to DLL on port creation (see PreStart())
+  // If you change it, callback functions with corresponding prefixes need to be renamed too 
+  char  gDSI1_Prefix[50] = "VPB_Phonebook_";
+  ///////////////////////////////////////////////////////////////////////////////////////////
+  byte  gDSI1_Buffer[cBufferSize]; 
+  long  gDSI1_BufferPos;
+  dword gDSI1_PortHandle;
+  long  gDSI1_RecvBlk;
+
+  ////////////////////////////////////////////////////////////
+  // Data Sink 2 
+  dword gDSI2_FBlockID  = 0x52;     // Navigation
+  dword gDSI2_InstID    = 0x1;
+  dword gDSI2_FktID     = 0xE01;    // Waypoints
+  dword gDSI2_OpTypeID  = 0xC;      // Status
+  char  gDSI2_Name[100]  = "Navigation.Waypoints.Status";
+  ///////////////////////////////////////////////////////////////////////////////////////////
+  // Prefix for callback functions of port is passed to DLL on port creation (see PreStart())
+  // If you change it, callback functions with corresponding prefixes need to be renamed too 
+  char  gDSI2_Prefix[50] = "Nav_Waypoints_";
+  ///////////////////////////////////////////////////////////////////////////////////////////
+  byte  gDSI2_Buffer[cBufferSize];
+  long  gDSI2_BufferPos; 
+  dword gDSI2_PortHandle;
+  long  gDSI2_RecvBlk;
+
+  long  gDSI_Active;
+
+  long gUseMHP2_3;
+}
+/*@@end*/
+
+/*@@caplFunc:MH_IndRequestConnection(dword,dword,dword,dword,dword,dword,dword):*///callback
+MH_IndRequestConnection(dword dsoDevice, dword funcBlockID, dword instID, dword fktID, dword opTypeID, dword prio, dword  frameSize)
+{
+  ////////////////////////////////////////////////////////////////////////////
+  // Callback is triggered, as soon as the node receives a REQUEST CONNECTION
+
+  if((funcBlockID == gDSI1_FBlockID) &&
+     (instID   == gDSI1_InstID) &&
+     (fktID    == gDSI1_FktID) &&
+     (opTypeID == gDSI1_OpTypeID))
+  { 
+    //////////////////////////////////////////
+    // accept connection by assigning a port 
+    MH_AcceptConnection(gDSI1_PortHandle);
+    // reset byte counter for each connection 
+    @sysvar::DSI1::ByteCnt = 0;
+    return;
+  }
+
+  if((funcBlockID == gDSI2_FBlockID) &&
+     (instID   == gDSI2_InstID) &&
+     (fktID    == gDSI2_FktID) &&
+     (opTypeID == gDSI2_OpTypeID))
+  { 
+    //////////////////////////////////////////
+    // accept connection by assigning a port 
+    MH_AcceptConnection(gDSI2_PortHandle);
+    // reset byte counter for each connection 
+    @sysvar::DSI2::ByteCnt = 0;
+    return;
+  }
+  //////////////////////////////////////////////////////////////////////////
+  // Connection is ignored if neither MH_AcceptConnection nor MH_DenyConnection
+  // is called within this callback.
+  // Explicit denial of connection is done by a calling MH_DenyConnection, e.g. 
+  // MH_DenyConnection(prio + 1). Then START CONNECTION with given priority is
+  // sent to the DSO.
+  // MH_DenyConnection(prio + 1);
+}
+/*@@end*/
+
+/*@@caplFunc:VPB_Phonebook_MH_IndRxBufferRequested(dword,long):*///callback
+VPB_Phonebook_MH_IndRxBufferRequested (dword handle, long isPacketBegin)
+{
+  ////////////////////////////////////////////////////////////////////////////////////
+  // A buffer is requested as soon as the transmission of the first block is started, 
+  // (see also function ResetBufferDSI1) or if the previously provided buffer is full.
+  
+  // Set byte buffer to store packet data ...
+  MH_SetRxBuffer(handle, gDSI1_Buffer, cBufferSize);
+  // ... or set a file (likewise in function ResetBufferDSI1)
+  // MH_SetRxBuffer(handle, 0, "C:\\Temp\\MHPBuffer.txt");
+
+  if(isPacketBegin == 1)
+  {
+    writeDbgLevel(3,"CAPL: %s: DSI1 requests rx buffer for first part of packet.", gECU);
+  }
+  else
+    writeDbgLevel(3,"CAPL: %s: DSI1 requests rx buffer for next part of packet.", gECU);
+
+  @sysvar::DSI1::IsActive = 1;   // indicate transmission activity => activate LED
+  gDSI1_BufferPos = 0;             // reset write position of buffer
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  mostApplicationNode();
+  /////////////////////////////////////////////////////////////////////
+  // Since a unique prefix is used for each port, a evaluation of the
+  // handle parameter in each callback is not necessary
+  
+  if (mostGetSpeedGrade(mostGetChannel()) == 3)
+  {
+    MH_UseProtocolRev(0, 3);
+    gUseMHP2_3 = 1;
+
+    if(!isSimulated())
+    {
+      MH_SetRxCapacity(0, cDefaultFramesPerBlock, 500, 30000, cDefaultPrio);
+    }
+    else
+    {
+      MH_SetRxCapacity(0, cDefaultFramesPerBlock, cDefaultUsrDataSize_Packet, cDefaultAIR, cDefaultPrio);
+    }
+  }
+  else
+  {
+    MH_SetRxCapacity(0, cDefaultFramesPerBlock, cDefaultFrameSize, cDefaultAIR, cDefaultPrio);
+  }
+
+  // register MHP rx port for DSI1 instance 
+  gDSI1_PortHandle = MH_CreateRxPort(gDSI1_Prefix);  
+  // register a MHP rx port for DSI2 instance
+  gDSI2_PortHandle = MH_CreateRxPort(gDSI2_Prefix);     
+}
+/*@@end*/
+
+/*@@caplFunc:VPB_Phonebook_MH_IndRxBufferFinished(dword,long,long):*///callback
+VPB_Phonebook_MH_IndRxBufferFinished (dword handle, long filledSize, long reason)
+{
+  writeDbgLevel(3, "CAPL: %s: DSI1 has written receive buffer with %d bytes", gECU, filledSize);
+  ///////////////////////////////////////////////////////////////////////////////////
+  // This function is called whenever the receiver buffer is full and the application 
+  // has to handle the received data. Additionally it is called when the connection 
+  // is closed to provide the remaining application data
+  // In this demo, processing of the received data takes place in the block handler
+  // (MH_IndRxBlckFinished) in order to update the panel controls a soon as possible. 
+  // In a normal application, this callback here is the place to save and process the 
+  // received data. 
+
+  @sysvar::DSI1::IsActive = 0;        // reset activity status => deactivate LED
+  if(reason == cReasonRxBuff_Packet)
+    writeDbgLevel(3, "CAPL: %s: DSI1 has finished reception of packet with %d bytes.", gECU, filledSize);
+  else
+    writeDbgLevel(3, "CAPL: %s: DSI1 has finished reception of %d bytes. Buffer is full.", gECU, filledSize);
+
+}
+/*@@end*/
+
+/*@@caplFunc:VPB_Phonebook_MH_IndRxConnectionClosed(dword,long):*///callback
+VPB_Phonebook_MH_IndRxConnectionClosed(dword handle, long res)
+{
+  @sysvar::DSI1::IsActive = 0;  // reset activity status => deactivate LED
+  ReportErrorsToWrite(res, gDSI1_Name);
+  gDSI1_RecvBlk = 0;
+  CheckHold(1);
+}
+/*@@end*/
+
+/*@@caplFunc:ReportErrorsToWrite(long,char[]):*///function
+ReportErrorsToWrite (long res, char sName[])
+{
+  switch (res)
+  {
+    case 0:     writeDbgLevel(0, "CAPL: %s: %s Result (%d): OK", gECU, sName, res);     break;
+    case 1:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Send retries exceeded", gECU, sName, res);          break;
+    case 2:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Trans retries exceeded", gECU, sName, res);         break;
+    case 3:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of End retries exceeded", gECU, sName, res);           break;
+    case 4:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Ready retries exceeded", gECU, sName, res);         break;
+    case 5:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Frame Retries exceeded", gECU, sName, res);         break;
+    case 6:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Receive retries execeeded", gECU, sName, res);      break;
+    case 10:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Receive buffer could not be provided", gECU, sName, res);     break;
+    case 11:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Connection rejected via higher priority", gECU, sName, res);  break;
+    case 13:    writeDbgLevel(0, "CAPL: %s: %s Result (%d): Transmission terminated by receiver", gECU, sName, res);     break;
+    case 14:    writeDbgLevel(0, "CAPL: %s: %s Result (%d): Transmission terminated by sender", gECU, sName, res);       break;
+    case 15:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Transmission killed by sender", gECU, sName, res);            break;
+    case 16:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Parameter out of range", gECU, sName, res);                   break;
+    default:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Unknown error", gECU, sName, res);                            break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:VPB_Phonebook_MH_IndRxBlockFinished(dword,long,long,long):*///callback
+VPB_Phonebook_MH_IndRxBlockFinished(dword handle, long blockSize, long segId, long blockCnt)
+{
+  ///////////////////////////////////////////////////////////////////////////////
+  // This optional callback is implemented to have a direct visualization of the 
+  // transmission process (set counters and update hex edit control)
+
+  long size;
+  byte data[cBufferSize];
+  long dataSize, i, maxSize;
+
+  if((segId == cSegID_Single) || (segId == cSegID_Last))
+    @sysvar::DSI1::IsActive = 0;  // last block received => deactivate LED 
+
+  // recalculate total byte received 
+  size = sysGetVariableInt(sysvar::DSI1::ByteCnt);
+  size += blockSize;
+
+  // copy new block data from DSI buffer into hex edit control 
+  sysGetVariableData(sysvar::DSI1::DataBuffer, data, dataSize);
+  @sysvar::DSI1::DataSize = dataSize;
+
+  maxSize = (dataSize + blockSize < cBufferSize) ? dataSize + blockSize : cBufferSize;
+  for (i = dataSize; i < maxSize; i++)
+  {
+    data[i] = gDSI1_Buffer[gDSI1_BufferPos];
+    gDSI1_BufferPos++;
+  }
+  sysSetVariableData(sysvar::DSI1::DataBuffer, data, i);
+  @sysvar::DSI1::DataSize = i;
+
+  gDSI1_RecvBlk = 0;
+  if (gUseMHP2_3 && gDSI2_RecvBlk)
+    MH_SetRxOnHold(gDSI1_PortHandle, 1, cRxHoldEvent);
+  CheckHold(1);
+
+  // Visualization only
+  @sysvar::DSI1::ByteCnt = size;  // total user data bytes received
+  writeDbgLevel(3, "CAPL: %s: DSI1 finished reception of block %d with %d bytes.", gECU, blockCnt, blockSize);
+
+}
+/*@@end*/
+
+/*@@caplFunc:ResetBufferDSI1():*///function
+ResetBufferDSI1()
+{
+  byte clearData[10];  // dummy data 
+  sysSetVariableData(sysvar::DSI1::DataBuffer, clearData, 0);
+
+  // Set byte buffer to store packet data ...
+  MH_SetRxBuffer(gDSI1_PortHandle, gDSI1_Buffer, cBufferSize);
+  // ... or set a file to which next packet is appended to
+  //MH_SetRxBuffer(gDSI1_PortHandle, 1, "C:\\Temp\\MHPBuffer.txt");
+
+  // reset write position of buffer
+  gDSI1_BufferPos = 0;
+
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  // display symbolic addresses of data sinks in panel
+  sysSetVariableString(sysvar::DSI1::SymbolicAddress, gDSI1_Name);
+  sysSetVariableString(sysvar::DSI2::SymbolicAddress, gDSI2_Name);
+}
+/*@@end*/
+
+/*@@sysvarChange:DSI1::StopTrans:*/
+on sysvar DSI1::StopTrans
+{
+  // No action if button is released
+  if (@this==0)
+      return;
+
+  MH_RxStopTrans(gDSI1_PortHandle); 
+  @sysvar::DSI1::IsActive = 0;  // reset activity status => deactivate LED
+  gDSI1_RecvBlk = 0;
+  CheckHold(1);
+}
+/*@@end*/
+
+/*@@sysvarChange:DSI1::ClearBuffer:*/
+on sysvar DSI1::ClearBuffer
+{
+  byte clearData[10];  // dummy data 
+  if(@this)
+  {
+    sysSetVariableData(sysvar::DSI1::DataBuffer, clearData, 0);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DSI1::DataBuffer:*/
+on sysvar DSI1::DataBuffer
+{
+  long rxArraySize; 
+
+  // Display size of data in hex editor
+  rxArraySize = sysGetVariableArrayLength(this);
+ 
+  @sysvar::DSI1::DataSize = rxArraySize;
+}
+/*@@end*/
+
+/*@@caplFunc:VPB_Phonebook_MH_IndRxZeroFrame(dword,long,long,long,long):*///callback
+VPB_Phonebook_MH_IndRxZeroFrame (dword handle, long numOfFrames, long segId, long options, long blockCnt)
+{
+  ///////////////////////////////////////////////////////////////////////////////
+  // This optional callback is implemented to have a direct visualization of the 
+  // transmission process (transmission activity indication). Additionally, each
+  // time the transmission of a new packet is recognized, the receive buffer is 
+  // reset to have the same buffer content as on the DSO side.
+
+  if((segId == cSegID_Single) || (segId == cSegID_First))
+  {
+    @sysvar::DSI1::IsActive = 1; // activate LED
+    ResetBufferDSI1(); 
+  }
+  gDSI1_RecvBlk = 1;
+  CheckHold(1);
+}
+/*@@end*/
+
+/*@@caplFunc:ResetBufferDSI2():*///function
+ResetBufferDSI2()
+{
+  byte clearData[10];  // dummy data 
+  sysSetVariableData(sysvar::DSI2::DataBuffer, clearData, 0);
+
+  // Set byte buffer to store packet data ...
+  MH_SetRxBuffer(gDSI2_PortHandle, gDSI2_Buffer, cBufferSize);
+  // ... or set a file to which next packet is appended to
+  //MH_SetRxBuffer(gDSI2_PortHandle, 1, "C:\\Temp\\MHPBuffer.txt");
+   
+  // reset write position of buffer
+  gDSI2_BufferPos = 0;
+
+}
+/*@@end*/
+
+/*@@sysvarChange:DSI2::ClearBuffer:*/
+on sysvar DSI2::ClearBuffer
+{
+  byte clearData[10];  // dummy data 
+  if(@this)
+  {
+    sysSetVariableData(sysvar::DSI2::DataBuffer, clearData, 0);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DSI2::DataBuffer:*/
+on sysvar DSI2::DataBuffer
+{
+  long rxArraySize;
+
+  // Display size of data in hex editor
+  rxArraySize = sysGetVariableArrayLength(this);
+
+  @sysvar::DSI2::DataSize = rxArraySize;
+}
+/*@@end*/
+
+/*@@sysvarChange:DSI2::StopTrans:*/
+on sysvar DSI2::StopTrans
+{
+  // No action if button is released
+  if (@this==0)
+      return;
+
+  MH_RxStopTrans(gDSI2_PortHandle); 
+  @sysvar::DSI2::IsActive = 0;  // reset activity status => deactivate LED
+  gDSI2_RecvBlk = 0;
+  CheckHold(2);
+}
+/*@@end*/
+
+/*@@caplFunc:Nav_Waypoints_MH_IndRxBlockFinished(dword,long,long,long):*///callback
+Nav_Waypoints_MH_IndRxBlockFinished(dword handle, long blockSize, long segId, long blockCnt)
+{
+  ///////////////////////////////////////////////////////////////////////////////
+  // This optional callback is implemented to have a direct visualization of the 
+  // transmission process (set counters and update hex edit control)
+
+  long size;
+  byte data[cBufferSize];
+  long dataSize, i, maxSize;
+
+  if((segId == cSegID_Single) || (segId == cSegID_Last))
+    @sysvar::DSI2::IsActive = 0;  // last block received => deactivate LED 
+
+  // recalculate total byte received 
+  size = @sysvar::DSI2::ByteCnt;
+  size += blockSize;
+
+  // copy new block data from DSI buffer into hex edit control 
+  sysGetVariableData(sysvar::DSI2::DataBuffer, data, dataSize);
+  @sysvar::DSI2::DataSize = dataSize;
+
+  maxSize = (dataSize + blockSize < cBufferSize) ? dataSize + blockSize : cBufferSize;
+  for (i = dataSize; i < maxSize; i++)
+  {
+    data[i] = gDSI2_Buffer[gDSI2_BufferPos];
+    gDSI2_BufferPos++;
+  }
+  sysSetVariableData(sysvar::DSI2::DataBuffer, data, i);
+  @sysvar::DSI2::DataSize = i;
+
+  gDSI2_RecvBlk = 0;
+  if (gUseMHP2_3 && gDSI1_RecvBlk)
+    MH_SetRxOnHold(gDSI2_PortHandle, 1, cRxHoldEvent);
+  CheckHold(2);
+
+  // Visualization only
+  @sysvar::DSI2::ByteCnt = size;  // total user data bytes received
+  writeDbgLevel(3, "CAPL: %s: DSI2 finished reception of block %d with %d bytes.", gECU, blockCnt, blockSize);
+
+}
+/*@@end*/
+
+/*@@caplFunc:Nav_Waypoints_MH_IndRxBufferFinished(dword,long,long):*///callback
+Nav_Waypoints_MH_IndRxBufferFinished (dword handle, long filledSize, long reason)
+{
+  writeDbgLevel(3, "CAPL: %s: DSI2 has written receive buffer with %d bytes", gECU, filledSize);
+  ///////////////////////////////////////////////////////////////////////////////////
+  // This function is called whenever the receiver buffer is full and the application 
+  // has to handle the received data. Additionally it is called when the connection 
+  // is closed to provide the remaining application data
+  // In this demo, processing of the received data takes place in the block handler
+  // (MH_IndRxBlckFinished) in order to update the panel controls a soon as possible. 
+  // In a normal application, this callback here is the place to save and process the 
+  // received data. 
+
+  @sysvar::DSI2::IsActive = 0;        // reset activity status => deactivate LED
+  if(reason == cReasonRxBuff_Packet)
+    writeDbgLevel(3, "CAPL: %s: DSI2 has finished reception of packet with %d bytes.", gECU, filledSize);
+  else
+    writeDbgLevel(3, "CAPL: %s: DSI2 has finished reception of %d bytes. Buffer is full.", gECU, filledSize);
+
+}
+/*@@end*/
+
+/*@@caplFunc:Nav_Waypoints_MH_IndRxBufferRequested(dword,long):*///callback
+Nav_Waypoints_MH_IndRxBufferRequested (dword handle, long isPacketBegin)
+{
+  ///////////////////////////////////////////////////////////////////////////////////
+  // A buffer is requested as soon as the transmission of the first block is started, 
+  // (see also function ResetBufferDSI2) or if the previously provided buffer is full
+  
+  // Set byte buffer to store packet data ...
+  MH_SetRxBuffer(handle, gDSI2_Buffer, cBufferSize);
+  // ... or set a file (likewise in function ResetBufferDSI2)
+  // MH_SetRxBuffer(handle, 0, "C:\\Temp\\MHPBuffer.txt");
+
+  if(isPacketBegin == 1)
+  {
+    writeDbgLevel(3,"CAPL: %s: DSI2 requests rx buffer for first part of packet.", gECU);
+  }
+  else
+    writeDbgLevel(3,"CAPL: %s: DSI2 requests rx buffer for next part of packet.", gECU);
+
+  @sysvar::DSI2::IsActive = 1;   // indicate transmission activity => activate LED
+  gDSI2_BufferPos = 0;             // reset write position of buffer
+}
+/*@@end*/
+
+/*@@caplFunc:Nav_Waypoints_MH_IndRxConnectionClosed(dword,long):*///callback
+Nav_Waypoints_MH_IndRxConnectionClosed(dword handle, long res)
+{
+  @sysvar::DSI2::IsActive = 0;  // reset activity status => deactivate LED
+  ReportErrorsToWrite(res, gDSI2_Name);
+  gDSI2_RecvBlk = 0;
+  CheckHold(2);
+}
+/*@@end*/
+
+/*@@caplFunc:Nav_Waypoints_MH_IndRxZeroFrame(dword,long,long,long,long):*///callback
+Nav_Waypoints_MH_IndRxZeroFrame(dword handle, long numOfFrames, long segId, long options, long blockCnt)
+{
+  ///////////////////////////////////////////////////////////////////////////////
+  // This optional callback is implemented to have a direct visualization of the 
+  // transmission process (transmission activity indication). Additionally, each
+  // time the transmission of a new packet is recognized, the receive buffer is 
+  // reset to have the same buffer content as on the DSO side.
+
+  if((segId == cSegID_Single) || (segId == cSegID_First))
+  {
+    @sysvar::DSI2::IsActive = 1; // activate LED
+    ResetBufferDSI2(); 
+  }
+  gDSI2_RecvBlk = 1;
+  CheckHold(2);
+}
+/*@@end*/
+
+/*@@caplFunc:CheckHold(long):*///function
+void CheckHold (long currentDSI)
+{
+  //This function checks the hold status of both connections
+  //to assure correct block interleave
+  if (0 == gDSI_Active)
+  {
+    //First connection active, nothing to do
+    gDSI_Active = currentDSI;
+    return;
+  }
+  if (gDSI1_RecvBlk && gDSI2_RecvBlk)
+  {
+    if (currentDSI != gDSI_Active)
+    {
+      if (1 == currentDSI)
+      {
+        MH_SetRxOnHold(gDSI1_PortHandle, 1, cRxHoldEvent);
+      }
+      else
+      {
+        MH_SetRxOnHold(gDSI2_PortHandle, 1, cRxHoldEvent);
+      }
+      MH_SetRxOnHold(gDSI_Active, 0, cRxHoldEvent);
+    }
+  }
+  else
+  {
+    if (gDSI1_RecvBlk)
+    {
+      gDSI_Active = 1;
+      MH_SetRxOnHold(gDSI1_PortHandle, 0, cRxHoldEvent);
+    }
+    if (gDSI2_RecvBlk)
+    {
+      gDSI_Active = 2;
+      MH_SetRxOnHold(gDSI2_PortHandle, 0, cRxHoldEvent);
+    }
+  }
+
+  if (!gDSI1_RecvBlk && !gDSI2_RecvBlk)
+  {
+    gDSI_Active = 0;
+  }
+}
+/*@@end*/
+
+/*@@mostNetState:OnMostNetState(long,long):*/
+OnMostNetState(long oldstate, long newstate)
+{
+  if(newstate == 4)
+  {
+    MH_RxStopTrans(gDSI2_PortHandle);
+  }
+}
+/*@@end*/
+

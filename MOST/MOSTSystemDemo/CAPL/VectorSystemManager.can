@@ -1,0 +1,848 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+  #include "FCatDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+//
+// Simulation of a system specific manager FBlock
+//
+// The VectorSystemManager FBlock manages the audio connections
+// of the system. It knows source and sink devices and uses
+// the ConnectionMaster to connect them.
+//
+// Abbreviations:
+// AA  - AudioAmplifier
+// ADP - AudioDiskPlayer
+// AFT - AmFmTuner
+// CM  - ConnectionMaster 
+// NAV - Navigation
+// NM  - NetworkMaster
+// VSM - VectorSystemManager
+//
+
+variables
+{
+  // current application phase
+  const byte kAppOff      = 0; // no power; no communication
+  const byte kAppOn       = 1; // power on
+  const byte kAppShutdown = 2; // power on; shutdown started
+  byte  gAppPhase = 0;
+
+  // currently active sound source
+  const byte kSourceIdNone        = 0;
+  const byte kSourceIdDiscPlayer  = 1;
+  const byte kSourceIdTuner       = 2;
+  const byte kSourceIdTelephone   = 3;
+  const byte kSourceIdMax         = kSourceIdTelephone;
+
+
+  // Method: SwitchAudioSource
+  const byte kSwitchingStateIdle              = 0;
+  const byte kSwitchingStateRemoveConnection  = 1; // waiting for response on CM.RemoveSyncConnection
+  const byte kSwitchingStateBuildConnection   = 2; // waiting for response on CM.BuildSyncConnection
+  byte       gSwitchingState = kSwitchingStateIdle;
+  mostAmsMessage VectorSystemManager.SwitchAudioSource.StartResultAck gMsgSwitchAudioSourceStartRes; // stores SenderHandle and SourceAddress
+  msTimer    tSwitchAudioSource;
+  const long kSwitchAudioSourceTimeout = 500; // in ms
+
+  // data of synchronous connection
+  byte       gSourceFBlockId = 0;
+  byte       gSourceInstId = 0;
+  byte       gSourceNr = 0;
+  byte       gSinkFBlockId = 0;
+  byte       gSinkInstId = 0;
+  byte       gSinkNr = 0;
+
+  // Property: CurrentAudioSource
+  byte       gCurrentAudioSource = kSourceIdNone;
+
+
+  //
+  // FBlock shadows
+  //
+
+  // ConnectionMaster InstId
+  long gInstId_CM = -1; // -1: InstID not known yet
+  // ConnectionMaster properties of interest
+  word gShadowProp_CM[1] = {
+     kFct_CM_SyncConnectionTable };
+
+  // AudioAmplifier
+  long gInstId_AA  = -1; // -1: InstID not known yet
+
+  // AudioDiskPlayer InstId
+  long gInstId_ADP = -1; // -1: InstID not known yet
+
+  // AmFmTuner InstId
+  long gInstId_AFT = -1; // -1: InstID not known yet
+
+}
+/*@@end*/
+
+/*@@mostAmsMsg:VectorSystemManager.CurrentAudioSource.Get (0xD0D011):*/
+on mostAMSMessage VectorSystemManager.CurrentAudioSource.Get
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 0))
+    return;
+
+  // reply status
+  SendStatus_CurrentAudioSource(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:VectorSystemManager.SwitchAudioSource.StartResultAck (0xD0D006):*/
+on mostAMSMessage VectorSystemManager.SwitchAudioSource.StartResultAck
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 3))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // ist method busy?
+  if(gSwitchingState != kSwitchingStateIdle)
+  {
+    mostSendError_Code(this, kErrBusy);
+    return;
+  }
+
+  // save command message; stores SenderHandle and SourceAddress
+  gMsgSwitchAudioSourceStartRes = this;
+
+  SwitchAudioSource();
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // configure CAPL node as application node (don't receive spy messages...)
+  mostApplicationNode();
+
+  if (kMost25 == mostGetSpeedGrade(mostGetChannel()))
+  {
+    gShadowProp_CM[0] = kFct_CM_SyncConnectionTable;
+  }
+  else
+  {
+    gShadowProp_CM[0] = kFct_CM_SyncConnectionTableLabel;
+  }
+
+  // configure FBlock AmFmTuner
+  ConfigureFBlock();
+
+  // enable FBlock requests
+  // node will poll the Network Master for addresses of these FBlocks after ConfigOk
+  mostAsShdEnable(kFB_CM,  kInstIdBroadcast);
+  mostAsShdEnable(kFB_AA,  kInstIdBroadcast);
+  mostAsShdEnable(kFB_ADP, kInstIdBroadcast);
+  mostAsShdEnable(kFB_AFT, kInstIdBroadcast);
+}
+/*@@end*/
+
+/*@@caplFunc:ConfigureFBlock():*///function
+void ConfigureFBlock()
+{
+  long oldInstId = -1; // static variable
+  long newInstId;
+
+  newInstId = mostApGetInstId();
+
+  if(newInstId < 0)
+  {
+    newInstId = -1;
+  }
+
+  if(oldInstId != -1)
+  {
+    // disable Notification Service
+    mostAsNtfDisableEx(kFB_VSM, oldInstId);
+    // disable Function Service
+    mostAsFsDisableEx(kFB_VSM, oldInstId);
+  }
+
+  if(newInstId != -1)
+  {
+    // enable Notification Service
+    mostAsNtfEnable();
+    // enable Function Service
+    mostAsFsEnable();
+
+    // Enable all functions and all operations defined in the XML function catalog
+    // for the FBlock. Additionally, functions of type 'property' will be registered
+    // at the Notification Service if a corresponding CAPL function for sending 
+    // the status message is defined.
+    mostAsFsFunctionEnable(kFctAllInFCat, kOpTFAllInFCat, "SendStatus_");
+  }
+  oldInstId = newInstId;
+}
+/*@@end*/
+
+/*@@caplFunc:CheckNormalOperation():*///function
+long CheckNormalOperation()
+{
+  // Description:
+  //   Checks if FBlock is able to process commands
+  //   (Maybe used for power simulation later.)
+  // Return:
+  //   0: failed; 1: Ok
+
+  //{{{ --- begin application section -----------
+
+  return 1;
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_CurrentAudioSource(long):*///function
+long SendStatus_CurrentAudioSource(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage VectorSystemManager.CurrentAudioSource.Status msg;
+  
+  if(!CheckNormalOperation())
+    return -1;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin application section -----------
+
+  msg.SourceID = gCurrentAudioSource;
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //{{{ --- end application section -------------
+}
+/*@@end*/
+
+/*@@timer:tSwitchAudioSource:*/
+on timer tSwitchAudioSource
+{
+  if(gSwitchingState == kSwitchingStateIdle)
+    return;
+
+  if(gCurrentAudioSource != gMsgSwitchAudioSourceStartRes.SourceID)
+  {
+    mostSendError_Code(gMsgSwitchAudioSourceStartRes, kErrProcessing);
+  }
+  gSwitchingState = kSwitchingStateIdle;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:ConnectionMaster.RemoveSyncConnection.ErrorAck (0x032019):*/
+on mostAMSMessage ConnectionMaster.RemoveSyncConnection.ErrorAck
+{
+  if(gSwitchingState != kSwitchingStateRemoveConnection)
+    return;
+  if(this.SenderHandle != mostGetNodeAdr(mostGetChannel()))
+    return;
+
+  // send error to requester
+  mostSendError_Code(gMsgSwitchAudioSourceStartRes, kErrProcessing);
+
+  gSwitchingState = kSwitchingStateIdle;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:ConnectionMaster.BuildSyncConnection.ErrorAck (0x032009):*/
+on mostAMSMessage ConnectionMaster.BuildSyncConnection.ErrorAck
+{
+  if(gSwitchingState != kSwitchingStateBuildConnection)
+    return;
+  if(this.SenderHandle != mostGetNodeAdr(mostGetChannel()))
+    return;
+
+  // send error to requester
+  mostSendError_Code(gMsgSwitchAudioSourceStartRes, kErrProcessing);
+
+  gSwitchingState = kSwitchingStateIdle;
+}
+/*@@end*/
+
+/*@@caplFunc:IsAudioSourceAvailable(byte):*///function
+long IsAudioSourceAvailable(byte sourceId)
+{
+  if(sourceId == kSourceIdNone)
+    return 1;
+  if(sourceId > kSourceIdMax)
+    return 0;
+  if(gInstId_CM == -1)
+    return 0; // cannot activate source if CM is not present
+  if(gInstId_AA == -1)
+    return 0; // cannot activate source without sink
+
+  switch(sourceId)
+  {
+    case kSourceIdDiscPlayer: return (gInstId_ADP == -1) ? 0 : 1;
+    case kSourceIdTuner:      return (gInstId_AFT == -1) ? 0 : 1;
+    case kSourceIdTelephone:  return 0;
+    default: return 0;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:SendBuildConnection(byte,byte,byte,byte,byte,byte):*///function
+void SendBuildConnection(byte sourceFBlockId, byte sourceInstId, byte sourceNr, byte sinkFBlockId, byte sinkInstId, byte sinkNr)
+{
+  char buffer[100];
+  word senderHandle;
+  senderHandle = mostGetNodeAdr(mostGetChannel());
+  
+  // prepare symbolic message
+  snprintf(buffer, elcount(buffer), "ConnectionMaster.BuildSyncConnection.StartResultAck(%d, %d, %d, %d, %d, %d, %d)",
+    senderHandle, sourceFBlockId, sourceInstId, sourceNr, sinkFBlockId, sinkInstId, sinkNr);
+  
+  // send message
+  mostAmsOutput(mostGetChannel(), buffer, gInstId_CM);
+}
+/*@@end*/
+
+/*@@caplFunc:SendRemoveConnection(byte,byte,byte,byte,byte,byte):*///function
+void SendRemoveConnection(byte sourceFBlockId, byte sourceInstId, byte sourceNr, byte sinkFBlockId, byte sinkInstId, byte sinkNr)
+{
+  char buffer[100];
+  word senderHandle;
+  senderHandle = mostGetNodeAdr(mostGetChannel());
+  
+  // prepare symbolic message
+  snprintf(buffer, elcount(buffer), "ConnectionMaster.RemoveSyncConnection.StartResultAck(%d, %d, %d, %d, %d, %d, %d)",
+    senderHandle, sourceFBlockId, sourceInstId, sourceNr, sinkFBlockId, sinkInstId, sinkNr);
+  
+  // send message
+  mostAmsOutput(mostGetChannel(), buffer, gInstId_CM);
+}
+/*@@end*/
+
+/*@@mostAmsMsg:ConnectionMaster.BuildSyncConnection.ResultAck (0x03200D):*/
+on mostAMSMessage ConnectionMaster.BuildSyncConnection.ResultAck
+{
+  if(gSwitchingState != kSwitchingStateBuildConnection)
+    return;
+  if(this.SenderHandle != mostGetNodeAdr(mostGetChannel()))
+    return;
+
+  gCurrentAudioSource = gMsgSwitchAudioSourceStartRes.SourceID;
+  gSourceFBlockId = this.SourceFBlock;
+  gSourceInstId = this.SourceInstID;
+  gSourceNr = this.SourceNr;
+  gSinkFBlockId = this.SinkFBlock;
+  gSinkInstId = this.SinkInstID;
+  gSinkNr = this.SinkNr;
+
+  // send notifications
+  SendStatus_CurrentAudioSource(kAsNtfDestAdr);
+
+  // next step in state machine
+  SwitchAudioSource();
+}
+/*@@end*/
+
+/*@@mostAmsMsg:ConnectionMaster.RemoveSyncConnection.ResultAck (0x03201D):*/
+on mostAMSMessage ConnectionMaster.RemoveSyncConnection.ResultAck
+{
+  if(gSwitchingState != kSwitchingStateRemoveConnection)
+    return;
+  if(this.SenderHandle != mostGetNodeAdr(mostGetChannel()))
+    return;
+
+  gCurrentAudioSource = kSourceIdNone;
+  gSourceFBlockId = 0;
+  gSourceInstId = 0;
+  gSourceNr = 0;
+  gSinkFBlockId = 0;
+  gSinkInstId = 0;
+  gSinkNr = 0;
+
+  // send notifications
+  SendStatus_CurrentAudioSource(kAsNtfDestAdr);
+
+  // next step in state machine
+  SwitchAudioSource();
+}
+/*@@end*/
+
+/*@@caplFunc:SwitchAudioSource():*///function
+void SwitchAudioSource()
+{
+  // Checks availability of an audio source. And lets the
+  // ConnectionMaster build a connection.
+
+  mostAmsMessage VectorSystemManager.SwitchAudioSource.ResultAck msgResultAck;
+  byte wantedSource;
+  wantedSource = gMsgSwitchAudioSourceStartRes.SourceID;
+
+  if(gCurrentAudioSource == wantedSource)
+  {
+    // source already connected -> send result
+    mostPrepareReport(gMsgSwitchAudioSourceStartRes, msgResultAck);
+    msgResultAck.SourceID = wantedSource;
+    output(msgResultAck);
+    gSwitchingState = kSwitchingStateIdle;
+    canceltimer(tSwitchAudioSource);
+    return;
+  }
+
+  // check if audio source is available
+  if(!IsAudioSourceAvailable(wantedSource))
+  {
+    mostSendError_CodeByteByte(gMsgSwitchAudioSourceStartRes, kErrParamNotAvailable, 2, wantedSource);
+    gSwitchingState = kSwitchingStateIdle;
+    return;
+  }
+
+  if(gCurrentAudioSource != kSourceIdNone)
+  {
+    // remove existing connection before establishing a new one
+    SendRemoveConnection(gSourceFBlockId, gSourceInstId, gSourceNr, gSinkFBlockId, gSinkInstId, gSinkNr);
+
+    gSwitchingState = kSwitchingStateRemoveConnection;
+    // timer expires -> send error
+    canceltimer(tSwitchAudioSource);
+    settimer(tSwitchAudioSource, kSwitchAudioSourceTimeout);
+  }
+  else
+  {
+    // establish new connection
+    switch(wantedSource)
+    {
+      case kSourceIdDiscPlayer:
+      {
+        if(gInstId_ADP != -1) // disc player is available
+          SendBuildConnection(kFB_ADP, gInstId_ADP, 1, kFB_AA, gInstId_AA, 1);
+        break;
+      }
+      case kSourceIdTuner:
+      {
+        if(gInstId_AFT != -1) // radio is available
+          SendBuildConnection(kFB_AFT, gInstId_AFT, 1, kFB_AA, gInstId_AA, 1);
+        break;
+      }
+    }
+
+    gSwitchingState = kSwitchingStateBuildConnection;
+
+    // timer expires -> send error
+    canceltimer(tSwitchAudioSource);
+    settimer(tSwitchAudioSource, kSwitchAudioSourceTimeout);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ConfigureShadowFBlocks():*///function
+void ConfigureShadowFBlocks()
+{
+  // Configures the shadow FBlocks of interest.
+  // Therefore the properties of interest will be registered at the
+  // Notification Shadow Service, which registers the device in the
+  // Notification Matrix of the FBlocks as soon as the FBlock is
+  // known to the device.
+
+  long instId_CM, instId_AA, instId_ADP, instId_AFT;
+  byte audioSourceBitfieldOld, audioSourceBitfieldNew;
+  audioSourceBitfieldOld = GetAvailableAudioSourcesBitfield();
+
+
+  // check InstIds of ConnectionMaster shadow
+  instId_CM = GetInstIdOfFirstFBlock(kFB_CM);
+
+  if(instId_CM != gInstId_CM)
+  {
+
+    // InstId has changed; update entries in notification matrix
+    if(gInstId_CM != -1) // unregister old
+      ConfigureShadowProperties(kFB_CM, gInstId_CM, gShadowProp_CM, 0);
+    if(instId_CM != -1) // register new
+      ConfigureShadowProperties(kFB_CM, instId_CM, gShadowProp_CM, 1);
+    
+    gInstId_CM = instId_CM; // set new InstId
+  }
+
+
+  // check InstIds of AudioAmplifier shadow
+  instId_AA = GetInstIdOfFirstFBlock(kFB_AA);
+
+  if(instId_AA != gInstId_AA)
+  {
+    gInstId_AA = instId_AA; // set new InstId
+  }
+
+
+  // check InstIds of AudioDiskPlayer shadow
+  instId_ADP = GetInstIdOfFirstFBlock(kFB_ADP);
+
+  if(instId_ADP != gInstId_ADP)
+  {
+    gInstId_ADP = instId_ADP; // set new InstId
+  }
+
+
+  // check InstIds of AmFmTuner shadow
+  instId_AFT = GetInstIdOfFirstFBlock(kFB_AFT);
+
+  if(instId_AFT != gInstId_AFT)
+  {
+    gInstId_AFT = instId_AFT; // set new InstId
+  }
+
+  
+  // update property AvailableAudioSources
+  audioSourceBitfieldNew = GetAvailableAudioSourcesBitfield();
+  if(audioSourceBitfieldOld != audioSourceBitfieldNew)
+  {
+    // notify clients
+    SendStatus_AvailableAudioSources(kAsNtfDestAdr);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ConfigureShadowProperties(byte,byte,word[],long):*///function
+void ConfigureShadowProperties(byte fblockId, byte instId, word shadowProp[], long init)
+{
+  // Registers/unregisters properties at the Notification Shadow Service.
+  // Service will send Notification.Set(SetFunction/ClearFunction) as soon
+  // as the FBlock is known to this device.
+ 
+  long i;
+
+  if(init)
+  {
+    // register properties in Notification Shadow Service
+    for(i = 0; i < elcount(shadowProp); ++i)
+    {
+      mostAsNtfShdFunctionEnable(fblockId, instId, shadowProp[i]);
+    }
+  }
+  else
+  {
+    // unregister properties from Notification Shadow Service
+    for(i = 0; i < elcount(shadowProp); ++i)
+    {
+      mostAsNtfShdFunctionDisable(fblockId, instId, shadowProp[i]);
+    }
+  }
+}
+/*@@end*/
+
+/*@@mostAsRegistry:OnMostAsRegistry(long):*/
+OnMostAsRegistry(long rgtype)
+{
+  // The event procedure indicates a change in the 
+  // Local FBlock list or Bus Registry
+ 
+  if(gAppPhase != kAppOn) 
+    return;
+
+  if(rgtype == kBusRegistry)
+  {
+    // Bus Registy has changed -> re-configure FBlock shadows
+    ConfigureShadowFBlocks();
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:GetInstIdOfFirstFBlock(byte):*///function
+long GetInstIdOfFirstFBlock(byte fblockId)
+{
+  // Finds the first FBlock with fblockId in the Bus Registry
+  // and returns its InstId.
+  // Returns -1 if FBlock is not available.
+
+  long i;
+
+  if(mostGetNetState() != kNetStateConfigOk)
+    return -1;
+
+  for(i = 0; i < mostAsRgGetSize(kBusRegistry); ++i)
+  {
+    if(mostAsRgGetFBlockID(kBusRegistry, i) == fblockId)
+    {
+       return mostAsRgGetInstID(kBusRegistry, i);
+    }
+  }
+  return -1;
+}
+/*@@end*/
+
+/*@@caplFunc:TableContainsConnection(mostAmsMessage*,byte,byte,byte,byte,byte,byte):*///function
+byte TableContainsConnection (mostAMSmessage * msg, byte sourceFBlockId, byte sourceInstId, byte sourceNr, byte sinkFBlockId, byte sinkInstId, byte sinkNr)
+{
+  // Tests if the SyncConnectionTable contains the 
+  // connection between source and sink parameters
+
+  int position = 0;
+  byte found = 0;
+  //check if message contains at least one connection
+  if(msg.DLC < 7)
+    return 0;
+
+  position = 0;
+  found = 0;
+
+  // start analysing the message
+  while((position + 8 <= msg.DLC) && !found)
+  {
+    found = 1;
+    // look at every byte
+    found = found && (msg.byte(position) == sourceFBlockId);
+    position++;
+    found = found && (msg.byte(position) == sourceInstId);
+    position++;
+    found = found && (msg.byte(position) == sourceNr);
+    position++;
+    found = found && (msg.byte(position) == sinkFBlockId);
+    position++;    
+    found = found && (msg.byte(position) == sinkInstId);
+    position++;
+    found = found && (msg.byte(position) == sinkNr);
+    position++;
+    // skip the SrcDelay
+    position++;
+    // now skip the channellist
+    position += msg.byte(position); // this byte contains the number of channels
+    position++; // skip the "number of channel"-byte
+  }
+  return found;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:ConnectionMaster.SyncConnectionTable.Status (0x03400C):*/
+on mostAMSMessage ConnectionMaster.SyncConnectionTable.Status
+{
+  // The message ConnectionMaster.SyncConnectionTable.Status is 
+  // crucial for the whole audio system in this simulation.
+  // The existence of audio connections will be checked or derived
+  // from this message.
+
+  byte currentSourceId;
+
+  if((gAppPhase != kAppOn) && (gAppPhase != kAppShutdown))
+    return;
+
+  // check if current connection still exists
+  if(gCurrentAudioSource != kSourceIdNone)
+  {
+    if(1 != TableContainsConnection(this, gSourceFBlockId, gSourceInstId, gSourceNr, gSinkFBlockId, gSinkInstId, gSinkNr))
+    {
+      gCurrentAudioSource = kSourceIdNone;
+      gSourceFBlockId = 0;
+      gSourceInstId = 0;
+      gSourceNr = 0;
+      gSinkFBlockId = 0;
+      gSinkInstId = 0;
+      gSinkNr = 0;
+
+      // send notifications
+      SendStatus_CurrentAudioSource(kAsNtfDestAdr);
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:AppExit():*///function
+void AppExit ()
+{
+  // Called on final exit of the application.
+
+  if(gAppPhase == kAppOff)
+    return;
+
+  // power off
+  gAppPhase = kAppOff;
+
+  gSwitchingState = kSwitchingStateIdle;
+  cancelTimer(tSwitchAudioSource);
+}
+/*@@end*/
+
+/*@@caplFunc:AppInit():*///function
+void AppInit()
+{
+  // Called on first start of the application.
+  byte oldAppPhase;
+
+  if(gAppPhase == kAppOn)
+    return;
+
+  oldAppPhase = gAppPhase;
+
+  // application has started now
+  gAppPhase = kAppOn;
+
+  gSwitchingState = kSwitchingStateIdle;
+
+  // initialize FBlock shadows
+  ConfigureShadowFBlocks();
+}
+/*@@end*/
+
+/*@@caplFunc:AppShutdown():*///function
+void AppShutdown()
+{
+  // Called for a regular shut down of the application.
+  
+  if(gAppPhase == kAppShutdown)
+    return;
+  
+  // application is in shutdown mode now
+  gAppPhase = kAppShutdown;
+}
+/*@@end*/
+
+/*@@mostNetOn:OnMostNetOn():*/
+OnMostNetOn()
+{
+  AppInit();
+}
+/*@@end*/
+
+/*@@mostNetState:OnMostNetState(long,long):*/
+OnMostNetState(long oldstate, long newstate)
+{
+  if(newstate == kNetStatePowerOff)
+  {
+    AppExit();
+  }
+
+  ConfigureShadowFBlocks();
+}
+/*@@end*/
+
+/*@@mostAmsMsg:VectorSystemManager.AvailableAudioSources.Get (0xD0D051):*/
+on mostAMSMessage VectorSystemManager.AvailableAudioSources.Get
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 0))
+    return;
+
+  // reply status
+  SendStatus_AvailableAudioSources(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_AvailableAudioSources(long):*///function
+long SendStatus_AvailableAudioSources(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage VectorSystemManager.AvailableAudioSources.Status msg;
+  byte bitfield;
+  
+  if(!CheckNormalOperation())
+    return -1;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin application section -----------
+
+  msg.InstanceId = MostApGetInstID();
+  bitfield = GetAvailableAudioSourcesBitfield();
+  msg.byte(0) = bitfield;
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //{{{ --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:GetAvailableAudioSourcesBitfield():*///function
+byte GetAvailableAudioSourcesBitfield()
+{
+  // Encodes available audio sources in a bitfield.
+
+  byte bitfield, i;
+
+  bitfield = 0;
+  for(i = 1; i <= kSourceIdMax; ++i)
+  {
+    if(IsAudioSourceAvailable(i))
+      bitfield = bitfield + (1 << i);
+  }
+
+  return bitfield;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:ConnectionMaster.SyncConnectionTableLabel.Status (0x03F40C):*/
+on mostAMSMessage ConnectionMaster.SyncConnectionTableLabel.Status
+{
+  // The message ConnectionMaster.SyncConnectionTableLabel.Status is 
+  // crucial for the whole audio system in this simulation.
+  // The existence of audio connections will be checked or derived
+  // from this message.
+
+  byte currentSourceId;
+
+  if((gAppPhase != kAppOn) && (gAppPhase != kAppShutdown))
+    return;
+
+  // check if current connection still exists
+  if(gCurrentAudioSource != kSourceIdNone)
+  {
+    if(1 != TableContainsConnection(this, gSourceFBlockId, gSourceInstId, gSourceNr, gSinkFBlockId, gSinkInstId, gSinkNr))
+    {
+      gCurrentAudioSource = kSourceIdNone;
+      gSourceFBlockId = 0;
+      gSourceInstId = 0;
+      gSourceNr = 0;
+      gSinkFBlockId = 0;
+      gSinkInstId = 0;
+      gSinkNr = 0;
+
+      // send notifications
+      SendStatus_CurrentAudioSource(kAsNtfDestAdr);
+    }
+  }
+}
+/*@@end*/
+

@@ -1,0 +1,797 @@
+/*@!Encoding:1252*/
+variables
+{
+  BYTE gEnableDebugOutput = 0 ; // 0=non, 1=enable normal output debug , 2=special output
+  
+ 
+  /********************************************/
+  // GPS position vars
+  float gLatitude    = 48.825081;
+  float gLongitude   = 009.090946;
+  float gSpeed       = 100;
+  float gHeading     = 100;
+  WORD  gAltitude    = 100;
+  char  gcTimeStamp[7];
+
+  struct WLANData
+  {
+    WORD durationId;
+    BYTE address1[6];
+    BYTE address2[6];
+    BYTE address3[6];
+    BYTE address4[6];
+    WORD sequenceControl;
+    WORD qos;
+  };
+  
+  struct EthData
+  {
+    BYTE source[6];  // source MAC Id
+    BYTE dest[6];    // destination MAC Id
+    WORD ethType;    // Ethernet Type
+  };
+
+  struct NetworkAddr // network address
+  {
+    BYTE manuallyFlag;
+    BYTE stationType;
+    BYTE stationSubType;
+    WORD countryCode;
+    BYTE addr[6];
+  };
+
+  struct LongPosVec // long position vector
+  {
+    struct NetworkAddr lpvNetAddr;
+    DWORD  timeStamp;
+    float  latitude;
+    float  longitude;
+    float  speed;
+    float  heading;
+    WORD   altitude;
+    BYTE   timeAccuracy;
+    BYTE   positionAccuracy;
+    BYTE   speedAccuracy;
+    BYTE   headingAccuracy;
+    BYTE   altitudeAccuracy;
+  };
+
+  struct CnhData // Common Network Header
+  {
+    BYTE version;
+    BYTE nextHeader;
+    BYTE ht;
+    BYTE hst;
+    BYTE reserved;
+    BYTE flags;
+    WORD payloadLength;
+    BYTE tc_Reserved;
+    BYTE tc_Relevance;
+    BYTE tc_Reliability;
+    BYTE tc_Latency;
+    BYTE hopLimit;
+    struct LongPosVec lpv;
+  };
+   
+  struct GeoNetworkingData // GeoNetworking data
+  {
+    WORD seqNumb;
+    BYTE lifeTime;
+    BYTE reserved;
+
+    struct LongPosVec lpv;
+
+    DWORD geoAreaPosLat;
+    DWORD geoAreaPosLong;
+    WORD  distanceA;
+    WORD  distanceB;
+    WORD  angle;
+
+    struct NetworkAddr reqNetAddr; 
+  };
+}
+
+/**********************************************************/
+//
+// read a line (position info) from GPS file
+// return 1: line could be read
+// return 0: end of file
+//
+/**********************************************************/
+BYTE GPS_FileReadLine (DWORD fileHandle)
+{
+  char buff[500];         // buffer to read line
+  long buffsize = 500;
+  char clineDesc[7];
+  char clatitude[11];
+  char clatSide[2];
+  int  degreeValueLati = 0;
+  char clongitude[11];
+  char clongSide[2];
+  int  degreeValueLong = 0;
+  char cspeed[10];
+  char cheading[10];
+  int i=0;
+  BYTE visible = 1;
+  BYTE visCounter = 0;
+  int pos,pos2;
+
+  pos=0;
+  pos2=0;
+
+  // read next position line
+  if (fileGetStringSZ (buff, buffsize, fileHandle) != 0)
+  {
+
+    /***************************************************/
+    // get the time stamp
+    pos=0;
+    pos = strstr_off(buff,pos,",") + 1;
+    substr_cpy(gcTimeStamp, buff, pos, 6, elcount(gcTimeStamp) );
+
+    // check if it is a GPRMC line
+    substr_cpy(clineDesc, buff, 0, 6, elcount(clineDesc) );
+    if (strncmp(clineDesc,"$GPRMC", elcount(clineDesc)) == 0)
+    {
+      /************************************************************/
+      // get latitude from line
+      pos=0;
+      for (i=0; i<3; i++)
+      {
+        pos = strstr_off(buff,pos,",") + 1;
+      }
+
+      substr_cpy(clatitude, buff, pos, 9, elcount(clatitude) );
+      gLatitude    = atodbl(clatitude);
+
+      gLatitude    = gLatitude/100;
+      degreeValueLati = gLatitude;
+      gLatitude    = gLatitude - degreeValueLati;
+      gLatitude    = gLatitude / 60;
+      gLatitude    = gLatitude*100;
+      gLatitude    = gLatitude + degreeValueLati;
+      
+      pos = strstr_off(buff,pos,",") + 1;
+      substr_cpy(clatSide, buff, pos, 1, elcount(clatSide) );
+
+      if (clatSide[0] != 'N') {
+        gLatitude = gLatitude * (-1);
+      }
+      //@envLatitude    = gLatitude;
+
+
+      /************************************************************/
+      // get longitude from line
+      pos = 0;
+      for (i=0; i<5; i++)
+      {
+        pos = strstr_off(buff,pos,",") + 1;
+      }
+      substr_cpy(clongitude, buff, pos, 10, elcount(clongitude) );
+      gLongitude   = atodbl(clongitude);
+      gLongitude   = gLongitude/100;
+      degreeValueLong = gLongitude;
+      gLongitude   = gLongitude - degreeValueLong;
+      gLongitude   = gLongitude*1000;
+      gLongitude   = gLongitude / 60 / 10;
+      gLongitude   = gLongitude + degreeValueLong;
+      
+      pos = strstr_off(buff,pos,",") + 1;
+      substr_cpy(clongSide, buff, pos, 1, elcount(clongSide) );
+
+      if (clongSide[0] != 'E') {
+        gLongitude = gLongitude * (-1);
+      }
+      //@envLongitude   = gLongitude;
+
+
+      /************************************************************/
+      // get speed from line
+      pos = 0;
+      for (i=0; i<7; i++)
+      {
+        pos = strstr_off(buff,pos,",") + 1;
+      }
+      pos2 = strstr_off(buff,pos,",");
+      substr_cpy(cspeed, buff, pos, (pos2-pos), elcount(cspeed) );
+      gSpeed = atodbl(cspeed) * 1.852;
+
+      //@envSpeed = gSpeed;
+
+      /************************************************************/
+      // heading
+      pos = 0;
+      for (i=0; i<8; i++)
+      {
+        pos = strstr_off(buff,pos,",") + 1;
+      }
+      pos2 = strstr_off(buff,pos,",");
+
+      substr_cpy(cheading, buff, pos, (pos2-pos), elcount(cheading) );
+      gHeading = atodbl(cheading);
+      //@envHeading = gHeading;
+
+      return 1;
+    }
+  }
+  else
+  {
+    // reset line pos to 0
+    //fileRewind (fileHandle);
+    return 0; // file end
+  }
+
+  return 0;
+}
+
+/**********************************************************/
+//
+// open the GPS file, returns the handle to the file
+//
+/**********************************************************/
+DWORD GPS_FileOpen (char fileName[])
+{
+  DWORD retValue;
+
+  retValue = openFileRead (fileName,0);
+  if (retValue == 0)
+  {
+    write ("File open error: cannot open file %s",fileName);
+  }
+
+  return retValue;
+}
+
+/********************************************************/
+//
+//  return the distance of two GPS coordinates in meter
+//  (simple algorithm)
+//
+/********************************************************/
+WORD GPS_CalcDistance (float longPos1, float latPos1, float longPos2, float latPos2)
+{
+  float   diffLong;
+  float   diffLat;
+  double  lDiffLong;
+  double  lDiffLat;
+  double  result;
+  DWORD   retResult;
+
+  retResult = 0;
+
+  diffLong = longPos1-longPos2;
+  if (diffLong < 0)
+  {
+    diffLong = diffLong * -1;
+  }
+
+  diffLat = latPos1-latPos2;
+  if (diffLat < 0)
+  {
+    diffLat = diffLat * -1;
+  }
+
+  diffLong  = diffLong*1000*71.5;
+  diffLat   = diffLat *1000*111.3;
+  
+  lDiffLong = diffLong;
+  lDiffLat  = diffLat;
+
+  result = sqrt( (lDiffLong*lDiffLong)+(lDiffLat*lDiffLat) );
+  retResult = result;
+
+  if (gEnableDebugOutput >= 2)
+  {
+    write ("result: %i",retResult);
+  }
+
+  return result;
+}
+
+/**********************************************************/
+//
+// set data of Ethernet protocol
+//
+/**********************************************************/
+int SetPacketData_ETH (LONG packetHandle, struct EthData ethData)
+{
+  LONG errCode;
+
+  if (packetHandle)
+  {
+    // set ETH source MAC Id
+    if ((errCode = C2xSetTokenData( packetHandle, "eth", "source", 6, ethData.source )) != 0) {
+      write ("Error while set data for token \"eth - source\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set ETH destination MAC Id
+    if ((errCode = C2xSetTokenData( packetHandle, "eth", "destination", 6, ethData.dest )) != 0) {
+      write ("Error while set data for token \"eth - destination\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set ETH type
+    if ((errCode = C2xSetTokenInt( packetHandle, "eth", "type", ethData.ethType )) != 0) {
+      write ("Error while set data for token \"eth - type\", error code %i",errCode);
+      return errCode;
+    }
+  }
+
+  return 0;
+}
+
+/**********************************************************/
+//
+// function sets the Common Network Header protocol data  
+// of packet with this packetHandle
+//
+/**********************************************************/
+int SetPacketData_CNH (LONG packetHandle, struct CnhData cnhData)
+{
+  LONG errCode;
+  BYTE data[10] =  { 0,0,0,0,0,0,0,0,0,0 };
+
+  if (packetHandle)
+  {
+    // set version
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "version", cnhData.version )) != 0) {
+      write ("Error while set data for token \"geo_cnh - version\", error code %i",errCode);
+      return errCode;
+    }
+    // set next header
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "nextHeader", cnhData.nextHeader )) != 0) {
+      write ("Error while set data for token \"geo_cnh - nextHeader\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set header type
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "ht", cnhData.ht )) != 0) {
+      write ("Error while set data for token \"geo_cnh - ht\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set header subtype
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "hst", cnhData.hst )) != 0) {
+      write ("Error while set data for token \"geo_cnh - hst\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set reserved bits
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "reserved", cnhData.reserved )) != 0) {
+      write ("Error while set data for token \"geo_cnh - reserved\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set flags
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "flags", cnhData.flags )) != 0) {
+      write ("Error while set data for token \"geo_cnh - flags\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set payloadLength
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "payloadLength", cnhData.payloadLength )) != 0) {
+      write ("Error while set data for token \"geo_cnh - payloadLength\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set traffic class reserved bit
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "tcReserved", cnhData.tc_reserved )) != 0) {
+      write ("Error while set data for token \"geo_cnh - tcReserved\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set traffic class relevance
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "tcRelevance", cnhData.tc_relevance )) != 0) {
+      write ("Error while set data for token \"geo_cnh - tcRelevance\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set traffic class Reliability
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "tcReliability", cnhData.tc_reliability )) != 0) {
+      write ("Error while set data for token \"geo_cnh - tcReliability\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set traffic class Latency
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "tcLatency", cnhData.tc_latency )) != 0) {
+      write ("Error while set data for token \"geo_cnh - tcLatency\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set hoplimit
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "hopLimit", cnhData.hopLimit )) != 0) {
+      write ("Error while set data for token \"geo_cnh - hoplimit\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set NetAddress - manually flag
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvNetAddrManually", cnhData.lpv.lpvNetAddr.manuallyFlag )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvNetAddrManually\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set NetAddress - Station Type
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvNetAddrStType", cnhData.lpv.lpvNetAddr.stationType )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvNetAddrStType\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set NetAddress - Station SubType
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvNetAddrStSubType", cnhData.lpv.lpvNetAddr.stationSubType )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvNetAddrStSubType\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set NetAddress - Station Country Code
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvNetAddrStCC", cnhData.lpv.lpvNetAddr.countryCode )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvNetAddrStCC\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set NetAddress - Net Addr MAC layer address
+    if ((errCode = C2xSetTokenData( packetHandle, "geo_cnh", "lpvNetAddrLL", 6, cnhData.lpv.lpvNetAddr.addr )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvNetAddrLL\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set time stamp
+    //C2xGetTimeStamp(1,data);
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvTS", cnhData.lpv.timeStamp )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvTS\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set latitude
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvLat", cnhData.lpv.latitude )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvLat\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set longitude
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvLong", cnhData.lpv.longitude )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvLong\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set speed
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvSpeed", cnhData.lpv.speed )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvSpeed\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set heading
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvHeading", cnhData.lpv.heading )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvHeading\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set altitude
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvAltitude", cnhData.lpv.altitude )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvAltitude\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set time accuracy
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvTimAc", cnhData.lpv.timeAccuracy )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvTimAc\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set position accuracy
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvPosAc", cnhData.lpv.positionAccuracy )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvPosAc\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set speed accuracy
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvSpeedAc", cnhData.lpv.speedAccuracy )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvSpeedAc\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set heading accuracy
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvHeadingAc", cnhData.lpv.headingAccuracy )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvHeadingAc\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set altitude accuracy
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_cnh", "lpvAltitudeAc", cnhData.lpv.altitudeAccuracy )) != 0) {
+      write ("Error while set data for token \"geo_cnh - lpvAltitudeAc\", error code %i",errCode);
+      return errCode;
+    }
+  }
+
+  return 0;
+}
+
+int GPS_IsHeadingInTolerance(float heading1, float heading2, float tolerance)
+{
+  float diff=0;
+
+  if (heading1 > heading2) {
+    diff = heading1 - heading2;
+  }
+  else {
+    diff = heading2 - heading1;
+  }
+
+  if (diff <= tolerance) {
+    return 1;
+  }
+  else {
+    return 0;
+  }
+}
+
+/**********************************************************/
+//
+// reset the line pos to 0
+//
+/**********************************************************/
+int GPS_FileReset (DWORD fileHandle)
+{
+  return fileRewind (fileHandle);
+}
+
+/**********************************************************/
+//
+// function sets the GeoNetworking protocol data  
+// of packet with this packetHandle
+//
+/**********************************************************/
+int SetPacketData_GeoNetworking (LONG packetHandle, struct GeoNetworkingData geoData)
+{
+  LONG errCode;
+  BYTE data[10] =  { 0,0,0,0,0,0,0,0,0,0 };
+  int headerType=0;
+
+  // get the CNH header type
+  headerType = C2xGetTokenInt(packetHandle, "geo_cnh", "ht");
+
+  if (packetHandle)
+  {
+    // set sequence number
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "seqNumber", geoData.seqNumb )) != 0) {
+      write ("Error while set data for token \"geo_ext - seqNumber\", error code %i",errCode);
+      return errCode;
+    }
+    // set lifetime
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lifeTime", geoData.lifeTime )) != 0) {
+      write ("Error while set data for token \"geo_ext - lifeTime\", error code %i",errCode);
+      return errCode;
+    }
+    // set reserved bits
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "reserved", geoData.reserved )) != 0) {
+      write ("Error while set data for token \"geo_ext - reserved\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set NetAddress - manually flag
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvNetAddrManually", geoData.lpv.lpvNetAddr.manuallyFlag )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvNetAddrManually\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set NetAddress - Station Type
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvNetAddrStType", geoData.lpv.lpvNetAddr.stationType )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvNetAddrStType\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set NetAddress - Station SubType
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvNetAddrStSubType", geoData.lpv.lpvNetAddr.stationSubType )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvNetAddrStSubType\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set NetAddress - Station Country Code
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvNetAddrStCC", geoData.lpv.lpvNetAddr.countryCode )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvNetAddrStCC\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set NetAddress - Net Addr MAC layer address
+    if ((errCode = C2xSetTokenData( packetHandle, "geo_ext", "lpvNetAddrLL", 6, geoData.lpv.lpvNetAddr.addr )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvNetAddrLL\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set time stamp
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvTS", geoData.lpv.timeStamp )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvTS\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set latitude
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvLat", geoData.lpv.latitude )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvLat\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set longitude
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvLong", geoData.lpv.longitude )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvLong\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set speed
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvSpeed", geoData.lpv.speed )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvSpeed\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set heading
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvHeading", geoData.lpv.heading )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvHeading\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set altitude
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvAltitude", geoData.lpv.altitude)) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvAltitude\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set time accuracy
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvTimAc", geoData.lpv.timeAccuracy )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvTimAc\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set position accuracy
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvPosAc", geoData.lpv.positionAccuracy )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvPosAc\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set speed accuracy
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvSpeedAc", geoData.lpv.speedAccuracy )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvSpeedAc\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set heading accuracy
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvHeadingAc", geoData.lpv.headingAccuracy )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvHeadingAc\", error code %i",errCode);
+      return errCode;
+    }
+
+    // set altitude accuracy
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvAltitudeAc", geoData.lpv.altitudeAccuracy )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvAltitudeAc\", error code %i",errCode);
+      return errCode;
+    }
+
+    if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "lpvAltitudeAc", geoData.lpv.altitudeAccuracy )) != 0) {
+      write ("Error while set data for token \"geo_ext - lpvAltitudeAc\", error code %i",errCode);
+      return errCode;
+    }
+
+
+    if ( (headerType == 4) || (headerType == 3)) // GeoBroadcast/Anycast
+    {
+      if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "geoAreaPosLat", geoData.geoAreaPosLat )) != 0) {
+        write ("Error while set data for token \"geo_ext - geoAreaPosLat\", error code %i",errCode);
+        return errCode;
+      }
+
+      if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "geoAreaPosLong", geoData.geoAreaPosLong )) != 0) {
+        write ("Error while set data for token \"geo_ext - geoAreaPosLong\", error code %i",errCode);
+        return errCode;
+      }
+   
+      if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "distanceA", geoData.distanceA )) != 0) {
+        write ("Error while set data for token \"geo_ext - distanceA\", error code %i",errCode);
+        return errCode;
+      }
+
+      if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "distanceB", geoData.distanceB )) != 0) {
+        write ("Error while set data for token \"geo_ext - distanceB\", error code %i",errCode);
+        return errCode;
+      }
+
+      if ((errCode = C2xSetTokenInt( packetHandle, "geo_ext", "angle", geoData.angle )) != 0) {
+        write ("Error while set data for token \"geo_ext - angle\", error code %i",errCode);
+        return errCode;
+      }
+    }
+  }
+  return 0;
+}
+
+int SetPacketData_WLAN(long packetHandle, struct WLANData wlanData)
+{
+  LONG errCode;
+
+  if (packetHandle)
+  {
+    // static, do not change
+    if ((errCode = C2xSetTokenInt( packetHandle, "wlan", "frameControl", 0x0088 )) != 0) {
+      write ("Error while set data for token \"wlan - frameControl\", error code %i",errCode);
+      return errCode;
+    }
+    
+    if ((errCode = C2xSetTokenInt( packetHandle, "wlan", "durationId", wlanData.durationId )) != 0) {
+      write ("Error while set data for token \"wlan - durationId\", error code %i",errCode);
+      return errCode;
+    }
+    if ((errCode = C2xSetTokenData( packetHandle, "wlan", "address1", 6, wlanData.address1 )) != 0) {
+      write ("Error while set data for token \"wlan - address1\", error code %i",errCode);
+      return errCode;
+    }
+    if ((errCode = C2xSetTokenData( packetHandle, "wlan", "address2", 6, wlanData.address2 )) != 0) {
+      write ("Error while set data for token \"wlan - address2\", error code %i",errCode);
+      return errCode;
+    }
+    if ((errCode = C2xSetTokenData( packetHandle, "wlan", "address3", 6, wlanData.address3 )) != 0) {
+      write ("Error while set data for token \"wlan - address3\", error code %i",errCode);
+      return errCode;
+    }
+    if ((errCode = C2xSetTokenData( packetHandle, "wlan", "address4", 6, wlanData.address4 )) != 0) {
+      write ("Error while set data for token \"wlan - address4\", error code %i",errCode);
+      return errCode;
+    }
+    if ((errCode = C2xSetTokenInt( packetHandle, "wlan", "sequenceControl", wlanData.sequenceControl )) != 0) {
+      write ("Error while set data for token \"wlan - sequenceControl\", error code %i",errCode);
+      return errCode;
+    }
+    if ((errCode = C2xSetTokenInt( packetHandle, "wlan", "qos", wlanData.qos )) != 0) {
+      write ("Error while set data for token \"wlan - qos\", error code %i",errCode);
+      return errCode;
+    }
+
+  }
+
+  return 0;
+}
+
+/**********************************************************/
+//
+// function sets the BTP protocol data  
+// of packet with this packetHandle
+//
+/**********************************************************/
+int SetPacketData_BTP (LONG packetHandle, WORD dest, WORD source, WORD info)
+{
+  LONG errCode;
+  int  nextHeader;
+
+  // get the CNH header type
+  nextHeader = C2xGetTokenInt(packetHandle, "geo_cnh", "nextHeader");
+
+  if (packetHandle)
+  {
+    // set BTP destination port
+    if ((errCode = C2xSetTokenInt( packetHandle, "btp", "destination", dest )) != 0) {
+      write ("Error while set data for token \"btp - destination\", error code %i",errCode);
+      return errCode;
+    }
+
+    if (nextHeader == 1)
+    {
+      // set BTP source port (for BTP-A)
+      if ((errCode = C2xSetTokenInt( packetHandle, "btp", "source", source )) != 0) {
+        write ("Error while set data for token \"btp - source\", error code %i",errCode);
+        return errCode;
+      }
+    }
+    else if (nextHeader == 2)
+    {
+      // set BTP destination info (for BTP-B)
+      if ((errCode = C2xSetTokenInt( packetHandle, "btp", "destinationInfo", info )) != 0) {
+        write ("Error while set data for token \"btp - destinationInfo\", error code %i",errCode);
+        return errCode;
+      }
+    }
+    else
+    {
+      return 1;
+      // not supported value
+    }
+  }
+
+  return 0;
+}
+

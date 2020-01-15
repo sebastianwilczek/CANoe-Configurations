@@ -1,0 +1,705 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "EV_MsgCallbacks.cin"
+  #include "EV_Sendfunctions.cin"
+  #include "EVSE_Sendfunctions.cin"
+  #include "Sendfunctions_Common.cin"
+  #include "Util.cin"
+}
+
+variables
+{
+  dword writeTab;  // Sink identifier
+  
+  int   iTemp1, iTemp2;
+  long  lTemp;
+  float fTemp;
+  
+  char strBuffer1[100];
+  
+  char gPanelName[32] = "Vehicle";
+  
+  int certificateServiceRequested = 0;    // 1 = installation, 2 = update
+  int serviceDetailRequests = 0;
+  
+  char gProtocolPanelName[9] = "Protocol";
+  char DCStatusCode[32];
+
+  int isPowerOn = 0;
+  int chargeLoopEntered = 0;
+  int isDCMode = 0;
+  int isPassiveMode = 0;
+  int reNegotiationRequested = 0;
+  int reNegotiationRunning = 0;
+  int isReconnectAfterReset = 0;
+  
+  msTimer tMessageTx;
+  msTimer tInvalidMessage;
+  msTimer tVerification;
+  msTimer tProcessingTime;
+  
+  msTimer tChipResetSimulation;  
+  
+  const int cChipResetTime = 3000;
+    
+  int processing = 0;
+  int processingFinished = 0;
+  
+  // VT access  
+  int MSGreaction = 0;
+  int nextStateChange_IECrelevant = 0;
+}
+
+on sysVar EV::Control::SysEV_Connected
+{
+  if (@this == 1)
+  {
+    SCC_StartSimulation(); 
+    
+    @sysVar::EV::SysEV_State = 0;    
+    @sysVar::EV::SysEV_Error = 0;
+        
+    ApplyLinkStatusMode();
+      
+    if (@sysVar::Common::SysLinkStatusSimulation)
+    {
+      SCC_SLAC_SetLinkStatus(0);
+      @sysVar::EV::SysEV_LinkStatus = 0;      
+    }
+    
+    if (@sysvar::EV::Control::SysEV_CertificateInstallation)
+    {
+      certificateServiceRequested = 1;
+      @sysVar::EV::Control::SysEV_CertificateUpdate = 0;
+    }  
+    else if (@sysvar::EV::Control::SysEV_CertificateUpdate)
+    {
+      certificateServiceRequested = 2;
+      @sysVar::EV::Control::SysEV_CertificateInstallation = 0;      
+    }    
+  }
+  else
+  {
+    SCC_StopSimulation();  
+  
+    @sysVar::EV::Control::SysEV_CertificateInstallation = 0;
+    @sysVar::EV::Control::SysEV_CertificateUpdate = 0;    
+    @sysVar::EV::SysEV_LinkStatus = 2;
+    
+    certificateServiceRequested = 0;
+  }
+  
+  EnableSchemaControls(!@this);
+  
+  @sysVar::EV::Control::SysEV_WaitResume = 0;
+  
+  // Request TLS only when the "TLS" option is checked, and schema is not DIN
+  if ((@sysVar::Common::SysTLSEnabled) && @sysVar::EV::Control::SysEV_Schema != 3)
+    SCC_SetTLSEnabled(1);
+  else
+    SCC_SetTLSEnabled(0);
+  
+  ReadEVStatus();
+  UpdateSimState();
+  
+  // VT access
+  @sysvar::EV::VT_Access::SysEV_S2close = 0;
+}
+
+on sysvar EV::Control::SysEV_Reset
+{
+  if (@this == 0)
+    return;
+  
+  SCC_SimulationReset();
+  InitSimulation();
+ 
+  @sysVar::EV::Control::SysEV_WaitResume = 0;
+  @sysVar::EV::Control::SysEV_Connected = 0;
+  @sysVar::EV::Control::SysEV_CertificateInstallation = 0;
+  @sysVar::EV::Control::SysEV_CertificateUpdate = 0;
+  
+  isReconnectAfterReset = 1;
+}
+
+on sysvar EV::Control::SysEV_Stop
+{
+  if (@this == 1)
+  {
+    // Shutdown and send "Pause"
+    SCC_Shutdown(0);
+  }
+}
+
+on sysvar EV::Control::SysEV_Renegotiate
+{
+  if (@this == 1)
+  {    
+    SCC_StartRenegotiation();
+    reNegotiationRequested = 1;
+  }
+}
+
+on sysvar EV::Control::SysEV_CertificateInstallation
+{
+  if (@this == 1)
+  {
+    certificateServiceRequested = 1;
+    @sysVar::EV::Control::SysEV_CertificateUpdate = 0;
+  }
+}
+
+on sysvar EV::Control::SysEV_CertificateUpdate 
+{
+  if (@this == 1)
+  {
+    certificateServiceRequested = 2;
+    @sysVar::EV::Control::SysEV_CertificateInstallation = 0;
+  }
+}
+
+on start
+{
+  writeTab = WriteCreate("SCC EV");    // same name as tab created by nodelayer
+
+  EnableSchemaControls(!@Sysvar::EV::Control::SysEV_Connected);
+  SetCertificateControlsVisible(@sysvar::EV::Control::SysEV_PnCEnabled);
+  
+  @sysVar::EV::SysEV_Error = 0;
+  @sysvar::Test::SysErrorIndEV = 0;
+  @sysVar::GUI::Battery = 0;
+  
+  InitSimulation();
+  PrintEthernetSettings("EV");
+  
+  AdaptPanelToStandard(sysGetVariableInt(sysvar::EV::Control::SysEV_Schema));
+
+  iTemp1 = sysGetVariableInt(sysvar::EV::Control::SysEV_Connected);
+  
+  if (iTemp1 == 1)
+    SCC_StartSimulation(); 
+  else
+    SCC_StopSimulation();      
+}
+
+void InitSimulation()
+{ 
+  // Set initial namespace
+  SetSchemaSelection(@sysVar::EV::Control::SysEV_Schema);
+   
+  ApplyLinkStatusMode();  
+  ApplyMessageDelay();
+  UpdateSimState();
+}
+
+on preStart
+{
+  if (@sysVar::Common::SysVerboseWrite)
+    SCC_SetVerbosity(5);
+  else
+    SCC_SetVerbosity(2);
+
+  @sysVar::EV::Control::SysEV_WaitResume = 0;
+  
+  UpdateSimState();
+}
+
+on sysVar EV::Control::SysEV_ClearBattery
+{
+  SCC_SetBatteryState(0.0);
+  @sysVar::EV::SysEV_BatteryState = 0.0;
+}
+
+on sysVar Common::SysUserChargingMode
+{
+  SetChargingModeAndPaymentOption();
+}
+
+on sysVar EV::Control::SysEV_PnCEnabled
+{
+  SetChargingModeAndPaymentOption();  
+  SetCertificateControlsVisible(@this);
+}
+
+void SCC_MessageTxInd( byte SessionID[], dword MessageId, long Error)
+{
+  /*
+  WriteLineEx(writeTab, 0, "EV: Message Tx: Session Id = %0X%0X%0X%0X%0X%0X%0X%0X, result = %i",
+    SessionID[0], SessionID[1], SessionID[2], SessionID[3], SessionID[4], SessionID[5], SessionID[6], SessionID[7],
+    error
+  );
+  */
+  
+  // VT Access
+  // IEC61851 Synchronization (only relevant for AC charging, because for DC we react to the response)
+  //-------------------------------------------------------------------------------------------------------
+  if (MSGreaction) 
+  {
+    // AC charging and no ReNegotiation
+    if (@sysvar::Common::SysUserChargingMode == 0 /* AC */ & @sysvar::EV::Control::SysEV_Renegotiate == 0)
+    {
+      // entering charge loop --> close S2
+      if (!isPowerOn)
+        @sysvar::EV::VT_Access::SysEV_S2close = 1;
+    }
+  }
+  MSGreaction = 0;
+  
+  //----------------------------------------------------------------------------------------------
+  
+  @Sysvar::EV::SysEV_MessageTx = 1;
+  setTimer(tMessageTx, 150);
+  
+  if (Error > 0)
+    WriteLineEx(writeTab, 2, "EV: Message sending of type %0x failed: %i", MessageId, Error); 
+}
+
+on timer tMessageTx
+{  
+  @Sysvar::EV::SysEV_MessageTx = 0;
+}
+
+on timer tInvalidMessage
+{  
+  @Sysvar::Test::SysErrorIndEV = 0;
+}
+
+on timer tVerification
+{
+  setControlVisibility(gPanelName, "Verification", 0);
+}
+
+on timer tChipResetSimulation
+{ 
+  SCC_SLAC_SetLinkStatus(1);
+  @sysVar::EV::SysEV_LinkStatus = SCC_SLAC_GetLinkStatus(); 
+}
+
+on timer tProcessingTime
+{ 
+  processingFinished = 1;
+}
+
+SCC_ErrorStateInd( byte sessionId[], long errorState)
+{  
+  @sysVar::EV::SysEV_Error = errorState;
+}
+
+SCC_RestartInd( byte sessionID[] )
+{
+  WriteLineEx(writeTab, 1, "EV: Restarting protocol, retries left: %d", SCC_GetRetriesLeft());
+}
+
+SCC_LinkStatusChangeInd( dword oldStatus, dword newStatus)
+{
+  // Note: this indication is only received when polling is enabled
+  WriteLineEx(writeTab, 1, "EV: Link status changed from %i to %i", oldStatus, newStatus);
+  @sysVar::EV::SysEV_LinkStatus = newStatus;
+}
+
+SCC_SLACFinishedInd( dword result)
+{
+  float resultBuffer[16];
+  long  resultCount = 0;
+  int i;
+  
+  if (result)
+    WriteLineEx(writeTab, 1, "EV: SLAC finished, result : OK");
+  else
+    WriteLineEx(writeTab, 1, "EV: SLAC finished, result : FAILED");
+  
+  if (result)
+  {
+    // Get and print attenuation values
+    SCC_SLAC_GetAttenResults(resultBuffer, resultCount);
+    
+    if (resultCount > 0)
+      WriteLineEx(writeTab, 1, "EV: %i EVSEs found, results sorted by attenuation are:", resultCount);
+    else
+      WriteLineEx(writeTab, 2, "EV: No EVSEs found");
+    
+    for (i = 0; i< resultCount; ++i)
+    {
+      WriteLineEx(writeTab, 1, "EVSE %i: %f db", i+1, resultBuffer[i]);
+    }
+  }
+  
+  if (result)   // SLAC finished successfully
+  {
+    if (@sysVar::Common::SysLinkStatusSimulation)
+    {
+      // Simulate chip reset
+      SCC_SLAC_SetLinkStatus(2);   // unkown state - "chip not responding"
+      @sysVar::EV::SysEV_LinkStatus = SCC_SLAC_GetLinkStatus(); 
+      
+      setTimer(tChipResetSimulation, cChipResetTime);
+      WriteLineEx(writeTab, 1, "EV: Waiting for simulated link status = 1");
+      
+      isReconnectAfterReset = 0;
+    }
+    else
+    {
+      WriteLineEx(writeTab, 1, "EV: Waiting for link status from chip = 1");
+    }
+  }      
+}
+
+SCC_TCPConnectInd( dword socket, long isSender)
+{
+  if (isSender)
+    WriteLineEx(writeTab, 1, "EV: TCP connection established on socket %i", socket);
+  else    // cannot happen here
+    WriteLineEx(writeTab, 1, "EV: TCP client connected to socket %i", socket);
+}
+
+SCC_TCPShutdownInd( dword socket, long isSender)
+{
+  if (isSender)
+    WriteLineEx(writeTab, 1, "EV: TCP connection on socket %i closed", socket);
+  else
+    WriteLineEx(writeTab, 1, "EV: TCP connection on socket %i was closed by remote station", socket);
+}
+
+SCC_InvalidMessageInd( long MessageType, long ErrorCode)
+{
+  @Sysvar::Test::SysErrorIndEV = 1;
+  setTimer(tInvalidMessage, 3000);  
+  
+  if (ErrorCode == 0)    
+    WriteLineEx(writeTab, 1, "EV: Invalid message received - wrong version number or format!");
+  else if (ErrorCode == 1)
+    WriteLineEx(writeTab, 1, "EV: Invalid message received - unknown payload type!");
+  else if (ErrorCode == 2)
+    WriteLineEx(writeTab, 1, "EV: Invalid message received - invalid payload length!");
+  else if (ErrorCode == 3)
+    WriteLineEx(writeTab, 1, "EV: Invalid message received - decoding error");
+}  
+
+SCC_SignaturePreSendInd( byte sessionID[], byte signature[], dword& signatureLength)
+{ 
+  WriteLineEx(writeTab, 1, "EV: Signature of length %i created", signatureLength);
+}
+
+SCC_SignatureVerificationInd( dword messageID, dword result)
+{
+  setControlVisibility(gPanelName, "Verification", 1);
+  setTimer(tVerification, 1000);
+}
+
+SCC_ConnectionTimeoutInd( byte sessionId[] )
+{  
+  WriteLineEx(writeTab, 2, "EV connection timeout");
+}
+
+SCC_V2G_EVCC_Msg_TimeoutInd( byte RunId[], dword MessageID)
+{
+  writeLineEx(writeTab, 0, "V2G_EVCC_Msg_TimeoutInd for message %i indication", MessageID);
+}
+
+SCC_V2G_EVCC_PreCharge_TimeoutInd( byte RunId[] )
+{
+  writeLineEx(writeTab, 0, "V2G_EVCC_PreCharge_Timeout indication");
+}
+
+SCC_V2G_EVCC_CableCheck_TimeoutInd( byte RunID[] )
+{
+  writeLineEx(writeTab, 0, "V2G_EVCC_CableCheck_Timeout indication");
+}
+
+SCC_ProtocolFinishedInd( byte sessionId[] )
+{
+  WriteLineEx(writeTab, 1, "EV: Protocol finished!");
+}
+
+ReadEVStatus()
+{
+  @sysVar::EV::SysEV_Ready = SCC_GetEVReady();
+
+  fTemp = SCC_GetBatteryState();
+  @sysVar::EV::SysEV_BatteryState = fTemp;
+  @sysVar::GUI::Battery = fTemp;
+
+  // Print DC status code 
+  strncpy(DCStatusCode, "                                 ", 32);
+  SCC_GetDCStatusCode(DCStatusCode);
+  SysSetVariableString(sysVar::EV::SysEV_DCStatusCode, DCStatusCode);
+}
+
+void UpdateSimState()
+{
+  lTemp = SCC_GetSimulationState();
+    
+  if (lTemp == 2)
+    @sysvar::EV::SysEV_SimState = 0;
+  else if (lTemp == 3)
+    @sysvar::EV::SysEV_SimState = 1;
+  else
+    @sysvar::EV::SysEV_SimState = 2;    
+}
+
+void ApplyChargeLoopInterval()
+{
+  dTemp1 = @sysvar::EV::Control::SysEV_ChargeLoopInterval;
+  lTemp2 = @sysvar::EV::Control::SysEV_ChargeLoopIntervalJitter;
+  
+  if (lTemp2 == 0)
+    SCC_SetChargeLoopInterval(dTemp1);  // jitter off
+  else
+    SCC_SetChargeLoopInterval(dTemp1, 5.0);  // jitter on with 5%
+}
+
+SetChargingModeAndPaymentOption()
+{
+  iTemp1 = @sysVar::Common::SysUserChargingMode;
+  iTemp2 = @sysVar::EV::Control::SysEV_Schema;
+
+  if (iTemp1 == 0)
+  { 
+    if (iTemp2 == 0)
+      SCC_SetEnergyTransferType("AC_charging", 0 /* not forced */);
+    else
+      SCC_SetEnergyTransferType("AC_single_phase_core", 0 /* not forced */);
+
+    isDCMode = 0;
+  }
+  else
+  {
+    if (iTemp2 == 0)
+      SCC_SetEnergyTransferType("DC_charging", 0 /* not forced */);
+    else if (@sysVar::EV::Control::SysEV_DCChargingMode == 1)
+      SCC_SetEnergyTransferType("DC_core", 0 /* not forced */);
+    else
+      SCC_SetEnergyTransferType("DC_extended", 0 /* not forced */);
+
+    isDCMode = 1;
+  }
+  
+  // Preferred Payment Option (hint: set second parameter to 1 for forced selection)
+  if (@sysVar::EV::Control::SysEV_PnCEnabled == 1)
+    SCC_SetPaymentOption("Contract", 0);
+  else
+    SCC_SetPaymentOption("ExternalPayment", 0);
+}
+
+HandleMessageGeneric( int responseCode)
+{    
+  long maxDelay;
+  
+  CheckFaultNotification();
+  
+  SCC_GetEVSENotification(strBuffer1, maxDelay);
+  
+  if (strncmp(strBuffer1, "ReNegotiation", strlen("ReNegotiation")) == 0)
+    reNegotiationRequested = 1;
+ 
+  
+  if (maxDelay > 0)
+    WriteLineEx(writeTab, 0, "  NotificationMaxDelay: %i", maxDelay);
+}
+
+EnableSchemaControls( int enabled)
+{
+  enableControl(gPanelName, "RadioButtonEVSchema1", enabled);
+  enableControl(gPanelName, "RadioButtonEVSchema2", enabled);
+  enableControl(gPanelName, "RadioButtonEVSchema3", enabled);
+  enableControl(gPanelName, "RadioButtonEVSchema4", enabled);
+  enableControl(gPanelName, "CheckBoxEVPNC", enabled);
+  enableControl(gPanelName, "ButtonEVCertInstall", enabled);
+  enableControl(gPanelName, "ButtonEVCertUpdate", enabled);
+}
+
+SetCertificateControlsVisible( int visible)
+{
+  // show certificate buttons only for PnC
+  setControlVisibility(gPanelName, "ButtonEVCertInstall", visible);
+  setControlVisibility(gPanelName, "ButtonEVCertUpdate", visible);
+}
+
+on preStop
+{
+  // Disconnect EV
+  @sysvar::EV::Control::SysEV_Connected = 0;
+  
+  SetCertificateControlsVisible(1);
+}
+
+on sysVar EV::Control::SysEV_Schema
+{
+  SetSchemaSelection(@this);
+  
+  // set valid options for the selected schema
+  if (@this == 3) // DIN 70121
+  {
+    @sysVar::Common::SysUserChargingMode = 1;
+    @sysVar::EV::Control::SysEV_PnCEnabled = 0;
+  }
+  
+  AdaptPanelToStandard(@this);
+}
+
+SetSchemaSelection ( int namespaceNr)
+{
+  switch (namespaceNr)
+  {
+    case 2:
+      SCC_SetSchema("urn:iso:15118:2:2013:MsgDef", 2, 0);
+      break;
+    case 3:
+      SCC_SetSchema("urn:din:70121:2012:MsgDef", 2, 0);
+      break;
+  }
+}
+
+on sysVar EV::Control::SysEV_WaitResume
+{
+  if(@this == 0)
+    SCC_SimulationResume();
+  else
+    SCC_SimulationWait();
+  
+  UpdateSimState();
+}
+
+on sysVar EV::SysEV_MaxPower
+{
+  SCC_SetMaxPower(@this * 1000);    // variable in [kW]
+}
+
+on sysVar EV::SysEV_MinCurrent
+{
+  SCC_SetMinCurrent(@this);
+}
+
+on sysVar EV::SysEV_MaxCurrent
+{
+  SCC_SetMaxCurrent(@this);
+}
+
+on sysVar EV::SysEV_MaxVoltage
+{
+  SCC_SetMaxVoltage(@this);
+}
+
+on sysVar EV::SysEV_TargetVoltage
+{
+  SCC_SetTargetVoltage(@this);
+}
+
+on sysVar EV::SysEV_TargetCurrent
+{
+  SCC_SetTargetCurrent(@this);
+}
+
+on sysVar EV::SysEV_Ready
+{
+  SCC_SetEVReady(@this);
+}
+
+on sysVar Test::SysTestApplyControlMode
+{
+  if (@this == 1)
+  {          
+    if (@sysVar::Test::SysTestControlledEntity != 1)
+    {      
+      isPassiveMode = 1;
+      SCC_StartPassive();
+    }
+    else
+    {
+      SCC_StartSimulation();
+    }
+    
+    // Request TLS only when the "TLS" option is checked
+    if (@sysVar::Common::SysTLSEnabled)
+      SCC_SetTLSEnabled(1);
+    else
+      SCC_SetTLSEnabled(0);
+        
+    if (@sysVar::Common::SysLinkStatusSimulation)
+    {
+      if (isReconnectAfterReset)
+      {
+        SCC_SLAC_SetLinkStatus(1);    // pretend link was not lost on reset        
+        @sysVar::EV::SysEV_LinkStatus = 1;
+      }
+      else
+      {        
+        SCC_SLAC_SetLinkStatus(0);
+        @sysVar::EV::SysEV_LinkStatus = 0;
+      }
+    }
+  }
+  else
+  {
+    // PEV needs to close the connection in order to start again
+    SCC_StopSimulation();
+  }
+}
+
+on sysVar SLAC_Test::SysStartSLACTest
+{  
+  if (@this == 1)
+  {    
+    SCC_SimulationReset();
+    isPassiveMode = 1;
+    SCC_StartPassive(0 /* start with manual SLAC */);    
+  }
+}
+
+on sysVar Common::SysMessageDelay
+{
+  ApplyMessageDelay();
+}
+
+on sysvar Common::SysMessageDelayJitter
+{
+  ApplyMessageDelay();
+}
+
+on sysVar EV::Control::SysEV_ChargeLoopInterval
+{
+  ApplyChargeLoopInterval();
+}
+
+on sysvar EV::Control::SysEV_ChargeLoopIntervalJitter
+{
+  ApplyChargeLoopInterval();
+}
+
+on sysvar Common::SysLinkStatusSimulation
+{
+  ApplyLinkStatusMode();   // only works when simulation is started!
+}
+
+on sysvar Common::SysVerboseWrite
+{  
+  if (@this)
+    SCC_SetVerbosity(5);
+  else
+    SCC_SetVerbosity(2);
+}
+
+// Functions to switch sender roles in Test
+
+int IsEVRoleActive()
+{
+  return @sysvar::Test::SysTestSwitchRoles == 0;
+}
+
+int IsEVSERoleActive()
+{
+  return @sysvar::Test::SysTestSwitchRoles == 1;
+}
+
+void AdaptPanelToStandard(int standardID)
+{
+  if (standardID == 2)
+  {
+    SetControlColors(gProtocolPanelName, "lblCertificate", MakeRGB(255,255,255), MakeRGB(0,0,0));
+  }
+  else if (standardID == 3)
+  {
+    SetControlColors(gProtocolPanelName, "lblCertificate", MakeRGB(255,255,255), MakeRGB(150,150,150));
+  }
+}

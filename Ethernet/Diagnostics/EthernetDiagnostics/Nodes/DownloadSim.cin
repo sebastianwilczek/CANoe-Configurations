@@ -1,0 +1,115 @@
+/*@@var:*/
+variables
+{
+  int   gDownloadActive = 0;
+  dword gDownloadSize = 0;
+  dword gDownloadReceived = 0;
+  byte  gDownloadCounter = 1;
+  dword gDownloadMaxBlockSize = 0x00001000;
+}
+/*@@end*/
+
+/*@@diagRequest:Download_Stop:*/
+on diagRequest Download_Stop
+{
+  diagResponse this resp;
+
+  gDownloadActive = 0;
+
+  DiagSendResponse( resp);
+}
+/*@@end*/
+
+/*@@diagRequest:Download_Transmit:*/
+on diagRequest Download_Transmit
+{
+  diagResponse this resp;
+
+  if ( !gDownloadActive)
+  {
+    writeLineEx( 0, 1, "%s: Download service is not active!", gECU);
+
+    StartNegativeResponseTimer();
+    // The download service is not active
+    DiagSendNegativeResponse( this, 0x24);
+    return;
+  }
+
+  writeLineEx( 0, 1, "%s: Download block received!", gECU);
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "blockSequenceCounter", DiagGetParameter( this, "blockSequenceCounter"));
+  DiagSendResponse( resp);
+}
+/*@@end*/
+
+/*@@diagRequest:Download_Request:*/
+on diagRequest Download_Request
+{
+  byte  addressAndLengthFormatIdentifier;
+  dword addressFormatSize;
+  dword memoryFormatSize;
+  dword memorySpecSize;
+  byte  memorySpec[8];
+  long  i;
+  dword address = 0;
+  byte  blockSpec[4];
+  diagResponse this resp;
+
+  if ( !gUnlocked)
+  {
+    StartNegativeResponseTimer();
+    // The ECU was not unlocked, so deny access.
+    DiagSendNegativeResponse( this, 0x33);
+    return;
+  }
+
+  addressAndLengthFormatIdentifier = DiagGetParameter( this, "addressAndLengthFormatIdentifier");
+  addressFormatSize = ( addressAndLengthFormatIdentifier & 0xF0) >> 4;
+  memoryFormatSize = addressAndLengthFormatIdentifier & 0x0F;
+  memorySpecSize = addressFormatSize + memoryFormatSize;
+
+  if ( addressFormatSize > 4 || memoryFormatSize > 4)
+  {
+    StartNegativeResponseTimer();
+    DiagSendNegativeResponse( this, 0x31);
+    return;
+  }
+
+  if ( DiagGetParameterRaw( this, "memoryAddressAndSize", memorySpec, memorySpecSize) != 0)
+  {
+    StartNegativeResponseTimer();
+    DiagSendNegativeResponse( this, 0x13);
+    return;
+  }
+
+  for ( i = 0; i < addressFormatSize; ++i)
+  {
+    address <<= 8;
+    address += memorySpec[i];
+  }
+
+  gDownloadSize = 0;
+  for ( ; i < memorySpecSize; ++i)
+  {
+    gDownloadSize <<= 8;
+    gDownloadSize += memorySpec[i];
+  }
+
+  writeLineEx( 0, 1, "%s: Received download request at address 0x%08X with size 0x%08X bytes", gECU, address, gDownloadSize);
+  
+  gDownloadActive = 1;
+  gDownloadReceived = 0;
+  gDownloadCounter = 1;
+  
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "lengthFormatIdentifier", 0x40);
+  blockSpec[0] = ( byte)( ( gDownloadMaxBlockSize >> 24) & 0xFF);
+  blockSpec[1] = ( byte)( ( gDownloadMaxBlockSize >> 16) & 0xFF);
+  blockSpec[2] = ( byte)( ( gDownloadMaxBlockSize >>  8) & 0xFF);
+  blockSpec[3] = ( byte)( ( gDownloadMaxBlockSize >>  0) & 0xFF);
+  DiagSetParameterRaw( resp, "maxNumberOfBlockLength", blockSpec, elcount( blockSpec));
+  DiagSendResponse( resp);
+}
+/*@@end*/
+

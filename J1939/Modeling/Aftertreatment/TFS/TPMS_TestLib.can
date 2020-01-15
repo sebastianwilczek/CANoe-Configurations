@@ -1,0 +1,1583 @@
+/*@@var:*/
+variables
+{
+  //
+  // Constants
+  //
+
+  const int  kNullAddr    = 0xfe;   // Null address
+  const int  kGlobalAddr  = 0xff;   // Global address
+
+  char kTesterPanel[32] = "Tester";
+
+  // Constants for diagnostics
+  const BYTE kFMI_AboveNormalCritical = 0;    // DATA VALID BUT ABOVE NORMAL OPERATIONAL RANGE
+  const BYTE kFMI_BelowNormalCritical = 1;    // DATA VALID BUT BELOW NORMAL OPERATIONAL RANGE
+  const BYTE kFMI_AboveNormalWarn     = 0x0f; // DATA VALID BUT ABOVE NORMAL OPERATIONAL RANGE
+  const BYTE kFMI_BelowNormalWarn     = 0x11; // DATA VALID BUT BELOW NORMAL OPERATIONAL RANGE
+  const BYTE kFMI_DataErratic         = 2;    // DATA ERRATIC, INTERMITTENT OR INCORRECT
+  const BYTE kFMI_CauseUnknown        = 11;   // ROOT CAUSE NOT KNOWN
+
+  //
+  // Global Test Variables
+  //
+
+  BYTE gTesterAddress = 253;
+
+  //
+  // Tester Control Variables
+  //
+
+  char textBuffer[512];
+}
+/*@@end*/
+
+/*@@testcase:TC1_1_RequestForACLGlobal():*/
+/*
+ * Test case 1.1 - Request for ACL
+ *
+ * The tester send a global request for ACL. The SUT must respond
+ * with a ACL message.
+ */
+testcase TC1_1_RequestForACLGlobal()
+{
+  pg ACL rxACL;
+
+  // write test case information to report file and set state of this test case
+  TestCaseTitle( "1.1", "Request for ACL (global)");
+  TestCaseDescription("Send a global request for ACL. The SUT must respond with a ACL message.");
+
+  //
+  // setup test case
+  //
+
+  // if SUT is not available, send a commanded address to the SUT
+  if (J1939TestNmtQueryAddress( TPMS ) == kNullAddr) {
+    j1939SendCommandedAddressToSUT( gTesterAddress, TPMS.NmStationAddress, 1 );
+
+    testWaitForTimeout( 200 );
+  }
+
+  //
+  // do test here
+  //
+
+  j1939SendRequestForACL( kNullAddr, kGlobalAddr );
+
+  j1939WaitForACL( TPMS.NmStationAddress, 1 );
+
+}
+/*@@end*/
+
+/*@@caplFunc:testInfoMessage(char[]):*/
+/*
+ * Write a info text to the info field and wait for the OK button.
+ *
+ * text - Text to write to the info field
+ */
+void testInfoMessage( char text[] )
+{
+  setControlBackColor( kTesterPanel, "InfoText", makeRGB( 255, 255, 255) );
+  putValueToControl( kTesterPanel, "InfoText", text );
+
+  enableControl( kTesterPanel, "OkButton", 1 );  
+  testWaitForTextEvent( "OkButton", 100000 );
+  enableControl( kTesterPanel, "OkButton", 0 );  
+
+  setControlBackColor( kTesterPanel, "InfoText", makeRGB( 255, 150, 40) );
+  putValueToControl( kTesterPanel, "InfoText", "Running..." );
+}
+/*@@end*/
+
+/*@@testcase:TC1_3_ACL_LowerPriority():*/
+/*
+ * Test case 1.3 - ACL with lower priority
+ *
+ * Send an ACL with a lower priority than the SUT.
+ * The SUT must send the ACL again with the claimed address.
+ */
+testcase TC1_3_ACL_LowerPriority()
+{
+  pg ACL acl;
+
+  // write test case information to report file and set state of this test case
+  TestCaseTitle( "1.3", "ACL with lower priority");
+  TestCaseDescription("Send an ACL with a lower priority than the SUT. The SUT must send the ACL again with the claimed address.");
+
+  //
+  // setup test case
+  //
+
+  // if SUT is not available, send a commanded address to the SUT
+  if (J1939TestNmtQueryAddress( TPMS ) == kNullAddr) {
+    j1939SendCommandedAddressToSUT( gTesterAddress, TPMS.NmStationAddress, 1 );
+
+    testWaitForTimeout( 200 );
+  }
+
+  //
+  // do test here
+  //
+
+  // send ACL
+  acl.SA                      = TPMS.NmStationAddress;
+  acl.DA                      = kGlobalAddr;
+  acl.ArbitraryAddressCapable = TPMS.NmJ1939AAC;
+  acl.IndustryGroup           = TPMS.NmJ1939IndustryGroup;
+  acl.VehicleSystem           = TPMS.NmJ1939System;
+  acl.VehicleSystemInstance   = TPMS.NmJ1939SystemInstance;
+  acl.Function                = TPMS.NmJ1939Function;
+  acl.FunctionInstance        = TPMS.NmJ1939FunctionInstance;
+  acl.ECUInstance             = TPMS.NmJ1939ECUInstance;
+  acl.ManufacturerCode        = TPMS.NmJ1939ManufacturerCode;
+  acl.IdentityNumber          = TPMS.NmJ1939IdentityNumber + 1; // lower priority
+  output( acl );
+
+  // wait for TX ACL
+  j1939WaitForACL( TPMS.NmStationAddress, 0 );
+
+  // wait for ACL from SUT
+  j1939WaitForACL( TPMS.NmStationAddress, 1 );
+
+
+}
+/*@@end*/
+
+/*@@testcase:TC2_1_RequestAllPGs():*/
+/*
+ * Test case 2.1 - Request PGs from SUT
+ *
+ * Request all parameter groups from the SUT, which the SUT can transmit.
+ */
+testcase TC2_1_RequestAllPGs()
+{
+  DWORD   pgns[6]   = { 0xFEDA, 0xFEF4, 0xFDB9, 0xFECB, 0xFECD, 0xFECE };
+  DWORD   global[6] = { 0     , 0     , 0     , 0xFECB, 1     , 0 };
+  int     i;
+  pg RQST txRQST;
+  BYTE    sourceAddr;
+
+  // write test case information to report file and set state of this test case
+  TestCaseTitle( "2.1", "Request PGs from SUT");
+  TestCaseDescription("Request all parameter groups from the SUT, which the SUT can transmit.");
+
+  //
+  // setup test case
+  //
+
+  // if SUT is not available, send a commanded address to the SUT
+  if (J1939TestNmtQueryAddress( TPMS ) == kNullAddr) {
+    j1939SendCommandedAddressToSUT( gTesterAddress, TPMS.NmStationAddress, 1 );
+  }
+
+  testWaitForTimeout( 250 ); // wait 250ms (may be claiming is not completed
+
+  //
+  // do test here
+  //
+
+  sourceAddr = gTesterAddress;
+
+  for( i = 0; i < elCount(pgns); i++ ) {
+    // send request
+    txRQST.SA                   = sourceAddr;
+    txRQST.DA                   = (global[i] == 1) ? kGlobalAddr : TPMS.NmStationAddress;
+    txRQST.ParameterGroupNumber = pgns[i];
+    output( txRQST );
+
+    if (((pgns[i] >> 8) & 0xff) >= 0xf0) {
+      // wait for a Global response
+      switch(J1939TestWaitForPG( TPMS.NmStationAddress, kGlobalAddr, pgns[i], 1250 )) {
+        case 0: /* timeout */
+          snprintf( textBuffer, elCount(textBuffer), "Timeout. Requested PGN 0x%x not received.", pgns[i] );
+          TestStepFail( textBuffer );
+          break;
+        case 1: /* ok: message has occurred */
+          break;
+        default: /* Failed */
+          TestStepFail( "WaitForMessage: General error occurred. ");
+          break;
+      }
+    }
+    else {
+      // wait for a Specific response
+      switch(J1939TestWaitForPG( TPMS.NmStationAddress, gTesterAddress, pgns[i], 1250 )) {
+        case 0: /* timeout */
+          snprintf( textBuffer, elCount(textBuffer), "Timeout. Requested PGN 0x%x not received.", pgns[i] );
+          TestStepFail( textBuffer );
+          break;
+        case 1: /* ok: message has occurred */
+          break;
+        default: /* Failed */
+          TestStepFail( "WaitForMessage: General error occurred. ");
+          break;
+      }
+    }
+  }
+  
+
+}
+/*@@end*/
+
+/*@@testcase:TC3_1_SetRefPressureWithTPRS():*/
+/*
+ * Test case 3.1 - Set reference pressure with TPRS
+ */
+testcase TC3_1_SetRefPressureWithTPRS()
+{
+  long         result;
+  pg RQST      txRQST;
+  pg TPRI_TPMS rxTPRI;
+  pg TPRS      txTPRS;
+  float        diff;
+	
+	txTPRS.DWORD(0) = txTPRS.DWORD(4) = 0xFFFFFFFF; //init datafield
+
+  // write test case information to report file and set state of this test case
+  TestCaseTitle( "", "Set Reference Pressure");
+  TestCaseDescription("Set reference pressure by sending TPRS.");
+
+  //
+  // Setup test case
+  //
+
+  diff = 8;
+
+  //
+  // Step 1
+  //
+
+  testStepBegin( 1, "Step 1", "Send TPRS for each Tire. " );
+
+  // send TPRS
+  txTPRS.SA                             = gTesterAddress;
+  txTPRS.DA                             = TPMS.NmStationAddress;
+  txTPRS.TireLocation                   = 0x00;
+  txTPRS.ReferenceTirePressSetting.phys = getValue( EnvTPMS_FrontLeftPressure ) + diff;
+  output( txTPRS );
+
+  // send TPRS
+  txTPRS.SA                             = gTesterAddress;
+  txTPRS.DA                             = TPMS.NmStationAddress;
+  txTPRS.TireLocation                   = 0x01;
+  txTPRS.ReferenceTirePressSetting.phys = getValue( EnvTPMS_FrontRightPressure ) + diff;
+  output( txTPRS );
+
+  // send TPRS
+  txTPRS.SA                             = gTesterAddress;
+  txTPRS.DA                             = TPMS.NmStationAddress;
+  txTPRS.TireLocation                   = 0x10;
+  txTPRS.ReferenceTirePressSetting.phys = getValue( EnvTPMS_Rear1LeftPressure ) + diff;
+  output( txTPRS );
+
+  // send TPRS
+  txTPRS.SA                             = gTesterAddress;
+  txTPRS.DA                             = TPMS.NmStationAddress;
+  txTPRS.TireLocation                   = 0x11;
+  txTPRS.ReferenceTirePressSetting.phys = getValue( EnvTPMS_Rear1RightPressure ) + diff;
+  output( txTPRS );
+
+  // send TPRS
+  txTPRS.SA                             = gTesterAddress;
+  txTPRS.DA                             = TPMS.NmStationAddress;
+  txTPRS.TireLocation                   = 0x20;
+  txTPRS.ReferenceTirePressSetting.phys = getValue( EnvTPMS_Rear2LeftPressure ) + diff;
+  output( txTPRS );
+
+  // send TPRS
+  txTPRS.SA                             = gTesterAddress;
+  txTPRS.DA                             = TPMS.NmStationAddress;
+  txTPRS.TireLocation                   = 0x21;
+  txTPRS.ReferenceTirePressSetting.phys = getValue( EnvTPMS_Rear2RightPressure ) + diff;
+  output( txTPRS ); 
+
+  //
+  // Step 2
+  //
+
+  testStepBegin( 1, "Step 2", "Send request for TPRI and wait for response." );
+
+  // send request
+  txRQST.SA                   = gTesterAddress;
+  txRQST.DA                   = TPMS.NmStationAddress;
+  txRQST.ParameterGroupNumber = 0xFDB9; // TPRI PGN
+  output( txRQST );
+
+  // wait for first TIRE response
+  if (tpmsWaitForTPRI( TPMS.NmStationAddress, rxTPRI ) == 0) {
+    if (rxTPRI.TireLocation != 0x00) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.TireLocation received %d, but must be 0x00. ", rxTPRI.TireLocation );
+      TestStepFail( textBuffer );
+    }
+    else if (rxTPRI.ReferenceTirePress.phys != getValue( EnvTPMS_FrontLeftPressure ) + diff) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.ReferenceTirePress received %f, but must be %f. ", rxTPRI.ReferenceTirePress.phys, getValue( EnvTPMS_FrontLeftPressure ) + diff );
+      TestStepFail( textBuffer );
+    } 
+  }
+  else {
+    TestStepFail( "First TPRI response missing."); 
+  }
+
+  // wait for second TIRE response
+  if (tpmsWaitForTPRI( TPMS.NmStationAddress, rxTPRI ) == 0) {
+    if (rxTPRI.TireLocation != 0x01) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.TireLocation received %d, but must be 0x01. ", rxTPRI.TireLocation );
+      TestStepFail( textBuffer );
+    }
+    else if (rxTPRI.ReferenceTirePress.phys != getValue( EnvTPMS_FrontRightPressure ) + diff) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.ReferenceTirePress received %f, but must be %f. ", rxTPRI.ReferenceTirePress.phys, getValue( EnvTPMS_FrontRightPressure ) + diff );
+      TestStepFail( textBuffer );
+    } 
+  }
+  else {
+    TestStepFail( "Second TPRI response missing."); 
+  }
+
+  // wait for third TIRE response
+  if (tpmsWaitForTPRI( TPMS.NmStationAddress, rxTPRI ) == 0) {
+    if (rxTPRI.TireLocation != 0x10) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.TireLocation received %d, but must be 0x10. ", rxTPRI.TireLocation );
+      TestStepFail( textBuffer );
+    }
+    else if (rxTPRI.ReferenceTirePress.phys != getValue( EnvTPMS_Rear1LeftPressure ) + diff) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.ReferenceTirePress received %f, but must be %f. ", rxTPRI.ReferenceTirePress.phys, getValue( EnvTPMS_Rear1LeftPressure ) + diff );
+      TestStepFail( textBuffer );
+    } 
+  }
+  else {
+    TestStepFail( "Third TPRI response missing."); 
+  }
+
+  // wait for fourth TIRE response
+  if (tpmsWaitForTPRI( TPMS.NmStationAddress, rxTPRI ) == 0) {
+    if (rxTPRI.TireLocation != 0x11) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.TireLocation received %d, but must be 0x11. ", rxTPRI.TireLocation );
+      TestStepFail( textBuffer );
+    }
+    else if (rxTPRI.ReferenceTirePress.phys != getValue( EnvTPMS_Rear1RightPressure ) + diff) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.ReferenceTirePress received %f, but must be %f. ", rxTPRI.ReferenceTirePress.phys, getValue( EnvTPMS_Rear1RightPressure ) + diff );
+      TestStepFail( textBuffer );
+    } 
+  }
+  else {
+    TestStepFail( "Fourth TPRI response missing."); 
+  }
+
+  // wait for fith TIRE response
+  if (tpmsWaitForTPRI( TPMS.NmStationAddress, rxTPRI ) == 0) {
+    if (rxTPRI.TireLocation != 0x20) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.TireLocation received %d, but must be 0x20. ", rxTPRI.TireLocation );
+      TestStepFail( textBuffer );
+    }
+    else if (rxTPRI.ReferenceTirePress.phys != getValue( EnvTPMS_Rear2LeftPressure ) + diff) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.ReferenceTirePress received %f, but must be %f. ", rxTPRI.ReferenceTirePress.phys, getValue( EnvTPMS_Rear2LeftPressure ) + diff );
+      TestStepFail( textBuffer );
+    } 
+  }
+  else {
+    TestStepFail( "Fith TPRI response missing."); 
+  }
+
+  // wait for sixth TIRE response
+  if (tpmsWaitForTPRI( TPMS.NmStationAddress, rxTPRI ) == 0) {
+    if (rxTPRI.TireLocation != 0x21) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.TireLocation received %d, but must be 0x21. ", rxTPRI.TireLocation );
+      TestStepFail( textBuffer );
+    }
+    else if (rxTPRI.ReferenceTirePress.phys != getValue( EnvTPMS_Rear2RightPressure ) + diff) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.ReferenceTirePress received %f, but must be %f. ", rxTPRI.ReferenceTirePress.phys, getValue( EnvTPMS_Rear2RightPressure ) + diff );
+      TestStepFail( textBuffer );
+    } 
+  }
+  else {
+    TestStepFail( "Sixth TPRI response missing."); 
+  }
+  
+  //
+  // Cleanup test case
+  //
+
+  // send TPRS
+  txTPRS.SA                             = gTesterAddress;
+  txTPRS.DA                             = TPMS.NmStationAddress;
+  txTPRS.TireLocation                   = 0x00;
+  txTPRS.ReferenceTirePressSetting.phys = 200;
+  output( txTPRS );
+
+  // send TPRS
+  txTPRS.TireLocation = 0x01;
+  output( txTPRS );
+
+  // send TPRS
+  txTPRS.TireLocation = 0x10;
+  output( txTPRS );
+
+  // send TPRS
+  txTPRS.TireLocation = 0x11;
+  output( txTPRS );
+
+  // send TPRS
+  txTPRS.TireLocation = 0x20;
+  output( txTPRS );
+
+  // send TPRS
+  txTPRS.TireLocation = 0x21;
+  output( txTPRS );
+
+}
+/*@@end*/
+
+/*@@testcase:TC3_2_ReduceTirePressue():*/
+/*
+ * Test case 3.2 - Reduce tire pressure and wait for DM1
+ */
+testcase TC3_2_ReduceTirePressue()
+{
+  long  result;
+
+  // write test case information to report file and set state of this test case
+  TestCaseTitle( "", "Reduce tire pressure and wait for DM1" );
+  TestCaseDescription("");
+
+  //
+  // Step 1
+  //
+
+  testStepBegin( 1, "Step 1", "Reduce tire pressue front/left to warning level and wait for DM1. " );
+
+  putValue( EnvTPMS_FrontLeftPressure, 185 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_BelowNormalWarn, 3 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_FrontLeftPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 2
+  //
+
+  testStepBegin( 1, "Step 2", "Reduce tire pressue front/left to critical level and wait for DM1. " );
+
+  putValue( EnvTPMS_FrontLeftPressure, 170 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_BelowNormalCritical, 2 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_FrontLeftPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 3
+  //
+
+  testStepBegin( 1, "Step 1", "Reduce tire pressue front/right to warning level and wait for DM1. " );
+
+  putValue( EnvTPMS_FrontRightPressure, 185 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_BelowNormalWarn, 3 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_FrontRightPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 4
+  //
+
+  testStepBegin( 1, "Step 2", "Reduce tire pressue front/right to critical level and wait for DM1. " );
+
+  putValue( EnvTPMS_FrontRightPressure, 170 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_BelowNormalCritical, 2 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_FrontRightPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 5
+  //
+
+  testStepBegin( 1, "Step 5", "Reduce tire pressue rear1/left to warning level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear1LeftPressure, 185 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_BelowNormalWarn, 3 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear1LeftPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 6
+  //
+
+  testStepBegin( 1, "Step 6", "Reduce tire pressue rear1/left to critical level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear1LeftPressure, 170 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_BelowNormalCritical, 2 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear1LeftPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 7
+  //
+
+  testStepBegin( 1, "Step 7", "Reduce tire pressue rear1/keft to warning level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear1RightPressure, 185 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_BelowNormalWarn, 3 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear1RightPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 8
+  //
+
+  testStepBegin( 1, "Step 8", "Reduce tire pressue rear1/right to critical level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear1RightPressure, 170 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_BelowNormalCritical, 2 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear1RightPressure, 200 );
+  testWaitForTimeout( 500 );
+
+
+  //
+  // Step 9
+  //
+
+  testStepBegin( 1, "Step 9", "Reduce tire pressue rear2/left to warning level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear2LeftPressure, 185 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_BelowNormalWarn, 3 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear2LeftPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 10
+  //
+
+  testStepBegin( 1, "Step 10", "Reduce tire pressue rear2/left to critical level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear2LeftPressure, 170 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_BelowNormalCritical, 2 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear2LeftPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 11
+  //
+
+  testStepBegin( 1, "Step 11", "Reduce tire pressue rear2/left to warning level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear2RightPressure, 185 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_BelowNormalWarn, 3 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear2RightPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 12
+  //
+
+  testStepBegin( 1, "Step 12", "Reduce tire pressue rear2/right to critical level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear2RightPressure, 170 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_BelowNormalCritical, 2 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear2RightPressure, 200 );
+  testWaitForTimeout( 500 );
+}
+/*@@end*/
+
+/*@@testcase:TC1_4_ACL_HigherPriority():*/
+/*
+ * Test case 1.4 - ACL with higher priority
+ *
+ * Send an ACL with a higher priority than the SUT.
+ * The SUT must send a cannot claim address (0xfe) or
+ * it must claim a new address.
+ */
+testcase TC1_4_ACL_HigherPriority()
+{
+  pg ACL acl;
+
+  // write test case information to report file and set state of this test case
+  TestCaseTitle( "1.4", "ACL with higher priority");
+  TestCaseDescription("Send an ACL with a higher priority than the SUT. The SUT must send a cannot claim address (0xfe) or it must claim a new address.");
+
+  //
+  // setup test case
+  //
+
+  // if SUT is not available, send a commanded address to the SUT
+  if (J1939TestNmtQueryAddress( TPMS ) == kNullAddr) {
+    j1939SendCommandedAddressToSUT( gTesterAddress, TPMS.NmStationAddress, 1 );
+
+    testWaitForTimeout( 200 );
+  }
+
+  //
+  // do test here
+  //
+
+  // send ACL
+  acl.SA                      = TPMS.NmStationAddress;
+  acl.DA                      = kGlobalAddr;
+  acl.ArbitraryAddressCapable = TPMS.NmJ1939AAC;
+  acl.IndustryGroup           = TPMS.NmJ1939IndustryGroup;
+  acl.VehicleSystem           = TPMS.NmJ1939System;
+  acl.VehicleSystemInstance   = TPMS.NmJ1939SystemInstance;
+  acl.Function                = TPMS.NmJ1939Function;
+  acl.FunctionInstance        = TPMS.NmJ1939FunctionInstance;
+  acl.ECUInstance             = TPMS.NmJ1939ECUInstance;
+  acl.ManufacturerCode        = TPMS.NmJ1939ManufacturerCode;
+  acl.IdentityNumber          = TPMS.NmJ1939IdentityNumber - 1; // higher priority
+  output( acl );
+
+  // wait for TX ACL
+  j1939WaitForACL( TPMS.NmStationAddress, 0 );
+
+  // wait for ACL from SUT
+  j1939WaitForACL( kNullAddr, 1 );
+
+
+}
+/*@@end*/
+
+/*@@testcase:TC1_5_CommandedAddress():*/
+/*
+ * Test case 1.5 - Commanded address test
+ *
+ * Send a commanded address to the SUT. The SUT must perform
+ * an ACL with the new address.
+ */
+testcase TC1_5_CommandedAddress()
+{
+  long  result;
+
+  // write test case information to report file and set state of this test case
+  TestCaseTitle( "1.5", "Commanded Address");
+  TestCaseDescription( "Send a commanded address to the SUT. The SUT must perform an ACL with the new address." );
+
+  //
+  // do test here
+  //
+
+  j1939SendCommandedAddressToSUT( gTesterAddress, TPMS.NmStationAddress+1, 1 );
+  testWaitForTimeout( 250 );
+
+  //
+  // Clean up
+  //
+
+  j1939SendCommandedAddressToSUT( gTesterAddress, TPMS.NmStationAddress, 1 );
+  testWaitForTimeout( 250 );
+
+}
+/*@@end*/
+
+/*@@caplFunc:j1939SendRequestForACL(byte,byte):*///function
+/*
+ * Send a request for ACL message.
+ *
+ * sourceAddr - Send from this address
+ * destAddr   - Send to this destination address
+ */
+void j1939SendRequestForACL( BYTE sourceAddr, BYTE destAddr )
+{
+  pg RQST txRQST;
+
+  txRQST.SA                   = sourceAddr;
+  txRQST.DA                   = destAddr;
+  txRQST.ParameterGroupNumber = 0xee00; // ACL PGN
+
+  output( txRQST );
+}
+/*@@end*/
+
+/*@@caplFunc:utilCompareACLwithSUT(pg418316030x):*///function
+/*
+ * Compare the device name of a ACL message with the
+ * Device name of the SUT in the database.
+ *
+ * return - 0 = equal
+ *         -1 = acl has lower priority than name in DBC
+ *          1 = acl has higher priority than name in DBC
+ * acl    - ACL message
+ */
+int utilCompareACLwithSUT( pg ACL acl )
+{
+  if (   (acl.ArbitraryAddressCapable  == TPMS.NmJ1939AAC )
+      && (acl.IndustryGroup            == TPMS.NmJ1939IndustryGroup )
+      && (acl.VehicleSystem            == TPMS.NmJ1939System )
+      && (acl.VehicleSystemInstance    == TPMS.NmJ1939SystemInstance )
+      && (acl.Function                 == TPMS.NmJ1939Function )
+      && (acl.FunctionInstance         == TPMS.NmJ1939FunctionInstance )
+      && (acl.ECUInstance              == TPMS.NmJ1939ECUInstance )
+      && (acl.ManufacturerCode         == TPMS.NmJ1939ManufacturerCode )
+      && (acl.IdentityNumber           == TPMS.NmJ1939IdentityNumber )
+     )
+  {
+    return 0;
+  }
+  else
+  {
+    return 1;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:j1939WaitForACL(byte,byte):*///function
+/*
+ * Wait for a ACL message from SUT.
+ *
+ * return       - Error code or 0
+ * sutAddress   - Address from which the SUT must send the ACL
+ * checkSUTName - 1 = check if device name of SUT is correct
+ *                0 = ignore device name
+ */
+int j1939WaitForACL( BYTE sutAddress, BYTE checkSUTName )
+{
+  char   text[128];
+  pg ACL rxACL;
+
+  switch(J1939TestWaitForPG( sutAddress, kGlobalAddr, rxACL.pgn, 1250 )) {
+    case 0: /* timeout */
+      TestStepFail( "Timeout. ACL message not received."); 
+      return -1;
+    case 1: /* ok: message has occurred */
+      J1939TestGetWaitEventPGData( rxACL );
+
+      if (checkSUTName) {
+        if (utilCompareACLwithSUT( rxACL ) == 0) {
+          snprintf( text, elCount(text), "Received ACL from address 0x%x, device name OK.", rxACL.SA );
+          TestStepPass( text );
+          return 0;
+        }
+        else {
+          snprintf( text, elCount(text), "Received ACL from address 0x%x, but device name is wrong !", rxACL.SA );
+          TestStepFail( text );
+          return 1;
+        }
+      }
+      else {
+        snprintf( text, elCount(text), "Received ACL from address 0x%x.", rxACL.SA );
+        TestStepPass( text );
+        return 0;
+      }
+      break;
+    default: /* Failed */
+      TestStepFail( "WaitForMessage: General error occurred. ");
+      return -2;
+  }
+
+  return -3;
+}
+/*@@end*/
+
+/*@@caplFunc:j1939SendCommandedAddressToSUT(byte,byte,int):*///function
+/*
+ * Send a commanded address message to the SUT
+ *
+ * return     - Error code or 0
+ * sourceAddr - Send message from this address
+ * newAddress - Use this new address
+ * waitForACL - 1 = wait for ACL
+ *              0 = do not wait
+ */
+int j1939SendCommandedAddressToSUT( BYTE sourceAddr, BYTE newAddress, int waitForACL )
+{
+  pg CA ca;
+
+  ca.SA                      = sourceAddr;
+  ca.ArbitraryAddressCapable = TPMS.NmJ1939AAC;
+  ca.IndustryGroup           = TPMS.NmJ1939IndustryGroup;
+  ca.VehicleSystem           = TPMS.NmJ1939System;
+  ca.VehicleSystemInstance   = TPMS.NmJ1939SystemInstance;
+  ca.Function                = TPMS.NmJ1939Function;
+  ca.FunctionInstance        = TPMS.NmJ1939FunctionInstance;
+  ca.ECUInstance             = TPMS.NmJ1939ECUInstance;
+  ca.ManufacturerCode        = TPMS.NmJ1939ManufacturerCode;
+  ca.IdentityNumber          = TPMS.NmJ1939IdentityNumber;
+  ca.AddressAssignment       = newAddress;
+  output( ca );
+
+  if (waitForACL) {
+    return j1939WaitForACL( newAddress, 1 );
+  }
+  else {
+    return 0;
+  }
+}
+/*@@end*/
+
+/*@@testcase:TC1_2_RequestForACLSpecific():*/
+/*
+ * Test case 1.2 - Request for ACL (specific)
+ *
+ * The tester send a specific request for ACL to the SUT. The SUT must respond
+ * with a ACL message.
+ */
+testcase TC1_2_RequestForACLSpecific()
+{
+  pg ACL rxACL;
+
+  // write test case information to report file and set state of this test case
+  TestCaseTitle( "1.2", "Request for ACL (specific)");
+  TestCaseDescription("Send a request specific for ACL to the address of the SUT. The SUT must respond with a ACL message.");
+
+  //
+  // setup test case
+  //
+
+  // if SUT is not available, send a commanded address to the SUT
+  if (J1939TestNmtQueryAddress( TPMS ) == kNullAddr) {
+    j1939SendCommandedAddressToSUT( gTesterAddress, TPMS.NmStationAddress, 1 );
+
+    testWaitForTimeout( 200 );
+  }
+
+  //
+  // do test here
+  //
+
+  j1939SendRequestForACL( kNullAddr, TPMS.NmStationAddress );
+
+  j1939WaitForACL( TPMS.NmStationAddress, 1 );
+
+}
+/*@@end*/
+
+/*@@testcase:TC1_6_RqForACL_DuringClaiming():*/
+/*
+ * Test case 1.6 - Request for ACL during claiming
+ *
+ * Send a request for ACL to the SUT, while the SUT ins in claiming
+ * phase (250ms after ACL). The SUT must respond the requeast after
+ * the claiming phase.
+ */
+testcase TC1_6_RqForACL_DuringClaiming()
+{
+  char  text[256];
+  DWORD aclTime;
+
+  // write test case information to report file and set state of this test case
+  TestCaseTitle( "1.6", "Request for ACL during claiming");
+  TestCaseDescription( "Send a request for ACL to the SUT, while the SUT ins in claiming phase (250ms after ACL). The SUT must respond the requeast after the claiming phase." );
+
+  //
+  // setup test case
+  //
+
+  // if SUT is not available, send a commanded address to the SUT
+  if (J1939TestNmtQueryAddress( TPMS ) == kNullAddr) {
+    j1939SendCommandedAddressToSUT( gTesterAddress, TPMS.NmStationAddress, 1 );
+
+  }
+
+  testWaitForTimeout( 250 );
+
+  //
+  // do test here
+  //
+
+  // force SUT to perform address claiming
+  j1939SendCommandedAddressToSUT( gTesterAddress, TPMS.NmStationAddress+2, 1 );
+  aclTime = timeNow();
+
+  // send a request, immedatelly after receiveing the ACL
+  j1939SendRequestForACL( kNullAddr, TPMS.NmStationAddress+2 );
+  j1939WaitForACL( TPMS.NmStationAddress+2, 1 );
+
+  // during claiming phase the SUT is not allowed to send a response for an ACL or other request
+  if (timeNow() < aclTime + 24000) { // 240ms
+    snprintf( text, elCount(text), "Response for Request received to early, %dms after request (must be > 250ms)", (timeNow() - aclTime) / 100 );
+    TestStepFail( text );
+  }
+
+  //
+  // Clean up
+  //
+
+  j1939SendCommandedAddressToSUT( gTesterAddress, TPMS.NmStationAddress, 1 );
+  testWaitForTimeout( 250 );
+
+}
+/*@@end*/
+
+/*@@testcase:TC2_2_RequestUnknownPGN():*/
+/*
+ * Test case 2.2 - Request unknown PGN from SUT
+ *
+ * Request an unkown PGN from the SUT. The SUT must respond with a NACK.
+ */
+testcase TC2_2_RequestUnknownPGN()
+{
+  pg RQST txRQST;
+  pg ACKM rxACKM;
+  DWORD   rqPGN;
+
+  // write test case information to report file and set state of this test case
+  TestCaseTitle( "2.2", " Request unknown PGN from SUT");
+  TestCaseDescription("Request an unkown PGN from the SUT. The SUT must respond with a NACK.");
+
+  //
+  // setup test case
+  //
+
+  // if SUT is not available, send a commanded address to the SUT
+  if (J1939TestNmtQueryAddress( TPMS ) == kNullAddr) {
+    j1939SendCommandedAddressToSUT( gTesterAddress, TPMS.NmStationAddress, 1 );
+
+    testWaitForTimeout( 200 );
+  }
+
+  //
+  // do test here
+  //
+
+  // send request
+  rqPGN                       = 0xfd12;
+  txRQST.SA                   = gTesterAddress;
+  txRQST.DA                   = TPMS.NmStationAddress;
+  txRQST.ParameterGroupNumber = rqPGN; // a unknown PGN
+  output( txRQST );
+
+  // wait for the response
+  switch(J1939TestWaitForPG( TPMS.NmStationAddress, kGlobalAddr, ACKM, 1250 )) {
+    case 0: /* timeout */
+      TestStepFail( "Timeout, negative ACKM not received."); 
+      break;
+    case 1: /* ok: message has occurred */
+      J1939TestGetWaitEventPGData( rxACKM );
+
+      if (rxACKM.ControlByte != 1) {
+        snprintf( textBuffer, elCount(textBuffer), "Received ACKM with wrong ControlByte 0x%x.", rxACKM.ControlByte );
+        TestStepFail( textBuffer );
+      }
+      else if (rxACKM.ParameterGroupNumber != rqPGN) {
+        snprintf( textBuffer, elCount(textBuffer), "Received ACKM with wrong PGN 0x%x.", rxACKM.ParameterGroupNumber );
+        TestStepFail( textBuffer );
+      }
+      else {
+        TestStepPass( "Received negative ACKM" );
+      }
+
+      break;
+    default: /* Failed */
+      TestStepFail( "WaitForMessage: General error occurred. ");
+      break;
+  }
+
+
+}
+/*@@end*/
+
+/*@@caplFunc:conditionsSetup():*///function
+/*
+ * Setup conditions for the test
+ */
+void conditionsSetup()
+{
+/*
+  int tolerance = 5;
+
+  // create cylce time check for EEC1
+  gCheckCylceEEC1 = J1939TestChkCreate_AbsCycleTimeViolation( TPMS, EEC1, EEC1.genMsgCycleTime-tolerance, EEC1.genMsgCycleTime+tolerance );
+  if (gCheckCylceEEC1 < 0) {
+    write( "Create cycle time check for EEC1 failed, error %d", gCheckCylceEEC1 );
+    stop();
+  }
+*/
+}
+/*@@end*/
+
+/*@@caplFunc:conditionsCleanup():*///function
+/*
+ * Cleanup conditions for the test
+ */
+void conditionsCleanup()
+{
+//  J1939TestChkControl_Destroy( gCheckCylceEEC1 );
+}
+/*@@end*/
+
+/*@@caplFunc:conditionsStart():*///function
+/*
+ * Start conditions for the test
+ */
+void conditionsStart()
+{
+/*
+  J1939TestChkControl_Start( gCheckCylceEEC1 );
+  
+  testAddCondition(gCheckCylceEEC1);
+*/
+}
+/*@@end*/
+
+/*@@caplFunc:conditionsStop():*///function
+/*
+ * Start conditions for the test.
+ */
+void conditionsStop()
+{
+/*
+  testRemoveCondition(gCheckCylceEEC1);
+
+  J1939TestChkControl_Stop( gCheckCylceEEC1 );
+*/
+}
+/*@@end*/
+
+/*@@testcase:TC2_3_RequestTIRE():*/
+/*
+ * Test case 2.3 - Request TIRE
+ *
+ * Request TIRE message from SUT.
+ */
+testcase TC2_3_RequestTIRE()
+{
+  pg RQST      txRQST;
+  pg TIRE_TPMS rxTIRE;
+
+  // write test case information to report file and set state of this test case
+  TestCaseTitle( "", "Request TIRE");
+  TestCaseDescription("Request TIRE from the SUT. The SUT must respond with 6 TIRE messages. One for each tire.");
+
+  testWaitForTimeout( 100 );
+
+  //
+  // Step 1
+  //
+
+  testStepBegin( 1, "Step 1", "Send request for TIRE and wait for response." );
+
+  // send request
+  txRQST.SA                   = gTesterAddress;
+  txRQST.DA                   = TPMS.NmStationAddress;
+  txRQST.ParameterGroupNumber = 0xFEF4; // TIRE PGN
+  output( txRQST );
+
+  // wait for first TIRE response
+  if (tpmsWaitForTIRE( TPMS.NmStationAddress, rxTIRE ) == 0) {
+    if (rxTIRE.TireLocation != 0x00) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TIRE.TireLocation received %d, but must be 0x00. ", rxTIRE.TireLocation );
+      TestStepFail( textBuffer );
+    }
+    else if (rxTIRE.TirePress.phys != getValue(EnvTPMS_FrontLeftPressure)) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TIRE.TirePress received %f, but must be %f. ", rxTIRE.TirePress.phys, getValue(EnvTPMS_FrontLeftPressure) );
+      TestStepFail( textBuffer );
+    }
+  }
+  else {
+    TestStepFail( "First TIRE response missing."); 
+  }
+
+  // wait for second TIRE response
+  if (tpmsWaitForTIRE( TPMS.NmStationAddress, rxTIRE ) == 0) {
+    if (rxTIRE.TireLocation != 0x01) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TIRE.TireLocation received %d, but must be 0x01. ", rxTIRE.TireLocation );
+      TestStepFail( textBuffer );
+    }
+    else if (rxTIRE.TirePress.phys != getValue(EnvTPMS_FrontRightPressure)) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TIRE.TirePress received %f, but must be %f. ", rxTIRE.TirePress.phys, getValue(EnvTPMS_FrontRightPressure) );
+      TestStepFail( textBuffer );
+    }
+  }
+  else {
+    TestStepFail( "Second TIRE response missing."); 
+  }
+
+  // wait for third TIRE response
+  if (tpmsWaitForTIRE( TPMS.NmStationAddress, rxTIRE ) == 0) {
+    if (rxTIRE.TireLocation != 0x10) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TIRE.TireLocation received %d, but must be 0x10. ", rxTIRE.TireLocation );
+      TestStepFail( textBuffer );
+    }
+    else if (rxTIRE.TirePress.phys != getValue(EnvTPMS_Rear1LeftPressure)) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TIRE.TirePress received %f, but must be %f. ", rxTIRE.TirePress.phys, getValue(EnvTPMS_Rear1LeftPressure) );
+      TestStepFail( textBuffer );
+    }
+  }
+  else {
+    TestStepFail( "Third TIRE response missing."); 
+  }
+
+  // wait for fourth TIRE response
+  if (tpmsWaitForTIRE( TPMS.NmStationAddress, rxTIRE ) == 0) {
+    if (rxTIRE.TireLocation != 0x11) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TIRE.TireLocation received %d, but must be 0x11. ", rxTIRE.TireLocation );
+      TestStepFail( textBuffer );
+    }
+    else if (rxTIRE.TirePress.phys != getValue(EnvTPMS_Rear1RightPressure)) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TIRE.TirePress received %f, but must be %f. ", rxTIRE.TirePress.phys, getValue(EnvTPMS_Rear1RightPressure) );
+      TestStepFail( textBuffer );
+    }
+  }
+  else {
+    TestStepFail( "Fourth TIRE response missing."); 
+  }
+
+  // wait for fith TIRE response
+  if (tpmsWaitForTIRE( TPMS.NmStationAddress, rxTIRE ) == 0) {
+    if (rxTIRE.TireLocation != 0x20) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TIRE.TireLocation received %d, but must be 0x20. ", rxTIRE.TireLocation );
+      TestStepFail( textBuffer );
+    }
+    else if (rxTIRE.TirePress.phys != getValue(EnvTPMS_Rear2LeftPressure)) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TIRE.TirePress received %f, but must be %f. ", rxTIRE.TirePress.phys, getValue(EnvTPMS_Rear2LeftPressure) );
+      TestStepFail( textBuffer );
+    }
+  }
+  else {
+    TestStepFail( "Fith TIRE response missing."); 
+  }
+
+  // wait for sixth TIRE response
+  if (tpmsWaitForTIRE( TPMS.NmStationAddress, rxTIRE ) == 0) {
+    if (rxTIRE.TireLocation != 0x21) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TIRE.TireLocation received %d, but must be 0x21. ", rxTIRE.TireLocation );
+      TestStepFail( textBuffer );
+    }
+    else if (rxTIRE.TirePress.phys != getValue(EnvTPMS_Rear2RightPressure)) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TIRE.TirePress received %f, but must be %f. ", rxTIRE.TirePress.phys, getValue(EnvTPMS_Rear2RightPressure) );
+      TestStepFail( textBuffer );
+    }
+  }
+  else {
+    TestStepFail( "Sixth TIRE response missing."); 
+  }
+
+}
+/*@@end*/
+
+/*@@caplFunc:tpmsWaitForTIRE(byte,pg419361873x):*///function
+/*
+ * Wait for TIRE message
+ */
+int tpmsWaitForTIRE( BYTE tpmsAddr, pg TIRE_TPMS rxPG )
+{
+  // wait for the response
+  switch(J1939TestWaitForPG( tpmsAddr, kGlobalAddr, TIRE_TPMS, 1250 )) {
+    case 0: /* timeout */
+      TestStepFail( "Timeout, TIRE response not received."); 
+      return -1;
+    case 1: /* ok: message has occurred */
+      J1939TestGetWaitEventPGData( rxPG );
+      return 0;
+    default: /* Failed */
+      TestStepFail( "WaitForMessage: General error occurred. ");
+      return -2;
+  }
+}
+/*@@end*/
+
+/*@@testcase:TC2_4_RequestTPRI():*/
+/*
+ * Test case 2.4 - Request TPRI
+ *
+ * Request TIRE message from SUT.
+ */
+testcase TC2_4_RequestTPRI()
+{
+  pg RQST      txRQST;
+  pg TPRI_TPMS rxTPRI;
+
+  // write test case information to report file and set state of this test case
+  TestCaseTitle( "", "Request TPRI");
+  TestCaseDescription("Request TPRI from the SUT. The SUT must respond with 6 TPRI messages. One for each tire.");
+
+  //
+  // Step 1
+  //
+
+  testStepBegin( 1, "Step 1", "Send request for TPRI and wait for response." );
+
+  // send request
+  txRQST.SA                   = gTesterAddress;
+  txRQST.DA                   = TPMS.NmStationAddress;
+  txRQST.ParameterGroupNumber = 0xFDB9; // TPRI PGN
+  output( txRQST );
+
+  // wait for first TIRE response
+  if (tpmsWaitForTPRI( TPMS.NmStationAddress, rxTPRI ) == 0) {
+    if (rxTPRI.TireLocation != 0x00) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.TireLocation received %d, but must be 0x00. ", rxTPRI.TireLocation );
+      TestStepFail( textBuffer );
+    }
+  }
+  else {
+    TestStepFail( "First TPRI response missing."); 
+  }
+
+  // wait for second TIRE response
+  if (tpmsWaitForTPRI( TPMS.NmStationAddress, rxTPRI ) == 0) {
+    if (rxTPRI.TireLocation != 0x01) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.TireLocation received %d, but must be 0x01. ", rxTPRI.TireLocation );
+      TestStepFail( textBuffer );
+    }
+  }
+  else {
+    TestStepFail( "Second TPRI response missing."); 
+  }
+
+  // wait for third TIRE response
+  if (tpmsWaitForTPRI( TPMS.NmStationAddress, rxTPRI ) == 0) {
+    if (rxTPRI.TireLocation != 0x10) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.TireLocation received %d, but must be 0x10. ", rxTPRI.TireLocation );
+      TestStepFail( textBuffer );
+    }
+  }
+  else {
+    TestStepFail( "Third TPRI response missing."); 
+  }
+
+  // wait for fourth TIRE response
+  if (tpmsWaitForTPRI( TPMS.NmStationAddress, rxTPRI ) == 0) {
+    if (rxTPRI.TireLocation != 0x11) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.TireLocation received %d, but must be 0x11. ", rxTPRI.TireLocation );
+      TestStepFail( textBuffer );
+    }
+  }
+  else {
+    TestStepFail( "Fourth TPRI response missing."); 
+  }
+
+  // wait for fith TIRE response
+  if (tpmsWaitForTPRI( TPMS.NmStationAddress, rxTPRI ) == 0) {
+    if (rxTPRI.TireLocation != 0x20) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.TireLocation received %d, but must be 0x20. ", rxTPRI.TireLocation );
+      TestStepFail( textBuffer );
+    }
+  }
+  else {
+    TestStepFail( "Fith TPRI response missing."); 
+  }
+
+  // wait for sixth TIRE response
+  if (tpmsWaitForTPRI( TPMS.NmStationAddress, rxTPRI ) == 0) {
+    if (rxTPRI.TireLocation != 0x21) {
+      snprintf( textBuffer, elCount(textBuffer), "Wrong TPRI.TireLocation received %d, but must be 0x21. ", rxTPRI.TireLocation );
+      TestStepFail( textBuffer );
+    }
+  }
+  else {
+    TestStepFail( "Sixth TPRI response missing."); 
+  }
+
+}
+/*@@end*/
+
+/*@@caplFunc:tpmsWaitForTPRI(byte,pg419281233x):*///function
+/*
+ * Wait for TPRI message
+ */
+int tpmsWaitForTPRI( BYTE tpmsAddr, pg TPRI_TPMS rxPG )
+{
+  // wait for the response
+  switch(J1939TestWaitForPG( tpmsAddr, kGlobalAddr, TPRI_TPMS, 1250 )) {
+    case 0: /* timeout */
+      TestStepFail( "Timeout, TPRI response not received."); 
+      return -1;
+    case 1: /* ok: message has occurred */
+      J1939TestGetWaitEventPGData( rxPG );
+      return 0;
+    default: /* Failed */
+      TestStepFail( "WaitForMessage: General error occurred. ");
+      return -2;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:tpmsWaitForDM1(byte,dword,word,byte):*///function
+/*
+ * Wait for DM1 message
+ */
+int tpmsWaitForDM1( BYTE tpmsAddr, DWORD spn, WORD fmi, BYTE led )
+{
+  pg DM1 dm1 = { DLC = 10 };
+
+  // wait for the response
+  switch(J1939TestWaitForPG( tpmsAddr, kGlobalAddr, DM1, 2000 )) {
+    case 0: /* timeout */
+      TestStepFail( "Timeout, DM1 response not received."); 
+      return -1;
+    case 1: /* ok: message has occurred */
+      J1939TestGetWaitEventPGData( dm1 );
+
+      switch(led) {
+        case 1:
+          if (dm1.ProtectLampStatus != 1) {
+            TestStepFail( "Protecion Lamp is off." );
+            return -2;
+          }
+          break;
+        case 2:
+          if (dm1.RedStopLampState != 1) {
+            TestStepFail( "Ret stop Lamp is off." );
+            return -2;
+          }
+          break;
+        case 3:
+          if (dm1.AmberWarningLampStatus != 1) {
+            TestStepFail( "Amber warning Lamp is off." );
+            return -2;
+          }
+          break;
+        case 4:
+          if (dm1.MalfunctionIndicatorLampStatus != 1) {
+            TestStepFail( "Malfunction indicator lamp off." );
+            return -2;
+          }
+          break;
+      }
+    
+      if (dm1.SPN1 != spn) {
+        snprintf( textBuffer, elCount(textBuffer), "DM1.SPN1 is %d but must be %d. ", dm1.SPN1, spn );
+        TestStepFail( textBuffer );
+        return -3;
+      }
+      
+      if (dm1.FailureModeIdentifier1 != fmi) {
+        snprintf( textBuffer, elCount(textBuffer), "DM1.FMI1 is %d but must be %d. ", dm1.FailureModeIdentifier1, fmi );
+        TestStepFail( textBuffer );
+        return -4;
+      }
+
+      return 0;
+    default: /* Failed */
+      TestStepFail( "WaitForMessage: General error occurred. ");
+      return -5;
+  }
+}
+/*@@end*/
+
+/*@@testcase:TC3_3_IncreaseTirePressue():*/
+/*
+ * Test case 3.3 - Increase tire pressure and wait for DM1
+ */
+testcase TC3_3_IncreaseTirePressue()
+{
+  long  result;
+
+  // write test case information to report file and set state of this test case
+  TestCaseTitle( "", "Increase tire pressure and wait for DM1" );
+  TestCaseDescription("");
+
+  //
+  // Step 1
+  //
+
+  testStepBegin( 1, "Step 1", "Increase tire pressue front/left to warning level and wait for DM1. " );
+
+  putValue( EnvTPMS_FrontLeftPressure, 215 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_AboveNormalWarn, 3 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_FrontLeftPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 2
+  //
+
+  testStepBegin( 1, "Step 2", "Increase tire pressue front/left to critical level and wait for DM1. " );
+
+  putValue( EnvTPMS_FrontLeftPressure, 230 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_AboveNormalCritical, 2 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_FrontLeftPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 3
+  //
+
+  testStepBegin( 1, "Step 3", "Increase tire pressue front/right to warning level and wait for DM1. " );
+
+  putValue( EnvTPMS_FrontRightPressure, 215 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_AboveNormalWarn, 3 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_FrontRightPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 4
+  //
+
+  testStepBegin( 1, "Step 4", "Increase tire pressue front/right to critical level and wait for DM1. " );
+
+  putValue( EnvTPMS_FrontRightPressure, 230 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_AboveNormalCritical, 2 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_FrontRightPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 5
+  //
+
+  testStepBegin( 1, "Step 5", "Increase tire pressue rear1/left to warning level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear1LeftPressure, 215 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_AboveNormalWarn, 3 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear1LeftPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 6
+  //
+
+  testStepBegin( 1, "Step 6", "Increase tire pressue rear1/left to critical level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear1LeftPressure, 230 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_AboveNormalCritical, 2 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear1LeftPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 7
+  //
+
+  testStepBegin( 1, "Step 7", "Increase tire pressue rear1/right to warning level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear1RightPressure, 215 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_AboveNormalWarn, 3 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear1RightPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 8
+  //
+
+  testStepBegin( 1, "Step 8", "Increase tire pressue rear1/right to critical level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear1RightPressure, 230 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_AboveNormalCritical, 2 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear1RightPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 9
+  //
+
+  testStepBegin( 1, "Step 9", "Increase tire pressue rear2/left to warning level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear2LeftPressure, 215 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_AboveNormalWarn, 3 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear2LeftPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 10
+  //
+
+  testStepBegin( 1, "Step 10", "Increase tire pressue rear2/left to critical level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear2LeftPressure, 230 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_AboveNormalCritical, 2 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear2LeftPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 11
+  //
+
+  testStepBegin( 1, "Step 11", "Increase tire pressue rear2/right to warning level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear2RightPressure, 215 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_AboveNormalWarn, 3 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear2RightPressure, 200 );
+  testWaitForTimeout( 500 );
+
+  //
+  // Step 12
+  //
+
+  testStepBegin( 1, "Step 12", "Increase tire pressue rear2/right to critical level and wait for DM1. " );
+
+  putValue( EnvTPMS_Rear2RightPressure, 230 );
+
+  if (tpmsWaitForDM1( TPMS.NmStationAddress, 241, kFMI_AboveNormalCritical, 2 ) != 0) {
+    TestStepFail( "DM1 missing or has wrong values. " );
+  }
+
+  putValue( EnvTPMS_Rear2RightPressure, 200 );
+  testWaitForTimeout( 500 );
+
+}
+/*@@end*/
+

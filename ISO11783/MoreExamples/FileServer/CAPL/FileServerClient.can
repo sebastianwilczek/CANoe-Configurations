@@ -1,0 +1,727 @@
+/*@!Encoding:1252*/
+/*
+ * Version 2.0
+ *
+ * Copyright 2019 - Vector Informatik GmbH
+ *
+ * This CAPL model simulates a File Server client ECU (ISO11783 Part 13)
+ *
+*/
+
+includes
+{
+  #include "..\CAPL\FileServerCommon.cin"
+}
+
+variables
+{
+  //
+  // Global variables for communication
+  //
+  int   gECUAddress   = kNullAddr;         // Address of the ECU
+  char  gECULabel[32] = "FSClient";        // Label for output to write window
+  
+  enum FileAction
+  {
+    kDoNothing    = 0,
+    kDoReadFile   = 1,
+    kDoWriteFile  = 2
+  };
+
+  // File Server variables
+  BYTE        FS_Address      = kNullAddr; // Address of the File Server ECU
+  LONG        FS_FileHandle   = 0;         // Handle of the opened file or directory
+  BYTE        FS_FileAction   = kDoNothing;// 1 = read File, 2=write file
+  DWORD       FS_LastStatus   = 0;         // Time of last received status message
+  BYTE        FS_TAN          = 0;         // Transaction number
+  msTimer     FS_MaintainTimer;            // Timer for maintenance message
+  msTimer     FS_TimeoutTimer;             // Timer for File Server observation
+  pg FSC      FS_Response = { DLC = 1785 };// Last received File Server Client command
+  pg CFS      FS_Request  = { DLC = 1785 };// Last sent File Server message
+
+  char        gPanelName[32]      = "File Server Client"; // Title of the panel
+  byte        gSupportedFSVersion = kVersionSecondIS;     // Supportred File Server Version
+  byte        gFSRequestState     = kNoRequestInProcess;  // State of the request
+  int         gDbgLevel           = kDbgWarning;          // Set debug level for output to write window
+}
+
+on preStart
+{
+  setWriteDbgLevel( gDbgLevel );
+  EcuInit();
+}
+
+on start
+{
+  EcuStartUp();
+}
+
+// Connection Maintenance Timer
+on timer FS_MaintainTimer
+{
+  if ((Iso11783IL_GetState() == kActive) && (FS_Address != kNullAddr)) 
+  {
+    if (FS_LastStatus + 600000 > timeNow()) // timeout after 6 sec.
+    { 
+      FS_Request.sa = Iso11783IL_GetAddress();
+      FS_Request.da = FS_Address;
+      FS_Request.dlc = 8;
+      FS_Request.FSClientCommand = CFS.FSClientCommand::ConnectionMaintenance;
+      FS_Request.CM_VersionNumber = gSupportedFSVersion;
+      FS_Request.word(2)  = 0xFFFF;
+      FS_Request.dword(4) = 0xFFFFFFFF;
+      output(FS_Request);
+
+      setTimer( FS_MaintainTimer, 2000 );
+    }
+    else 
+    {
+      // missing Status message from File Server for more than 6 seconds
+      FS_Address      = kNullAddr;
+      gFSRequestState = 0; 
+      cancelTimer( FS_TimeoutTimer );
+      
+      writeDbgLevel( kDbgInfo, "<%s> Status message of File Server is missing for more than 6 seconds.");    
+    }
+  }
+  else if (Iso11783IL_GetState() == kClaiming)
+  {
+    setTimer( FS_MaintainTimer, 10 );    
+  }  
+}
+
+// Timout timer for File Server requests
+on timer FS_TimeoutTimer
+{
+  // No response from the File Server received. Abort the current request.
+  gFSRequestState = 0;
+  panelUpdateState();
+}
+
+// Change the current directory of the File Server
+on sysvar sysvar::FileServerClient::SetCurrentDirectory
+{
+  char path[kMaxPath];
+
+  if (@this) 
+  {
+    sysGetVariableString( sysvar::FileServerClient::CurrentDirectory, path, elCount(path) );
+    fsChangeCurrentDirectory( path );
+  }
+}
+
+// Request the current directory from the File Server
+on sysvar sysvar::FileServerClient::GetCurrentDirectory
+{
+  if (@this) 
+  {
+    fsGetCurrentDirectory();
+  }
+}
+
+// Read file on the File Server
+on sysvar sysvar::FileServerClient::ReadFile
+{
+  char path[kMaxPath];
+
+  if (@this) 
+  {
+    sysGetVariableString( sysvar::FileServerClient::FilePath, path, elCount(path) );
+    fsReadFileContent( path );
+  }
+}
+
+// Write file on the File Server
+on sysvar sysvar::FileServerClient::WriteFile
+{
+  char path[kMaxPath];
+
+  if (@this) 
+  {
+    sysGetVariableString( sysvar::FileServerClient::FilePath, path, elCount(path) );
+    fsWriteFileContent( path );
+  }
+}
+
+// Client to File Server message
+on pg CFS
+{
+  if ((this.sa == Iso11783IL_GetAddress()) && (this.dir == Tx)) // Message sent by this client
+  {
+    // set request state but ignore maintenance message
+    if (this.byte(0) != CFS.FSClientCommand::ConnectionMaintenance) 
+    {
+      gFSRequestState = kWaitingForResponse;
+    }
+  }
+}
+
+// File Server to Client message
+on pg FSC
+{
+  if (this.da == Iso11783IL_GetAddress())
+  {
+    FS_Response = this;
+    fsOnResponse();
+  }
+  else if (this.da == kGlobalAddr)
+  {
+    if (this.byte(0) == FSC.FSServerCommand::FileServerStatus) 
+    {
+      if (this.SA != FS_Address) 
+      {
+        FS_Address = this.SA;
+        cancelTimer( FS_MaintainTimer );
+        cancelTimer( FS_TimeoutTimer );
+        if (Iso11783IL_GetState() == kActive) 
+        {
+          setTimer( FS_MaintainTimer, 1 );
+        }
+      }
+      FS_LastStatus = timeNow();
+    }
+  }
+}
+
+///////////////////////////////////////////////////////////////
+// Callbacks
+///////////////////////////////////////////////////////////////
+
+// A commanded address PG was received.
+long Iso11783IL_OnCA(long newAddress)
+{  
+  return 1;
+}
+
+// An error is reported
+void Iso11783IL_OnError( LONG errorCode, LONG param )
+{
+  writeDbgLevel( kDbgError, "<%s> ERROR %i", gECULabel, errorCode );
+}
+
+// Internal state of the client has been changed
+void Iso11783IL_OnChangedState( long state )
+{
+  switch (state)
+  {
+    case kInitialized:
+      break;
+    case kClaiming:
+      break;
+    case kActive:
+      writeDbgLevel( kDbgInfo, "<%s> online with address %d", gECULabel, Iso11783IL_GetAddress() );
+      if (FS_Address != kNullAddr)
+      {
+        // send maintenance message if server status already has been received
+        setTimer( FS_MaintainTimer, 1 );
+      }
+      break;
+    case kStopped:
+      cancelTimer( FS_MaintainTimer );
+      cancelTimer( FS_TimeoutTimer );
+      FS_Address = kNullAddr;
+      break;
+    case kSuspended:
+      break;
+    default:
+      break;
+  }
+}
+
+///////////////////////////////////////////////////////////////
+// Functions
+///////////////////////////////////////////////////////////////
+
+// Initialize all global variables in this function.
+void EcuInit()
+{
+  FS_Address      = kNullAddr;
+  gFSRequestState = kNoRequestInProcess;
+}
+
+// Call this function to connect the node to the bus
+void EcuStartUp()
+{
+  long result;
+  result = Iso11783IL_ControlStart();
+  if (result != kSuccess)
+  {
+    writeDbgLevel( kDbgInfo, "<%s> function 'EcuStartUp' failed (error %i)", gECULabel, result);
+  }
+}
+
+//  Update the state of the controls
+void panelUpdateState()
+{
+  int buttonEnable;
+
+  buttonEnable = (gFSRequestState == 0) ? 1 : 0;
+
+  enableControl( gPanelName, "GetCurrentDirButton", buttonEnable );
+  enableControl( gPanelName, "SetCurrentDirButton", buttonEnable );
+  enableControl( gPanelName, "CurrentDirText", buttonEnable );
+
+  enableControl( gPanelName, "ReadDirectoryButton", buttonEnable );
+  enableControl( gPanelName, "NewDirectoryButton", buttonEnable );
+  enableControl( gPanelName, "RemoveDirectoryButton", buttonEnable );
+  enableControl( gPanelName, "DirectoryText", buttonEnable );
+
+  enableControl( gPanelName, "FilePathText", buttonEnable );
+  enableControl( gPanelName, "ReadFileButton", buttonEnable );
+  enableControl( gPanelName, "WritFileButton", buttonEnable );
+  enableControl( gPanelName, "DeleteFileButton", buttonEnable );
+}
+
+/*
+ * Sends a Request to the File Server. The data is taken from
+ * the global RX_FSRequest variable.
+ *
+ * return - 1 = request was put to send queue
+ *          0 = a request is pending
+ */
+int fsSendRequest(pg CFS request)
+{
+  char txBuffer[1785];
+  long size, i;
+
+  if (gFSRequestState == 0) 
+  {
+    gFSRequestState = kRequestSending;
+
+    request.sa = Iso11783IL_GetAddress();
+    request.da = FS_Address;
+    if (request.dlc <8)
+    {
+      request.dlc = 8;
+    }
+    output(request);
+
+    setTimer( FS_TimeoutTimer, 1500 );
+    panelUpdateState();
+
+    return 1;
+  }
+  else 
+  {
+    return 0;
+  }
+}
+
+/*
+ * Request the current directory from the File Server
+ *
+ * return - 1 = success
+ */
+int fsGetCurrentDirectory()
+{
+  if (gFSRequestState == 0) {
+    FS_Request.FSClientCommand = 0x10;
+    FS_Request.GCD_TAN         = ++FS_TAN;
+    FS_Request.DLC             = 2;
+
+    return fsSendRequest(FS_Request);
+  }
+  else {
+    return 0;
+  }
+}
+
+/*
+ * Change current directory of the File Server
+ *
+ * return - 1 = success
+ * path   - Path of the new current directory
+ */
+int fsChangeCurrentDirectory( char path[] )
+{
+  long i, length;
+
+  if (gFSRequestState == 0) {
+    length = strlen( path );
+
+    FS_Request.FSClientCommand = kChangeCurrentDirectory;
+    FS_Request.CCD_TAN         = ++FS_TAN;
+		FS_Request.CCD_PathName    = length;
+    FS_Request.DLC             = 4 + length;
+
+    for( i = 0; i < length; i++ ) {
+      FS_Request.byte(4+i) = path[i];
+    }
+
+    return fsSendRequest(FS_Request);
+  }
+  else {
+    return 0;
+  }
+}
+
+/*
+ * Close file on the File Server
+ *
+ * return - 1 = success
+ * handle - File Handle
+ */
+int fsCloseFile( BYTE handle )
+{
+  long i, length;
+
+  if (gFSRequestState == 0) {
+    FS_Request.FSClientCommand = kCloseFile;
+    FS_Request.CF_TAN          = ++FS_TAN;
+    FS_Request.CF_Handle       = handle;
+    FS_Request.DLC             = 3;
+
+    return fsSendRequest(FS_Request);
+  }
+  else {
+    return 0;
+  }
+}
+
+/*
+ * Read file content On the File Server
+ *
+ * return - 1 = success
+ * path   - Path of the file
+ */
+int fsReadFileContent( char path[] )
+{
+  long i, length;
+  byte buf[1];
+
+  if ((gFSRequestState == 0) && (FS_FileHandle == 0)) {
+    length = strlen( path );
+
+    FS_Request.FSClientCommand        = kOpenFile;
+    FS_Request.OF_TAN                 = ++FS_TAN;
+    FS_Request.OF_FlagExclusiveAccess = 0;
+    FS_Request.OF_FlagAppend          = 0;
+    FS_Request.OF_FlagCreateNew       = 0;
+    FS_Request.OF_FlagReadWrite       = 2;
+    FS_Request.OF_PathName            = length;
+    FS_Request.DLC                    = 5 + length;
+
+    for( i = 0; i < length; i++ ) {
+      FS_Request.byte(5+i) = path[i];
+    }
+    FS_FileAction = kDoReadFile;
+
+    sysSetVariableData(sysvar::FileServerClient::FileData, buf, 0);
+
+    return fsSendRequest(FS_Request);
+  }
+  else {
+    return 0;
+  }
+}
+
+/*
+ * Read file data on the File Server
+ *
+ * return - 1 = success
+ * handle - File Handle
+ * count  - Number of bytes to read
+ */
+int fsReadFile( BYTE handle, WORD count )
+{
+  long i, length;
+
+  if (gFSRequestState == 0) 
+  {
+    FS_Request.FSClientCommand = kReadFile;
+    FS_Request.RF_TAN          = ++FS_TAN;
+    FS_Request.RF_Handle       = handle;
+    FS_Request.RF_Count        = count;
+    FS_Request.DLC             = 5;
+
+    return fsSendRequest(FS_Request);
+  }
+  else 
+  {
+    return 0; 
+  }
+}
+
+/*
+ * Write file content On the File Server
+ *
+ * return - 1 = success
+ * path   - Path of the file
+ */
+int fsWriteFileContent( char path[] )
+{
+  long i, length;
+
+  if ((gFSRequestState == 0) && (FS_FileHandle == 0)) 
+  {
+    length = strlen( path );
+
+    FS_Request.FSClientCommand        = kOpenFile;
+    FS_Request.OF_TAN                 = ++FS_TAN;
+    FS_Request.OF_FlagReadWrite       = 0x02;
+    FS_Request.OF_FlagCreateNew       = 1;
+    FS_Request.OF_FlagAppend          = 0;
+    FS_Request.OF_FlagExclusiveAccess = 0;
+    FS_Request.OF_PathName            = length;
+    FS_Request.DLC                    = 5 + length;
+
+    for( i = 0; i < length; i++ ) 
+    {
+      FS_Request.byte(5+i) = path[i];
+    }
+
+    FS_FileAction = kDoWriteFile;
+
+    return fsSendRequest(FS_Request);
+  }
+  else {
+    return 0;
+  }
+}
+
+/*
+ * Write file data on the File Server
+ *
+ * return - 1 = success
+ * handle - File Handle
+ * data   - Data to write
+ * count  - Number of bytes to write
+ */
+int fsWriteFile( BYTE handle, byte data[], long count )
+{
+  long i;
+
+  if (gFSRequestState == 0) 
+  {    
+    FS_Request.FSClientCommand = 0x23; // write file
+    FS_Request.WF_TAN          = ++FS_TAN;
+    FS_Request.WF_Handle       = handle;
+    FS_Request.WF_Count        = count;
+    FS_Request.DLC             = 5 + count;
+
+    for( i = 0; i < count; i++ ) 
+    {
+      FS_Request.byte(5+i) = data[i];
+    }
+
+    return fsSendRequest(FS_Request);
+  }
+  else 
+  {
+    return 0;
+  }
+}
+
+// A response from the File Server was received
+void fsOnResponse()
+{
+  char path[kMaxPath];
+  byte data[200];
+  long copiedBytes, i;
+
+  if (Iso11783IL_GetState() != kActive) return;
+
+  if (FS_Response.FSServerCommand == FSC.FSServerCommand::FileServerStatus) 
+  {
+    // Status
+    if (FS_Response.SA != FS_Address) 
+    {
+      FS_Address = FS_Response.SA;
+      cancelTimer( FS_MaintainTimer );
+      cancelTimer( FS_TimeoutTimer );
+      setTimer( FS_MaintainTimer, 0 );
+    }
+    FS_LastStatus = timeNow();
+    return;
+  }
+  else if (FS_Address == kNullAddr) 
+  {
+    return;
+  }
+
+  // check TAN
+  if (FS_Response.OF_TAN != FS_Request.OF_TAN) 
+  {
+    // wrong TAN, ignore it !
+    return;
+  }
+
+  // request complete
+  if ((gFSRequestState > 0) && (FS_Response.FSServerCommand == FS_Request.FSClientCommand)) 
+  {
+    cancelTimer( FS_TimeoutTimer );
+    gFSRequestState = 0; 
+  }
+
+  sysSetVariableString(sysvar::FileServerClient::ErrorText, "");
+  
+  // dispatch command
+  switch(FS_Response.FSServerCommand) 
+  {
+    case kOpenFile:
+      if (FS_Response.OF_ErrorCode == 0) 
+      {
+        if (FS_FileAction == kDoReadFile) 
+        {
+          FS_FileHandle = FS_Response.OF_Handle;
+          fsReadFile( FS_FileHandle, 100 );
+        }
+        else if (FS_FileAction == kDoWriteFile) 
+        {
+          FS_FileHandle = FS_Response.OF_Handle;
+          sysGetVariableData( sysvar::FileServerClient::FileData, data, copiedBytes);
+          fsWriteFile(FS_FileHandle, data, copiedBytes);
+        }
+      }
+      else 
+      {
+        fsOnError(FS_Response.OF_ErrorCode);
+      }
+      break;
+    case kSeekFile:
+      if (FS_Response.SF_ErrorCode == 0) 
+      {
+      }
+      else 
+      {
+        fsOnError(FS_Response.SF_ErrorCode);
+      }
+      break;
+    case kReadFile:
+      if ((FS_Response.RF_ErrorCode == 0) || (FS_Response.RF_ErrorCode == 45)) 
+      {
+        for( i = 5; (i < FS_Response.DLC) && ((i-5) < FS_Response.RF_Count); i++ ) 
+        {
+          data[i-5] = FS_Response.byte(i);
+        }
+        data[i-5] = 0;
+        sysSetVariableData( sysvar::FileServerClient::FileData, data, FS_Response.RF_Count);
+      }
+      else 
+      {
+        fsOnError(FS_Response.RF_ErrorCode);
+      }
+      fsCloseFile( FS_FileHandle );
+      break;
+    case kWriteFile:
+      if (FS_Response.WF_ErrorCode != 0) 
+      {
+        fsOnError(FS_Response.WF_ErrorCode);
+      }
+      fsCloseFile( FS_FileHandle );
+      break;
+    case kCloseFile:
+      if (FS_Response.CF_ErrorCode == 0) 
+      {
+        FS_FileHandle = 0;
+        FS_FileAction = kDoNothing;
+      }
+      else 
+      {
+        fsOnError(FS_Response.CF_ErrorCode);
+      }
+      break;
+    case kMoveFile:
+      if (FS_Response.MF_ErrorCode == 0) 
+      {
+      }
+      else 
+      {
+        fsOnError(FS_Response.MF_ErrorCode);
+      }
+      break;
+    case kDeleteFile:
+      if (FS_Response.MF_ErrorCode == 0) 
+      {
+      }
+      else 
+      {
+        fsOnError(FS_Response.MF_ErrorCode);
+      }
+      break;      
+    case kGetFileAttributes:
+      if (FS_Response.GA_ErrorCode == 0) 
+      {
+      }
+      else 
+      {
+        fsOnError(FS_Response.GA_ErrorCode);
+      }
+      break;
+    case kSetFileAttributes:
+      if (FS_Response.SA_ErrorCode == 0) 
+      {
+      }
+      else 
+      {
+        fsOnError(FS_Response.SA_ErrorCode);
+      }
+      break;
+    case kGetFileDateTime:
+      if (FS_Response.FDT_ErrorCode == 0) 
+      {
+      }
+      else 
+      {
+        fsOnError(FS_Response.FDT_ErrorCode);
+      }
+      break;
+    case kGetCurrentDirectory:
+      if (FS_Response.GCD_ErrorCode == 0) 
+      {
+        for( i = 13; (i < FS_Response.DLC) && (i-13 < FS_Response.GCD_PathName); i++ ) 
+        {
+          path[i-13] = FS_Response.byte(i);
+        }
+        path[i-13] = 0;
+        sysSetVariableString(sysvar::FileServerClient::CurrentDirectory, path);
+      }
+      else 
+      {
+        fsOnError(FS_Response.GCD_ErrorCode);
+      }
+      break;
+    case kChangeCurrentDirectory:
+      if (FS_Response.CCD_ErrorCode != 0) 
+      {
+        fsOnError(FS_Response.CCD_ErrorCode);
+      }
+      break;
+    default:   // invalid command
+      break;
+  }
+
+  panelUpdateState();
+}
+
+void fsOnError( BYTE status)
+{
+  char text[200];
+  if (status != 0) 
+  {
+    switch(FS_Response.OF_ErrorCode) 
+    {
+      case 1: snprintf( text, elCount(text), "Access Denied (0x%x)"                     , status ); break;
+      case 2: snprintf( text, elCount(text), "Invalid Access (0x%x)"                    , status ); break;
+      case 3: snprintf( text, elCount(text), "Too many files open (0x%x)"               , status ); break;
+      case 4: snprintf( text, elCount(text), "File, path or volume not found (0x%x)"    , status ); break;
+      case 5: snprintf( text, elCount(text), "Invalid Handle (0x%x)"                    , status ); break;
+      case 6: snprintf( text, elCount(text), "Invalid given source name (0x%x)"         , status ); break;
+      case 7: snprintf( text, elCount(text), "Invalid given destination name (0x%x)"    , status ); break;
+      case 8: snprintf( text, elCount(text), "Volume out of free space (0x%x)"          , status ); break;
+      case 9: snprintf( text, elCount(text), "Failure during a write operation (0x%x)"  , status ); break;
+      case 10:snprintf( text, elCount(text), "Media is not present  (0x%x)"             , status ); break;
+      case 11:snprintf( text, elCount(text), "Failure during a read operation (0x%x)"   , status ); break;
+      case 12:snprintf( text, elCount(text), "Function not supported (0x%x)"            , status ); break;
+      case 13:snprintf( text, elCount(text), "Volume is possibly not initialized (0x%x)", status ); break;
+      case 42:snprintf( text, elCount(text), "Invalid request length (0x%x)"            , status ); break;
+      case 43:snprintf( text, elCount(text), "Out of memory (0x%x)"                     , status ); break;
+      case 44:snprintf( text, elCount(text), "Any other error (0x%x)"                   , status ); break;
+      case 45:snprintf( text, elCount(text), "End of file reached (0x%x)"               , status ); break;
+      default:snprintf( text, elCount(text), "File Server Error, status 0x%x"           , status ); break;
+    }
+    sysSetVariableString(sysvar::FileServerClient::ErrorText, text);
+    panelUpdateState();
+    return;
+  }
+}

@@ -1,0 +1,720 @@
+/*@@var:*/
+/*
+ * EDD - Electronic Dash Display                   Version 1.0
+ *
+ * Copyright 2006, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Pr) Created 
+ */
+variables
+{
+  // Constants
+  const int  kAppChannel  = 1;      // Application channel this node is connected to 
+
+  const int  kNullAddr    = 0xfe;   // Null address
+  const int  kGlobalAddr  = 0xff;   // Global address
+  const int  kSuccess     = 0;      // Nodelayer function returns 0 on success
+
+  const int  kInitialized = 0;
+  const int  kOnline      = 1;
+  const int  kOffline     = 2;
+
+  // Display
+  const int  kDisplayIdle           = 0;
+  const int  kDisplayBusy           = 1;
+  const int  kDisplayWaitForAcknowl = 2;
+
+  // Language support
+  const int  kEnglish     = 0;
+  const int  kSpanish     = 1;
+  const int  kFrench      = 2;
+  const int  kGerman      = 3;
+  const int  kItalian     = 4;
+
+  // Text msg acknowledge types
+  const int  kOnDisplay   = 4;
+  const int  kOnKey       = 2;
+  const int  kOnNetMsg    = 1;
+
+  char gNodeName[32]      = "EDD";   // Name of the node, is used for output to write window
+
+  // Simulation constants
+  const int  kMaxMIDs     = 20;      // Max. number of MIDs concurrently on the bus
+  
+  const BYTE kRows              = 4;       // Number of rows of the display
+  const BYTE kCols              = 20;      // Number of columns of the display
+  const BYTE kLanguageSupport   = kGerman; // Language default, English always supported
+  const BYTE kAcknowlKeySupport = 1;       // Acknowledge key is supported
+  const BYTE kBeeperSupport     = 1;       // Beeper is supported
+
+  // Communication variables
+  BYTE  gECU_MID  = kNullAddr;     // Address of this ECU
+  BYTE  gECUState = kInitialized;  // Communication state of the ECU
+
+  // Simulation variables
+  BYTE  gCurrentLanguage = kGerman;
+
+  // Number of text message sender MIDs
+  int   gCurrentMIDs = 0;
+  
+  // Buffered msg texts and attributes
+  BYTE  gSenderMID[kMaxMIDs];                // Sender MID of message
+  char  gTextBuffer[kMaxMIDs][kRows][kCols]; // Message buffer
+  BYTE  gMsgDisplayTime[kMaxMIDs];           // Time message is displayed
+  BYTE  gMsgPriority[kMaxMIDs];              // Priority of text in message
+  BYTE  gMsgAcknowledge[kMaxMIDs];           // Acknowledge types
+  BYTE  gMsgBeeper[kMaxMIDs];                // Message beep
+ 
+  BYTE  gDisplayStatus = kDisplayIdle;       // Status of display
+  int 	gMsgIndexQueue[kMaxMIDs];
+  int 	gMsgIndexQueueCount;
+  char	gNoMessageText[16] = "No Messages";
+
+  J1587Param TextMessageDisplayType  TX_DisplayType; // TX Buffer: TextMessageDisplayType
+  J1587Param TextMessageAcknowledged TX_Acknowledge; // TX Buffer: TextMessageAcknowledged
+  
+  msTimer DisplayTimer;
+  
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel         = kDbgWarning; // Set debug level for output to write window
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  setWriteDbgLevel( gDbgLevel );
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  if (getValue( EvEDD_Enable ) == 1) {
+    EDDInit();
+    EDDStartUp();
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:EDDInit():*///function
+/*
+ * Initialize the EMS
+ */
+void EDDInit()
+{
+  int i;
+
+  gECU_MID = EDD.NmStationAddress;
+
+  TX_DisplayType.MsgChannel                  = kAppChannel;
+  TX_DisplayType.J1587_MID                   = kNullAddr;
+  TX_DisplayType.LanguageSelection           = gCurrentLanguage;
+  TX_DisplayType.Beeper_Sound                = kBeeperSupport;
+  TX_DisplayType.AcknowledgmentKey           = kAcknowlKeySupport;
+  TX_DisplayType.NumberOfRowsInTheDisplay    = kRows;
+  TX_DisplayType.NumberOfColumnsInTheDisplay = kCols;
+
+  TX_DisplayType.MsgChannel                   = kAppChannel;
+  TX_Acknowledge.J1587_MID                    = kNullAddr;
+  TX_Acknowledge.MID                          = kNullAddr;
+  TX_Acknowledge.MessageAborted               = 0;
+  TX_Acknowledge.DisplayBuffersFull           = 0;
+  TX_Acknowledge.MessageDisplayed             = 0;
+  TX_Acknowledge.OperatorHasPressedAcknKey    = 0;
+  TX_Acknowledge.ReceiveNetworkMsgFromSender  = 0;
+  TX_Acknowledge.MessageRowLineNumber         = 0;
+  TX_Acknowledge.MessageColumnNumber          = 0;
+
+  for (i = 0; i < kMaxMIDs; i++) {
+    gSenderMID[i] = 0;
+    gMsgIndexQueue[i] = 0;
+  }
+
+  gCurrentMIDs = 0;
+  gMsgIndexQueueCount = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:EDDStartUp():*///function
+/*
+ * Start up EMS
+ *
+ */
+void EDDStartUp()
+{
+  ClearDisplay();
+  EDDChangeState( kOnline );
+}
+/*@@end*/
+
+/*@@caplFunc:EDDShutDown():*///function
+/*
+ * Shut down EMS
+ *
+ * Send cannot claim address and stop sending messages
+ */
+void EDDShutDown()
+{
+  cancelTimer(DisplayTimer);
+
+  EDDChangeState( kOffline );
+  putValue( EvEDD_Enable, 0 );
+}
+/*@@end*/
+
+/*@@caplFunc:EDDChangeState(byte):*///function
+/*
+ * Change the state of the ECU
+ */
+void EDDChangeState( BYTE newState )
+{
+  if (newState == kInitialized) {
+    // stop everthing immediately
+    cancelTimer( DisplayTimer );
+    ClearDisplay();
+
+    gECUState = kInitialized;
+    return;
+  }
+
+  switch( gECUState ) {
+    case kInitialized:
+    case kOffline:
+      if (newState == kOnline) {
+        EnterOnline();
+        gECUState = newState;
+      }
+      break;
+    case kOnline:
+      if (newState == kOffline) {
+        EnterOffline();
+        gECUState = newState;
+      }
+      break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:EnterOnline():*///function
+/*
+ * Enter online state
+ */
+void EnterOnline()
+{
+  // set source addresses of TX messages
+  TX_DisplayType.J1587_MID   = gECU_MID;
+  TX_Acknowledge.J1587_MID   = gECU_MID;
+
+  putValue( EvEDD_MID, gECU_MID );
+
+  output(TX_DisplayType);
+  writeDbgLevel( kDbgInfo, "<%s> online with address %d", gNodeName, gECU_MID );
+}
+/*@@end*/
+
+/*@@caplFunc:EnterOffline():*///function
+/*
+ * Enter offline state
+ */
+void EnterOffline()
+{
+  putValue( EvEDD_MID, kNullAddr );
+
+  ClearDisplay();
+  ClearBuffers(-1);
+  RemoveFromQueue(-1);
+  gCurrentMIDs = 0;
+
+  writeDbgLevel( kDbgInfo, "<%s> offline", gNodeName );
+}
+/*@@end*/
+
+/*@@envVar:EvEDD_Enable:*/
+on envVar EvEDD_Enable
+{
+  if (getValue( this )) {
+    EDDInit();
+    EDDStartUp();
+  }
+  else {
+    EDDShutDown();
+  }
+}
+/*@@end*/
+
+/*@@j1587Param:J1587::RequestP1 (0x0):*/
+on J1587Param RequestP1
+{
+  if (this.RequestedPID == 227) {
+    output(TX_DisplayType);
+  }
+}
+/*@@end*/
+
+/*@@j1587Param:J1587::TextMessageToDisplay (0xE2):*/
+on J1587Param TextMessageToDisplay
+{
+  BYTE status1, status2, row, col;
+  int MIDIndex, i;
+
+  if (gECUState == kOnline) {
+    status1 = this.byte(0);
+    status2 = this.byte(1);
+    row     = this.byte(2);
+    col     = this.byte(3);
+
+    // Get index of sender MID
+    MIDIndex = GetMIDIndex(this.J1587_MID);
+    if (MIDIndex == -1) {
+      write ("EDD: Max. number of MIDs reached. ");
+    }
+
+    // Abort buffered message
+    if (status1 & 0x40) {
+      ClearBuffers(MIDIndex);				
+    }
+
+    // Revert to English?
+    if (status1 & 0x80) {
+      gCurrentLanguage = kEnglish;
+    }
+
+  // Beeper activation, display time and priority
+    gMsgBeeper[MIDIndex]      = status1 & 0x08 ? 1 : 0;
+    gMsgDisplayTime[MIDIndex] = (status2 & 0xF8) >> 3;
+    gMsgPriority[MIDIndex]    = status2 & 0x07;
+
+  // Fill display buffer of MID of this message
+  if (col > 0 && row > 0 && col <= kCols && row <= kRows) {
+      for (i = col - 1; i < this.DLC + col - 5; i++) {
+      if ((row-1 + i/kCols) < kRows) {
+          gTextBuffer[MIDIndex][row-1 + i/kCols][i%kCols] = this.byte(5+i-col);
+        } 
+      }
+    }
+
+    // Set message acknowledgment types
+    gMsgAcknowledge[MIDIndex]  = status1 & kOnDisplay ?  kOnDisplay : 0;
+    gMsgAcknowledge[MIDIndex] |= status1 & kOnKey     ?  kOnKey     : 0;
+    gMsgAcknowledge[MIDIndex] |= status1 & kOnNetMsg  ?  kOnNetMsg  : 0;
+
+    // Send acknnowledgement on reception of net message
+    if (gMsgAcknowledge[MIDIndex] & kOnNetMsg) {
+      SendAcknowlOnReceived(this.J1587_MID, row, col);
+    } 
+
+    // Display full message
+    if (status1 & 0x10) {
+      if (gMsgIndexQueueCount < kMaxMIDs && !IsQueued(MIDIndex)) {
+        AddToQueue(MIDIndex);
+      }
+      DisplayNextMsg();
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:GetMIDIndex(byte):*///function
+int GetMIDIndex(BYTE MID)
+{
+  int i, newIndex;
+  for (i = 0; i < gCurrentMIDs; i++) {
+    if (gSenderMID[i] == MID) {
+      return i;
+    }
+  }
+
+  // new MID:
+  if (gCurrentMIDs < elCount(gSenderMID)) {
+    gSenderMID[gCurrentMIDs] = MID;
+    newIndex = gCurrentMIDs;
+    gCurrentMIDs++;
+    return newIndex;
+  }
+  else {
+    return -1;
+  }	
+}
+/*@@end*/
+
+/*@@caplFunc:ClearTextBuffer(int):*///function
+void ClearTextBuffer(int MIDIndex)
+{
+  int i, j;
+  if (MIDIndex >= gCurrentMIDs) {
+    write ("Error: MIDIndex >= gCurrentMIDs");
+    return;
+  }
+  for (i = 0; i < kRows; i++) {
+    for (j = 0; j < kCols; j++) {
+      gTextBuffer[MIDIndex][i][j] = 0;
+    } 
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:SendAcknowlOnReceived(byte,byte,byte):*///function
+void SendAcknowlOnReceived (BYTE MID, BYTE row, BYTE col)
+{
+  int MIDIndex, i, j;
+  MIDIndex = GetMIDIndex(MID);
+
+  TX_Acknowledge.MID                         = MID; // Received network message
+  TX_Acknowledge.MessageRowLineNumber        = row;
+  TX_Acknowledge.MessageColumnNumber         = col;
+  TX_Acknowledge.MessageAborted              = 0;
+  TX_Acknowledge.DisplayBuffersFull          = MIDIndex >= 0 ? IsTextBufferFull(MIDIndex) : 0;
+  TX_Acknowledge.MessageDisplayed            = 0;
+  TX_Acknowledge.OperatorHasPressedAcknKey   = 0;
+  TX_Acknowledge.ReceiveNetworkMsgFromSender = 1;
+
+  output(TX_Acknowledge);
+}
+/*@@end*/
+
+/*@@caplFunc:DisplayNextMsg():*///function
+void DisplayNextMsg()
+{
+  char text[6];
+
+  if (gDisplayStatus == kDisplayIdle && gMsgIndexQueueCount > 0) {
+    WriteDisplay(gMsgIndexQueue[0]);
+
+    gDisplayStatus = kDisplayBusy;
+
+    if (gMsgAcknowledge[gMsgIndexQueue[0]] & kOnKey) {
+      gDisplayStatus = kDisplayWaitForAcknowl;
+    }
+
+    setTimer(DisplayTimer, gMsgDisplayTime[gMsgIndexQueue[0]] * 1000);
+    putValue(EvEDD_Beeper, gMsgBeeper[gMsgIndexQueue[0]]);
+
+    enableControl("\0", "EnvVar:EvEDD_Acknowledge", gMsgAcknowledge[gMsgIndexQueue[0]] & kOnKey);
+    ltoa(gSenderMID[gMsgIndexQueue[0]], text, 10);
+    putValue(EvEDD_SenderMID, text);
+    putValue(EvEDD_Priority, gMsgPriority[gMsgIndexQueue[0]]);
+  }
+}
+/*@@end*/
+
+/*@@timer:DisplayTimer:*/
+on timer DisplayTimer
+{
+  if (gMsgIndexQueueCount > 0 && (gMsgAcknowledge[gMsgIndexQueue[0]] & kOnDisplay)) {
+    SendAcknowlOnDisplay();
+  }
+  
+  if (gDisplayStatus != kDisplayWaitForAcknowl) {
+    FinishDisplayMsg();
+    DisplayNextMsg();
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ClearDisplay():*///function
+void ClearDisplay()
+{
+  putValue(EvEDD_Row1, "\0");
+  putValue(EvEDD_Row2, "\0");
+  putValue(EvEDD_Row3, "\0");
+  putValue(EvEDD_Row4, "\0");
+  
+  enableControl("\0", "EnvVar:EvEDD_Acknowledge", 0);
+
+  putValue(EvEDD_Acknowledge, 0);
+  putValue(EvEDD_Beeper, 0);
+  putValue(EvEDD_SenderMID, gNoMessageText);
+  putValue(EvEDD_Priority, 0);
+
+  gDisplayStatus = kDisplayIdle;
+}
+/*@@end*/
+
+/*@@envVar:EvEDD_Acknowledge:*/
+on envVar EvEDD_Acknowledge
+{
+  if (getValue(this) == 0 && ((gMsgAcknowledge[gMsgIndexQueue[0]] & kOnKey))) {
+    CancelTimer(DisplayTimer);
+    SendAcknowlOnKey();
+
+    FinishDisplayMsg();
+    DisplayNextMsg();
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:SendAcknowlOnKey():*///function
+void SendAcknowlOnKey()
+{
+  TX_Acknowledge.MID                         = gSenderMID[gMsgIndexQueue[0]];
+  TX_Acknowledge.MessageAborted              = 0;
+  TX_Acknowledge.DisplayBuffersFull          = IsTextBufferFull(gMsgIndexQueue[0]);
+  TX_Acknowledge.MessageDisplayed            = 1;
+  TX_Acknowledge.OperatorHasPressedAcknKey   = 1;
+  TX_Acknowledge.ReceiveNetworkMsgFromSender = 0;
+  TX_Acknowledge.MessageRowLineNumber        = 1;
+  TX_Acknowledge.MessageColumnNumber         = 1;
+
+  output(TX_Acknowledge);
+}
+/*@@end*/
+
+/*@@caplFunc:WriteDisplay(int):*///function
+void WriteDisplay(int MIDindex)
+{
+  int i, j;
+  char line[kCols+1];
+
+  for (i = 0; i < kCols; i++) {
+    line[i] = gTextBuffer[MIDindex][0][i] != 0 ? gTextBuffer[MIDindex][0][i] : ' ';
+  }
+  line[i] = 0;
+  putValue(EvEDD_Row1, line);
+
+  for (i = 0; i < kCols; i++) {
+    line[i] = gTextBuffer[MIDindex][1][i] != 0 ? gTextBuffer[MIDindex][1][i] : ' ';
+  }
+  line[i] = 0;
+  putValue(EvEDD_Row2, line);
+
+  for (i = 0; i < kCols; i++) {
+    line[i] = gTextBuffer[MIDindex][2][i] != 0 ? gTextBuffer[MIDindex][2][i] : ' ';
+  }
+  line[i] = 0;
+  putValue(EvEDD_Row3, line);
+
+  for (i = 0; i < kCols; i++) {
+   line[i] = gTextBuffer[MIDindex][3][i] != 0 ? gTextBuffer[MIDindex][3][i] : ' ';
+  }
+  line[i] = 0;
+  putValue(EvEDD_Row4, line);
+}
+/*@@end*/
+
+/*@@caplFunc:SendAcknowlOnDisplay():*///function
+void SendAcknowlOnDisplay()
+{
+  TX_Acknowledge.MID                         = gSenderMID[gMsgIndexQueue[0]];
+  TX_Acknowledge.MessageAborted              = 0;
+  TX_Acknowledge.DisplayBuffersFull          = IsTextBufferFull(gMsgIndexQueue[0]);
+  TX_Acknowledge.MessageDisplayed            = 1;
+  TX_Acknowledge.OperatorHasPressedAcknKey   = 0;
+  TX_Acknowledge.ReceiveNetworkMsgFromSender = 0;
+  TX_Acknowledge.MessageRowLineNumber        = 1;
+  TX_Acknowledge.MessageColumnNumber         = 1;
+
+  output(TX_Acknowledge);
+}
+/*@@end*/
+
+/*@@caplFunc:IsTextBufferFull(int):*///function
+BYTE IsTextBufferFull(int MIDIndex)
+{
+  int i, j;
+  BYTE full;
+
+  full = 1;
+  for (i = 0; i < kRows; i++) {
+    for (j = 0; j < kCols; j++) {
+      if (gTextBuffer[MIDIndex][i][j] == 0) {
+        full = 0;
+        return full;
+      }
+    }
+  }
+
+  return full;
+}
+/*@@end*/
+
+/*@@caplFunc:ClearBuffers(int):*///function
+void ClearBuffers(int MIDIndex)
+{
+  int i;
+  if (MIDIndex >= 0 && MIDIndex < kMaxMIDs) {
+    gMsgPriority[MIDIndex]    = 8;
+    gMsgAcknowledge[MIDIndex] = 0;
+    gMsgBeeper[MIDIndex]      = 0;
+    gMsgDisplayTime[MIDIndex] = 0;
+
+    ClearTextBuffer(MIDIndex);
+  }
+  else if (MIDIndex == -1) { // clear all Buffers
+    for (i = 0; i < gCurrentMIDs; i++) {
+      gMsgPriority[i] 	 = 8;
+      gMsgAcknowledge[i] = 0;
+      gMsgBeeper[i]      = 0;
+      gMsgDisplayTime[i] = 0;
+  
+      ClearTextBuffer(i);
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:FinishDisplayMsg():*///function
+void FinishDisplayMsg()
+{
+  int i;
+
+  ClearDisplay();
+  if (gMsgIndexQueueCount > 0) {
+    ClearBuffers(gMsgIndexQueue[0]);
+    RemoveFromQueue(gMsgIndexQueue[0]);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:RemoveFromQueue(int):*///function
+void RemoveFromQueue(int MIDIndex)
+{
+  int i;
+  for (i = 0; i < gMsgIndexQueueCount; i++) {
+    if (gMsgIndexQueue[i] == MIDIndex) {
+      for (; i < gMsgIndexQueueCount - 1; i++) {
+      gMsgIndexQueue[i] = gMsgIndexQueue[i+1];
+      }
+      gMsgIndexQueueCount--;
+      return;
+    }
+  }
+  
+  if (MIDIndex == -1) { // Remove all
+    for (i = 0; i < gMsgIndexQueueCount; i++) {
+      gMsgIndexQueue[i] = 0;
+    }
+    gMsgIndexQueueCount = 0;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:IsQueued(int):*///function
+BYTE IsQueued(int MIDIndex)
+{
+  int i;
+  for (i = 0; i < gMsgIndexQueueCount; i++) {
+    if (gMsgIndexQueue[i] == MIDIndex) {
+      return 1;
+    }
+  }
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:AddToQueue(int):*///function
+void AddToQueue(int MIDIndex)
+{
+  int i, insertIndex;
+  if (gMsgIndexQueueCount < kMaxMIDs) {
+
+    insertIndex = gMsgIndexQueueCount;
+
+    i = gMsgPriority[MIDIndex] <= 1 ? 0 : 1;
+    for (; i < gMsgIndexQueueCount; i++) {
+      if (gMsgPriority[gMsgIndexQueue[i]] > gMsgPriority[MIDIndex]) {
+        insertIndex = i;
+        break;
+      }
+    }
+
+    for (i = gMsgIndexQueueCount; i > insertIndex; i--) {
+      gMsgIndexQueue[i] = gMsgIndexQueue[i-1];  
+    }
+
+    gMsgIndexQueue[insertIndex] = MIDIndex;
+    gMsgIndexQueueCount++;
+
+    // High Priority (0 or 1): Immediate display of msg
+    if (gMsgPriority[MIDIndex] <= 1 && gDisplayStatus != kDisplayIdle) {
+      AbortDisplay();
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:AbortDisplay():*///function
+void AbortDisplay ()
+{
+  cancelTimer(DisplayTimer);
+  ClearDisplay();
+}
+/*@@end*/
+
+/*@@j1587Param:J1587::CMP (0xC5),J1587::CDP (0xC6):*/
+on J1587Param CMP, CDP
+{
+  J1587Param CMP rxCmp;
+  J1587Param CMP txCmp;
+  J1587Param CDP rxCdp;
+  INT            i;
+  BYTE           nextSegment;
+  BYTE           numberOfSegments;
+  WORD           numberOfDataBytes;
+
+  if (this.J1587_PID == rxCmp.J1587_PID) {
+    rxCmp.DWORD(0) = this.DWORD(0);
+    rxCmp.DWORD(4) = this.DWORD(4);
+
+    if (this.J1587_ReceiverMID != gECU_MID) return;
+
+    switch(rxCmp.CMCommand) {
+      case 1: // RTS
+        nextSegment       = 1;
+        numberOfSegments  = rxCmp.RTSNumberOfSegments;
+        numberOfDataBytes = rxCmp.RTSNumberOfDataBytes;
+
+        txCmp.J1587_MID           = gECU_MID;
+        txCmp.ReceiverMID         = this.J1587_MID;
+        txCmp.CMCommand           = txCmp.CMCommand::CTS;
+        txCmp.CTSNextSegment      = nextSegment;
+        txCmp.CTSNumberOfSegments = 1;
+        txCmp.DLC                 = 4;
+        output( txCmp );
+        break;
+    }
+  }
+  else {
+    for( i = 0; i < this.dlc; i++ ) {
+      rxCdp.byte(i) = this.byte(i);
+    }
+
+    if (this.J1587_ReceiverMID != gECU_MID) return;
+
+    if (rxCdp.SegmentID == nextSegment) {
+      nextSegment++;
+      if (nextSegment > numberOfSegments) {
+        txCmp.J1587_MID           = gECU_MID;
+        txCmp.ReceiverMID         = this.J1587_MID;
+        txCmp.CMCommand           = txCmp.CMCommand::EOM;
+        txCmp.DLC                 = 2;
+        output( txCmp );
+      }
+      else {
+        txCmp.J1587_MID           = gECU_MID;
+        txCmp.ReceiverMID         = this.J1587_MID;
+        txCmp.CMCommand           = txCmp.CMCommand::CTS;
+        txCmp.CTSNextSegment      = nextSegment;
+        txCmp.CTSNumberOfSegments = 1;
+        txCmp.DLC                 = 4;
+        output( txCmp );
+      }
+    }
+    else {
+      txCmp.J1587_MID           = gECU_MID;
+      txCmp.ReceiverMID         = this.J1587_MID;
+      txCmp.CMCommand           = txCmp.CMCommand::Abort;
+      txCmp.DLC                 = 2;
+      output( txCmp );
+    }
+  }
+}
+/*@@end*/
+

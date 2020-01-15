@@ -1,0 +1,517 @@
+/*@@includes:*/
+includes
+{
+#include "MOST_MHP.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  char gECU[32]  = "DSO";
+  const long cBufferSize = 131072;
+  
+  const long cTResendPacket = 5000; // timeout value to resend packet (< tDelayEnd )
+  
+  // Default settings will be applied in preStart before ports are invoked 
+  long  gDefaultTransportMode = cTransportMode_Packet; 
+  long  gDefaultAckMode = cAckMode_Block;
+
+  // Device address of destination data sink 
+  dword gDestDev = 0x172;
+
+  //////////////////////////////////////////////////////
+  // Data Source 1
+  dword gDSO1_FBlockID  = 0x51;     // VectorPhoneBook
+  dword gDSO1_InstID    = 0x01;
+  dword gDSO1_FktID     = 0x400;    // Phonebook
+  dword gDSO1_OpTypeID  = 0xC;      // Status
+  char  gDSO1_Name[100]  = "VectorPhoneBook.Phonebook.Status";
+  ///////////////////////////////////////////////////////////////////////////////////////////
+  // Prefix for callback functions of port is passed to DLL on port creation (see PreStart())
+  // If you change it, callback functions with corresponding prefixes need to be renamed too 
+  char  gDSO1_Prefix[50] = "VPB_Phonebook_";
+  ///////////////////////////////////////////////////////////////////////////////////////////
+  byte  gDSO1_Buffer[cBufferSize]; 
+  dword gDSO1_PortHandle;
+  mstimer gDSO1_ResendTimer;  // used for cyclic resending of buffer content
+
+  //////////////////////////////////////////////////////
+  // Data Source 2 
+  dword gDSO2_FBlockID  = 0x52;     // Navigation
+  dword gDSO2_InstID    = 0x1;
+  dword gDSO2_FktID     = 0xE01;    // Waypoints
+  dword gDSO2_OpTypeID  = 0xC;      // Status
+  char  gDSO2_Name[100]  = "Navigation.Waypoints.Status";
+  ///////////////////////////////////////////////////////////////////////////////////////////
+  // Prefix for callback functions of port is passed to DLL on port creation (see PreStart())
+  // If you change it, callback functions with corresponding prefixes need to be renamed too 
+  char  gDSO2_Prefix[50] = "Nav_Waypoints_";
+  ///////////////////////////////////////////////////////////////////////////////////////////
+  byte  gDSO2_Buffer[cBufferSize]; 
+  dword gDSO2_PortHandle;
+  mstimer gDSO2_ResendTimer;  // used for cyclic resending of buffer content
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  mostApplicationNode();
+  ///////////////////////////////////////////////////////////////////
+  // Initialize default settings used by ports created subsequently 
+  // Note, that packet transport mode must be set BEFORE frame 
+  // sizes can be set, that are larger than allowed on the control 
+  // channel.
+
+  MH_SetTxTranspMode(0, gDefaultTransportMode); 
+  MH_SetTxFrameSize(0, cDefaultUsrDataSize_Packet);
+  MH_SetTxBlockAck(0, gDefaultAckMode);
+
+  if (mostGetSpeedGrade(mostGetChannel()) == 3)
+  {
+    MH_UseProtocolRev(0, 3);
+  }
+
+  // register MHP tx port for DSO1 instance 
+  gDSO1_PortHandle = MH_CreateTxPort(gDSO1_Prefix);  
+  // register a MHP rx port for DSO2 instance
+  gDSO2_PortHandle = MH_CreateTxPort(gDSO2_Prefix); 
+  
+  ////////////////////////////////////////////////////////////////
+  // If required, set specific port settings here, f.e
+  // MH_SetTxFrameSize(gDSO1_PortHandle, 200);    
+
+}
+/*@@end*/
+
+/*@@caplFunc:VPB_Phonebook_MH_IndTxBufferRequested(dword,long):*///callback
+VPB_Phonebook_MH_IndTxBufferRequested(dword handle, long isPacketBegin) 
+{
+  long bufferSize;
+  long isMoreDataToSend = 0;  // 0: MH_IndTxBufferRequested is never called again 
+                              //    => do not care about isPacketBegin
+
+  // get current data buffer content from panel
+  sysGetVariableData(sysvar::DSO1::DataBuffer, gDSO1_Buffer, bufferSize);
+  @sysvar::DSO1::DataSize = bufferSize;
+
+  ////////////////////////////////////////////////////////////////////////
+  // Set data buffer to be transmitted. Data buffer is complete packet in 
+  // this application, so there's no need to re-call this callback  
+  MH_SetTxBuffer(handle, gDSO1_Buffer, bufferSize, isMoreDataToSend);  
+
+  @sysvar::DSO1::ByteCnt = 0; 
+  writeDbgLevel(3,"CAPL: %s: DSO1 starts transmission of buffer with %d bytes.", gECU, bufferSize);
+
+  @sysvar::DSO1::IsActive = 1;   // indicate transmission activity => activate LED
+}
+/*@@end*/
+
+/*@@caplFunc:Nav_Waypoints_MH_IndTxBufferRequested(dword,long):*///callback
+Nav_Waypoints_MH_IndTxBufferRequested(dword handle, long isPacketBegin)
+{
+  long bufferSize;
+  long isMoreDataToSend = 0;  // 0: MH_IndTxBufferRequested is never called again 
+                              //    => do not care about isPacketBegin
+
+  // get current data buffer content from panel
+  sysGetVariableData(sysvar::DSO2::DataBuffer, gDSO2_Buffer, bufferSize);
+  @sysvar::DSO2::DataSize = bufferSize;
+
+  ////////////////////////////////////////////////////////////////////////
+  // Set data buffer to be transmitted. Data buffer is complete packet in 
+  // this application, so there's no need to re-call this callback  
+  MH_SetTxBuffer(handle, gDSO2_Buffer, bufferSize, isMoreDataToSend);  
+
+  @sysvar::DSO2::ByteCnt = 0; 
+  writeDbgLevel(3,"CAPL: %s: DSO2 starts transmission of buffer with %d bytes.", gECU, bufferSize);
+
+  @sysvar::DSO2::IsActive = 1;   // indicate transmission activity => activate LED
+}
+/*@@end*/
+
+/*@@sysvarChange:DSO1::StartTrans:*/
+on sysvar DSO1::StartTrans
+{
+  // No action if button is released
+  if (@this==0)
+    return;
+
+  RequestTransmissionDSO1(); 
+}
+/*@@end*/
+
+/*@@sysvarChange:DSO1::StopTrans:*/
+on sysvar DSO1::StopTrans
+{
+  // No action if button is released
+  if (@this==0)
+    return;
+
+  MH_TxStopTrans(gDSO1_PortHandle); 
+  @sysvar::DSO1::IsActive = 0;  // reset activity status => deactivate LED
+}
+/*@@end*/
+
+/*@@caplFunc:VPB_Phonebook_MH_IndTxConnectionClosed(dword,long):*///callback
+VPB_Phonebook_MH_IndTxConnectionClosed(dword handle, long res)
+{
+  @sysvar::DSO1::IsActive = 0;  // reset activity status => deactivate LED
+  ReportErrorsToWrite (res, gDSO1_Name);
+}
+/*@@end*/
+
+/*@@caplFunc:ReportErrorsToWrite(long,char[]):*///function
+ReportErrorsToWrite (long res, char sDSOName[])
+{
+  switch (res)
+  {
+    case 0:     writeDbgLevel(0, "CAPL: %s: %s Result (%d): OK", gECU, sDSOName, res);     break;
+    case 1:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Send retries exceeded", gECU, sDSOName, res);          break;
+    case 2:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Trans retries exceeded", gECU, sDSOName, res);         break;
+    case 3:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of End retries exceeded", gECU, sDSOName, res);           break;
+    case 4:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Ready retries exceeded", gECU, sDSOName, res);         break;
+    case 5:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Frame Retries exceeded", gECU, sDSOName, res);         break;
+    case 6:     writeDbgLevel(0, "CAPL: %s: %s Error (%d): Number of Receive retries execeeded", gECU, sDSOName, res);      break;
+    case 10:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Receive buffer could not be provided", gECU, sDSOName, res);     break;
+    case 11:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Connection rejected via higher priority", gECU, sDSOName, res);  break;
+    case 13:    writeDbgLevel(0, "CAPL: %s: %s Result (%d): Transmission terminated by receiver", gECU, sDSOName, res);     break;
+    case 14:    writeDbgLevel(0, "CAPL: %s: %s Result (%d): Transmission terminated by sender", gECU, sDSOName, res);       break;
+    case 15:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Transmission killed by sender", gECU, sDSOName, res);            break;
+    case 16:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Parameter out of range", gECU, sDSOName, res);                   break;
+    default:    writeDbgLevel(0, "CAPL: %s: %s Error (%d): Unknown error", gECU, sDSOName, res);                            break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:Nav_Waypoints_MH_IndTxConnectionClosed(dword,long):*///callback
+Nav_Waypoints_MH_IndTxConnectionClosed(dword handle, long res)
+{
+  @sysvar::DSO2::IsActive = 0;  // reset activity status => deactivate LED
+  ReportErrorsToWrite (res, gDSO2_Name);
+}
+/*@@end*/
+
+/*@@caplFunc:VPB_Phonebook_MH_IndTxPktFinished(dword,long):*///callback
+VPB_Phonebook_MH_IndTxPktFinished(dword handle, long packetSize)
+{
+  writeDbgLevel(3,"CAPL: %s: DSO1 completed transmission of packet with %d bytes.", gECU, packetSize);
+  @sysvar::DSO1::IsActive = 0;  // reset activity status => deactivate LED
+
+  // wait for cTResendPacket and retransmit current buffer content
+  // if cyclic sending is activated in panel
+  if(@sysvar::DSO1::IsCyclicSendActive == 1)
+    setTimer(gDSO1_ResendTimer, cTResendPacket); 
+}
+/*@@end*/
+
+/*@@caplFunc:Nav_Waypoints_MH_IndTxPktFinished(dword,long):*///callback
+Nav_Waypoints_MH_IndTxPktFinished(dword handle, long packetSize)
+{
+  writeDbgLevel(3,"CAPL: %s: DSO2 completed transmission of packet with %d bytes.", gECU, packetSize);
+  @sysvar::DSO2::IsActive = 0;  // reset activity status => deactivate LED
+
+  // wait for cTResendPacket and retransmit current buffer content,
+  // if cyclic sending is activated in panel
+  if(@sysvar::DSO2::IsCyclicSendActive == 1)
+    setTimer(gDSO2_ResendTimer, cTResendPacket); 
+}
+/*@@end*/
+
+/*@@sysvarChange:DSO1::FillData:*/
+on sysvar DSO1::FillData
+{
+  long txCount,i;
+
+  // No action if button is released
+  if (@this==0)
+      return;
+
+  // Get the size to be filled and generate arbitrary data into the buffer
+  txCount = @sysvar::DSO1::FillDataSize;
+  if(txCount > cBufferSize)
+    return;
+  for( i=0; i<txCount; i++ )
+  {
+    gDSO1_Buffer[i] = 0x30+i;
+  }
+  // Show data in panel
+  sysSetVariableData(sysvar::DSO1::DataBuffer, gDSO1_Buffer, txCount);
+  @sysvar::DSO1::DataSize = txCount;
+
+  // Send data
+  RequestTransmissionDSO1();  
+}
+/*@@end*/
+
+/*@@caplFunc:RequestTransmissionDSO1():*///function
+RequestTransmissionDSO1 ()
+{
+  long availableBytes;
+
+  availableBytes = sysGetVariableArrayLength(sysvar::DSO1::DataBuffer);
+
+  // Check, if data is available
+  if(availableBytes == 0)
+  {
+    writeDbgLevel(3,"CAPL: %s: %s failed to request transmission on tx port %d. No data available.", 
+                      gECU, 
+                      gDSO1_Name, 
+                      gDSO1_PortHandle);  
+    return;                        
+  }
+
+  ////////////////////////////////////////////////////////////////////////
+  // MH_ReqTrans creates a sender instance and tries to open a connection
+  // to the destination address. Once the connection is established, the
+  // callback ...MH_IndTxBufferRequested is called to provide the data to 
+  // be transmitted.     
+  if(MH_ReqTrans(gDSO1_PortHandle, 
+                 gDestDev, 
+                 gDSO1_FBlockID, 
+                 gDSO1_InstID, 
+                 gDSO1_FktID, 
+                 gDSO1_OpTypeID) == cAPIResult_Ok)  
+  {
+    writeDbgLevel(3,"CAPL: %s: %s requests transmission on tx port %d.", 
+                  gECU, 
+                  gDSO1_Name, 
+                  gDSO1_PortHandle);
+  }
+  else
+  {
+    writeDbgLevel(3,"CAPL: %s: %s failed to request transmission on tx port %d. Port is busy or callback is missing.", 
+                  gECU, 
+                  gDSO1_Name, 
+                  gDSO1_PortHandle);   
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DSO1::DataBuffer:*/
+on sysvar DSO1::DataBuffer
+{
+  long txArraySize; 
+
+  // Display size of data in hex editor
+  txArraySize = sysGetVariableArrayLength(this);
+
+  @sysvar::DSO1::DataSize = txArraySize;
+}
+/*@@end*/
+
+/*@@caplFunc:VPB_Phonebook_MH_IndTxBlockFinished(dword,long,long,long):*///callback
+VPB_Phonebook_MH_IndTxBlockFinished(dword handle, long blockSize, long segId, long blockCnt)
+{
+  long size;
+  // Update the transmitted bytes counter 
+  size = @sysvar::DSO1::ByteCnt;
+  size += blockSize;
+  @sysvar::DSO1::ByteCnt = size; 
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  // display symbolic addresses of data sources in panel
+  sysSetVariableString(sysvar::DSO1::SymbolicAddress, gDSO1_Name);
+  sysSetVariableString(sysvar::DSO2::SymbolicAddress, gDSO2_Name);
+}
+/*@@end*/
+
+/*@@timer:gDSO1_ResendTimer:*/
+on timer gDSO1_ResendTimer
+{
+  long bufferSize;
+
+  // get current data buffer content from panel
+  sysGetVariableData(sysvar::DSO1::DataBuffer, gDSO1_Buffer, bufferSize);
+  @sysvar::DSO1::DataSize = bufferSize;
+
+  if(MH_SetTxBuffer(gDSO1_PortHandle, gDSO1_Buffer, bufferSize, 0) != cAPIResult_Ok)
+  {
+    writeDbgLevel(3,"CAPL: %s: DSO1 failed to start retransmission of buffer. Connection may be already terminated or no data available.", 
+                  gECU, 
+                  bufferSize);
+  }
+  else
+  {
+    writeDbgLevel(3,"CAPL: %s: DSO1 starts retransmission of buffer with %d bytes.", gECU, bufferSize);
+    @sysvar::DSO1::IsActive = 1;   // indicate transmission activity => activate LED
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DSO1::ClearBuffer:*/
+on sysvar DSO1::ClearBuffer
+{
+  byte clearData[10];  // dummy data 
+  if(@this)
+  {
+    sysSetVariableData(sysvar::DSO1::DataBuffer, clearData, 0);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:Nav_Waypoints_MH_IndTxBlockFinished(dword,long,long,long):*///callback
+Nav_Waypoints_MH_IndTxBlockFinished(dword handle, long blockSize, long segId, long blockCnt)
+{
+  long size;
+  // Update the transmitted bytes counter 
+  size = @sysvar::DSO2::ByteCnt;
+  size += blockSize;
+  @sysvar::DSO2::ByteCnt = size; 
+}
+/*@@end*/
+
+/*@@sysvarChange:DSO2::ClearBuffer:*/
+on sysvar DSO2::ClearBuffer
+{
+  byte clearData[10];  // dummy data 
+  if(@this)
+  {
+    sysSetVariableData(sysvar::DSO2::DataBuffer, clearData, 0);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DSO2::DataBuffer:*/
+on sysvar DSO2::DataBuffer
+{
+  long txArraySize; 
+
+  // Display size of data in hex editor
+  txArraySize = sysGetVariableArrayLength(this);
+
+  @sysvar::DSO2::DataSize = txArraySize;
+}
+/*@@end*/
+
+/*@@sysvarChange:DSO2::FillData:*/
+on sysvar DSO2::FillData
+{
+  long txCount,i;
+
+  // No action if button is released
+  if (@this==0)
+      return;
+
+  // Get the size to be filled and generate arbitrary data into the buffer
+  txCount = @sysvar::DSO2::FillDataSize;
+  if(txCount > cBufferSize)
+    return;
+  for( i=0; i<txCount; i++ )
+  {
+    gDSO2_Buffer[i] = 0x30+i;
+  }
+  // Show data in panel
+  sysSetVariableData(sysvar::DSO2::DataBuffer, gDSO2_Buffer, txCount);
+  @sysvar::DSO2::DataSize = txCount;
+
+  // Send data
+  RequestTransmissionDSO2();  
+}
+/*@@end*/
+
+/*@@caplFunc:RequestTransmissionDSO2():*///function
+RequestTransmissionDSO2 ()
+{
+  long availableBytes;
+
+  availableBytes = sysGetVariableArrayLength(sysvar::DSO2::DataBuffer);
+
+  // Check, if data is available
+  if(availableBytes == 0)
+  {
+    writeDbgLevel(3,"CAPL: %s: %s failed to request transmission on tx port %d. No data available.", 
+                      gECU, 
+                      gDSO2_Name, 
+                      gDSO2_PortHandle);  
+    return;                        
+  }
+
+  ////////////////////////////////////////////////////////////////////////
+  // MH_ReqTrans creates a sender instance and tries to open a connection
+  // to the destination address. Once the connection is established, the
+  // callback ...MH_IndTxBufferRequested is called to provide the data to 
+  // be transmitted. 
+  if(MH_ReqTrans(gDSO2_PortHandle, 
+                 gDestDev, 
+                 gDSO2_FBlockID, 
+                 gDSO2_InstID, 
+                 gDSO2_FktID, 
+                 gDSO2_OpTypeID) == cAPIResult_Ok)  
+  {
+    writeDbgLevel(3,"CAPL: %s: %s requests transmission on tx port %d.", 
+                  gECU, 
+                  gDSO2_Name, 
+                  gDSO2_PortHandle);
+  }
+  else
+  {
+    writeDbgLevel(3,"CAPL: %s: %s failed to request transmission on tx port %d. Port is busy or callback is missing.", 
+                  gECU, 
+                  gDSO2_Name, 
+                  gDSO2_PortHandle);   
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:DSO2::StartTrans:*/
+on sysvar DSO2::StartTrans
+{
+  // No action if button is released
+  if (@this==0)
+    return;
+
+  RequestTransmissionDSO2(); 
+}
+/*@@end*/
+
+/*@@sysvarChange:DSO2::StopTrans:*/
+on sysvar DSO2::StopTrans
+{
+  // No action if button is released
+  if (@this==0)
+    return;
+
+  MH_TxStopTrans(gDSO2_PortHandle); 
+  @sysvar::DSO2::IsActive = 0;  // reset activity status => deactivate LED
+}
+/*@@end*/
+
+/*@@timer:gDSO2_ResendTimer:*/
+on timer gDSO2_ResendTimer
+{
+  long bufferSize;
+  // get current data buffer content from panel
+  sysGetVariableData(sysvar::DSO2::DataBuffer, gDSO2_Buffer, bufferSize);
+  @sysvar::DSO2::DataSize = bufferSize;
+
+  if(MH_SetTxBuffer(gDSO2_PortHandle, gDSO2_Buffer, bufferSize, 0) != cAPIResult_Ok)
+  {
+    writeDbgLevel(3,"CAPL: %s: DSO2 failed to start retransmission of buffer. Connection may be already terminated or no data available.", 
+                  gECU, 
+                  bufferSize);
+  }
+  else
+  {
+    writeDbgLevel(3,"CAPL: %s: DSO2 starts retransmission of buffer with %d bytes.", gECU, bufferSize);
+    @sysvar::DSO2::IsActive = 1;   // indicate transmission activity => activate LED
+  }
+}
+/*@@end*/
+
+/*@@mostNetState:OnMostNetState(long,long):*/
+OnMostNetState(long oldstate, long newstate)
+{
+  if(newstate == 4)
+  {
+    MH_TxStopTrans(gDSO1_PortHandle);
+    MH_TxStopTrans(gDSO2_PortHandle);
+  }
+}
+/*@@end*/
+

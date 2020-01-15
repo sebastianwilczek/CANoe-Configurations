@@ -1,0 +1,642 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+/**
+ * Adds parameters to check for common ethernet fields.
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param etherType The ethernet type.
+ */
+void PrepareWaitForEthernet(
+  char	destMac[],
+  char	srcMac[])
+{
+  PrepareWaitForEthernet(destMac, srcMac, 0);
+}
+  
+/**
+ * Adds parameters to check for common ethernet fields.
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param etherType The ethernet type.
+ * @param groupIndex The parameter group index.
+ */
+void PrepareWaitForEthernet(
+  char	destMac[],
+  char	srcMac[],
+  int groupIndex
+  )
+{
+  if (!IsWildcard(destMac))
+    InternalAddExpectedParameter("eth", "destination", ConvertMacAddressStringToInt64(destMac), kEquals, groupIndex);
+
+  if (!IsWildcard(srcMac))
+    InternalAddExpectedParameter("eth", "source", ConvertMacAddressStringToInt64(srcMac), kEquals, groupIndex);
+}
+
+/**
+ * Adds parameters to check for common ARP fields.
+ * @param opCode The ARP operation code i.e. request or reply.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ */
+void PrepareWaitForArp(
+  char destinationMac[],
+  char sourceMac[],
+  enum ArpOperation opCode,
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  PrepareWaitForArp(
+    destinationMac,
+    sourceMac,
+    opCode,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress,
+    kEquals);
+}
+
+/**
+ * Adds parameters to check for common ARP fields.
+ * @param opCode The ARP operation code i.e. request or reply.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ * @param targetProtocolAddressCheckType Determines how to compare the targetProtocolAddress.
+ */
+void PrepareWaitForArp(
+  char destinationMac[],
+  char sourceMac[],
+  enum ArpOperation opCode,
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[],
+  enum CheckType targetProtocolAddressCheckType)
+{
+  InternalAddExpectedParameter("eth", "type", 0x0806); // ARP Ethertype
+  
+  if (!IsWildcard(sourceMac))
+    InternalAddExpectedParameter("eth", "source", ConvertMacAddressStringToInt64(sourceMac), kEquals);
+    
+  if (!IsWildcard(destinationMac))
+  {
+    // special handling for ARP response: Response may be sent via unicast or broadcast
+    if(opCode == kResponse)
+    {      
+      CopyExpectedParameters(0,1);
+      InternalAddExpectedParameter("eth", "destination", ConvertMacAddressStringToInt64(syspar::MacAddressBroadcast), kEquals, 1);
+    }
+    InternalAddExpectedParameter("eth", "destination", ConvertMacAddressStringToInt64(destinationMac), kEquals, 0);
+  } 
+  
+  InternalAddExpectedParameter("arp", "operation", (int64)opCode);
+
+  if (!IsWildcard(senderHardwareAddress))
+    InternalAddExpectedParameter("arp", "hwSourceAddr", ConvertMacAddressStringToInt64(senderHardwareAddress));
+
+  if (!IsWildcard(senderProtocolAddress))
+    InternalAddExpectedParameter("arp", "protSourceAddr", ConvertIpAddressStringToInt64(senderProtocolAddress));
+
+  if (!IsWildcard(targetHardwareAddress))
+    InternalAddExpectedParameter("arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(targetHardwareAddress));
+
+  if (!IsWildcard(targetProtocolAddress))
+    InternalAddExpectedParameter("arp", "protDestinationAddr",
+                                    ConvertIpAddressStringToInt64(targetProtocolAddress),
+                                    targetProtocolAddressCheckType);
+}
+
+/**
+ * Adds parameters to check for common ARP fields.
+ * @param opCode The ARP operation code i.e. request or reply.
+ * @param hardwareType The hardware type.
+ * @param protocolType The protocol type.
+ * @param hardwareSize The hardware size.
+ * @param protocolSize The protocol size.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ */
+void PrepareWaitForArp(
+  char destinationMac[],
+  char sourceMac[],
+  enum ArpOperation opCode,
+  char hardwareType[],
+  char protocolType[],
+  char hardwareSize[],
+  char protocolSize[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  PrepareWaitForArp(
+    destinationMac,
+    sourceMac,
+    opCode,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+
+  if (!IsWildcard(hardwareType))
+    InternalAddExpectedParameter("arp", "hwType", atol(hardwareType));
+
+  if (!IsWildcard(protocolType))
+    InternalAddExpectedParameter("arp", "protType", atol(protocolType));
+
+  if (!IsWildcard(hardwareSize))
+    InternalAddExpectedParameter("arp", "hwSize", atol(hardwareSize));
+
+  if (!IsWildcard(protocolSize))
+    InternalAddExpectedParameter("arp", "protSize", atol(protocolSize));
+}
+
+/**
+ * Adds parameters to check for common IPv4 fields.
+ * @param destIpAddr The destination IP address.
+ * @param srcIpAddr The source IP address.
+ */
+void PrepareWaitForIpv4(
+  char	destIpAddr[],
+  char	srcIpAddr[])
+{
+  InternalAddExpectedParameter("eth", "type", 0x0800); //IPv4 Ethertype
+  
+  if (!IsWildcard(destIpAddr))
+    InternalAddExpectedParameter("ipv4", "destination", ConvertIpAddressStringToInt64(destIpAddr));
+
+  if (!IsWildcard(srcIpAddr))
+    InternalAddExpectedParameter("ipv4", "source", ConvertIpAddressStringToInt64(srcIpAddr));
+
+  InternalAddExpectedParameter("ipv4", "version", 4);
+}
+
+/**
+ * Adds parameters to check for common IPv4 fields.
+ * @param destIpAddr The destination IP address.
+ * @param srcIpAddr The source IP address.
+ * @param protocol The IP protocol.
+ */
+void PrepareWaitForIpv4(
+  char	destIpAddr[],
+  char	srcIpAddr[],
+  byte	protocol)
+{
+  PrepareWaitForIpv4(destIpAddr, srcIpAddr);
+  InternalAddExpectedParameter("ipv4", "protocol", protocol);
+}
+
+/**
+ * Adds parameters to check for common IPv4 fields.
+ * @param destIpAddr The destination IP address.
+ * @param srcIpAddr The source IP address.
+ * @param protocol The IP protocol.
+ * @param groupIndex The parameter group index.
+ */
+void PrepareWaitForIpv4(
+  char	destIpAddr[],
+  char	srcIpAddr[],
+  byte	protocol,
+  int groupIndex)
+{
+  InternalAddExpectedParameter("eth", "type", 0x0800); //IPv4 Ethertype
+  
+  if (!IsWildcard(destIpAddr))
+    InternalAddExpectedParameter("ipv4", "destination", ConvertIpAddressStringToInt64(destIpAddr), kEquals, groupIndex);
+
+  if (!IsWildcard(srcIpAddr))
+    InternalAddExpectedParameter("ipv4", "source", ConvertIpAddressStringToInt64(srcIpAddr), kEquals, groupIndex);
+
+  InternalAddExpectedParameter("ipv4", "version", 4, kEquals, groupIndex);
+  
+  InternalAddExpectedParameter("ipv4", "protocol", protocol, kEquals, groupIndex);
+}
+
+
+/**
+ * Adds parameters to check for common IP fields. Waits for either Ipv4 or IPv6 fields based on the format of the parameters.
+ * @param destIpAddr The destination IP address.
+ * @param srcIpAddr The source IP address.
+ * @param protocol The next header protocol.
+ * @returns The IP version
+ */
+int PrepareWaitForIp(
+  char	destIpAddr[],
+  char	srcIpAddr[],
+  byte	protocol)
+{
+  int version;
+  char versionString[5];
+  
+  version = IpVersionOfString(destIpAddr);
+  if(version < 0)
+  {
+    version = IpVersionOfString(srcIpAddr);
+    if(version < 0)
+    {
+      return -1;
+    }
+  }
+  
+  if(version == 4)
+  {  
+    snprintf(versionString, 5, "ipv4");
+    InternalAddExpectedParameter("eth", "type", 0x0800); //IPv4 Ethertype
+    InternalAddExpectedParameter("ipv4", "protocol", protocol);
+  }
+  else
+  {
+    snprintf(versionString, 5, "ipv6");
+    InternalAddExpectedParameter("eth", "type", 0x86DD); //IPv6 Ethertype
+    InternalAddExpectedParameter("ipv6", "next", protocol);
+  }
+  
+  if (!IsWildcard(destIpAddr))
+  {
+    byte destIpAddressData[16];
+    ConvertIpAddressStringToByteArray(destIpAddr, destIpAddressData);
+    InternalAddExpectedDataParameter(versionString, "destination", destIpAddressData, BytesPerIpVersion(version));
+  }
+
+  if (!IsWildcard(srcIpAddr))
+  {
+    byte sourceIpAddressData[16];
+    ConvertIpAddressStringToByteArray(srcIpAddr, sourceIpAddressData);
+    InternalAddExpectedDataParameter(versionString, "source", sourceIpAddressData, BytesPerIpVersion(version));
+  }
+  
+  InternalAddExpectedParameter(versionString, "version", version);
+  
+  return version;
+}
+
+/**
+ * Adds parameters to check for common UDP fields.
+ * @param destPort The destination port.
+ * @param srcPort The source port.
+ */
+void PrepareWaitForUdp(
+  char	destPort[],
+  char	srcPort[])
+{
+  if(!IsWildcard(destPort))
+  {
+    InternalAddExpectedParameter("udp", "destination", atol(destPort));
+  }
+  if(!IsWildcard(srcPort))
+  {
+    InternalAddExpectedParameter("udp", "source", atol(srcPort));
+  }
+}
+
+/**
+ * Adds parameters to check for common UDP fields.
+ * @param destPort The destination port.
+ * @param srcPort The source port.
+ */
+void PrepareWaitForUdp(int destPort, int srcPort)
+{
+  InternalAddExpectedParameter("udp", "destination", destPort);
+  InternalAddExpectedParameter("udp", "source", srcPort);
+}
+
+void PrepareWaitForTcp(
+  char	destPort[],
+  char	srcPort[])
+{
+  if(!IsWildcard(destPort))
+  {
+   InternalAddExpectedParameter("tcp", "destination", atol(destPort));
+  }
+  if(!IsWildcard(srcPort))
+  {
+   InternalAddExpectedParameter("tcp", "source", atol(srcPort));
+  }
+}
+
+/**
+ * Adds a parameter to check for the ICMP type.
+ * @param type The ICMP type.
+ */
+void PrepareWaitForIcmp(char type[])
+{
+  if(!IsWildcard(type))
+  {
+    InternalAddExpectedParameter("icmpv4", "type", atol(type));
+  }
+}
+
+/**
+ * Adds parameters to check for an ICMP echo reply.
+ * @param identifier The ICMP identifier.
+ * @param sequence The ICMP sequence.
+ * @param data The ICMP payload.
+ * @param dataLength The ICMP payload length.
+ */
+void PrepareWaitForIcmpEchoReply(char identifier[],char sequence[],byte data[],char dataLength[])
+{
+  InternalAddExpectedParameter("icmpv4", "type", 0);
+  if(!IsWildcard(identifier))
+  {
+   InternalAddExpectedParameter("icmpv4", "identifier", atol(identifier));
+  }
+  if(!IsWildcard(sequence))
+  {
+   InternalAddExpectedParameter("icmpv4", "sequence", atol(sequence));
+  }
+  if(!IsWildcard(dataLength))
+  {
+   InternalAddExpectedDataParameter("icmpv4", "data", data, atol(dataLength));
+  }
+}
+
+/**
+ * Adds parameters to check for common ICMP fields.
+ * @param identifier The ICMP identifier.
+ * @param sequence The ICMP sequence.
+ * @param timestampOriginate The timestamp originate field.
+ * @param timestampOriginateCheckType Determines how to compare the timestamp originate field.
+ * @param timestampReceive The timestamp receive field.
+ * @param timestampReceiveCheckType Determines how to compare the timestamp receive field.
+ * @param timestampTransmit The timestamp transmit field.
+ * @param timestampTransmitCheckType Determines how to compare the timestamp transmit field.
+ */
+void PrepareWaitForIcmpTimestamp(
+  char  identifier[],
+  char  sequence[],
+  char  timestampOriginate[],
+  enum  CheckType timestampOriginateCheckType,
+  char  timestampReceive[],
+  enum  CheckType timestampReceiveCheckType,
+  char  timestampTransmit[],
+  enum  CheckType timestampTransmitCheckType)
+{
+  InternalAddExpectedParameter("icmpv4", "type", 14);
+  if(!IsWildcard(identifier))
+  {
+    InternalAddExpectedParameter("icmpv4", "identifier", atol(identifier));
+  }
+  if(!IsWildcard(sequence))
+  {
+    InternalAddExpectedParameter("icmpv4", "sequence", atol(sequence));
+  }
+  if(!IsWildcard(timestampOriginate))
+  {
+    InternalAddExpectedParameter("icmpv4", "timestampOriginate", atol(timestampOriginate), timestampOriginateCheckType);
+  }
+  if(!IsWildcard(timestampReceive))
+  {
+    InternalAddExpectedParameter("icmpv4", "timestampReceive", atol(timestampReceive), timestampReceiveCheckType);
+  }
+  if(!IsWildcard(timestampTransmit))
+  {
+    InternalAddExpectedParameter("icmpv4", "timestampTransmit", atol(timestampTransmit), timestampTransmitCheckType);
+  }
+}
+
+/**
+ * Adds parameters to check for an ICMP paramter problem message.
+ * @param pointer The ICMP pointer.
+ */
+void PrepareWaitForIcmpParameterProblem(char pointer[])
+{
+  InternalAddExpectedParameter("icmpv4", "type", 12);
+  if(!IsWildcard(pointer))
+  {
+    InternalAddExpectedParameter("icmpv4", "pointer", atol(pointer));
+  }
+}
+
+/**
+ * Adds parameters to check for an ICMP destination unreachable message.
+ * @param code The error code of the message.
+ */
+void PrepareWaitForIcmpDestinationUnreachable(char code[])
+{
+  if(IpVersionOfString(syspar::Host1Ip) == 4)
+  {
+    InternalAddExpectedParameter("icmpv4", "type", 3);
+    if(!IsWildcard(code))
+    {
+     InternalAddExpectedParameter("icmpv4", "code", atol(code));
+    }
+  }
+  else
+  {
+    InternalAddExpectedParameter("icmpv6", "type", 1);
+    if(!IsWildcard(code))
+    {
+     InternalAddExpectedParameter("icmpv6", "code", atol(code));
+    }
+  }
+}
+
+/**
+ * Adds parameters to check for an ICMP time exceeded message.
+ * @param code The error code of the message.
+ */
+void PrepareWaitForIcmpTimeExceeded(char code[])
+{
+  InternalAddExpectedParameter("icmpv4", "type", 11);
+  if(!IsWildcard(code))
+  {
+   InternalAddExpectedParameter("icmpv4", "code", atol(code));
+  }
+}
+
+/**
+* Adds a parameter to the list of expected parameters with checktype = kEquals for group 0
+* @param protocol The protocol to which the token belongs to.
+* @param token The token to check.
+* @param value The value to check for.
+*/
+void InternalAddExpectedParameter(char protocol[], char token[], int64 value)
+{
+  InternalAddExpectedParameter(protocol, token, value, kEquals, -1);
+}
+
+/**
+* Adds a parameter to the list of expected parameters for group 0
+* @param protocol The protocol to which the token belongs to.
+* @param token The token to check.
+* @param value The value to check for.
+* @param checktype How to compare the expected and the observed value e.g. kEquals to check for equality.
+*/
+void InternalAddExpectedParameter(char protocol[], char token[], int64 value, enum CheckType checktype)
+{
+  InternalAddExpectedParameter(protocol, token, value, checktype, -1);
+}
+
+/**
+* Adds a parameter to the list of expected parameters
+* @param protocol The protocol to which the token belongs to.
+* @param token The token to check.
+* @param value The value to check for.
+* @param checktype How to compare the expected and the observed value e.g. kEquals to check for equality.
+* @param groupIndex The parameter group index. Messages need to match only one group.
+*/
+void InternalAddExpectedParameter(char protocol[], char token[], int64 value, enum CheckType checktype, int groupIndex)
+{
+  struct Parameter param;
+  int    cur, last;
+  
+  // if the group index is not specified, we add the parameter to all lists
+  cur  = groupIndex >= 0 ? groupIndex     : 0;
+  last = groupIndex >= 0 ? groupIndex + 1 : elcount(gExpectedParameters) ;
+  
+  for(;cur < last; cur++)
+  {
+    // break on the first empty copy to avoid iterating over the entire array
+    if(groupIndex == -1 && cur > 0 && gExpectedParametersIndex[cur] == 0)
+      break;
+    
+    strncpy(param.Protocol, protocol, elcount(protocol));
+    strncpy(param.Token, token, elcount(token));
+    param.Value = value;
+    param.checkType = checktype;
+    memcpy(gExpectedParameters[cur][gExpectedParametersIndex[cur]], param);
+    gExpectedParametersIndex[cur]++;
+  }
+}
+
+/**
+* Adds a parameter to the list of expected parameters. Compares only the last byte
+* @param protocol The protocol to which the token belongs to.
+* @param token The token to check.
+* @param value The value to check for.
+* @param checktype How to compare the expected and the observed value e.g. kEquals to check for equality.
+*/
+void InternalAddExpectedParameterLastByte(char protocol[], char token[], int64 value, enum CheckType checktype)
+{
+  struct Parameter param;
+
+  strncpy(param.Protocol, protocol, elcount(protocol));
+  strncpy(param.Token, token, elcount(token));
+  param.Value = value;
+  param.checkType = checktype;
+  memcpy(gExpectedParametersLastByte[gExpectedParametersLastByteIndex], param);
+  gExpectedParametersLastByteIndex++;
+}
+
+/**
+* Adds a parameter to the list of expected data parameters.
+* @param protocol The protocol to which the token belongs to.
+* @param token The token to check.
+* @param value The value to check for.
+* @param valueLength The number of bits to check.
+*/
+void InternalAddExpectedDataParameter(char protocol[], char token[], byte value[], int valueLength)
+{
+  InternalAddExpectedDataParameter(protocol, token, value, valueLength, kTrue, 0, kEquals);
+}
+
+/**
+* Adds a parameter to the list of expected data parameters.
+* @param protocol The protocol to which the token belongs to.
+* @param token The token to check.
+* @param value The value to check for.
+* @param valueLength The number of bits to check.
+* @param lengthCheck If the length of the observed value needs to match the expected values length.
+* @param offset Offset of the observed value.
+* @param checktype How to compare the expected and the observed value e.g. kEquals to check for equality.
+*/
+void InternalAddExpectedDataParameter(
+  char protocol[],
+  char token[],
+  byte value[],
+  int valueLength,
+  enum Bool lengthCheck,
+  int offset,
+  enum CheckType checkType)
+{
+  int i;
+  struct DataParameter param;
+
+  param.offset = offset;
+  param.lengthCheck = lengthCheck;
+  param.checkType = checkType;
+  
+  strncpy(param.Protocol, protocol, elcount(protocol));
+  strncpy(param.Token, token, elcount(token));
+  if (valueLength == 0)
+    param.valueLength = elcount(value);
+  else
+    param.valueLength = valueLength;
+  for (i = 0; i < param.valueLength; i++)
+    param.value[i] = value[i];
+  memcpy(gExpectedDataParameters[gExpectedDataParametersIndex], param);
+  gExpectedDataParametersIndex++;
+}
+
+/**
+* Adds two parameter to the list of expected parameters to compare against each other.
+* @param protocol1 The protocol to which the first token belongs to.
+* @param token1 The first token.
+* @param protocol2 The protocol to which the second token belongs to.
+* @param token2 The second token.
+* @param checktype How to compare the expected and the observed value e.g. kEquals to check for equality.
+*/
+void Internal_AddExpectedParameterCompareTwoParameters(char protocol1[], char token1[], char protocol2[], char token2[], enum CheckType checkType)
+{
+  struct ParameterPair pair;
+
+  strncpy(pair.Protocol1, protocol1, elcount(protocol1));
+  strncpy(pair.Token1, token1, elcount(token1));
+  strncpy(pair.Protocol2, protocol2, elcount(protocol2));
+  strncpy(pair.Token2, token2, elcount(token2));
+  pair.checkType = checkType;
+  memcpy(gExpectedParametersCompareTwo[gExpectedParametersCompareTwoIndex], pair);
+  gExpectedParametersCompareTwoIndex++;
+}
+
+/**
+* Copy all expected parameters from a group to another
+* @param groupIndexSource The source group.
+* @param groupIndexDest The destination group.
+*/
+void CopyExpectedParameters(int groupIndexSource, int groupIndexDest)
+{
+  int i;
+  if(groupIndexSource == groupIndexDest)
+  {
+    return;
+  }
+  
+  gExpectedParametersIndex[groupIndexDest] = 0;
+  for (i = 0; i < gExpectedParametersIndex[groupIndexSource]; i++)
+  {
+    memcpy(gExpectedParameters[groupIndexDest][i], gExpectedParameters[groupIndexSource][i]);
+  }
+  gExpectedParametersIndex[groupIndexDest] = gExpectedParametersIndex[groupIndexSource];
+}

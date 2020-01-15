@@ -1,0 +1,3460 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+  #include "FCatDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+//
+// Simulation of a MOST AudioDiskPlayer FBlock (with disc changer capability)
+//
+variables
+{
+  // Application phase
+  const byte kAppOff      = 0; // no power; no communication
+  const byte kAppOn       = 1; // power on
+  const byte kAppShutdown = 2; // power on; shutdown started
+  byte  gAppPhase = kAppOff;
+
+
+  // Property: TimePosition
+  mstimer tTimePosition;
+  const dword kTimePositionCycle = 1000; // update cycle for time position
+
+
+  // Property: MediaInfo
+  // virtual magazine
+  const long kMediaInfoSize = 6;  // maximum number of CDs of the changer
+  // media info will be derived from gAudioDiskInfoAudioTime[] 
+  // as soon as the magazine is loaded
+  word  gMediaInfoMediaType[kMediaInfoSize];
+  word  gMediaInfoMediaFilesystem[kMediaInfoSize];
+  word  gMediaInfoFirstTrack[kMediaInfoSize];
+  word  gMediaInfoLastTrack[kMediaInfoSize];
+  dword gMediaInfoPlayTime[kMediaInfoSize];
+  // MediaTitles are fix for simulation
+  char  gMediaInfoMediaTitle[kMediaInfoSize][50] = {
+    "Pink Floyd - The Wall",
+    "Beethoven - 9. Symphonie",
+    "Metallica - Reload",
+    "Depeche Mode  - Violator",
+    "Badesalz - Diwodaso",
+    "Mike Oldfield - Tubular Bells"};
+
+
+  // Property: AudioDiskInfo
+  // virtual CDs
+  const long kAudioDiskInfoSize = 10; // maximum number of titles on a CD
+  // title length of virtual CDs in ms
+  dword gAudioDiskInfoAudioTime[kMediaInfoSize][kAudioDiskInfoSize] = {
+    { 10000,  9000, 12000,  9000,  8000,     0,     0,     0,     0,     0 },
+    { 15000, 14000, 13000, 12000,     0,     0,     0,     0,     0,     0 },
+    {     0,     0,     0,     0,     0,     0,     0,     0,     0,     0 },
+    { 13000, 11000,  5000, 10000, 19000,  9000,     0,     0,     0,     0 },
+    {     0,     0,     0,     0,     0,     0,     0,     0,     0,     0 },
+    {  8000,     0,     0,     0,     0,     0,     0,     0,     0,     0 }};
+  char  gAudioDiskInfoAudioTitle[kMediaInfoSize][kAudioDiskInfoSize][50] = {
+    { "Another Brick in the Wall", "Goodbye blue Sky", "The thin Ice", "Empty Spaces", "Don't leave me now", "", "", "", "", "" },
+    { "First Movement", "Second Movement", "Third Movement", "Fourth Movement", "", "", "", "", "", "" },
+    { "Fuel", "The Memory Remains", "Low Man's Lyric", "Attitude", "", "", "", "", "", "" },
+    { "World In My Eyes", "Sweetest Perfection", "Personal Jesus", "Halo", "Waiting For The Night", "Enjoy The Silence", "", "", "", "" },
+    { "In Der Waschaalaach", "Verirrt", "Hessi James", "Alles Wie Vorher", "", "", "", "", "", "" },
+    { "Part One", "Part Two", "", "", "", "", "", "", "", "" }};
+
+
+  // Method: Allocate / DeAllocate
+  long    gAllocState = 0; // 0: no allocation; 1: allocating; 2: allocated; 3: deallocating
+  mostAMSMessage AudioDiskPlayer.Allocate.Result gMsgAllocateRes; // store allocation parameters here
+  mostAMSMessage AudioDiskPlayer.DeAllocate.Result gMsgDeAllocateRes;
+
+  // Property: PeakLevel
+  msTimer tPeakLevel;
+  const long kPeakLevelCycle = 300; // in ms
+
+  long gSpeedGrade;
+
+  ///////////////////////////////////////////////////////////////////////////////
+  // Error Injection
+  //
+  // All variables and functions starting with 'EI' are introduced for simulating
+  // erroneous behavior of the FBlock.
+
+  const int kEINormalAnswer = 0;  // Property answers with status message
+  const int kEIErrorAnswer  = 1;  // Property answers with error message 
+  const int kEINoAnswer     = 2;  // Property doesn't answer at all
+
+
+  // DeckStatus delayed response
+  msTimer tEIDelayDeckStatusSet;
+  mostAmsMessage AudioDiskPlayer.DeckStatus.Set gEIMsgDeckStatusSet;
+  msTimer tEIDelayDeckStatusGet;
+  mostAmsMessage AudioDiskPlayer.DeckStatus.Get gEIMsgDeckStatusGet;
+  msTimer tEIDelayDeckStatusSetGet;
+  mostAmsMessage AudioDiskPlayer.DeckStatus.SetGet gEIMsgDeckStatusSetGet;
+
+  // TrackPosition delayed response
+  msTimer tEIDelayTrackPositionSet;
+  mostAmsMessage AudioDiskPlayer.TrackPosition.Set gEIMsgTrackPositionSet;
+  msTimer tEIDelayTrackPositionGet;
+  mostAmsMessage AudioDiskPlayer.TrackPosition.Get gEIMsgTrackPositionGet;
+  msTimer tEIDelayTrackPositionSetGet;
+  mostAmsMessage AudioDiskPlayer.TrackPosition.SetGet gEIMsgTrackPositionSetGet;
+  msTimer tEIDelayTrackPositionInc;
+  mostAmsMessage AudioDiskPlayer.TrackPosition.Increment gEIMsgTrackPositionInc;
+  msTimer tEIDelayTrackPositionDec;
+  mostAmsMessage AudioDiskPlayer.TrackPosition.Decrement gEIMsgTrackPositionDec;
+
+  // MediaInfo delayed response
+  msTimer tEIDelayMediaInfoGet;
+  mostAmsMessage AudioDiskPlayer.MediaInfo.Get gEIMsgMediaInfoGet;
+
+  // Allocate delayed response
+  msTimer tEIDelayAllocateStartRes;
+  mostAmsMessage AudioDiskPlayer.Allocate.StartResult gEIMsgAllocateStartRes;
+  msTimer tEIProcessingAllocate;
+  const long kEIProcessingCycle = 100; // in ms
+
+  //
+  ///////////////////////////////////////////////////////////////////////////////
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.SourceActivity.StartResult (0x311032):*/
+
+on mostAMSMessage AudioDiskPlayer.SourceActivity.StartResult
+{
+  mostAMSMessage AudioDiskPlayer.SourceActivity.Result msgRes;
+  byte disc, bFail;
+  word track;
+
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 2))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // this player has one source only
+  if(this.SourceNr != 0x01)
+  {
+    mostSendError_CodeByteByte(this, kErrParamNotAvailable, 1, this.SourceNr);
+    return;
+  }
+
+  if(this.Activity > 2)
+  {
+    mostSendError_CodeByteByte(this, kErrParamWrong, 2, this.Activity);
+    return;
+  }
+  
+  // source not allocated
+  if(gAllocState != 2)
+  {
+    // since no channels allocated, no source can be activated
+    mostSendError_CodeByteByte(this, kErrParamNotAvailable, 1, this.SourceNr);
+    return;
+  }
+
+  bFail = 0;
+  switch(this.Activity)
+  {
+    case 0: // Off
+    {
+      @sysvar::CDC::AudioDiskPlayer::DeckStatus = 1;
+      break;
+    }
+    case 1: // Pause
+    {
+      @sysvar::CDC::AudioDiskPlayer::DeckStatus = 2;
+      break;
+    }
+    case 2: // On
+    {
+      // start playing
+      disc = @sysvar::CDC::AudioDiskPlayer::ActiveDisk;
+      track = @sysvar::CDC::AudioDiskPlayer::TrackPosition;
+      if(!IsTrackPositionValid(disc, track))
+      {
+        // track number not available -> search next disc
+        disc = NextDiscNumber();
+        track = 1;
+        if(disc == 0)
+          bFail = 1;
+      }
+
+      if(!bFail)
+      {
+        // start playback
+        @sysvar::CDC::AudioDiskPlayer::DeckStatus = 0;
+      }
+      break;
+    }
+  }
+
+  if(bFail)
+  {
+    mostSendError_CodeByteByte(this, kErrParamNotAvailable, 1, this.SourceNr);
+    return;
+  }
+  else
+  {
+    // this is just a simulation; send result immediately
+    msgRes.DA = this.SA;
+    msgRes.InstanceId = this.InstanceId;
+    msgRes.SourceNr = this.SourceNr;
+    msgRes.Activity = this.Activity;
+    output(msgRes);
+  }
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.Allocate.StartResult (0x311012):*/
+
+on mostAMSMessage AudioDiskPlayer.Allocate.StartResult
+{
+  //{{{ --- begin error injection code ------------------
+
+  if(!CheckValidReception(this))
+    return;
+
+  switch(@sysvar::CDC::ErrorInjection::Allocate)
+  {
+    case kEINormalAnswer:
+    case kEIErrorAnswer:
+      // save command message for delayed processing
+      gEIMsgAllocateStartRes = this;
+      cancelTimer(tEIDelayAllocateStartRes);
+      setTimer(tEIDelayAllocateStartRes, @sysvar::CDC::ErrorInjection::Delay_Allocate);
+      cancelTimer(tEIProcessingAllocate);
+      setTimer(tEIProcessingAllocate, kEIProcessingCycle);
+      break;
+
+    default:
+      return; // don't answer
+  }
+
+  //}}} --- end error injection code --------------------
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // configure CAPL node as application node (don't receive spy messages...)
+  mostApplicationNode();
+
+  // configure FBlock AudioDiskPlayer
+  ConfigureFBlock();
+}
+/*@@end*/
+
+/*@@caplFunc:CheckNormalOperation():*/
+
+long CheckNormalOperation()
+{
+  // Description:
+  //   Checks if FBlock is able to process commands
+  // Return:
+  //   0: failed; 1: Ok
+
+  //{{{ --- begin application section -----------
+
+  return (kAppOff != gAppPhase);
+
+  //}}} --- end application section -------------
+
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.TrackPosition.Get (0x312021):*/
+
+on mostAMSMessage AudioDiskPlayer.TrackPosition.Get
+{
+  //{{{ --- begin error injection code ------------------
+
+  if(!CheckValidReception(this))
+    return;
+
+  switch(@sysvar::CDC::ErrorInjection::TrackPosition)
+  {
+    case kEINormalAnswer:
+    case kEIErrorAnswer:
+      // save command message for delayed processing
+      gEIMsgTrackPositionGet = this;
+      cancelTimer(tEIDelayTrackPositionGet);
+      setTimer(tEIDelayTrackPositionGet, @sysvar::CDC::ErrorInjection::Delay_TrackPosition);
+      break;
+
+    default:
+      return; // don't answer
+  }
+
+  //}}} --- end error injection code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.TrackPosition.Set (0x312020):*/
+
+on mostAMSMessage AudioDiskPlayer.TrackPosition.Set
+{
+  //{{{ --- begin error injection code ------------------
+
+  if(!CheckValidReception(this))
+    return;
+
+  switch(@sysvar::CDC::ErrorInjection::TrackPosition)
+  {
+    case kEINormalAnswer:
+    case kEIErrorAnswer:
+      // save command message for delayed processing
+      gEIMsgTrackPositionSet = this;
+      cancelTimer(tEIDelayTrackPositionSet);
+      setTimer(tEIDelayTrackPositionSet, @sysvar::CDC::ErrorInjection::Delay_TrackPosition);
+      break;
+
+    default:
+      return; // don't answer
+  }
+
+  //}}} --- end error injection code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.TrackPosition.SetGet (0x312022):*/
+
+on mostAMSMessage AudioDiskPlayer.TrackPosition.SetGet
+{
+  //{{{ --- begin error injection code ------------------
+
+  if(!CheckValidReception(this))
+    return;
+
+  switch(@sysvar::CDC::ErrorInjection::TrackPosition)
+  {
+    case kEINormalAnswer:
+    case kEIErrorAnswer:
+      // save command message for delayed processing
+      gEIMsgTrackPositionSetGet = this;
+      cancelTimer(tEIDelayTrackPositionSetGet);
+      setTimer(tEIDelayTrackPositionSetGet, @sysvar::CDC::ErrorInjection::Delay_TrackPosition);
+      break;
+
+    default:
+      return; // don't answer
+  }
+
+  //}}} --- end error injection code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.TrackPosition.Increment (0x312023):*/
+
+on mostAMSMessage AudioDiskPlayer.TrackPosition.Increment
+{
+  //{{{ --- begin error injection code ------------------
+
+  if(!CheckValidReception(this))
+    return;
+
+  switch(@sysvar::CDC::ErrorInjection::TrackPosition)
+  {
+    case kEINormalAnswer:
+    case kEIErrorAnswer:
+      // save command message for delayed processing
+      gEIMsgTrackPositionInc = this;
+      cancelTimer(tEIDelayTrackPositionInc);
+      setTimer(tEIDelayTrackPositionInc, @sysvar::CDC::ErrorInjection::Delay_TrackPosition);
+      break;
+
+    default:
+      return; // don't answer
+  }
+
+  //}}} --- end error injection code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.TrackPosition.Decrement (0x312024):*/
+
+on mostAMSMessage AudioDiskPlayer.TrackPosition.Decrement
+{
+  //{{{ --- begin error injection code ------------------
+
+  if(!CheckValidReception(this))
+    return;
+
+  switch(@sysvar::CDC::ErrorInjection::TrackPosition)
+  {
+    case kEINormalAnswer:
+    case kEIErrorAnswer:
+      // save command message for delayed processing
+      gEIMsgTrackPositionDec = this;
+      cancelTimer(tEIDelayTrackPositionDec);
+      setTimer(tEIDelayTrackPositionDec, @sysvar::CDC::ErrorInjection::Delay_TrackPosition);
+      break;
+
+    default:
+      return; // don't answer
+  }
+
+  //}}} --- end error injection code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_TrackPosition(long):*/
+
+long SendStatus_TrackPosition(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service
+  //     (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage AudioDiskPlayer.TrackPosition.Status msg;
+  
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstID();
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.Track = @sysvar::CDC::AudioDiskPlayer::TrackPosition;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.DeAllocate.StartResult (0x311022):*/
+
+on mostAMSMessage AudioDiskPlayer.DeAllocate.StartResult
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // this player has one source only
+  if(this.SourceNr != 0x01)
+  {
+    mostSendError_CodeByteByte(this, kErrParamNotAvailable, 1, this.SourceNr);
+    return;
+  }
+
+  if(gAllocState != 2)
+  {
+    // nothing allocated
+    mostSendError_Code(this, kErrNotAvailable);
+    return;
+  }
+
+  // call synchronous channel allocation service
+  // OnMostSyncDeallocResult() will be invoked on completion or timeout
+  if((kMost25 == gSpeedGrade) && (0 != mostSyncDealloc(gMsgAllocateRes.byte(2))))
+  {
+    mostSendError_Code(this, kErrNotAvailable);
+    return;
+  }
+
+  // stop playing
+  PlaybackStop();
+
+  // state: deallocating
+  gAllocState = 3;
+
+  // store address of initiator
+  gMsgDeAllocateRes.DA = this.SA;
+
+  if(kMost25 != gSpeedGrade)
+  {
+    // simulate deallocation of channels
+    OnMostSyncDeallocResult(1, gMsgAllocateRes.byte(2));
+  }
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.DeckEvent.Get (0x314301):*/
+
+on mostAMSMessage AudioDiskPlayer.DeckEvent.Get
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 0))
+    return;
+
+  // reply status
+  SendStatus_DeckEvent(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_DeckEvent(long):*/
+
+long SendStatus_DeckEvent(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service
+  //     (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+  
+  //{{{ --- begin default code ------------------
+  mostAMSMessage AudioDiskPlayer.DeckEvent.Status msg;
+
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstID();
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.DeckEvent =  @sysvar::CDC::AudioDiskPlayer::DeckEvent;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_MediaEvent(long):*/
+
+long SendStatus_MediaEvent(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service
+  //     (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+  
+  //{{{ --- begin default code ------------------
+  mostAMSMessage AudioDiskPlayer.MediaEvent.Status msg;
+
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstID();
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.MediaEvent = @sysvar::CDC::AudioDiskPlayer::MediaEvent;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.MediaEvent.Get (0x314311):*/
+
+on mostAMSMessage AudioDiskPlayer.MediaEvent.Get
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 0))
+    return;
+
+  // reply status
+  SendStatus_MediaEvent(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_MediaInfo(long):*/
+
+long SendStatus_MediaInfo(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service
+  //     (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+  
+  //{{{ --- begin default code ------------------
+  mostAMSMessage AudioDiskPlayer.MediaInfo.Status msg = { DLC = 1000 };
+
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstID();
+
+  //}}} --- end default code --------------------
+
+ 
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  FillMediaInfoStatusMsg(msg);
+    
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+  
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_ActiveDisk(long):*/
+
+long SendStatus_ActiveDisk(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service
+  //     (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage AudioDiskPlayer.ActiveDisk.Status msg;
+
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstID();
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.MagazinPos = @sysvar::CDC::AudioDiskPlayer::ActiveDisk;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // send message
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_MagazineStatus(long):*/
+
+long SendStatus_MagazineStatus(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service
+  //     (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+  
+  //{{{ --- begin default code ------------------
+  mostAMSMessage AudioDiskPlayer.MagazineStatus.Status msg;
+
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstID();
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.MagazineStatus = @sysvar::CDC::AudioDiskPlayer::MagazineStatus;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_Random(long):*/
+
+long SendStatus_Random(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service
+  //     (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage AudioDiskPlayer.Random.Status msg;
+
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstID();
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.RandomState = @sysvar::CDC::AudioDiskPlayer::Random;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_Scan(long):*/
+long SendStatus_Scan(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service
+  //     (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage AudioDiskPlayer.Scan.Status msg;
+  
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstID();
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.ScanState = @sysvar::CDC::AudioDiskPlayer::Scan;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  // display InstId in panel
+  @sysvar::CDC::AudioDiskPlayer::InstId = mostApGetInstId();
+
+  // Property: MagazineStatus
+
+  // simulate loaded magazine
+  @sysvar::CDC::AudioDiskPlayer::MagazineStatus = 0x01;
+}
+/*@@end*/
+
+/*@@sysvarChange:CDC::AudioDiskPlayer::MagazineStatus:*/
+
+on sysvar CDC::AudioDiskPlayer::MagazineStatus
+{
+  long numbytes;
+  byte buffer[500];
+
+  //{{{ --- begin application section -----------
+ 
+  // simulate actions when magazine status changes
+
+  switch(@sysvar::CDC::AudioDiskPlayer::MagazineStatus)
+  {
+    case 0x01:
+    {
+      // magazine loaded
+
+      // calculate media info from simulated discs
+      MediaInfoCalculate();
+
+      // update property MediaInfo
+      SendStatus_MediaInfo(kAsNtfDestAdr);
+
+      // update property ActiveDisk
+      @sysvar::CDC::AudioDiskPlayer::ActiveDisk = NextDiscNumber();
+
+      // update property MediaEvent
+      @sysvar::CDC::AudioDiskPlayer::MediaEvent = 0; // Normal Operation
+
+      // update property DeckStatus
+      @sysvar::CDC::AudioDiskPlayer::DeckStatus = 1; // Stop
+
+      break;
+    }
+    default:
+    { 
+      // magazine not loaded
+      PlaybackStop();
+
+      // calculate media info from simulated discs
+      MediaInfoCalculate();
+
+      // update property MediaInfo
+      SendStatus_MediaInfo(kAsNtfDestAdr);
+
+      // stop current track
+      canceltimer(tTimePosition); 
+
+      // update property ActiveDisk
+      @sysvar::CDC::AudioDiskPlayer::ActiveDisk = 0;
+
+      // update property MediaEvent
+      @sysvar::CDC::AudioDiskPlayer::MediaEvent = 6; // Disk not available
+
+      break;
+    }
+  }
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // send status message to all notification clients
+  SendStatus_MagazineStatus(kAsNtfDestAdr);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@sysvarChange:CDC::AudioDiskPlayer::Random:*/
+
+on sysvar CDC::AudioDiskPlayer::Random
+{
+  //{{{ --- begin default code ------------------
+
+  // send status message to all notification clients
+  SendStatus_Random(kAsNtfDestAdr);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@sysvarChange:CDC::AudioDiskPlayer::Scan:*/
+
+on sysvar CDC::AudioDiskPlayer::Scan
+{
+  //{{{ --- begin default code ------------------
+
+  // send status message to all notification clients
+  SendStatus_Scan(kAsNtfDestAdr);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:IsDiscValid(long):*/
+
+long IsDiscValid(long disc)
+{
+  // Description:
+  //   Checks if disc is available.
+  // Parameter:
+  //   disc   disc number
+  // Return:
+  //   0: failed; 1: Ok
+
+  if(!IsMagazineLoaded())
+    return 0;
+
+  if((disc > 0) && (disc <= kMediaInfoSize))
+  {
+    // is there a disc at the current magazine position
+    if(gMediaInfoMediaType[disc-1] != 0)
+      return 1;
+  }
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:NextDiscNumber():*/
+
+long NextDiscNumber ()
+{
+  // Description:
+  //   Returns the next disc number.
+  //   Wraps around if kMediaInfoSize is reached.
+  // Return: 
+  //   Disc number or 0 if there is no disc/magazine inserted.
+
+  long current, next;
+
+  if(!IsMagazineLoaded())
+    return 0; // magazine not loaded
+
+  current = @sysvar::CDC::AudioDiskPlayer::ActiveDisk;
+  if(current >= kMediaInfoSize)
+    current = 0;
+  next = current+1;
+  while(next != current)
+  {
+    if(gMediaInfoMediaType[next-1] != 0)
+      break;
+    next++;
+    if(next > kMediaInfoSize) // wrap around
+    {
+      if(current == 0)
+      {
+        next = 0;
+        break;
+      }
+      next = 1;
+    }
+  }
+
+  if(next == current)
+    return 0; // no disk found
+
+  return next;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.ActiveDisk.SetGet (0x314122):*/
+
+on mostAMSMessage AudioDiskPlayer.ActiveDisk.SetGet
+{
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  if(!IsMagazineLoaded())
+  {
+    // no magazine
+    mostSendError_Code(this, kErrNotAvailable);
+    return;
+  }
+
+  // verify position
+  if((this.MagazinPos == 0) || (this.MagazinPos > kMediaInfoSize))
+  {
+    mostSendError_CodeByteByte(this, kErrParamWrong, 1, this.MagazinPos);
+    return;
+  }
+
+  // verify CD is inserted
+  if(!IsDiscValid(this.MagazinPos))
+  {
+    mostSendError_CodeByteByte(this, kErrParamWrong, 1, this.MagazinPos);
+    return;
+  }
+
+  // set property
+  @sysvar::CDC::AudioDiskPlayer::ActiveDisk = this.MagazinPos;
+
+  // start playback
+  if(@sysvar::CDC::AudioDiskPlayer::DeckStatus == 0) // play
+    PlaybackStartTrack(this.MagazinPos, 1);
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_ActiveDisk(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.ActiveDisk.Set (0x314120):*/
+
+on mostAMSMessage AudioDiskPlayer.ActiveDisk.Set
+{
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  if(!IsMagazineLoaded())
+  {
+    // no magazine
+    mostSendError_Code(this, kErrNotAvailable);
+    return;
+  }
+
+  // verify position
+  if((this.MagazinPos == 0) || (this.MagazinPos > kMediaInfoSize))
+  {
+    mostSendError_CodeByteByte(this, kErrParamWrong, 1, this.MagazinPos);
+    return;
+  }
+
+  // verify CD is inserted
+  if(!IsDiscValid(this.MagazinPos))
+  {
+    mostSendError_CodeByteByte(this, kErrParamWrong, 1, this.MagazinPos);
+    return;
+  }
+
+  // set property
+  @sysvar::CDC::AudioDiskPlayer::ActiveDisk = this.MagazinPos;
+
+  // start playback
+  if(@sysvar::CDC::AudioDiskPlayer::DeckStatus == 0) // play
+    PlaybackStartTrack(this.MagazinPos, 1);
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:IsMagazineLoaded():*/
+
+long IsMagazineLoaded()
+{
+  // Description:
+  //   Checks if magazine is loaded.
+  // Return:
+  //   0: failed; 1: Ok
+
+  if(1 != @sysvar::CDC::AudioDiskPlayer::MagazineStatus)
+    return 0;
+  return 1;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.ActiveDisk.Get (0x314121):*/
+
+on mostAMSMessage AudioDiskPlayer.ActiveDisk.Get
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 0))
+    return;
+
+  // reply status
+  SendStatus_ActiveDisk(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.ActiveDisk.Increment (0x314123):*/
+
+on mostAMSMessage AudioDiskPlayer.ActiveDisk.Increment
+{
+  byte currdisc, nextdisc;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  if(!IsMagazineLoaded())
+  {
+    // no magazine
+    mostSendError_Code(this, kErrNotAvailable);
+    return;
+  }
+
+  // check if current disc is valid
+  currdisc = @sysvar::CDC::AudioDiskPlayer::ActiveDisk;
+  if(IsDiscValid(currdisc))
+  {  
+    // next disc
+    nextdisc = currdisc + this.NSteps;
+
+    if(!IsDiscValid(nextdisc))
+      nextdisc = currdisc; // set a valid value
+  }
+  else
+  {
+    nextdisc = 1;
+    if(!IsDiscValid(nextdisc))
+      nextdisc = 0; // set a valid value
+  }
+  
+  // set property
+  @sysvar::CDC::AudioDiskPlayer::ActiveDisk = nextdisc;
+
+  // start playback
+  if(@sysvar::CDC::AudioDiskPlayer::DeckStatus == 0) // play
+    PlaybackStartTrack(nextdisc, 1);
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_ActiveDisk(this.SA);
+  
+  //}}} --- end default code --------------------
+
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.ActiveDisk.Decrement (0x314124):*/
+
+on mostAMSMessage AudioDiskPlayer.ActiveDisk.Decrement
+{
+  byte currdisc, nextdisc;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  if(!IsMagazineLoaded())
+  {
+    // no magazine
+    mostSendError_Code(this, kErrNotAvailable);
+    return;
+  }
+
+  // check if current disc is valid
+  currdisc = @sysvar::CDC::AudioDiskPlayer::ActiveDisk;
+  if(IsDiscValid(currdisc))
+  {  
+    // next disc
+    nextdisc = currdisc - this.NSteps;
+
+    if(!IsDiscValid(nextdisc))
+      nextdisc = currdisc; // set a valid value
+  }
+  else
+  {
+    nextdisc = 1;
+    if(!IsDiscValid(nextdisc))
+      nextdisc = 0; // set a valid value
+  }
+
+  // set property
+  @sysvar::CDC::AudioDiskPlayer::ActiveDisk = nextdisc;
+
+  // start playback
+  if(@sysvar::CDC::AudioDiskPlayer::DeckStatus == 0) // play
+    PlaybackStartTrack(nextdisc, 1);
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_ActiveDisk(this.SA);
+
+  //}}} --- end default code --------------------
+
+}
+/*@@end*/
+
+/*@@sysvarChange:CDC::AudioDiskPlayer::ActiveDisk:*/
+on sysvar CDC::AudioDiskPlayer::ActiveDisk
+{
+  byte disc;
+
+  //{{{ --- begin application section -----------
+
+  disc = @sysvar::CDC::AudioDiskPlayer::ActiveDisk;
+  if(IsDiscValid(disc))
+  {
+    @sysvar::CDC::AudioDiskPlayer::TrackPosition = gMediaInfoFirstTrack[disc-1];
+  }
+  
+  TimePositionSetTrack(0);
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // send status message to all notification clients
+  SendStatus_ActiveDisk(kAsNtfDestAdr);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@sysvarChange:CDC::AudioDiskPlayer::DeckEvent:*/
+on sysvar CDC::AudioDiskPlayer::DeckEvent
+{
+  //{{{ --- begin default code ------------------
+
+  // send status message to all notification clients
+  SendStatus_DeckEvent(kAsNtfDestAdr);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@sysvarChange:CDC::AudioDiskPlayer::MediaEvent:*/
+on sysvar CDC::AudioDiskPlayer::MediaEvent
+{
+  //{{{ --- begin default code ------------------
+
+  // send status message to all notification clients
+  SendStatus_MediaEvent(kAsNtfDestAdr);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@sysvarChange:CDC::AudioDiskPlayer::TrackPosition:*/
+on sysvar CDC::AudioDiskPlayer::TrackPosition
+{
+  //{{{ --- begin application section -----------
+
+  if(!IsTrackPositionValid(@sysvar::CDC::AudioDiskPlayer::ActiveDisk, @sysvar::CDC::AudioDiskPlayer::TrackPosition))
+  {
+    // error: track doesn't exist
+    PlaybackStop();
+  }
+
+  // start new track at position 0
+  TimePositionSetTrack(0);
+
+  //}}} --- end application section -------------
+
+  //{{{ --- begin default code ------------------
+
+  // send status message to all notification clients
+  SendStatus_TrackPosition(kAsNtfDestAdr);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostNetState:OnMostNetState(long,long):*/
+OnMostNetState(long oldstate, long newstate)
+{
+  //{{{ --- begin application section -----------
+
+  if(newstate == kNetStatePowerOff)
+  {
+    AppExit();
+  }
+  else if((newstate == kNetStateConfigOk) && (kMost25 == gSpeedGrade))
+  {
+    // read NDR register for SrcDelay parameter
+    mostReadReg(mostGetChannel(), 1, 0x8F, 1);
+  }
+
+
+  // Property: Deckstatus
+  if((oldstate == kNetStateConfigOk) && (newstate <= kNetStateConfigNotOk))
+  {
+    PlaybackStop();
+  }
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@mostReg:OnMostReg():*/
+OnMostReg()
+{
+  //{{{ --- begin application section -----------
+
+  // Method: Allocate
+  long res;
+  res = mostRegGetByteAbs(1, 0x8F);
+  if(res >= 0)
+  {
+    // store node delay for SrcDelay parameter
+    gMsgAllocateRes.SrcDelay = res;
+  }
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@mostApInstID:OnMostApInstID():*/
+OnMostApInstID()
+{
+  // reconfigure FBlock
+  ConfigureFBlock();
+
+  // display InstId in panel
+  @sysvar::CDC::AudioDiskPlayer::InstId = mostApGetInstId();
+}
+/*@@end*/
+
+/*@@sysvarChange:CDC::AudioDiskPlayer::TimePosition_Track:*/
+on sysvar CDC::AudioDiskPlayer::TimePosition_Track
+{
+  //{{{ --- begin default code ------------------
+
+  // send status message to all notification clients
+  SendStatus_TimePosition(kAsNtfDestAdr);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_TimePosition(long):*///function
+
+long SendStatus_TimePosition(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service
+  //     (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage AudioDiskPlayer.TimePosition.Status msg;
+  
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstID();
+
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.PosX = 0;
+  mostParamSet(msg, "Data.DiskTime", @sysvar::CDC::AudioDiskPlayer::TimePosition_Disk);
+  mostParamSet(msg, "Data.TrackTime", @sysvar::CDC::AudioDiskPlayer::TimePosition_Track);
+  mostParamSet(msg, "Data.TitleTime", @sysvar::CDC::AudioDiskPlayer::TimePosition_Title);
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // send message
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.TimePosition.Get (0x312011):*/
+on mostAMSMessage AudioDiskPlayer.TimePosition.Get
+{
+  mostAMSmessage AudioDiskPlayer.TimePosition.Status msg;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 2))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  msg.InstanceId = mostApGetInstID();
+
+  switch(this.PosX)
+  {
+  case 0: // send DiskTime, TrackTime and TitleTime
+    {
+      SendStatus_TimePosition(this.SA);
+      break;
+    }
+  case 1: // send DiskTime
+    {
+      msg.DLC = 6;
+      msg.PosX = 1;
+      mostParamSet(msg, "Data.DiskTime", @sysvar::CDC::AudioDiskPlayer::TimePosition_Disk);
+      mostAsNtfOutput(this.SA, msg);
+      break;
+    }
+  case 2: // send TrackTime
+    {
+      msg.DLC = 6;
+      msg.PosX = 2;
+      mostParamSet(msg, "Data.TrackTime", @sysvar::CDC::AudioDiskPlayer::TimePosition_Track);
+      mostAsNtfOutput(this.SA, msg);
+      break;
+    }
+  case 3: // send TitleTime
+    {
+      msg.DLC = 6;
+      msg.PosX = 3;
+      mostParamSet(msg, "Data.TitleTime", @sysvar::CDC::AudioDiskPlayer::TimePosition_Title);
+      mostAsNtfOutput(this.SA, msg);
+      break;
+    }
+  default:
+    {
+      mostSendError_CodeByteWord(this, kErrParamWrong, 1, this.Pos);
+    }
+  }
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:MediaInfoCalculate():*///function
+void MediaInfoCalculate()
+{
+  // Description:
+  //   Fills the gMediaInfo arrays by analyzing gAudioDiskInfoAudioTime[]
+
+  word disc, title;
+  dword playtime;
+
+  if(IsMagazineLoaded())
+  {
+    // check all discs
+    for(disc = 0; disc < kMediaInfoSize; ++disc)
+    {
+      // is disc inserted?
+      if(gAudioDiskInfoAudioTime[disc][0] > 0)
+      {
+        gMediaInfoMediaType[disc] = 1;
+        gMediaInfoMediaFilesystem[disc] = 1;
+        gMediaInfoFirstTrack[disc] = 1;
+        
+        // find last track and get play time
+        playtime = 0;
+        title = 0;
+        while((title < kAudioDiskInfoSize) && (gAudioDiskInfoAudioTime[disc][title] != 0))
+        {
+          // summarize play time
+          playtime = playtime + gAudioDiskInfoAudioTime[disc][title];
+          // next title
+          title++;
+        }
+        gMediaInfoLastTrack[disc] = title;
+        gMediaInfoPlayTime[disc] = playtime;
+      }
+      else
+      {
+        // no disc present
+        gMediaInfoMediaType[disc] = 0;
+        gMediaInfoMediaFilesystem[disc] = 0;
+        gMediaInfoFirstTrack[disc] = 0;
+        gMediaInfoLastTrack[disc] = 0;
+        gMediaInfoPlayTime[disc] = 0;
+      }
+    }
+  }
+  else
+  {
+    // no magazine -> no media info
+    for(disc = 0; disc < kMediaInfoSize; ++disc)
+    {
+      gMediaInfoMediaType[disc] = 0;
+      gMediaInfoMediaFilesystem[disc] = 0;
+      gMediaInfoFirstTrack[disc] = 0;
+      gMediaInfoLastTrack[disc] = 0;
+      gMediaInfoPlayTime[disc] = 0;
+    }
+  }
+}
+/*@@end*/
+
+/*@@timer:tTimePosition:*/
+on timer tTimePosition
+{
+  //{{{ --- begin application section -----------
+
+  // Property: TimePosition
+
+  dword currenttracktime, tracktime;
+  long disc, track, newtrack;
+
+  currenttracktime = @sysvar::CDC::AudioDiskPlayer::TimePosition_Track;
+  disc = @sysvar::CDC::AudioDiskPlayer::ActiveDisk;
+  track = @sysvar::CDC::AudioDiskPlayer::TrackPosition;
+
+  if(!IsTrackPositionValid(disc, track))
+  {
+    // error: playing an invalid track
+    PlaybackStop();
+  }
+  else
+  {
+    // track complete?
+    tracktime = gAudioDiskInfoAudioTime[disc-1][track-1]; // length of track
+    if((currenttracktime + kTimePositionCycle) > tracktime)
+    {
+      
+      // automatically play next track
+      if(@sysvar::CDC::AudioDiskPlayer::Random == 0x02) // random track on disc
+      {
+        // get random track
+        newtrack = random(gMediaInfoLastTrack[disc-1]) + 1;
+      }
+      else
+      {
+        // next track
+        newtrack = track+1;
+        if(newtrack > gMediaInfoLastTrack[disc-1])
+        {
+          // load next disc
+          disc = NextDiscNumber();
+          newtrack = 1; 
+        }
+      }
+      
+      PlaybackStartTrack(disc, newtrack);
+    }
+    else
+    {
+      canceltimer(tTimePosition);
+      settimer(tTimePosition, kTimePositionCycle);
+      TimePositionSetTrack(currenttracktime + kTimePositionCycle);
+    }
+  }
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.MagazineStatus.Get (0x314101):*/
+on mostAMSMessage AudioDiskPlayer.MagazineStatus.Get
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 0))
+    return;
+
+  // reply status
+  SendStatus_MagazineStatus(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:IsTrackPositionValid(long,long):*///function
+long IsTrackPositionValid(long disc, long track)
+{
+  // Description:
+  //   Checks if track is available.
+  // Parameter:
+  //   disc   disc number
+  //   track  track number
+  // Return:
+  //   0: failed; 1: Ok
+
+  if(!IsDiscValid(disc))
+    return 0;
+  
+  if((track > 0) && (track <= kAudioDiskInfoSize))
+  {
+    if(gAudioDiskInfoAudioTime[disc-1][track-1] != 0)
+      return 1;
+  }
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:PlaybackStartTrack(long,long):*///function
+void PlaybackStartTrack(long disc, long track)
+{
+  // Description:
+  //   Starts playback of a track.
+
+  // stop current track
+  canceltimer(tTimePosition);
+  
+  if(IsTrackPositionValid(disc, track))
+  {
+    // set DeckStatus
+    @sysvar::CDC::AudioDiskPlayer::DeckStatus = 0; // play
+
+    // set internal state of device
+    @sysvar::CDC::AudioDiskPlayer::Mode = 0;
+
+    // set ActiveDisk
+    @sysvar::CDC::AudioDiskPlayer::ActiveDisk = disc;
+
+    // set TrackPosition
+    @sysvar::CDC::AudioDiskPlayer::TrackPosition = track;
+
+    // set TimePosition
+    TimePositionSetTrack(@sysvar::CDC::AudioDiskPlayer::TimePosition_Track);
+
+    // set play timer
+    settimer(tTimePosition, kTimePositionCycle);
+
+    // set peak level timer
+    cancelTimer(tPeakLevel);
+    setTimer(tPeakLevel, 100);
+
+    if ((kMost25 != gSpeedGrade) || (isSimulated()))
+    {
+      // don't call HW commands for MOST 150 or in simulated mode
+      return;
+    }
+  
+    // demute line in
+    // params: channel, device (0: line in; 1: line out), mode (0: demute; 1: mute)
+    MostSetSyncMute(MostGetChannel(), 0, 0);
+  }
+  else
+  {
+    // set DeckStatus
+    @sysvar::CDC::AudioDiskPlayer::DeckStatus = 1; // stop
+
+    // set internal state of device
+    @sysvar::CDC::AudioDiskPlayer::Mode = 1;
+
+    // invalid track
+    // set ActiveDisk
+    if(!IsDiscValid(disc))
+      disc = 0;
+    @sysvar::CDC::AudioDiskPlayer::ActiveDisk = disc;
+
+    // set TrackPosition
+    @sysvar::CDC::AudioDiskPlayer::TrackPosition = 0;
+
+    // set TimePosition
+    TimePositionSetTrack(0);
+
+    if ((kMost25 != gSpeedGrade) || (isSimulated()))
+    {
+      // don't call HW commands for MOST 150 or in simulated mode
+      return;
+    }
+
+    // cancel routing of line in
+    // params: channel, device (0: line in; 1: line out), mode (0: demute; 1: mute)
+    MostSetSyncMute(MostGetChannel(), 0, 1);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:PlaybackStop():*///function
+void PlaybackStop()
+{
+  // Description:
+  //   Stops playback of a track.
+
+  // stop play timer
+  canceltimer(tTimePosition);
+
+  // stop peak level timer
+  ResetPeakLevel();
+
+  // set DeckStatus
+  @sysvar::CDC::AudioDiskPlayer::DeckStatus = 1; // stop
+
+  // set TrackPosition
+  @sysvar::CDC::AudioDiskPlayer::TrackPosition = 1;
+
+  // set TimePosition
+  TimePositionSetTrack(0);
+
+  if (kMost25 != gSpeedGrade)
+  {
+    return;
+  }
+
+  // demute line in
+  // params: channel, device (0: line in; 1: line out), mode (0: demute; 1: mute)
+  mostSetSyncMute(mostGetChannel(), 0, 1);
+}
+/*@@end*/
+
+/*@@caplFunc:PlaybackPause():*///function
+void PlaybackPause ()
+{
+  // Description:
+  //   Pauses playback of a track.
+
+  // stop play timer
+  canceltimer(tTimePosition);
+
+  // stop peak level timer
+  ResetPeakLevel();
+
+  // set DeckStatus
+  @sysvar::CDC::AudioDiskPlayer::DeckStatus = 2; // pause
+
+  if ((kMost25 != gSpeedGrade) || (isSimulated()))
+  {
+    // don't call HW commands for MOST 150 or in simulated mode
+    return;
+  }
+
+  // demute line in
+  // params: channel, device (0: line in; 1: line out), mode (0: demute; 1: mute)
+  mostSetSyncMute(mostGetChannel(), 0, 1);
+}
+/*@@end*/
+
+/*@@caplFunc:TimePositionSetTrack(dword):*///function
+void TimePositionSetTrack(dword tracktime)
+{
+  // Description:
+  //   Sets the track time of property TimePosition
+  //   DiskTime and TitleTime will be calculated from TrackTime
+  //   and the title play times.
+
+  dword disctime;
+  byte disc, i;
+  word track;
+
+  // disk time calculation
+  disc = @sysvar::CDC::AudioDiskPlayer::ActiveDisk;
+  track = @sysvar::CDC::AudioDiskPlayer::TrackPosition;
+  disctime = 0;
+  if(IsTrackPositionValid(disc, track))
+  {
+    for(i = 1; i < track; ++i)
+      disctime = disctime + gAudioDiskInfoAudioTime[disc-1][i-1];
+    disctime = disctime + tracktime;
+  }
+
+  // set disk time
+  @sysvar::CDC::AudioDiskPlayer::TimePosition_Disk = disctime;
+
+  // set title time; same as track time here
+  @sysvar::CDC::AudioDiskPlayer::TimePosition_Title = tracktime;
+
+  // set track time
+  @sysvar::CDC::AudioDiskPlayer::TimePosition_Track = tracktime;
+}
+/*@@end*/
+
+/*@@caplFunc:RoutingEngineSet(long[]):*///function
+void RoutingEngineSet(long channels[])
+{
+  // Description:
+  //   Routes line-in of the interface hardware onto 4 synchronous channels.
+  //   Prerequisit: Channel numbers are stored in gMsgAllocateRes
+
+  if ((kMost25 != gSpeedGrade) || (isSimulated()))
+  {
+    // don't call HW commands for MOST 150 or in simulated mode
+    return;
+  }
+
+  // route line in
+  // params: channel, syncchannels, device (0: line in; 1: line out), mode (0: mute; 1: on)
+  mostSetSyncAudio(mostGetChannel(), channels, 0, 1); 
+
+  // volume
+  // params: channel, device (0: line in; 1: line out), volume (0...255 = 100%)
+  mostSetSyncVolume(mostGetChannel(), 0, 255);
+}
+/*@@end*/
+
+/*@@caplFunc:RoutingEngineReset():*///function
+void RoutingEngineReset()
+{
+  // Description:
+  //   Resets the line-in routing of the interface hardware.
+
+  long chn[4];
+  chn[0] = gMsgAllocateRes.byte(2);
+  chn[1] = gMsgAllocateRes.byte(3);
+  chn[2] = gMsgAllocateRes.byte(4);
+  chn[3] = gMsgAllocateRes.byte(5);
+
+  if ((kMost25 != gSpeedGrade) || (isSimulated()))
+  {
+    // don't call HW commands for MOST 150 or in simulated mode
+    return;
+  }
+
+  // mute line in
+  // params: channel, syncchannels, device (0: line in; 1: line out), mode (0: mute; 1: on)
+  mostSetSyncAudio(mostGetChannel(), chn, 0, 0); 
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.MediaInfo.Get (0x314131):*/
+on mostAMSMessage AudioDiskPlayer.MediaInfo.Get
+{
+  //{{{ --- begin error injection code ------------------
+
+  if(!CheckValidReception(this))
+    return;
+
+  switch(@sysvar::CDC::ErrorInjection::MediaInfo)
+  {
+    case kEINormalAnswer:
+    case kEIErrorAnswer:
+      // save command message for delayed processing
+      gEIMsgMediaInfoGet = this;
+      cancelTimer(tEIDelayMediaInfoGet);
+      setTimer(tEIDelayMediaInfoGet, @sysvar::CDC::ErrorInjection::Delay_MediaInfo);
+      break;
+
+    default:
+      return; // don't answer
+  }
+
+  //}}} --- end error injection code --------------------
+}
+/*@@end*/
+
+/*@@sysvarChange:CDC::AudioDiskPlayer::DeckStatus:*/
+on sysvar CDC::AudioDiskPlayer::DeckStatus
+{
+ //{{{ --- begin application section -----------
+
+  switch(@sysvar::CDC::AudioDiskPlayer::DeckStatus)
+  {
+  case 0: // Play
+    PlaybackStartTrack(@sysvar::CDC::AudioDiskPlayer::ActiveDisk, @sysvar::CDC::AudioDiskPlayer::TrackPosition);
+    break;
+  case 1: // Stop
+    PlaybackStop();
+    break;
+  case 2: // Pause
+    PlaybackPause();
+    break;
+  case 3: // Load
+    @sysvar::CDC::AudioDiskPlayer::MagazineStatus = 1;
+    break;
+  case 4: // Unload
+    @sysvar::CDC::AudioDiskPlayer::MagazineStatus = 0;
+    PlaybackStop();
+    break;
+  default:
+    // ignore
+    break;
+  }
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // HINT: Calling Notification Service to inform all notified clients
+  SendStatus_DeckStatus(kAsNtfDestAdr);
+
+  //}}} --- end default code --------------------
+
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_DeckStatus(long):*///function
+long SendStatus_DeckStatus(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service
+  //     (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+  mostAMSMessage AudioDiskPlayer.DeckStatus.Status msg;
+
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstID();
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.DeckStatus = @sysvar::CDC::AudioDiskPlayer::DeckStatus;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // send message
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.DeckStatus.Get (0x312001):*/
+
+on mostAMSMessage AudioDiskPlayer.DeckStatus.Get
+{
+  //{{{ --- begin error injection code ------------------
+
+  if(!CheckValidReception(this))
+    return;
+
+  switch(@sysvar::CDC::ErrorInjection::DeckStatus)
+  {
+    case kEINormalAnswer:
+    case kEIErrorAnswer:
+      // save command message for delayed processing
+      gEIMsgDeckStatusGet = this;
+      cancelTimer(tEIDelayDeckStatusGet);
+      setTimer(tEIDelayDeckStatusGet, @sysvar::CDC::ErrorInjection::Delay_DeckStatus);
+      break;
+
+    default:
+      return; // don't answer
+  }
+
+  //}}} --- end error injection code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.DeckStatus.Set (0x312000):*/
+
+on mostAMSMessage AudioDiskPlayer.DeckStatus.Set
+{
+  //{{{ --- begin error injection code ------------------
+
+  if(!CheckValidReception(this))
+    return;
+
+  switch(@sysvar::CDC::ErrorInjection::DeckStatus)
+  {
+    case kEINormalAnswer:
+    case kEIErrorAnswer:
+      // save command message for delayed processing
+      gEIMsgDeckStatusSet = this;
+      cancelTimer(tEIDelayDeckStatusSet);
+      setTimer(tEIDelayDeckStatusSet, @sysvar::CDC::ErrorInjection::Delay_DeckStatus);
+      break;
+
+    default:
+      return; // don't answer
+  }
+
+  //}}} --- end error injection code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.DeckStatus.SetGet (0x312002):*/
+
+on mostAMSMessage AudioDiskPlayer.DeckStatus.SetGet
+{
+  //{{{ --- begin error injection code ------------------
+
+  if(!CheckValidReception(this))
+    return;
+
+  switch(@sysvar::CDC::ErrorInjection::DeckStatus)
+  {
+    case kEINormalAnswer:
+    case kEIErrorAnswer:
+      // save command message for delayed processing
+      gEIMsgDeckStatusSetGet = this;
+      cancelTimer(tEIDelayDeckStatusSetGet);
+      setTimer(tEIDelayDeckStatusSetGet, @sysvar::CDC::ErrorInjection::Delay_DeckStatus);
+      break;
+
+    default:
+      return; // don't answer
+  }
+
+  //}}} --- end error injection code --------------------
+}
+/*@@end*/
+
+/*@@mostAllocTable:OnMostAllocTable():*/
+OnMostAllocTable()
+{
+  //{{{ --- begin application section -----------
+
+  byte buffer[60];
+  int i;
+  byte bNoChannels;
+  bNoChannels = 1;
+
+  if(mostGetAllocTable(mostGetChannel(), buffer, 60) == 0)
+  {
+    for(i=0; i<elcount(buffer); ++i)
+    {
+      // mask msb, since this signalizes channel usage
+      if( (buffer[i] & 0x7F) != 0x70)
+      {
+        bNoChannels = 0;
+        break;
+      }      
+    }
+  }
+
+  if(bNoChannels)
+  {
+    // channels have to be re-allocated
+    gAllocState = 0;
+  }
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@timer:tPeakLevel:*/
+on timer tPeakLevel
+{
+  int x,y;
+
+  //{{{ --- begin application section -----------
+
+  if(!CheckNormalOperation()) 
+    return;
+
+  x = random(127);
+  y = random(127);
+
+  @sysvar::CDC::AudioDiskPlayer::PeakLevel_Left = x/2;
+  @sysvar::CDC::AudioDiskPlayer::PeakLevel_Right = y/2;
+
+  // send notification
+  SendStatus_PeakLevel(kAsNtfDestAdr);
+
+  canceltimer(tPeakLevel);
+  setTimer(tPeakLevel, kPeakLevelCycle);
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_PeakLevel(long):*///function
+long SendStatus_PeakLevel(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+
+  //{{{ --- begin default code ------------------
+
+  mostAMSMessage AudioDiskPlayer.PeakLevel.Status msg;
+  
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstID();
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin application section -----------
+
+  msg.LevelLeft  = @sysvar::CDC::AudioDiskPlayer::PeakLevel_Left;
+  msg.LevelRight = @sysvar::CDC::AudioDiskPlayer::PeakLevel_Right;
+
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //{{{ --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:ResetPeakLevel():*///function
+ResetPeakLevel ()
+{
+  cancelTimer(tPeakLevel);
+  @sysvar::CDC::AudioDiskPlayer::PeakLevel_Left = 0;
+  @sysvar::CDC::AudioDiskPlayer::PeakLevel_Right = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:FillMediaInfoStatusMsg(mostAmsMessage3227964):*///function
+FillMediaInfoStatusMsg(mostAmsMessage AudioDiskPlayer.MediaInfo.Status msg)
+{
+  // Fill MediaInfo.Status() message dependent on posx and posy
+  // posx   =   posy =  0  --> Fill all available records with disk info
+  // posx != 0, posy =  0  --> Fill dedicated record with disk info
+  // posy != 0, posy != 0  --> Fill dedicated record field with disk info
+
+  byte i;
+
+  // remove data behind Pos parameter; deletes all array elements
+  msg.DLC = 2;
+
+  // check posx, posy
+  if((msg.PosX > kMediaInfoSize) || (msg.PosY > 6))
+    return;
+
+  if(msg.PosX == 0)
+  {
+    // set size of array
+    mostParamSet(msg, "Data", kMediaInfoSize);
+  }
+  // copy data
+  for(i = 1; i <= kMediaInfoSize; ++i)
+  {
+    if((i == msg.PosX) || (msg.PosX == 0))
+    {
+      if((msg.PosY == 1) || (msg.PosY == 0))
+      {
+        if(gMediaInfoPlayTime[i-1] == 0)
+          mostParamSetString(msg, "Data.Record[].MediaTitle", i, "");
+        else
+          mostParamSetString(msg, "Data.Record[].MediaTitle", i, gMediaInfoMediaTitle[i-1]);
+      }
+
+      if((msg.PosY == 2) || (msg.PosY == 0))
+      {
+        mostParamSet(msg, "Data.Record[].MediaType", i, gMediaInfoMediaType[i-1]);
+      }
+
+      if((msg.PosY == 3) || (msg.PosY == 0))
+      {
+        mostParamSet(msg, "Data.Record[].MediaFilesystem", i, gMediaInfoMediaFilesystem[i-1]);
+      }
+
+      if((msg.PosY == 4) || (msg.PosY == 0))
+      {
+        mostParamSet(msg, "Data.Record[].FirstTrack", i, gMediaInfoFirstTrack[i-1]);
+      }
+
+      if((msg.PosY == 5) || (msg.PosY == 0))
+      {
+        mostParamSet(msg, "Data.Record[].LastTrack", i, gMediaInfoLastTrack[i-1]);
+      }
+
+      if((msg.PosY == 6) || (msg.PosY == 0))
+      {
+        mostParamSet(msg, "Data.Record[].PlayTime", i, gMediaInfoPlayTime[i-1]);
+      }
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ConfigureFBlock():*///function
+void ConfigureFBlock()
+{
+  // Configures the FBlock.
+  // Therefore functions are registered at CANoe's Function and 
+  // Notification Service.
+
+  long oldInstId = -1; // static variable
+  long newInstId;
+
+  // OpType flags: Properties
+  long kFlagSet          = 0x0001;
+  long kFlagGet          = 0x0002;
+  long kFlagSetGet       = 0x0004;
+  long kFlagInc          = 0x0008;
+  long kFlagDec          = 0x0010;
+  long kFlagGetIf        = 0x0020;
+  long kFlagStatus       = 0x1000;
+  long kFlagIf           = 0x4000;
+  long kFlagError        = 0x8000;
+  long kFlagStdPropR     = 0x0002|0x1000|0x8000;
+  long kFlagStdPropRW    = 0x0001|0x0002|0x0004|0x1000|0x8000;
+  // OpType flags: Methods
+  long kFlagStart        = 0x0001;
+  long kFlagAbort        = 0x0002;
+  long kFlagStartRes     = 0x0004;
+  long kFlagStartResAck  = 0x0040;
+  long kFlagAbortAck     = 0x0080;
+  long kFlagStartAck     = 0x0100;
+  long kFlagErrorAck     = 0x0200;
+  long kFlagProcAck      = 0x0400;
+  long kFlagProc         = 0x0800;
+  long kFlagRes          = 0x1000;
+  long kFlagResAck       = 0x2000;
+  long kFlagStdMeth      = 0x0004|0x1000|0x8000;
+
+  newInstId = mostApGetInstId();
+
+  if(newInstId < 0)
+  {
+    newInstId = -1;
+  }
+
+  if(oldInstId != -1)
+  {
+    // disable Notification Service
+    mostAsNtfDisableEx(kFB_ADP, oldInstId);
+    // disable Function Service
+    mostAsFsDisableEx(kFB_ADP, oldInstId);
+  }
+
+  if(newInstId != -1)
+  {
+    // enable Notification Service
+    mostAsNtfEnable();
+    // enable Function Service
+    mostAsFsEnable();
+
+    // enable functions and operations
+
+    // properties with notification ability
+    mostAsFsFunctionEnable(kFct_ADP_DeckStatus,      kFlagStdPropRW, "SendStatus_DeckStatus");
+    mostAsFsFunctionEnable(kFct_ADP_TimePosition,    kFlagStdPropR,  "SendStatus_TimePosition");
+    mostAsFsFunctionEnable(kFct_ADP_TrackPosition,   kFlagStdPropRW|kFlagInc|kFlagDec, "SendStatus_TrackPosition");
+    mostAsFsFunctionEnable(kFct_ADP_MagazineStatus,  kFlagStdPropR,  "SendStatus_MagazineStatus");
+    mostAsFsFunctionEnable(kFct_ADP_ActiveDisk,      kFlagStdPropRW|kFlagInc|kFlagDec, "SendStatus_ActiveDisk");
+    mostAsFsFunctionEnable(kFct_ADP_MediaInfo,       kFlagStdPropR,  "SendStatus_MediaInfo");
+    mostAsFsFunctionEnable(kFct_ADP_DeckEvent,       kFlagStdPropR,  "SendStatus_DeckEvent");
+    mostAsFsFunctionEnable(kFct_ADP_MediaEvent,      kFlagStdPropR,  "SendStatus_MediaEvent");
+    mostAsFsFunctionEnable(kFct_ADP_Random,          kFlagStdPropRW, "SendStatus_Random");
+    mostAsFsFunctionEnable(kFct_ADP_Scan,            kFlagStdPropRW, "SendStatus_Scan");
+    mostAsFsFunctionEnable(kFct_ADP_PeakLevel,       kFlagStdPropR,  "SendStatus_PeakLevel");
+
+    // properties without notification ability
+    mostAsFsFunctionEnable(kFct_ADP_AudioDiskInfo,   kFlagStdPropR);
+
+    // methods
+    mostAsFsFunctionEnable(kFct_ADP_Allocate,        kFlagStdMeth);
+    mostAsFsFunctionEnable(kFct_ADP_DeAllocate,      kFlagStdMeth);
+    mostAsFsFunctionEnable(kFct_ADP_SourceActivity,  kFlagStdMeth);
+  }
+  oldInstId = newInstId;
+
+  gSpeedGrade = mostGetSpeedGrade(mostGetChannel());
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.PeakLevel.Get (0x31F001):*/
+on mostAMSMessage AudioDiskPlayer.PeakLevel.Get
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 0))
+    return;
+
+  // reply status
+  SendStatus_PeakLevel(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:AppInit():*///function
+void AppInit()
+{
+  // Called on first start of the application.
+  
+  if(gAppPhase == kAppOn)
+    return;
+
+  // application has started now
+  gAppPhase = kAppOn;
+}
+/*@@end*/
+
+/*@@caplFunc:AppExit():*///function
+void AppExit()
+{
+  // Called on final exit of the application.
+
+  if(gAppPhase == kAppOff)
+    return;
+
+  // power off
+  gAppPhase = kAppOff;
+
+  // reset state machine
+  if(gAllocState == 2)
+    RoutingEngineReset();
+  gAllocState = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:AppShutdown():*///function
+void AppShutdown()
+{
+  // Called for a regular shut down of the application.
+  
+  if(gAppPhase == kAppShutdown)
+    return;
+  
+  // application is in shutdown mode now
+  gAppPhase = kAppShutdown;
+
+}
+/*@@end*/
+
+/*@@mostNetOn:OnMostNetOn():*/
+OnMostNetOn()
+{
+  AppInit();
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncAllocResult(long,long,long[]):*///callback
+OnMostSyncAllocResult(long allocResult, long numChannels, long channels[])
+{
+  // result of allocation process
+  
+  long i;
+
+  if(allocResult == 0x01) // alloc grant
+  {
+    // fill result msg
+    gMsgAllocateRes.SourceNr = 0x01;
+    for(i = 0; i < 4; ++i)
+      gMsgAllocateRes.byte(2+i) = channels[i];
+    gMsgAllocateRes.DLC = 6;
+    gMsgAllocateRes.InstanceId = mostApGetInstID();
+    output(gMsgAllocateRes);
+
+    // state is now 'allocated'
+    gAllocState = 2;
+
+    // programm routing engine
+    RoutingEngineSet(channels);
+  }
+  else
+  {
+    // fill and send error message
+    if(gAppPhase != kAppOff)
+      mostSendError_Code(gMsgAllocateRes, kErrProcessing);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncDeallocResult(long,long):*///callback
+OnMostSyncDeallocResult(long deallocResult, long label)
+{
+  // result of deallocation process
+
+  if(deallocResult == 0x01) // alloc grant
+  {
+    // fill result msg
+    gMsgDeAllocateRes.SourceNr = 0x01;
+    gMsgDeAllocateRes.DLC = 1;
+    gMsgDeAllocateRes.InstanceId = mostApGetInstID();
+    output(gMsgDeAllocateRes);
+
+    // state is now 'not allocated'
+    gAllocState = 0;
+
+    // programm routing engine
+    RoutingEngineReset();
+  }
+  else
+  {
+    // fill and send error message
+    if(gAppPhase != kAppOff)
+      mostSendError_Code(gMsgAllocateRes, kErrProcessing);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:CDC::Button_Eject:*/
+on sysvar CDC::Button_Eject
+{
+  // unload magazine
+
+  if(@this)
+    return;
+
+  @sysvar::CDC::AudioDiskPlayer::MagazineStatus = 0;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.AudioDiskInfo.Get (0x314201):*/
+on mostAMSMessage AudioDiskPlayer.AudioDiskInfo.Get
+{
+  mostAMSmessage AudioDiskPlayer.AudioDiskInfo.Status msg = { DLC = 500} ;
+  byte disc;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 2))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  // semantic checks
+  disc = @sysvar::CDC::AudioDiskPlayer::ActiveDisk;
+  if(this.PosX > NumberOfTracks(disc))
+  {
+    mostSendError_CodeByteWord(this, kErrParamWrong, 1, this.Pos);
+    return;
+  }
+
+  if((this.PosX > kAudioDiskInfoSize) || (this.PosY > 4))
+  {
+    mostSendError_CodeByteWord(this, kErrParamWrong, 1, this.Pos);
+    return;
+  }
+
+  // fill message
+  mostPrepareReport(this, msg);
+  msg.Pos = this.Pos;
+  FillAudioDiskInfoStatusMsg(msg);
+  
+  // reply status
+  mostAsNtfOutput(this.SA, msg);
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@caplFunc:SendStatus_AudioDiskInfo(long):*///function
+long SendStatus_AudioDiskInfo(long destAdr)
+{
+  // Description:
+  //   The SendStatus function is used for 
+  //   - the Notification Service
+  //     (status message on Notification.Set(SetFunction)
+  //     and spontaneos property change)
+  //   - for replies on OpType Get, SetGet, Inc, Dec
+  // Parameter:
+  //   destAdr  Target device(s)
+  //     destadr==kAsNtfDestAdr: to all notification clients
+  //     destadr!=kAsNtfDestAdr: to destAdr
+  // Return:
+  //   0: Ok; -1: Failed (property currently not available...)
+  
+  //{{{ --- begin default code ------------------
+  mostAMSMessage AudioDiskPlayer.AudioDiskInfo.Status msg;
+
+  if(!CheckNormalOperation())
+    return -1;
+  msg.InstanceId = mostApGetInstID();
+
+  //}}} --- end default code --------------------
+
+ 
+  //{{{ --- begin application section -----------
+
+  // assemble status message
+  msg.Pos = 0;
+  FillAudioDiskInfoStatusMsg(msg);
+    
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+  
+  mostAsNtfOutput(destAdr, msg);
+  return 0;
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@caplFunc:FillAudioDiskInfoStatusMsg(mostAmsMessage3228172):*///function
+FillAudioDiskInfoStatusMsg(mostAmsMessage AudioDiskPlayer.AudioDiskInfo.Status msg)
+{
+  // Fill AudioDiskInfo.Status() message dependent on posx and posy in msg
+  // posx   =   posy =  0  --> Fill all available records with disk info
+  // posx != 0, posy =  0  --> Fill dedicated record with disk info
+  // posy != 0, posy != 0  --> Fill dedicated record field with disk info
+
+  byte i, disc, tracks;
+  char bufferFilename[50];
+  
+  // remove data behind Pos parameter; deletes all array elements
+  msg.DLC = 2;
+
+  // check posx, posy
+  disc = @sysvar::CDC::AudioDiskPlayer::ActiveDisk;
+  tracks = NumberOfTracks(disc);
+  if((msg.PosX > tracks) || (msg.PosY > 4))
+    return;
+
+  if(msg.PosX == 0)
+  {
+    // set size of array
+    mostParamSet(msg, "Data", tracks);
+  }
+
+  // copy data
+  for(i = 1; i <= tracks; ++i)
+  {
+    if((i == msg.PosX) || (msg.PosX == 0))
+    {
+      if((msg.PosY == 1) || (msg.PosY == 0))
+      {
+        mostParamSetString(msg, "Data.Record[].AudioTitle", i, gAudioDiskInfoAudioTitle[disc-1][i-1]);
+      }
+
+      if((msg.PosY == 2) || (msg.PosY == 0))
+      {
+        mostParamSet(msg, "Data.Record[].AudioTime", i, gAudioDiskInfoAudioTime[disc-1][i-1]);
+      }
+
+      if((msg.PosY == 3) || (msg.PosY == 0))
+      {
+        mostParamSet(msg, "Data.Record[].TrackNo", i, i);
+      }
+
+      if((msg.PosY == 4) || (msg.PosY == 0))
+      {
+        snprintf(bufferFilename, elcount(bufferFilename), "Track%02d.mp3", i);
+        mostParamSetString(msg, "Data.Record[].AudioFilename", i, bufferFilename);
+      }
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:NumberOfTracks(long):*///function
+long NumberOfTracks(long disc)
+{
+  // Returns number of tracks on the current disc.
+
+  long i;
+
+  if(!IsDiscValid(disc))
+    return 0;
+
+  i = 0;
+  while(gAudioDiskInfoAudioTime[disc-1][i] > 0)
+  {
+    ++i;
+  }
+
+  return i;
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.Random.Set (0x314500):*/
+on mostAMSMessage AudioDiskPlayer.Random.Set
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  if(this.RandomState > 4)
+  {
+    mostSendError_CodeByteByte(this, kErrParamWrong, 1, this.RandomState);
+    return;
+  }
+
+  // set property
+  @sysvar::CDC::AudioDiskPlayer::Random = this.RandomState;
+
+  //}}} --- end application section -------------}
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.Random.SetGet (0x314502):*/
+on mostAMSMessage AudioDiskPlayer.Random.SetGet
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  if(this.RandomState > 4)
+  {
+    mostSendError_CodeByteByte(this, kErrParamWrong, 1, this.RandomState);
+    return;
+  }
+
+  // set property
+  @sysvar::CDC::AudioDiskPlayer::Random = this.RandomState;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_Random(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.Random.Get (0x314501):*/
+on mostAMSMessage AudioDiskPlayer.Random.Get
+{
+  //{{{ --- begin default code ------------------
+  
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 0))
+    return;
+
+  // reply status
+  SendStatus_Random(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.Scan.Set (0x314510):*/
+on mostAMSMessage AudioDiskPlayer.Scan.Set
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  if(this.ScanState > 4)
+  {
+    mostSendError_CodeByteByte(this, kErrParamWrong, 1, this.ScanState);
+    return;
+  }
+
+  // set property
+  @sysvar::CDC::AudioDiskPlayer::Scan = this.ScanState;
+
+  //}}} --- end application section -------------}
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.Scan.SetGet (0x314512):*/
+on mostAMSMessage AudioDiskPlayer.Scan.SetGet
+{
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  if(this.ScanState > 4)
+  {
+    mostSendError_CodeByteByte(this, kErrParamWrong, 1, this.ScanState);
+    return;
+  }
+
+  // set property
+  @sysvar::CDC::AudioDiskPlayer::Scan = this.ScanState;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_Scan(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.Scan.Get (0x314511):*/
+on mostAMSMessage AudioDiskPlayer.Scan.Get
+{
+  //{{{ --- begin default code ------------------
+  
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(this, 0))
+    return;
+
+  // reply status
+  SendStatus_Scan(this.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@timer:tEIDelayDeckStatusSet:*/
+on timer tEIDelayDeckStatusSet
+{
+  // delayed command processing
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(gEIMsgDeckStatusSet, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin error injection code ------------------
+
+  if(@sysvar::CDC::ErrorInjection::DeckStatus == kEIErrorAnswer)
+  {
+    mostSendError_Code(gEIMsgDeckStatusSet, kErrNotAvailable);
+    return;
+  }
+
+  //}}} --- end error injection code --------------------
+
+  //{{{ --- begin application section -----------
+
+  if(gEIMsgDeckStatusSet.DeckStatus > 4) // AudioDiskPlayer.DeckStatus.Status.DeckStatus::Unload
+  {
+    mostSendError_CodeByteByte(gEIMsgDeckStatusSet, kErrParamWrong, 1, gEIMsgDeckStatusSet.DeckStatus);
+    return;
+  }
+
+  // any changes?
+  if(gEIMsgDeckStatusSet.DeckStatus == @sysvar::CDC::AudioDiskPlayer::DeckStatus)
+    return;
+
+  // load magazine?
+  if(gEIMsgDeckStatusSet.DeckStatus != 3) // AudioDiskPlayer.DeckStatus.Status.DeckStatus::Load)
+  {
+    // verify player can play
+    if(!IsTrackPositionValid(@sysvar::CDC::AudioDiskPlayer::ActiveDisk, @sysvar::CDC::AudioDiskPlayer::TrackPosition))
+    {
+      mostSendError_Code(gEIMsgDeckStatusSet, kErrNotAvailable);
+      return;
+    }
+  }
+  else
+  {
+    // magazine already loaded?
+    if(IsMagazineLoaded())
+    {
+      return;
+    }
+  }
+
+  // set property
+  @sysvar::CDC::AudioDiskPlayer::DeckStatus = gEIMsgDeckStatusSet.DeckStatus;
+
+  // set internal state of device
+  @sysvar::CDC::AudioDiskPlayer::Mode = gEIMsgDeckStatusSet.DeckStatus;
+
+  if(gEIMsgDeckStatusSet.DeckStatus == 0) // AudioDiskPlayer.DeckStatus.Status.DeckStatus::Play
+  {
+    cancelTimer(tPeakLevel);
+    setTimer(tPeakLevel, 100);
+  }
+  else
+  {
+    ResetPeakLevel();
+  }
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@timer:tEIDelayDeckStatusGet:*/
+on timer tEIDelayDeckStatusGet
+{
+  // delayed command processing
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(gEIMsgDeckStatusGet, 0))
+    return;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin error injection code ------------------
+
+  if(@sysvar::CDC::ErrorInjection::DeckStatus == kEIErrorAnswer)
+  {
+    mostSendError_Code(gEIMsgDeckStatusGet, kErrNotAvailable);
+    return;
+  }
+
+  //}}} --- end error injection code --------------------
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_DeckStatus(gEIMsgDeckStatusGet.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@timer:tEIDelayDeckStatusSetGet:*/
+on timer tEIDelayDeckStatusSetGet
+{
+  // delayed command processing
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(gEIMsgDeckStatusSetGet, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin error injection code ------------------
+
+  if(@sysvar::CDC::ErrorInjection::DeckStatus == kEIErrorAnswer)
+  {
+    mostSendError_Code(gEIMsgDeckStatusSetGet, kErrNotAvailable);
+    return;
+  }
+
+  //}}} --- end error injection code --------------------
+
+  //{{{ --- begin application section -----------
+
+  if(gEIMsgDeckStatusSetGet.DeckStatus  > 4) // AudioDiskPlayer.DeckStatus.Status.DeckStatus::Unload
+  {
+    mostSendError_CodeByteByte(gEIMsgDeckStatusSetGet, kErrParamWrong, 1, gEIMsgDeckStatusSetGet.DeckStatus);
+    return;
+  }
+
+  // load magazine?
+  if(gEIMsgDeckStatusSetGet.DeckStatus != 3) // AudioDiskPlayer.DeckStatus.Status.DeckStatus::Load)
+  {
+    // verify player can play
+    if(!IsTrackPositionValid(@sysvar::CDC::AudioDiskPlayer::ActiveDisk, @sysvar::CDC::AudioDiskPlayer::TrackPosition))
+    {
+      mostSendError_Code(gEIMsgDeckStatusSetGet, kErrNotAvailable);
+      return;
+    }
+  }
+  
+  // set property
+  @sysvar::CDC::AudioDiskPlayer::DeckStatus = gEIMsgDeckStatusSetGet.DeckStatus;
+
+  // set internal state of device
+  @sysvar::CDC::AudioDiskPlayer::Mode = gEIMsgDeckStatusSetGet.DeckStatus;
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_DeckStatus(gEIMsgDeckStatusSetGet.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@timer:tEIDelayTrackPositionSet:*/
+on timer tEIDelayTrackPositionSet
+{
+  // delayed command processing
+
+  byte disc;
+  word newtrack;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(gEIMsgTrackPositionSet, 2))
+    return;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin error injection code ------------------
+
+  if(@sysvar::CDC::ErrorInjection::TrackPosition == kEIErrorAnswer)
+  {
+    mostSendError_Code(gEIMsgTrackPositionSet, kErrNotAvailable);
+    return;
+  }
+
+  //}}} --- end error injection code --------------------
+
+  //{{{ --- begin application section -----------
+
+  newtrack = gEIMsgTrackPositionSet.Track;
+  disc = @sysvar::CDC::AudioDiskPlayer::ActiveDisk;
+
+  // verify track
+  if(!IsTrackPositionValid(disc, newtrack))
+  {
+    mostSendError_CodeByteWord(gEIMsgTrackPositionSet, kErrParamWrong, 1, newtrack);
+    return;
+  }
+
+  // set TrackPosition
+  @sysvar::CDC::AudioDiskPlayer::TrackPosition = newtrack;
+
+  if(@sysvar::CDC::AudioDiskPlayer::DeckStatus == 0) // play
+  {
+    // start playback
+    PlaybackStartTrack(disc, newtrack);
+  }
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@timer:tEIDelayTrackPositionGet:*/
+on timer tEIDelayTrackPositionGet
+{
+  // delayed command processing
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(gEIMsgTrackPositionGet, 0))
+    return;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin error injection code ------------------
+
+  if(@sysvar::CDC::ErrorInjection::TrackPosition == kEIErrorAnswer)
+  {
+    mostSendError_Code(gEIMsgTrackPositionGet, kErrNotAvailable);
+    return;
+  }
+
+  //}}} --- end error injection code --------------------
+
+  //{{{ --- begin application section -----------
+
+  if(0 == @sysvar::CDC::AudioDiskPlayer::ActiveDisk)
+  {
+    // no disk in drive
+    mostSendError_Code(gEIMsgTrackPositionGet, kErrNotAvailable);
+    return;
+  }
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_TrackPosition(gEIMsgTrackPositionGet.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@timer:tEIDelayTrackPositionSetGet:*/
+on timer tEIDelayTrackPositionSetGet
+{
+  // delayed command processing
+
+  byte disc;
+  word newtrack;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(gEIMsgTrackPositionSetGet, 2))
+    return;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin error injection code ------------------
+
+  if(@sysvar::CDC::ErrorInjection::TrackPosition == kEIErrorAnswer)
+  {
+    mostSendError_Code(gEIMsgTrackPositionSetGet, kErrNotAvailable);
+    return;
+  }
+
+  //}}} --- end error injection code --------------------
+
+  //{{{ --- begin application section -----------
+
+  newtrack = gEIMsgTrackPositionSetGet.Track;
+  disc = @sysvar::CDC::AudioDiskPlayer::ActiveDisk;
+
+  // verify track
+  if(!IsTrackPositionValid(disc, newtrack))
+  {
+    mostSendError_CodeByteWord(gEIMsgTrackPositionSetGet, kErrParamWrong, 1, newtrack);
+    return;
+  }
+
+  // set TrackPosition
+  @sysvar::CDC::AudioDiskPlayer::TrackPosition = newtrack;
+
+  if(@sysvar::CDC::AudioDiskPlayer::DeckStatus == 0) // play
+  {
+    // start playback
+    PlaybackStartTrack(disc, newtrack);
+  }
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_TrackPosition(gEIMsgTrackPositionSetGet.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@timer:tEIDelayTrackPositionInc:*/
+on timer tEIDelayTrackPositionInc
+{
+  // delayed command processing
+
+  byte disc;
+  word newtrack;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(gEIMsgTrackPositionInc, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin error injection code ------------------
+
+  if(@sysvar::CDC::ErrorInjection::TrackPosition == kEIErrorAnswer)
+  {
+    mostSendError_Code(gEIMsgTrackPositionInc, kErrNotAvailable);
+    return;
+  }
+
+  //}}} --- end error injection code --------------------
+
+  //{{{ --- begin application section -----------
+
+  disc = @sysvar::CDC::AudioDiskPlayer::ActiveDisk;
+  if(!IsDiscValid(disc))
+  {
+    // no disk in drive
+    mostSendError_Code(gEIMsgTrackPositionInc, kErrNotAvailable);
+    return;
+  }
+
+  // next track
+  newtrack = @sysvar::CDC::AudioDiskPlayer::TrackPosition;
+  newtrack += gEIMsgTrackPositionInc.NSteps;
+    
+  // verify track
+  if(newtrack > gMediaInfoLastTrack[disc-1])
+    newtrack = gMediaInfoLastTrack[disc-1];
+
+  // set TrackPosition
+  @sysvar::CDC::AudioDiskPlayer::TrackPosition = newtrack;
+
+  if(@sysvar::CDC::AudioDiskPlayer::DeckStatus == 0) // play
+  {
+    // start playback
+    PlaybackStartTrack(disc, newtrack);
+  }
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_TrackPosition(gEIMsgTrackPositionInc.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@timer:tEIDelayTrackPositionDec:*/
+on timer tEIDelayTrackPositionDec
+{
+  // delayed command processing
+
+  byte disc;
+  word newtrack;
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(gEIMsgTrackPositionDec, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin error injection code ------------------
+
+  if(@sysvar::CDC::ErrorInjection::TrackPosition == kEIErrorAnswer)
+  {
+    mostSendError_Code(gEIMsgTrackPositionDec, kErrNotAvailable);
+    return;
+  }
+
+  //}}} --- end error injection code --------------------
+
+
+  //{{{ --- begin application section -----------
+
+  disc = @sysvar::CDC::AudioDiskPlayer::ActiveDisk;
+  if(!IsDiscValid(disc))
+  {
+    // no disk in drive
+    mostSendError_Code(gEIMsgTrackPositionDec, kErrNotAvailable);
+    return;
+  }
+
+  // next track
+  newtrack = @sysvar::CDC::AudioDiskPlayer::TrackPosition;
+  newtrack -= gEIMsgTrackPositionDec.NSteps;
+  
+  // verify track
+  if(newtrack < gMediaInfoFirstTrack[disc-1])
+    newtrack = gMediaInfoFirstTrack[disc-1];
+
+  // set TrackPosition
+  @sysvar::CDC::AudioDiskPlayer::TrackPosition = newtrack;
+
+  if(@sysvar::CDC::AudioDiskPlayer::DeckStatus == 0) // play
+  {
+    // start playback
+    PlaybackStartTrack(disc, newtrack);
+  }
+
+  //}}} --- end application section -------------
+
+
+  //{{{ --- begin default code ------------------
+
+  // reply status
+  SendStatus_TrackPosition(gEIMsgTrackPositionDec.SA);
+
+  //}}} --- end default code --------------------
+}
+/*@@end*/
+
+/*@@timer:tEIDelayMediaInfoGet:*/
+on timer tEIDelayMediaInfoGet
+{
+  // delayed command processing
+
+  mostAMSmessage AudioDiskPlayer.MediaInfo.Status msg = { DLC = 1000};
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckNormalOperation())
+    return;
+  if(!CheckValidReceptionAndLength(gEIMsgMediaInfoGet, 2))
+    return;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin error injection code ------------------
+
+  if(@sysvar::CDC::ErrorInjection::MediaInfo == kEIErrorAnswer)
+  {
+    mostSendError_Code(gEIMsgMediaInfoGet, kErrNotAvailable);
+    return;
+  }
+
+  //}}} --- end error injection code --------------------
+
+  //{{{ --- begin application section -----------
+
+  // semantic checks
+  if((gEIMsgMediaInfoGet.PosX > kMediaInfoSize) || (gEIMsgMediaInfoGet.PosY > 6))
+  {
+    mostSendError_CodeByteWord(gEIMsgMediaInfoGet, kErrParamWrong, 1, gEIMsgMediaInfoGet.Pos);
+    return;
+  }
+
+  // fill message
+  msg.InstanceId = mostApGetInstID();
+  msg.Pos = gEIMsgMediaInfoGet.Pos;
+  FillMediaInfoStatusMsg(msg);
+  
+  // reply status
+  mostAsNtfOutput(gEIMsgMediaInfoGet.SA, msg);
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@timer:tEIDelayAllocateStartRes:*/
+on timer tEIDelayAllocateStartRes
+{
+  // delayed command processing
+
+  cancelTimer(tEIProcessingAllocate);
+
+  //{{{ --- begin default code ------------------
+
+  if(!CheckValidReception(gEIMsgAllocateStartRes))
+    return;
+  if(!CheckMsgLength(gEIMsgAllocateStartRes, 1))
+    return;
+
+  //}}} --- end default code --------------------
+
+  //{{{ --- begin error injection code ------------------
+
+  if(@sysvar::CDC::ErrorInjection::Allocate == kEIErrorAnswer)
+  {
+    mostSendError_Code(gEIMsgAllocateStartRes, kErrNotAvailable);
+    return;
+  }
+
+  //}}} --- end error injection code --------------------
+
+  //{{{ --- begin application section -----------
+
+  // this player has one source only
+  if(gEIMsgAllocateStartRes.SourceNr != 0x01)
+  {
+    mostSendError_CodeByteByte(gEIMsgAllocateStartRes, kErrParamNotAvailable, 1, gEIMsgAllocateStartRes.SourceNr);
+    return;
+  }
+
+  if(gAllocState != 0)
+  {
+    // allocation already in progress
+    mostSendError_Code(gEIMsgAllocateStartRes, kErrNotAvailable);
+    return;
+  }
+
+  // store address of initiator
+  gMsgAllocateRes.DA = gEIMsgAllocateStartRes.SA;
+
+  // call synchronous channel allocation service
+  // OnMostSyncAllocResult() will be invoked on completion or timeout
+  if(0 != mostSyncAlloc(4))
+  {
+    mostSendError_Code(gEIMsgAllocateStartRes, kErrNotAvailable);
+    return;
+  }
+
+  // state: allocating
+  gAllocState = 1;
+
+  //}}} --- end application section -------------
+}
+/*@@end*/
+
+/*@@timer:tEIProcessingAllocate:*/
+on timer tEIProcessingAllocate
+{
+  // send processing message
+
+  mostAmsMessage AudioDiskPlayer.Allocate.Processing msg;
+
+  if(!@sysvar::CDC::ErrorInjection::SendProc_Allocate)
+    return;
+
+  if(!CheckValidReception(gEIMsgAllocateStartRes))
+    return;
+
+  msg.InstanceId = mostApGetInstId();
+  msg.DA = gEIMsgAllocateStartRes.SA;
+  output(msg);
+
+  setTimer(tEIProcessingAllocate, kEIProcessingCycle);
+}
+/*@@end*/
+
+/*@@sysvarChange:CDC::ErrorInjection::NotifEnabled_TimePos:*/
+on sysvar CDC::ErrorInjection::NotifEnabled_TimePos
+{
+  if(@this == 1)
+  {
+    MostAsNtfFunctionEnable(kFct_ADP_TimePosition, "SendStatus_TimePosition");
+  }
+  else // == 0
+  {
+    MostAsNtfFunctionDisable(kFct_ADP_TimePosition);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:CDC::ErrorInjection::NotifEnabled_TrackPos:*/
+on sysvar CDC::ErrorInjection::NotifEnabled_TrackPos
+{
+  if(@this == 1)
+  {
+    MostAsNtfFunctionEnable(kFct_ADP_TrackPosition, "SendStatus_TrackPosition");
+  }
+  else // == 0
+  {
+    MostAsNtfFunctionDisable(kFct_ADP_TrackPosition);
+  }
+}
+/*@@end*/
+

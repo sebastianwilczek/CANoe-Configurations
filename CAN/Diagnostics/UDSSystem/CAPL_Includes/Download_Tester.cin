@@ -1,0 +1,202 @@
+/*@!Encoding:1252*/
+variables
+{
+  diagRequest DoorFL.ExtendedDiagnosticSession_Start       sessionExtended;
+  diagRequest DoorFL.ProgrammingSession_Start              sessionProgramming;
+  diagRequest DoorFL.SeedLevel_0x11_Request                securitySeed;
+  diagRequest DoorFL.KeyLevel_0x11_Send                    securityKey;
+  diagRequest DoorFL.Download_Request                      downloadRequest;
+  diagRequest DoorFL.Download_Transmit                     downloadTransmit;
+  diagRequest DoorFL.Download_Stop                         downloadStop;
+
+  byte  memorySpecification[8];
+  long  maxBlockSize;
+  dword transmittedSize;
+
+  dword downloadSize;
+  byte  downloadBuffer[64 * 1024];
+  byte  downloadCounter;
+  
+  char moduleID[20]="TCDownload";
+}
+
+tsFailWithRetCode(char error_text[], long ret)
+{
+  snprintf(gResultString, elcount(gResultString), "%s failed (Return code=%ld)!", error_text, ret);
+  testStepFail(gTestIdStr, gResultString);
+}
+
+//===================================================================================
+// Testcase: Download data to an ECU
+//===================================================================================
+
+export testcase TCDownload(int tcId)
+{
+  long ret;
+  byte seedArray[4]; 
+  byte keyArray[4];
+  dword keyActualSize;
+  dword i;
+  
+  byte  lengthFormatIdentifier;
+  dword blockSpecSize;
+  byte  blockSpec[4];
+  
+
+  //---------------------------------------------------------------------------------
+  // Fill buffer to be downloaded to simulated ECU with data unequal zero
+  //---------------------------------------------------------------------------------
+  downloadSize=@sysvar::Tester_Display::DownloadSize;
+  for (i=0;i<downloadSize; i++) {
+    downloadBuffer[i]=i%256;
+  }
+
+  SetTestId(tcId,1);
+  //---------------------------------------------------------------------------------
+  TestStep( "", "Stop Tester Present to reduce unnecessary bus traffic...");
+  //---------------------------------------------------------------------------------
+
+  ret=DiagStopTesterPresent(gDiagTarget);
+  if (0 !=ret) {
+    tsFailWithRetCode("DiagStopTesterPresent()", ret);
+  }
+  TestStepPass( gTestIdStr, "Tester Present stopped.");
+
+
+  IncTestStepId();
+  //---------------------------------------------------------------------------------
+  TestStep( "", "Switch to extended session...");
+  //---------------------------------------------------------------------------------
+
+  if (!SendRequestAndWaitForResponse(sessionExtended, true)) return;
+  TestStepPass( "", "Extended session started.");
+
+  
+  IncTestStepId();
+  //---------------------------------------------------------------------------------
+  TestStep( "", "Switch to programming session...");
+  //---------------------------------------------------------------------------------
+
+  if (!SendRequestAndWaitForResponse(sessionProgramming, true)) return;
+  TestStepPass( "", "Programming session started.");
+
+
+  IncTestStepId();
+  //---------------------------------------------------------------------------------
+  TestStep( "", "Request security seed...");
+  //---------------------------------------------------------------------------------
+  if (!SendRequestAndWaitForResponse(securitySeed, true)) return;
+  if ( (ret=diagGetRespParameterRaw(securitySeed, "SecuritySeed", seedArray, elCount(seedArray)))<0) {
+    tsFailWithRetCode("diagGetRespParameterRaw()", ret); 
+    return;
+  }
+  else {
+    if ( (ret=diagGenerateKeyFromSeed(gDiagTarget, seedArray, elcount(seedArray), 1, "", "", keyArray, elcount(keyArray), keyActualSize)) !=0) {
+      tsFailWithRetCode("diagGenerateKeyFromSeed()", ret);
+      return;
+    };
+  }
+  TestStepPass( "", "Got security seed and generated key.");
+  
+
+  IncTestStepId();
+  //---------------------------------------------------------------------------------
+  TestStep( "", "Write security key...");
+  //---------------------------------------------------------------------------------
+  DiagSetParameterRaw( securityKey, "SecurityKey", keyArray, elcount(keyArray));
+  if (!SendRequestAndWaitForResponse(securityKey, true)) return;
+  TestStepPass( "", "Security key written");
+
+
+  IncTestStepId();
+  //---------------------------------------------------------------------------------
+  TestStep( "", "Request download session...");
+  //---------------------------------------------------------------------------------
+  maxBlockSize = 0;
+  memorySpecification[7] = ( byte)( ( downloadSize & 0x000000FF) >>  0);
+  memorySpecification[6] = ( byte)( ( downloadSize & 0x0000FF00) >>  8);
+  memorySpecification[5] = ( byte)( ( downloadSize & 0x00FF0000) >> 16);
+  memorySpecification[4] = ( byte)( ( downloadSize & 0xFF000000) >> 24);
+  DiagSetParameter( downloadRequest, "DFI_", 0); // dataFormatIdentifier
+  DiagSetParameter( downloadRequest, "ALFID", 0x44); // addressAndLengthFormatIdentifier: 4 Byte memorySize, 4 Byte memoryAddress
+  DiagSetParameterRaw( downloadRequest, "MA_MS_", memorySpecification, elCount(memorySpecification));
+  if (!SendRequestAndWaitForResponse(downloadRequest, true)) return;
+
+  lengthFormatIdentifier = DiagGetRespParameter( downloadRequest, "LFID"); // lengthFormatIdentifier
+  blockSpecSize = ( lengthFormatIdentifier & 0xF0) >> 4;
+  if ( blockSpecSize > 4)
+  {
+    writeLineEx( -3, 3, "%s: ***** Unexpected blockSpecSize (%d)", moduleID, blockSpecSize);
+    testStepFail(gTestIdStr, "Unexpected blockSpecSize (%d)!", blockSpecSize);
+    return;
+  }
+  
+  for (i=0; i<blockSpecSize; i++) { //MaxNumberOfBlockLength
+    if ((ret=DiagGetRespPrimitiveByte(downloadRequest, i+2))<0) {
+      tsFailWithRetCode("DiagGetRespPrimitiveByte()", ret);
+      return;
+    }
+    else {
+      blockSpec[i]=(byte)ret;
+    }
+  }
+  
+  maxBlockSize = 0;
+  for ( i = 0; i < blockSpecSize; ++i)
+  {
+    maxBlockSize <<= 8;
+    maxBlockSize += blockSpec[i];
+  }
+
+  maxBlockSize -= 2;
+  if ( maxBlockSize < 0)                                                          {
+    snprintf(gResultString, elcount(gResultString), "Unexpected maxBlockSize(=%d)!", maxBlockSize);
+    testStepFail(gTestIdStr, gResultString);
+    return;
+  }
+  TestStepPass( "", "Download session activated.");
+
+  writeLineEx( 0, 1, "%s: Using block size %d bytes", moduleID, maxBlockSize);
+
+
+  //---------------------------------------------------------------------------------
+  TestStep( "", "Download data...");
+  //---------------------------------------------------------------------------------
+  transmittedSize = 0;
+  downloadCounter = 0;
+  while ( transmittedSize < downloadSize)
+  {
+    if ( downloadSize - transmittedSize < maxBlockSize)
+    {
+      maxBlockSize = downloadSize - transmittedSize;
+    }
+    downloadCounter++;
+    DiagSetParameter( downloadTransmit, "blockSequenceCounter", downloadCounter);
+    DiagSetParameterRaw( downloadTransmit, "transferRequestParameterRecord", downloadBuffer, maxBlockSize);
+
+    IncTestStepId();
+    if (!SendRequestAndWaitForResponse(downloadTransmit, true)) return;
+    transmittedSize += maxBlockSize;
+  }
+  TestStepPass( "", "Download data completed.");
+
+  
+  IncTestStepId();
+  //---------------------------------------------------------------------------------
+  TestStep( "", "Request download stop...");
+  //---------------------------------------------------------------------------------
+  if (!SendRequestAndWaitForResponse(downloadStop, true)) return;
+  TestStepPass( "", "Download stopped.");
+  writeLineEx( 0, 1, "%s: Flashed %d bytes", moduleID, downloadSize);
+
+
+  IncTestStepId();
+  //---------------------------------------------------------------------------------
+  TestStep( "", "Start Tester Present...");
+  //---------------------------------------------------------------------------------
+  ret=DiagStartTesterPresent(gDiagTarget);
+  if (0 !=ret) {
+    tsFailWithRetCode("DiagStartTesterPresent", ret);
+  }
+  TestStepPass( gTestIdStr, "Tester Present started.");
+}

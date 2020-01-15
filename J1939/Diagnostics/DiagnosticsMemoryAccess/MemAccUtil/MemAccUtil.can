@@ -1,0 +1,113 @@
+/*@@var:*/
+/*
+ * MemAccUtil - Utility for Diagnostics Memory Access             Version 1.0
+ *
+ * Copyright 2005, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Gw) Created 
+ */
+variables
+{
+  char gNodeName[32]    = "MemAccUtil"; // Name of the node, is used for output to write window
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel         = kDbgInfo; // Set debug level for output to write window
+}
+/*@@end*/
+
+/*@@envVar:EvTPMS_MemSeed:*/
+//
+// Called if a seed is recieved by the Memory Access window
+//
+on envVar EvTPMS_MemSeed
+{
+    byte seed[1785];
+    long length;
+
+    length = getValue( this, seed );
+    
+    CalcAndSetKey( seed, length );
+}
+/*@@end*/
+
+/*@@envVar:EvTPMS_MemBootLoad:*/
+//
+// Called if a boot load command is successfully executed
+//
+on envVar EvTPMS_MemBootLoad
+{
+  if (getValue( this )) {
+    writeDbgLevel( kDbgInfo, "<%s> Boot load data is written to the device", gNodeName );  
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:CalcAndSetKey(byte[],dword):*///function
+/*
+ * Calculate key and set environment variable 
+
+ * seed  - received seed of a device
+ * len   - length of the seed
+*/
+void CalcAndSetKey( byte seed[], dword len )
+{
+    byte newKey[1785];
+    long newKeyLong[1785];
+    dword i;
+
+    //for this sample configuration, we only copy the seed and use it as new key
+    for (i = 0; i < len; ++i) 
+    {
+        newKey[i]     = seed[i];
+        newKeyLong[i] = seed[i];
+    }
+
+    // set environment variable
+    putValue( EvTPMS_MemKey, newKey, len );
+
+
+    // set system variable
+    SysSetVariableLongArray(sysvar::MemAcc::Key, newKeyLong, len );
+}
+/*@@end*/
+
+/*@@sysvarUpdate:MemAcc::BootLoad:*/
+//
+// Called if a boot load is finished
+//
+on sysvar_update sysvar::MemAcc::BootLoad
+{
+  if (SysGetVariableInt(this) == 1) {
+    writeDbgLevel( kDbgInfo, "<%s> Boot load data is written to the device", gNodeName );  
+  }
+}
+/*@@end*/
+
+/*@@sysvarUpdate:MemAcc::Seed:*/
+//
+// Called if a seed is set by the memory access dialog
+//
+on sysvar_update sysvar::MemAcc::Seed
+{
+  byte seed[1785];
+  dword length, i;
+
+
+  length = SysGetVariableArrayLength(this);
+  for (i = 0; (i < length) && (i<elcount(seed)); ++i) 
+  {
+    seed[i] = @this[i];
+  }
+
+
+  CalcAndSetKey( seed, length );
+}
+/*@@end*/
+

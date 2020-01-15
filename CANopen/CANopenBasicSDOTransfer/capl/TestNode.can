@@ -1,0 +1,590 @@
+/*@!Encoding:1252*/
+variables
+{
+  BYTE gNodeId         = 126;         // the test node's node identifier
+  char gNodeLabel[9]   = "TestNode";
+  
+  // SDO information
+  DWORD nodeId;
+  DWORD objIndex;
+  DWORD objSubIndex;
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  int gDbgLevel         = kDbgWarning;  // Set debug level for output to write window
+  int gOutputLevelNL    = 1;            // output level for the NodeLayer DLL (for more information refer
+                                        // to function "coSetOutputLevel()" in the online help system)
+  // Definitions for possible objects
+  const int kWriteOutput         =  0;
+  const int kReadInput           =  1;
+  const int kTxMapPar1           =  2;
+  const int kTxMapPar0           =  3;
+  const int kTxComPar1           =  4;
+  const int kTxComPar0           =  5;
+  const int kRxMapPar1           =  6;
+  const int kRxMapPar0           =  7;
+  const int kRxComPar1           =  8;
+  const int kRxComPar0           =  9;
+  const int kLifeTimeFactor      = 10;
+  const int KGuardTime           = 11;
+  const int kUseObjectSelection  = 12;
+  int gSelIndex                  =  0;
+
+  // Definitions for possible Sub-objects
+  const int kSub10               =  0;
+  const int kSubF                =  1;
+  const int kSubE                =  2;
+  const int kSubD                =  3;
+  const int kSubC                =  4;
+  const int kSubB                =  5;
+  const int kSubA                =  6;
+  const int kSub9                =  7;
+  const int kSub8                =  8;
+  const int kSub7                =  9;
+  const int kSub6                = 10;
+  const int kSub5                = 11;
+  const int kSub4                = 12;
+  const int kSub3                = 13;
+  const int kSub2                = 14;
+  const int kSub1                = 15;
+  const int kSub0                = 16;
+  int gSelSub                    =  0;
+  
+  Timer getDeviceType;
+}
+
+on timer getDeviceType
+{
+  @sysvar::GUIControls::TestNode_NodeID = 11;
+  @sysvar::GUIControls::TestNode_ObjIndex = 0x1000;
+  @sysvar::GUIControls::TestNode_ObjSubIndex = 0;
+  @sysvar::GUIControls::TestNode_ReadObject = 1;
+}
+
+int GetSDOInformation()
+{ 
+  nodeId = @sysvar::GUIControls::TestNode_NodeID;
+  if(nodeId <= 0 || nodeId > 127){
+    write( "Invalid value (%d) for Node ID. Value range: 0 - 127", nodeId );
+	return 0;
+  }
+
+  // check if we are in mode "Do Not Use Object Selection"
+  if(@sysvar::GUIControls::PossibleObjects != kUseObjectSelection)
+  {
+    objIndex = gSelIndex;
+    objSubIndex = gSelSub;
+  }
+  else
+  {
+    objIndex = @sysvar::GUIControls::TestNode_ObjIndex;
+    if(objIndex < 0x1000 || objIndex > 0xFFFF){
+      write( "Invalid value (%d) for Object Index. Value range: 0x1000 - 0xFFFF", objIndex );
+	  return 0;
+    }
+
+    objSubIndex = @sysvar::GUIControls::TestNode_ObjSubIndex;
+    if(objSubIndex < 0x0 || objSubIndex > 0xFF){
+      write( "Invalid value (%d) for Object Sub-Index. Value range: 0x0 - 0xFF", objSubIndex );
+	  return 0;
+    }
+  }
+
+  return 1;
+}
+
+on sysvar GUIControls::TestNode_ReadObject
+{
+  dword  errCode[1];                // the error code
+  if(@sysvar::GUIControls::TestNode_ReadObject != 0)
+  {
+    // reset error light and the other error output
+  	@sysvar::GUIControls::ErrorState = 0;
+  	sysSetVariableString(sysvar::GUIControls::ErrorMessage, "");
+  	@sysvar::GUIControls::ErrorCode = 0;
+  	
+  	if(GetSDOInformation())
+  	{
+      CANopenUpload(nodeId,objIndex,objSubIndex,0, errCode);
+      if (errCode[0] != 0)
+  	  {
+        write("Error reading object data: Error code %d", errCode[0] );
+  	    @sysvar::GUIControls::ErrorState = 1;
+  	  } // if
+  	  else
+  	  {
+  	    @sysvar::GUIControls::ErrorState = 3;
+  	  } // else
+    } // if
+    @this = 0;
+  } // if
+}
+
+on sysvar CANopen::CAN::I_O_Device_1::Control::SDOAbortCode
+{
+  dword abortCode;
+  dword index;
+  dword subIndex;
+  abortCode = @sysvarMember::CANopen::CAN::I_O_Device_1::Control::SDOAbortCode.AbortCode;
+  index = @sysvarMember::CANopen::CAN::I_O_Device_1::Control::SDOAbortCode.Index;
+  subIndex = @sysvarMember::CANopen::CAN::I_O_Device_1::Control::SDOAbortCode.SubIndex;
+  OnSDOError(abortCode, 10, index, subIndex);
+}
+
+on sysvar CANopen::CAN::I_O_Device_2::Control::SDOAbortCode
+{
+  dword abortCode;
+  int index;
+  int subIndex;
+  abortCode = @sysvarMember::CANopen::CAN::I_O_Device_2::Control::SDOAbortCode.AbortCode;
+  index = @sysvarMember::CANopen::CAN::I_O_Device_2::Control::SDOAbortCode.Index;
+  subIndex = @sysvarMember::CANopen::CAN::I_O_Device_2::Control::SDOAbortCode.SubIndex;
+  OnSDOError(abortCode, 11, index, subIndex);
+}
+
+void SetErrorText(char text[])
+{
+  sysSetVariableString(sysvar::GUIControls::ErrorMessage, text);
+}
+
+//
+// This function is called from 'coOnError'
+// if a SDO error occurs.
+//
+// errorCode:  Error code
+// nodeId:     Node identifier
+// index:      Index
+// subIndex:   Subindex
+//
+void OnSDOError( DWORD errorCode, DWORD nodeId, DWORD index, DWORD subIndex )
+{ 
+  // we have an SDO error, so set the state light
+  @sysvar::GUIControls::ErrorState = 1;
+  @sysvar::GUIControls::ErrorCode = errorCode;
+  
+  switch(errorCode)
+  {
+    // SDO abort codes
+    case 0x05030000: SetErrorText("Toggle bit not alternated");  break;
+    case 0x05040000: SetErrorText("SDO protocol timeout"); break;
+    case 0x05040001: SetErrorText("Client/server command specifier not valid or unknown"); break;
+    case 0x05040002: SetErrorText("invalid block size"); break;
+    case 0x05040003: SetErrorText("invalid sequence number"); break;
+    case 0x05040004: SetErrorText("CRC error"); break;
+    case 0x05040005: SetErrorText("out of memory"); break;
+    case 0x06010000: SetErrorText("unsupported access to an object"); break;
+    case 0x06010001: SetErrorText("attempt to read a write only object"); break;
+    case 0x06010002: SetErrorText("attempt to write a read only object"); break;
+    case 0x06020000: SetErrorText("object does not exist in the object dictionary"); break;
+    case 0x06040041: SetErrorText("object cannot be mapped to the PDO"); break;
+    case 0x06040042: SetErrorText("the number and length of the objects to be mapped would exceed PDO length"); break;
+    case 0x06040043: SetErrorText("general parameter incompatibility reason"); break;
+    case 0x06040047: SetErrorText("general internal incompatibility in the device"); break;
+    case 0x06060000: SetErrorText("access failed due to a hardware error"); break;
+    case 0x06070010: SetErrorText("data type does not match, length of service parameter does not match"); break;
+    case 0x06070012: SetErrorText("data type does not match, length of service parameter too high"); break;
+    case 0x06070013: SetErrorText("data type does not match, length of service parameter too low"); break;
+    case 0x06090011: SetErrorText("sub-index does not exist"); break;
+    case 0x06090030: SetErrorText("value range of parameter exceeded"); break;
+    case 0x06090031: SetErrorText("value of parameter writte too high"); break;
+    case 0x06090032: SetErrorText("value of parameter writte too low"); break;
+    case 0x06090036: SetErrorText("maximum value is less than minimum value"); break;
+    case 0x08000000: SetErrorText("general error"); break;
+    case 0x08000020: SetErrorText("data cannot be transferred or stored to the application"); break;
+    case 0x08000021: SetErrorText("data cannot be transferred or stored to the application because of local control"); break;
+    case 0x08000022: SetErrorText("data cannot be transferred or stored to the application because of the present device state"); break;
+    case 0x08000023: SetErrorText("Object dictionary dynamic generation fails or no object is present"); break;
+    // internal SDO errors
+    case 0xFF010031: SetErrorText("SDO handle is already registered"); break;
+    case 0xFF010032: SetErrorText("protocol error occured"); break;
+    case 0xFF010034: SetErrorText("the required SDO is already outstanding"); break;
+    case 0xFF010035: SetErrorText("this SDO is not outstanding"); break;
+    case 0xFF010036: SetErrorText("not enough memory available"); break;
+    case 0xFF010037: SetErrorText("not enough memory available"); break;
+    case 0xFF010038: SetErrorText("no buffer specified for the SDO"); break;
+    case 0xFF010039: SetErrorText("no transfer memory available for the SDO"); break;
+    case 0xFF01003A: SetErrorText("the required SDO ressource is not available"); break;
+    case 0xFF01003B: SetErrorText("SDO time-out occured"); break;
+    case 0xFF010024: SetErrorText("COB-ID allocation error"); break;
+    case 0xFF010021: SetErrorText("no timer available for the SDO functionality"); break;
+    case 0xFF010027: SetErrorText("no valid SDO handle"); break;
+    case 0xFF010002: SetErrorText("Tx Queue full"); break;
+    default:         SetErrorText("SDO error not specified"); break;
+  }
+}
+
+on start
+{
+  // read the device type of node 11 for example reasons
+  setTimer(getDeviceType, 1);  
+}
+
+//
+// This is a callback function which is called, if a SDO upload
+// response is received.
+//
+// nodeId:     Node identifier
+// index:      Index
+// subIndex:   Subindex
+// size:       Number of databytes
+//
+
+void OnCANopenUploadResponse( DWORD nodeId,
+                              DWORD index,
+                              DWORD subIndex,
+                              DWORD size )
+{
+  char buffer[128];
+  BYTE value1;
+  WORD value2;
+  DWORD value3;
+  dword  errCode[1];                // the error code
+  
+  if(size > 0 && size < 5)
+  {
+    // rest the string value if we have a number
+  	sysSetVariableString(sysvar::GUIControls::TestNode_UploadValue_str, "");
+  	
+  	switch(size)
+    {
+    	case 1: 
+    	    value1 = CANopenUploadGetSigned(errCode);
+    	    @sysvar::GUIControls::TestNode_UploadValue_hex = value1;
+          @sysvar::GUIControls::TestNode_UploadValue_dec = value1;
+    	  break;
+        case 2: 
+    	    value2 = CANopenUploadGetSigned(errCode);
+    	    @sysvar::GUIControls::TestNode_UploadValue_hex = value2;
+          @sysvar::GUIControls::TestNode_UploadValue_dec = value2;
+    	  break;
+    	case 3:
+    	case 4:
+    	default:
+    	   value3 = CANopenUploadGetSigned(errCode);
+    	   @sysvar::GUIControls::TestNode_UploadValue_hex = value3;
+         @sysvar::GUIControls::TestNode_UploadValue_dec = value3;
+    	 break;
+	  }
+  }
+  else
+  {
+    // more than 4 data bytes, so handle the value as a string
+  	CANopenUploadGetData( buffer, elCount(buffer), errCode );
+	  @sysvar::GUIControls::TestNode_UploadValue_hex = 0;
+    @sysvar::GUIControls::TestNode_UploadValue_dec = 0;
+	  
+    sysSetVariableString(sysvar::GUIControls::TestNode_UploadValue_str, buffer);
+  }
+}
+
+on sysvar GUIControls::TestNode_WriteObject
+{
+  dword  errCode[1];                // the error code
+  DWORD value;
+  DWORD size;  
+  long err = 0;
+
+  if(@sysvar::GUIControls::TestNode_WriteObject)
+  {
+    // reset error light and the other error output
+  	@sysvar::GUIControls::ErrorState = 0;
+  	sysSetVariableString(sysvar::GUIControls::ErrorMessage,"");
+  	@sysvar::GUIControls::ErrorCode = 0;
+  	
+  	if(GetSDOInformation())
+  	{ 
+  	  value = @sysvar::GUIControls::TestNode_DownloadValue_hex;
+      size = @sysvar::GUIControls::TestNode_DownloadValueSize;
+      CANopenDownload (nodeId, objIndex, objSubIndex, value, size, 0, errCode);
+      if(errCode[0] != 0)
+  	  {
+  	  	write("Error writing object data: Error code %d",err);
+  		  @sysvar::GUIControls::ErrorState = 1;
+  	  } // if
+  	  else
+  	  {
+  	    @sysvar::GUIControls::ErrorState = 3;
+  	  } // else
+    } // if
+  } // if
+}
+
+on sysvar GUIControls::PossibleObjects
+{
+  EvaluateObjectSettings();
+}
+
+EvaluateObjectSettings()
+{
+  int obj = 0;   // the selected object value
+  int sub = 0;   // the selected sub-object
+  int size = 0;  // the object size
+  
+  // get the object which is selected in the possible object
+  // combo box and evalueate theese settings
+  obj = @sysvar::GUIControls::PossibleObjects;
+  sub = @sysvar::GUIControls::PossibleSubObject;
+  
+  switch(obj)
+  {
+  case kRxComPar0:
+    gSelIndex = 0x1400;
+	size = GetComParSubSize(sub);
+	break;
+  case kRxComPar1:
+    gSelIndex = 0x1401;
+	size = GetComParSubSize(sub);
+	break;
+  case kRxMapPar0:
+    gSelIndex = 0x1600;
+	size =  GetMapParSubSize(sub);
+	break;
+  case kRxMapPar1:
+    gSelIndex = 0x1601;
+	size =  GetMapParSubSize(sub);
+	break;
+  case kTxComPar0:
+    gSelIndex = 0x1800;
+	size = GetComParSubSize(sub);
+	break;
+  case kTxComPar1:
+    gSelIndex = 0x1801;
+	size = GetComParSubSize(sub);
+	break;
+  case kTxMapPar0:
+    gSelIndex = 0x1a00;
+	size =  GetMapParSubSize(sub);
+	break;
+  case kTxMapPar1:
+    gSelIndex = 0x1a01;
+	size =  GetMapParSubSize(sub);
+	break;
+  case kWriteOutput:
+    size = 1;
+	gSelIndex = 0x6200;
+	break;
+  case kReadInput:
+    size = 1;
+	gSelIndex = 0x6000;
+	break;
+  case KGuardTime:
+    size = 2;
+	sub = kSub0;
+	gSelSub = 0;
+	gSelIndex = 0x100c;
+	break;
+  case kLifeTimeFactor:
+    size = 1;
+	sub = kSub0;
+    gSelSub = 0;
+    gSelIndex = 0x100d;
+	break;
+  case kUseObjectSelection:  
+  default:
+    size = 0;
+  } // switch
+
+  // write the new values to the panel
+  @sysvar::GUIControls::TestNode_DownloadValueSize = size;
+  @sysvar::GUIControls::PossibleSubObject = sub;
+}
+
+on sysvar GUIControls::PossibleSubObject
+{
+  EvaluateSubObjectSettings();
+}
+
+EvaluateSubObjectSettings()
+{
+  int obj = 0;   // the selected object value
+  int sub = 0;   // the selected sub-object
+  int size = 0;  // the object size
+  
+  // get the object which is selected in the possible object
+  // combo box and evalueate theese settings
+  obj = @sysvar::GUIControls::PossibleObjects;
+  sub = @sysvar::GUIControls::PossibleSubObject;
+  
+  switch(sub)
+  {
+  case kSub0:
+    switch(obj)
+	{
+    case kLifeTimeFactor:
+    case kRxComPar0:
+    case kRxComPar1:
+    case kRxMapPar0:
+    case kRxMapPar1:
+    case kTxComPar0:
+    case kTxComPar1:
+    case kTxMapPar0:
+    case kTxMapPar1:
+    case kWriteOutput:
+    case kReadInput:
+	  size = 1;
+	  break;
+    case KGuardTime:
+	  size = 2;
+	  break;
+    default:
+	  size = 0;
+	} // switch
+	break;
+  case kSub1:
+    switch(obj)
+	{
+	case kReadInput:
+	case kWriteOutput:
+	  size = 1;
+	  break;
+    case kRxComPar0:
+    case kRxComPar1:
+    case kRxMapPar0:
+    case kRxMapPar1:
+    case kTxComPar0:
+    case kTxComPar1:
+    case kTxMapPar0:
+    case kTxMapPar1:
+	  size = 4;
+	  break;
+	default:
+	  size = 0;
+    } // switch
+	break;
+  case kSub2:
+    switch(obj)
+	{
+	case kReadInput:
+	case kWriteOutput:
+	case kRxComPar0:
+    case kRxComPar1:
+    case kTxComPar0:
+    case kTxComPar1:
+	  size = 1;
+	  break;
+    case kRxMapPar0:
+    case kRxMapPar1:
+	case kTxMapPar0:
+    case kTxMapPar1:
+	  size = 4;
+	  break;
+	default:
+	  size = 0;
+	} // switch
+	break;
+  case kSub3:
+  case kSub5:
+    switch(obj)
+	{
+	case kReadInput:
+	case kWriteOutput:
+	  size = 1;
+	  break;
+	case kRxComPar0:
+    case kRxComPar1:
+    case kTxComPar0:
+    case kTxComPar1:
+	  size = 2;
+	  break;
+    case kRxMapPar0:
+    case kRxMapPar1:
+	case kTxMapPar0:
+    case kTxMapPar1:
+	  size = 4;
+	  break;
+	default:
+	  size = 0;
+	} // switch
+	break;
+  case kSub4:
+    switch(obj)
+	{
+	case kReadInput:
+	case kWriteOutput:
+	  size = 1;
+	  break;
+    case kRxMapPar0:
+    case kRxMapPar1:
+	case kTxMapPar0:
+    case kTxMapPar1:
+	  size = 4;
+	  break;
+	default:
+	  size = 0;
+	} // switch
+	break;
+  case kSub6:
+  case kSub7:
+  case kSub8:
+  case kSub9:
+  case kSubA:
+  case kSubB:
+  case kSubC:
+  case kSubD:
+  case kSubE:
+  case kSubF:
+  case kSub10:
+    switch(obj)
+	{
+	case kReadInput:
+	case kWriteOutput:
+	  size = 1;
+	  break;
+    case kRxMapPar0:
+    case kRxMapPar1:
+	case kTxMapPar0:
+    case kTxMapPar1:
+	  size = 4;
+	  break;
+	default:
+	  size = 0;
+	} // switch
+	break;
+  default:
+    size = 0;
+  } // switch
+
+  // store the selected sub object index
+  gSelSub = ((kSub0 - sub));
+  
+  // write the new values to the panel
+  @sysvar::GUIControls::TestNode_DownloadValueSize = size;
+}
+
+int GetComParSubSize(int sub)
+{
+  // check which sub object is passed and get the corresponding
+  // size depending on DS-301
+  switch(sub)
+  {
+  case kSub0:
+  case kSub2:
+    return 1;
+  case kSub3:
+  case kSub5:
+    return 2;
+  case kSub1:
+    return 4;
+  default:
+    return 0;
+  } // switch
+  return 0;
+}
+
+int GetMapParSubSize(int sub)
+{
+  // check which sub object is passed and get the corresponding
+  // size depending on DS-301
+  switch(sub)
+  {
+  case kSub0:
+    return 1;
+  default:
+    return 4;
+  } // switch
+  return 0;
+}

@@ -1,0 +1,123 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "CANopenHelper.cin"
+}
+
+variables
+{
+  // ------------------------------------------------
+  // File information
+  // Copyright         : 2019, Vector Informatik GmbH
+  // ------------------------------------------------
+
+  // Globals for "Sensor_3" device
+  BYTE gNodeId          = 28;
+  char gNodeLabel[32]   = "Sensor_3";
+
+  sysvarInt * gRunLEDVar;
+  sysvarInt * gErrLEDVar;
+  msTimer enableTimer;
+}
+
+on preStart
+{
+  gRunLEDVar = sysvar::GUIControls::Node28_State;
+  gErrLEDVar = sysvar::GUIControls::Node28ErrLed;
+  InitGUI();
+}
+
+void InitGUI()
+{
+  @sysvar::GUIControls::Node28_ID = gNodeId;
+  @sysvar::SensorValues::Sensor28_1 =  @sysvar::CANopen::CAN::Sensor_3::Pressure_32_Bit::Pressure_1;
+  @sysvar::SensorValues::Sensor28_2 = ~@sysvar::CANopen::CAN::Sensor_3::Pressure_32_Bit::Pressure_1_inverted;
+}
+
+on sysvar CANopen::CAN::Sensor_3::Control::CommunicationState
+{
+  CANopenUpdateState(@this);
+}
+
+void EnableSensor(byte enable)
+{
+  if(enable == 1)
+  {
+    @sysvar::CANopen::CAN::Sensor_3::Control::Enabled = 1;
+    setTimer(enableTimer, 1);
+  }
+  else
+  {
+    @sysvar::CANopen::CAN::Sensor_3::Control::Enabled = 0;
+    ShutDownLights();
+  }
+}
+
+void UpdateData()
+{
+  @sysvar::CANopen::CAN::Sensor_3::Pressure_32_Bit::Pressure_1 = @sysvar::SensorValues::Sensor28_1;
+  @sysvar::CANopen::CAN::Sensor_3::Pressure_32_Bit::Pressure_1_inverted = ~@sysvar::SensorValues::Sensor28_2;
+}
+
+on sysvar SensorValues::Sensor28_1
+{
+  if (@sysvar::GUIControls::SyncSlider28 == 1)
+  {
+    @sysvar::SensorValues::Sensor28_2 = @this;
+  }
+  UpdateData();
+}
+
+on sysvar SensorValues::Sensor28_2
+{
+  if (@sysvar::GUIControls::SyncSlider28 == 1)
+  {
+    @sysvar::SensorValues::Sensor28_1 = @this;
+  }
+  UpdateData();
+}
+
+on sysvar GUIControls::SyncSlider28
+{
+  if (@sysvar::GUIControls::SyncSlider28 == 1)
+  {
+    @sysvar::SensorValues::Sensor28_2 = @sysvar::SensorValues::Sensor28_1;
+  }
+}
+
+on timer enableTimer
+{
+  CANopenInternalNMTCommand(gNodeId, 1);
+  InitGUI();
+}
+  
+on sysvar GUIControls::Sensor3Connected
+{
+  // write the actual state
+  if (@this == 1)
+  {
+    sysSetVariableString(sysvar::GUIControls::Sensor3_CnxnState, ""); //, ());
+  }
+  else
+  {
+    sysSetVariableString(sysvar::GUIControls::Sensor3_CnxnState, "!! unplugged !!"); //, ());
+  }
+  
+  if(@sysvar::GUIControls::MainSwitch == 0)
+  {
+    return;
+  }
+  
+  EnableSensor(@this);
+}
+
+ShutDownLights()
+{
+  @sysvar::GUIControls::Node28_State = 0;
+  @sysvar::GUIControls::Node28_ID = 0;
+}
+
+on sysvar GUIControls::MainSwitch
+{
+  EnableSensor(@sysvar::GUIControls::Sensor2Connected == 1 && @sysvar::GUIControls::MainSwitch);
+}

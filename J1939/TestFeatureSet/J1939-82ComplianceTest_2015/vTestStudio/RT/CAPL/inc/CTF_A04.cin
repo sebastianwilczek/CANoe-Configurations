@@ -1,0 +1,1810 @@
+/*@!Encoding:1252*/
+/*@!Encoding:1252*/
+includes
+{
+  #include "RT_checks.cin"
+}
+
+variables
+{
+}
+
+// ==============================================================================================================
+// functionality of the test A4 01 Standard Frame Message Tolerance.
+// FuncPath's:
+// 1: No disturbance detected. (PASS)
+// 2: There are disturbances detected for requestable messages. (FAIL)
+// 3: There are disturbances detected for cyclic messages. (FAIL)
+// 4: There are disturbances detected due there are error frames. (FAIL)
+// 5: PGI inconsistency (FAIL);
+//
+// pgnInfo contains all the pgns (incl attribs) that are used by this test-function.
+// The content of the pgnInfo is not checked
+void CTF_A04_01_MsgTolerance(struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  message* m;
+  long n;
+  int64 msgTimes[long];
+  dword cycleTimes[long];
+  dword ct,mct,maxTime;
+  int64 meaEndTime;
+  long bufIdx;
+  word bufIdxs[long];
+  dword meaMs;
+  char text[1024];
+  char errText[4096];
+  dword timeout;
+  byte src,dst,prio;
+  byte ok;
+  float relTol; 
+  dword absTol;
+  dword pgn;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  src = gTOOL_Addr;
+  dst = gDUT_Addr;
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  absTol = gDUT_MsgToleranceAbs;
+  relTol = gDUT_MsgToleranceRel;
+  
+  // if dut is configured to send no cyclic messages, then return 3
+  if (@CT::CFG::DUT::CyclicDisabled)
+  {
+    CT_STEP_PRECOND_ERROR(3, "DUT is configured not to send cyclic messages, but this test needs cyclic messages to be present.");
+    return;
+  }
+  
+  // PRECONDITIONS... at least one cyclic and one requestable pgi has to be contained.
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  
+  ok = 1;
+  if (!CT_ContainsReq(pgis))
+  { 
+    CT_STEP_PRECOND_ERROR(5, "There are no requestable PGIs given."); 
+    ok = 0;
+  }
+  if (!CT_ContainsCyclic(pgis))
+  { 
+    CT_STEP_PRECOND_ERROR(5, "There are no cyclic PGIs given."); 
+    ok = 0;
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  
+  // ---------------------------------------
+  // find mea seconds by get the max of all the cycle message times.
+  // the strategy is to measure 4 times of the max cycle time...
+  // ---------------------------------------
+  meaMs = 1000;
+  for(long k: pgis)
+  {
+    if ( pgis[k].CycleTime > meaMs )
+    {
+      meaMs = pgis[k].CycleTime;
+    }
+  }
+  meaMs*=4;
+    
+  // ---------------------------------------
+  // START a CAN-Frame-Generator producing 11bit random messages...
+  // step 1/4: start generator...
+  // ---------------------------------------
+  snprintf(text, elcount(text), "Start random standard CAN message frame generator, do requests and measure %d ms...", meaMs);
+  CT_STEP_BEGIN(-4, text);
+  CT_START_RANDOM_CAN_FRAME_GENERATOR(10);
+  CT_STEP_END_PASS(0);
+    
+  // ---------------------------------------
+  // step 2/4
+  // ---------------------------------------
+  // WAIT 1 second and do requests of all messages...
+  CT_WAIT(1000);
+  
+  CT_STEP_BEGIN("Request all requestable non cyclic messages...");
+  ok = 1;
+  
+  for(long k: pgis) // pgn shall not be used as key here! (unit test fills function with id-keys!)
+  {
+    pgn = pgis[k].PGN;
+    
+    // for all requestable messages. 
+    //if (CT_IsNonReq( pgis[k] ) || CT_IsCyclic(pgis[k])) continue; // if non requestable or cyclic, then skip.
+    if (CT_IsCyclic(pgis[k])) continue; // if cyclic, then skip.
+    
+    pgR.dlc = gc_J1939_PG_DLC_MAX;
+    if ( CT_Request_And_Await_Response(pgR, pgis[k], errText, src, dst, timeout, prio) != 0)
+    {
+      // requesting error
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errText, timeout);
+      ok = 0;
+      break;
+    }
+    
+    // check for error frames...
+    if (gErrFrameBuf.size()>0)
+    {
+      snprintf(text, elcount(text), "Error frame after requesting PGN %d (0x%.05X) at %.06fs", pgn, pgn, CT_Ns2Sec( gErrFrameBuf[gErrFrameBuf.size()-1].Time_ns) );
+      CT_STEP_END_FAIL(4, text);
+      ok = 0;
+      break;
+    }
+    //CT_STEP("","");
+  }
+
+  // on failure test can be left now.
+  if (!ok)
+  {
+    return;
+  }
+  else
+  {
+    // OK up to here. requests done successfully. continue measuring the cycles...
+    CT_STEP_END_PASS(1, "All requests OK");
+    // WAIT some time to get a message buffer...
+    ok = !CT_WAIT_WITH_INFO_BREAK_ON_ERRORFRAMES(meaMs, "Measuring cyclic messages...");
+    if (!ok) CT_STEP("[!]", "Stopped measuring due to error frames.");
+  }
+
+  // measurment after meaMs done at this time.
+  // this time is needed to check cyclic messages are continuously...
+  meaEndTime = timeNowInt64();
+  
+  // stop msg buffering and generator...
+  MsgBuf_StopRecording();
+  
+  CT_STOP_RANDOM_CAN_FRAME_GENERATOR();
+  CT_WAIT(200); // short wait to have trace report output be slowerd
+  
+  
+  // ---------------------------------------
+  // step 3/4 check for error frames...
+  // ---------------------------------------
+  if (!CT_STEP_CHECK_ERRORFRAMES(-1, 0, 4)) return;
+
+  // ---------------------------------------
+  // step 4/4 check cyclic messages for disturbances...
+  // cycle-Time ct of messages has to be within range of given message cycle mct +-abs and +-rel tolerance...
+  //
+  //        -absTol      +absTol
+  //      |--------- mct ----------|   ==>  mct-absTol <= ct <= mct+absTol
+  //      [<-- (valid ct range) -->]
+  //
+  //        -relTol      +relTol
+  //      |--------- mct ----------|   ==>  mct-(mct*relTol) <= ct <= mct+(mct*relTol)
+  //      [<-- (valid ct range) -->]
+  // ---------------------------------------
+  snprintf(text, elcount(text), "Checking cyclic messages for disturbances using message tolerance (abs: ±%dms, rel: ±%3.2f percent)...", absTol, relTol*100);
+  CT_STEP_BEGIN(text);
+  
+  //MsgBuf_Debug(0xFFFFFFFF);
+  //CT_WAIT(5000);
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+
+    // for all cyclic messages...
+    if (pgis[k].CycleTime == 0) continue; // if non cyclic (cycleTime==0) skip
+    
+    mct = pgis[k].CycleTime;
+    if (@CT::DEBUG::CHECKS) write("-------------------------------> CHECK PGN=%x", pgn);
+    // write("mct=%d", mct);
+    CT_Find_All_In_MsgBuf(bufIdxs, 0, pgn, gDUT_Addr);
+    
+    // get all the cycle-times for the message with pgn x by "collecting" their message times...
+    // ... and calculate the delta times...
+    msgTimes.clear();
+    n=0;
+    for(long bi: bufIdxs)
+    {
+      bufIdx = bufIdxs[bi];
+      msgTimes[n] = gMsgBuf[bufIdx].Time_ns;
+      if (@CT::DEBUG::CHECKS) write("msgTimes[%d] = %.6f", n, CT_Ns2Sec(msgTimes[n]));
+      n++;
+    }
+    // artificially add the meaEndTime to get one use case solved.
+    // a node sends some cycles and then stops forever sending them.
+    // this can not be detected when only looking at the message occurances.
+    msgTimes[n] = meaEndTime;
+    if (@CT::DEBUG::CHECKS) write("msgTimes[%d] = %.6f", n, CT_Ns2Sec(msgTimes[n]));
+    
+    // calculate the current cycle-times by building dt's...
+    cycleTimes.clear();
+    if (msgTimes.size() > 1)
+    {
+      for(long ti: msgTimes)
+      {
+        if (ti>0)
+        {
+          ct = CT_Ns2Ms(msgTimes[ti]-msgTimes[ti-1]);
+          if (ct>0)
+          {
+            cycleTimes[ti-1] = ct;
+            if (@CT::DEBUG::CHECKS) write("cycleTime[%d] = %dms", ti-1, cycleTimes[ti-1]);
+          }
+        }
+      }
+    }
+
+    ok = 0;
+    // check cycle-time tolerances...
+    snprintf(text, elcount(text), ""); // empty text first... an additional error text is stored there. up to here there is no error.
+    
+    // no cylce times available?
+    if (cycleTimes.size()==0)
+    {
+      // additional error text...
+      snprintf(text, elcount(text), "\nCycle time measurement not possible lacks of message occurances.");
+    }
+    for(long ti:cycleTimes)
+    {
+      // cycle time has to be lower than max tolerance (abs or rel)
+      ct = cycleTimes[ti];
+      maxTime = _max(mct+absTol, mct+(dword)_ceil(mct*relTol));
+      ok = (ct <= maxTime);
+      if (!ok)
+      {
+        // additional error text...
+        snprintf(text, elcount(text), "\n[@%.6f-%.6f] Cycle time %dms is above max. tolerance of %dms", CT_Ns2Sec(msgTimes[ti]), CT_Ns2Sec(msgTimes[ti+1]), ct, maxTime);
+        break;
+      }
+    }
+    
+    // if there is an error, print error message including the additional text.
+    if ( !ok )
+    {
+      snprintf(errText, elcount(errText), "Cyclic message disturbance for message with PGN %d (0x%.05X) detected.%s", pgn, pgn, text );
+      CT_STEP_END_FAIL(3, errText);
+      return;
+    }
+  }
+  
+  // no early return up to here, so everything is ok.
+  CT_STEP_END_PASS(1); // everything is ok - no disturbances detected.
+}
+
+
+// ==============================================================================================================
+// functionality of the test A4 02 CAN2B device
+// FuncPath's:
+// 1: No error frames detected (PASS)
+// 2: There are error frames detected. (FAIL)
+void CTF_A04_02_CAN2B()
+{
+  char reportText[1024];
+  word i;
+  
+  // ---------------------------------------
+  // step produce 29bit frames using a (e.g dm01 message)
+  // ---------------------------------------
+  snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) produces some 29bit messages...", gTOOL_Addr, gTOOL_Addr);
+  CT_STEP_BEGIN(-2, reportText);
+  
+  for (i=0; i<3; i++)
+  {
+    CT_SendMessage(gc_PGN_DM01, gTOOL_Addr, gc_BC_ADDR);
+    CT_WAIT(2000);
+  }
+  
+  CT_STEP_END_PASS(1);
+  
+  // ---------------------------------------
+  // step 2/2 check for error frames...
+  // ---------------------------------------
+  CT_STEP_CHECK_ERRORFRAMES(-1, 1, 2);
+}
+
+// ==============================================================================================================
+// functionality of the test A4 03 PGN received independantly of prio bits.
+// FuncPath's:
+// 1: DUT answers as expected (NACK for requested pgn) (PASS)
+// 2: expected NACK not detected. (FAIL)
+// 3: Error due error frames detected. (FAIL)
+// 4: PGI inconsistency (FAIL)
+void CTF_A04_03_PGNReceivePrioIndep(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR;
+  char reportText[1024];
+  char errText[1024];
+  byte prio;
+  word timeout;
+  long n;
+  dword pgn;
+  byte ok;
+  
+  timeout = gc_RESP_TIMEOUT;
+  
+  // precondition. check pgis.
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(4, pgis)) return;
+  ok = 1;
+  for( long k: pgis)
+  {
+    if (CT_IsReq(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(4, pgis[k], "non requestable");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on error.
+  
+  n = pgis.size();
+  
+  CT_LOOP(-n);
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // for all prios...
+    for (prio=0; prio<=7; prio++)
+    {
+      snprintf(reportText, elcount(reportText), "Request PGN %d (0x%.05X) from Tool %d (0x%.02X) to DUT %d (0x%.02X) with prio %d...", pgn, pgn, src, src, dst,dst, prio);
+      
+      if (prio==0) 
+        CT_STEP_BEGIN(-9, reportText); 
+      else 
+        CT_STEP_BEGIN(reportText);
+      
+      // request not requestable message and await nack to all...
+      gVerboseRequest = 0;
+      if (!CT_Request_And_Await_NACK(pgR, errText, pgn, src, dst, prio, timeout, 0))
+      {
+        CT_STEP_END_FAIL(2, errText);
+        return; // leave on fail.
+      }
+    
+      CT_STEP_END_PASS(1);
+      CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+    }
+    
+    // finally check for error frames, on success...
+    if (CT_FUNC_PATH()==1) 
+    {
+      if (CT_STEP_CHECK_ERRORFRAMES(9, 1, 3)==0)
+      {
+        return; // leave on fail.
+      }
+    }
+  };
+}
+
+
+// ==============================================================================================================
+// functionality of the test A4 04 EDPinPGN and A4 05 DPinPGN
+// variantNr 1=> modify EDP bit in request,
+// variantNr 2=> modify  EP bit in request.
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Expected NACK not detected. (FAIL)
+// 3: DUT unexpectedly reacts on invalid / modified request message (FAIL)
+// 4: PGI inconsistency.
+void CTF_A04_COMBI_04_TO_05(byte variantNr, byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgNack;
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  pg* pgReq = {dlc=gc_J1939_PG_DLC_MAX};
+  char reportText[1024];
+  char errText[1024];
+  dword timeout;
+  word respDest;
+  byte prio;
+  dword pgn;
+  byte ok;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  pgReq.dlc = gc_J1939_PG_DLC_MAX;
+  prio = gc_PRIO_DEFAULT;
+  timeout =  gc_RESP_TIMEOUT;
+  
+  // precondition. check pgis.
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(4, pgis)) return;
+  ok = 1;
+  for( long k: pgis)
+  {
+    if (CT_IsReq(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(4, pgis[k], "non requestable");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on error.
+  CT_LOOP(-pgis.size());
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/2
+    // ====================
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X)...", src, src, pgn, pgn, dst, dst);
+    CT_STEP_BEGIN(-2, reportText);
+
+    // request a non requestable pgn... NACK is expected!
+    pgR.dlc = gc_J1939_PG_DLC_MAX;
+    if (!CT_Request_And_Await_NACK(pgR, errText, pgn, src, dst, prio, timeout, 0))
+    {
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/2
+    // ====================
+    // modify edp in request message and check if DUT reacts (fail)
+    CT_BuildRequest(pgReq, pgn, src, dst, prio);
+    pgReq.pgn |= (variantNr == 1) ? 0x00020000 : 0x00010000; // add EDP or DP bit to request (depends on variantNr)
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) as modified/wrong request (PGN 0x%.05X)...", src, src, pgn, pgn, dst, dst, pgReq.pgn);
+    CT_STEP_BEGIN(reportText);
+    output(pgReq);
+
+    if (CT_AWAIT_NACK_FROM(pgNack, dst, src, pgn, timeout+1, errText, 0)) // await nack for requested pgn
+    {
+      // DUT reacts with NACK to wrong / modified request message. => failure.
+      snprintf(reportText, elcount(reportText), "DUT reacts on an invalid request message with DP/EDP bit set. This is wrongly seen as request, but it isnt!");
+      CT_STEP_END_FAIL(3, reportText);
+      return; // leave on fail.
+    };
+    
+    CT_STEP_END_PASS(1);
+    CT_Wait(350); // do not request too fast.
+  }
+}
+
+
+
+// ==============================================================================================================
+// functionality of the test A4 04 EDPinPGN
+// FuncPaths: see used function.
+void CTF_A04_04_EDPinPGN(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CTF_A04_COMBI_04_TO_05(1, src, dst, pgis);
+}
+
+
+
+// ==============================================================================================================
+// functionality of the test A4 05 DPinPGN
+// FuncPaths: See used function.
+void CTF_A04_05_DPinPGN(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CTF_A04_COMBI_04_TO_05(2, src, dst, pgis);
+}
+
+
+
+// ==============================================================================================================
+// functionality of the test A4 06 Filtering on destination address.
+// FuncPath's:
+// 1: DUT answers as expected and ignores request to other destination. (PASS)
+// 2: Expected NACK not detected. (timeout) (FAIL)
+// 3: DUT answers to a request for other destination. (FAIL)
+// 4: PGI inconsistency. (FAIL)
+void CTF_A04_06_FilterOnDstAddr(byte src, byte dst, struct gPGAttrs pgis[long] )
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  pg* pgReq = {dlc=gc_J1939_PG_DLC_MAX};
+  char reportText[1024];
+  char errText[1024];
+  dword timeout;
+  int64 t;
+  word respDest;
+  byte prio, wrongDst;
+  int result;
+  word bufResult[long];
+  dword pgn;
+  byte ok;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  pgReq.dlc = gc_J1939_PG_DLC_MAX;
+  prio = gc_PRIO_DEFAULT;
+  timeout =  gc_TIMEOUT_T3;
+
+  // precondition. check pgis.
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(4, pgis)) return;
+  ok = 1;
+  for( long k: pgis)
+  {
+    if (CT_IsReq(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(4, pgis[k], "non requestable");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on error.
+
+  CT_LOOP(-pgis.size());
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);  
+    
+    // ====================
+    // step 1/2
+    // ====================
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X)...", src, src, pgn, pgn, dst, dst);
+    CT_STEP_BEGIN(-2, reportText);
+
+    // request a non requestable pgn... NACK is expected!
+    if (!CT_Request_And_Await_NACK(pgR, errText, pgn, src, dst, prio, timeout, 0))
+    {
+      CT_STEP_END_FAIL(2, errText);
+      return;
+    }
+
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/2
+    // ====================
+    wrongDst = ~dst;
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from other node %d (0x%.02X)...", src, src, pgn, pgn, wrongDst, wrongDst);
+    t = CT_STEP_BEGIN(reportText);
+
+    // request a non requestable pgn... timeout is expected.
+    // if the dut answers with a NACK, then also a timeout is done. so check for NACK message in message buffer...
+    
+    result=CT_Request_And_Await_NACK(pgR, errText, pgn, src, wrongDst, prio, timeout, 0);
+    if (!result)
+    {
+      // timeout - ok so far... but did the node sent an (N)ACK nevertheless?
+      // check in message buffer that there is no NACK.
+      CT_Find_All_In_MsgBuf(bufResult, t+1, gc_PGN_NACK, dst);
+      if (bufResult.size()>0)
+      {
+        snprintf(errText, elcount(errText), "DUT reacts to a request for another node.");
+        CT_STEP_END_FAIL(3, errText);
+        return;
+      }
+    }
+    
+    CT_STEP_END_PASS(1, " no answer as expected.");
+    CT_WAIT(50); // wait a bit longer than timeout, to sync trace...
+  }
+}
+
+
+
+// ==============================================================================================================
+// functionality of the test A4 07 Support of Receive of Global Destination Address
+// FuncPath's:
+// 1: DUT reacts as expected. (PASS)
+// 2: DUT does not answer. (FAIL)
+// 3: CA not supported (INCONCLUSIVE)
+// 4: CA reset fail (FAILL)
+void CTF_A04_07_GlobDestAddr(byte src, byte dst)
+{
+  pg J1939::J1939_CT_RT::AC pgACDUT;
+  pg J1939::J1939_CT_RT::CA pgCA;
+  char reportText[1024];
+  byte newAdr;
+  dword timeout;
+  byte resultResponse;
+  byte ok;
+  enum eVerdict verdict;
+
+  timeout = gc_RESP_TIMEOUT;
+
+  newAdr = CT_Get_Third_Node_Adr(src, dst);
+  
+  pgCA.sa = src;
+  pgCA.AddressAssignment = newAdr;
+
+  // =============
+  // PRECONDITIONS
+  // =============
+  if (!CT_CHECK_CA_SUPPORT_INCONCLUSIVE(3)) return;
+  
+  // ====================
+  // step 1/1 Check Global DST addr with Command address.
+  // ====================
+  snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) commands DUT %d (0x%.02X) to use address %d (0x%.02X)...", src, src, dst, dst, newAdr, newAdr);
+  CT_STEP_BEGIN(-2, reportText);
+
+  pgCA.dp  = 0;
+  pgCA.edp = 0;
+  ok = 1;
+  resultResponse = CT_CommandedDUTAdressAndAwaitResponse(pgACDUT, pgCA, timeout);
+  if (resultResponse == 1)
+  {
+    CT_STEP_END_FAIL(2, "DUT does not respond with ACL on new address (timeout).");
+    return;
+  }
+  else if (resultResponse == 2)
+  {
+    snprintf(reportText, elcount(reportText), "DUT's address claimed but with wrong content. Got:0x%llX. Expected:0x%llX.", pgACDUT.qword(0), gDUT_DevName);
+    CT_STEP_END_FAIL(3, reportText);
+    ok = 0;
+    // do not return to do a reset dut address in the last step bellow...
+  }
+  if (ok) CT_STEP_END_PASS(1);
+  
+  CT_STEP_CA_RESET_DUT_ADR(4);
+}
+
+
+// ==============================================================================================================
+// functionality of the test A4 08 PDU processing capabilities
+// FuncPath's:
+// 1: DUT answers as expected (NACK for requested pgn) (PASS)
+// 2: DUT does not react within Tr (200ms) (FAIL)
+// 3: PGI inconsistency. (INCONCLUSIVE)
+void CTF_A04_08_PDUProcCapabilities(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR;
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  byte i;
+  dword pgn;
+  byte ok;
+  byte thirdNodeAddr;
+  int64 reqTime;
+  pg 0 pgBurst;
+  
+  // precondition. check pgis.
+  i=0;
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(3, pgis)) return;
+  ok = 1;
+  for( long k: pgis)
+  {
+    if (CT_IsReq(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR_INCONCLUSIVE(3, pgis[k], "non requestable");
+      ok = 0;
+    }
+    i++;
+  }
+
+  if (!ok) return; // leave on error.
+  
+  thirdNodeAddr = CT_Get_Third_Node_Adr(src, dst);
+  
+  initJ1939PGData(pgBurst);
+  pgBurst.sa = src;
+  pgBurst.dlc = 8;
+  pgBurst.pgn = 0x1000;
+  pgBurst.qword(0) = -1;
+  pgBurst.prio = 0;
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn );
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/4 Create P2P burst and request directly before the burst
+    // ====================
+    CT_STEP_BEGIN(-4, "Create a P2P burst and requests directly before the burst...");
+    pgBurst.da = thirdNodeAddr;
+    
+    // request at the beginning of the burst...
+    reqTime = 0;
+    for(i=0; i<20; i++) 
+    {
+      if (i==0) 
+      {
+        // request before the burst...
+        reqTime = CT_SendRequest(pgn, src, dst, gc_PRIO_DEFAULT, 0); // wait unitl request is seen on the bus
+      }
+      output(pgBurst);
+    }
+    
+    // wait T3 before looking into the buffer if the DUT answers with NACK within 200ms after the request.
+    CT_WAIT(gc_TIMEOUT_T3);
+    if (CT_Check_For_NACKs_In_MsgBuf_Between(bufIndices, reqTime, reqTime + CT_Ms2Ns(gc_TIMEOUT_TR), dst, src, pgn) == 0)
+    {
+      // expected NACK (reaction) not found.
+      snprintf(reportText, elcount(reportText), "Request at t=%.6f from 0x%X->0x%X not answered with NACK within Tr(200ms) up to t=%.6f, directly before a 10ms P2P burst.", CT_Ns2Sec(reqTime), src, dst, CT_Ns2Sec(reqTime + CT_Ms2Ns(gc_TIMEOUT_TR)));
+      CT_STEP_END_FAIL(2, reportText);
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/4 Create P2P burst and request directly after the burst
+    // ====================
+    CT_STEP_BEGIN("Create P2P burst and request directly after the burst");
+    
+    // repeat burst...
+    reqTime = 0;
+    for(i=0; i<20; i++) 
+    {
+      output(pgBurst);
+    }
+    
+    // request directly after the burst.
+    // check for answer within Tr(200ms)...
+    if ( CT_Request_And_Await_Response(pgR, pgis[k], errText, src, dst, gc_TIMEOUT_TR, gc_PRIO_DEFAULT) != 0)
+    {
+      reqTime = timeNowInt64() - ((gc_TIMEOUT_TR + 2) * 1000000); //This time is estimated
+      // requesting error
+      snprintf(reportText, elcount(reportText),"Request at t=%.6f not answered with NACK within Tr(200ms) directly at a 10ms P2P burst at the end. %s", CT_Ns2Sec(reqTime), errText);
+      CT_STEP_END_FAIL(2, reportText);
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    
+    // Wait T3... before continue with next burst...
+    CT_Wait(gc_TIMEOUT_T3);
+    
+    // ====================
+    // step 3/4 Create a broadcast burst and request directly before the burst...
+    // ====================
+    CT_STEP_BEGIN("Create a broadcast burst and request directly before the burst...");
+    pgBurst.da = gc_BC_ADDR;
+    for(i=0; i<20; i++) 
+    {
+      if (i==0) 
+      {
+        // request before the burst...
+        reqTime = CT_SendRequest(pgn, src, dst, gc_PRIO_DEFAULT, 0); // wait unitl request is seen on the bus
+      }
+      output(pgBurst);
+    }
+    
+    // wait T3 before looking into the buffer if the DUT answers with NACK within 200ms after the request.
+    CT_WAIT(gc_TIMEOUT_T3);
+    if (CT_Check_For_NACKs_In_MsgBuf_Between(bufIndices, reqTime, reqTime + CT_Ms2Ns(gc_TIMEOUT_TR), dst, src, pgn) == 0)
+    {
+      // expected NACK (reaction) not found.
+      snprintf(reportText, elcount(reportText), "Request at t=%.6f not answered with NACK within Tr(200ms) up to t=%.6f, directly before a 10ms broadcast burst.", CT_Ns2Sec(reqTime), CT_Ns2Sec(reqTime + CT_Ms2Ns(gc_TIMEOUT_TR)));
+      CT_STEP_END_FAIL(2, reportText);
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 4/4 Create a broadcast burst and request directly after the burst...
+    // ====================
+    CT_STEP_BEGIN("Create a broadcast burst and request directly after the burst...");
+    // repeat burst...
+    reqTime = 0;
+    for(i=0; i<20; i++) 
+    {
+      output(pgBurst);
+    }
+    // request directly after the burst.
+    // Check for answer within Tr (200ms)
+    if ( CT_Request_And_Await_Response(pgR, pgis[k], errText, src, dst, gc_TIMEOUT_TR, gc_PRIO_DEFAULT) != 0)
+    {
+      reqTime = timeNowInt64() - ((gc_TIMEOUT_TR + 2) * 1000000); //This time is estimated
+      // requesting error
+      snprintf(reportText, elcount(reportText),"Request at t=%.6f not answered with NACK within Tr(200ms) directly at the end of a 10ms broadcast burst. %s", CT_Ns2Sec(reqTime), errText);
+      CT_STEP_END_FAIL(2, reportText);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(gc_TIMEOUT_T3);
+    
+  } // end CT-LOOP  
+}
+
+// ==============================================================================================================
+// functionality of the test A4 09 Multipacket as single frame with DLC<9
+// FuncPath's:
+// 1: DUT reacts as expected (PASS)
+// 2: DUT does not react as expected (FAIL)
+// 3: Not Testable.
+void CTF_A04_09_Multipacket_Single(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CT_NOT_TESTABLE(3);
+}
+
+// ==============================================================================================================
+// functionality of the test A4 10 Multipacket for PDU1 with DLC<9 and DLC>9
+// FuncPath's:
+// 1: DUT reacts as expected (PASS)
+// 2: DUT does not react as expected (FAIL)
+// 3: Not Testable.
+void CTF_A04_10_Multipacket_PDU1(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CT_NOT_TESTABLE(3);
+}
+
+// ==============================================================================================================
+// functionality of the test A4 11 Multipacket for PDU2 with DLC<9 and DLC>9
+// FuncPath's:
+// 1: DUT reacts as expected (PASS)
+// 2: DUT does not react as expected (FAIL)
+// 3: Not Testable.
+void CTF_A04_11_Multipacket_PDU2(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CT_NOT_TESTABLE(3);
+}
+
+// ==============================================================================================================
+// functionality of the test A4 12 Requests
+// FuncPath's:
+// 1: DUT reacts as expected          (PASS)
+// 2: Requestable PGN timeout         (FAIL)
+// 3: ACK missing                     (FAIL)
+// 4: Missing expected NACK           (FAIL)
+// 5: PGI inconsistency               (FAIL)
+void CTF_A04_12_Request(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  char reportText[1024];
+  char errText[1024];
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  int result;
+  byte prio;
+  word timeout;
+  dword pgn;
+  byte ok;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  prio = gc_PRIO_DEFAULT;
+  timeout = gc_RESP_TIMEOUT;
+  
+  // precondition. check pgis.
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  ok = 1;
+  for( long k: pgis)
+  {
+    if (CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "non cyclic");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on error.
+
+  // start report looping over all given pgis.
+  CT_LOOP(-pgis.size());
+  for( long k: pgis )
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // BEGIN STEP
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X)...", src, src, pgn, pgn, dst, dst);
+    CT_STEP_BEGIN(-1, reportText); // always step 1/1
+    
+    // do the request...
+    pgR.dlc = gc_J1939_PG_DLC_MAX;
+    if (CT_IsReq(pgis[k]))
+    {
+      if ((result = CT_Request_And_Await_Response(pgR, pgis[k], errText, src, dst, timeout, prio)) != 0 )
+      {
+        // results...                                 funcpath
+        // 0 : ok                                         -
+        // -1: timeout                                    2
+        // -2: failed to wait for response pg             2
+        // -3: failed to retrieve response pg.            2
+        // -4: ACK missing                                3
+        switch(result)
+        {
+          case -1: result = 2; break;
+          case -2: result = 2; break;
+          case -3: result = 2; break;
+          case -4: result = 3; break;
+        }
+        CT_STEP_END_FAIL(result, errText);
+        return;
+      }
+    }
+    else
+    {
+      if (!CT_Request_And_Await_NACK(pgR, errText, pgn, src, dst, prio, timeout, 0))
+      {
+        result = 4;
+        CT_STEP_END_FAIL(result, errText);
+        return;
+      }
+    }
+  
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+  }
+  
+}
+
+// ==============================================================================================================
+// Common function for A04-13 to A04-20.
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Request error (FAIL)
+// 3: Response error (DLC / (N)ACK error) (FAIL)
+// 4: pgis inconsistent (INCONCLUSIVE)
+void CT_A04_COMBI_13_TO_23( 
+    byte src
+  , byte dst
+  , enum gPduType pgnType
+  , enum gFlag_Dlc dlc
+  , enum gFlag_Glob globalReq
+  , enum gFlag_Gen nackCheck
+  , struct gPGAttrs pgis[long] )
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  char reportText[1024];
+  char errText[1024];
+  char ackTypeName[5];
+  dword timeout;
+  byte prio;
+  byte ok;
+  dword pgn;
+  int requestResult;
+
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  prio = gc_PRIO_DEFAULT;
+  timeout =  gc_RESP_TIMEOUT;
+
+  // precondition check for empty pgis
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(4, pgis)) return;
+  ok = 1;
+  for (long k: pgis)
+  {
+    if (pgnType != gPDU_BOTH)
+    {
+      if ( 
+              ((pgnType == gPDU1) && !CT_IsPdu1(pgis[k]))
+          ||  ((pgnType == gPDU2) && !CT_IsPdu2(pgis[k]))
+        )
+      {
+        snprintf(errText, elcount(errText), "of needed type %s.", gsPduType[pgnType]);
+        CT_STEP_PGI_CFG_ERROR(4, pgis[k], errText);
+        ok = 0;
+      }
+    }
+    if (dlc != gDlcDontCare)
+    {
+      if ( 
+              ((dlc == gDLC8) && !CT_IsDLC8(pgis[k]))
+          ||  ((dlc == gDLCx) && !CT_IsDLCx(pgis[k]))
+        )
+      {
+        snprintf(errText, elcount(errText), "of needed DLC %s.", gsDlc[dlc]);
+        CT_STEP_PGI_CFG_ERROR(4, pgis[k], errText);
+        ok = 0;
+      }
+    }
+    
+    // for nack checks, there has not to be any requestable message configured!
+    if (nackCheck)
+    {  
+      if (CT_IsReq(pgis[k]))
+      {
+        CT_STEP_PGI_CFG_ERROR(4, pgis[k], "non requestable");
+        ok = 0;
+      }
+    }
+  }
+  if (!ok) return; // leave on error.
+  
+  // work on the given pgis...
+  CT_LOOP(-pgis.size());
+  for (long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X)...", src, src, pgn, pgn, dst, dst);
+    CT_STEP_BEGIN(-1, reportText); // always step 1/1
+
+    if (nackCheck)
+    {
+      if (CT_IsReq(pgis[k]))
+      {
+        snprintf(reportText, elcount(reportText), "PGN %d (0x%.02X) is configured as requestable, but needs to be non requestable.", pgn, pgn);
+        CT_STEP_END_FAIL(4, reportText);
+        return; // leave on fail.
+      }
+    }
+
+    pgR.dlc = gc_J1939_PG_DLC_MAX;
+    if (globalReq == gGlobal)
+    {
+      if (nackCheck)
+      {
+        // A04_23 requests (glob nack)
+        requestResult = CT_Request_And_Await_NACK_OR_ACK(pgR, errText, pgn, src, dst, prio, gc_TIMEOUT_T3, 1);
+        ok = (requestResult == 1);
+      }
+      else
+      {
+        // A04_13-20 global requests
+        requestResult = CT_Request_And_Await_Response_Glob(pgR, pgis[k], errText, src, dst, timeout, prio, 1);
+        ok = (requestResult == 0);
+      }
+    }
+    else if (globalReq == gNonGlobal)
+    {
+      if (nackCheck)
+      {
+        // A04_22 request (p2p nack)
+        requestResult = CT_Request_And_Await_NACK(pgR, errText, pgn, src, dst, prio, timeout, 1);
+        ok = (requestResult == 1);
+      }
+      else
+      {
+        // A04_13-20 p2p requests
+        requestResult = CT_Request_And_Await_Response(pgR, pgis[k], errText, src, dst, timeout, prio);
+        ok = (requestResult == 0);
+      }
+    }
+    
+    if (pgR.pgn == gc_PGN_ACK)
+    {
+      snprintf(ackTypeName, elcount(ackTypeName), "NACK");
+    }
+    else
+    {
+      snprintf(ackTypeName, elcount(ackTypeName), "ACK");
+    }
+    
+    if (ok)
+    {
+      // sa, da and pgn are correct, else function returns a timeout.
+      // check the dlc of the answer...
+      if (dlc != gDlcDontCare)
+      {
+        if (dlc == gDLC8)
+        {
+          if (pgR.dlc != 8)
+          {
+            snprintf(errText, elcount(errText), "DLC of response is expected to be 8, but it's %d.", pgR.dlc);
+            CT_STEP_END_FAIL(3, errText);
+            return; // leave on fail.
+          }
+        }
+        else
+        {
+          if (pgR.dlc <= 8)
+          {
+            snprintf(errText, elcount(errText), "DLC of response is expected to be >8, but it's %d.", pgR.dlc);
+            CT_STEP_END_FAIL(3, errText);
+            return; // leave on fail.
+          }
+        }
+      }
+      
+      if (nackCheck)
+      {
+        // A04_22 + A04_23 - ACKS have to be respond globally.
+        if (pgR.da != gc_BC_ADDR)
+        {
+          snprintf(errText, elcount(errText), "Unexpected destination specific %s detected.", ackTypeName);
+          CT_STEP_END_FAIL(3, errText);
+          return; // leave on fail.
+        }
+        else
+        {
+          // A04_23 global response is not expected for global requests (that shall not be acknowledged)
+          if (globalReq == gGlobal)
+          {
+            snprintf(errText, elcount(errText), "Unexpected %s detected.", ackTypeName);
+            CT_STEP_END_FAIL(2, errText);
+            return; // leave on fail.
+          }
+        }
+      }
+      
+      if (ok) CT_STEP_END_PASS(1);
+    }
+    else // !ok
+    {
+      if (nackCheck)
+      {
+        // A04_22 p2p nack not detected
+        if (globalReq == gNonGlobal)
+        {
+          CT_STEP_END_FAIL(2, "Expected NACK missing."); 
+          return; // leave on fail.
+        }
+        else
+        {
+          // A04_23 global nack not detected. -> passed.
+          CT_STEP_END_PASS(1); // global nackCheck is passed on timeout.
+        }
+      }
+      else
+      {
+        // A04_13-A04_20 normal requesting timeouts.
+        // requesting error
+        CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errText, timeout);
+        return; // leave on fail.
+      }
+    }
+  }
+}
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout (FAIL)
+// 3: response DLC>8 (FAIL)
+// 4: pgis inconsistent (FAIL)
+void CTF_A04_13_P2P_Response_PDU1_DLC8(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CT_A04_COMBI_13_TO_23(src, dst, gPDU1, gDLC8, gNonGlobal, gFalse, pgis);
+}
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout (FAIL)
+// 3: Response DLC>8 (FAIL)
+// 4: pgis inconsistent (FAIL)
+void CTF_A04_14_Glob_Response_PDU1_DLC8(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CT_A04_COMBI_13_TO_23(src, dst, gPDU1, gDLC8, gGlobal, gFalse, pgis);
+}
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout (FAIL)
+// 3: DLC<=8 (FAIL)
+// 4: pgis inconsistent (FAIL)
+void CTF_A04_15_P2P_Response_PDU1_DLCx(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CT_A04_COMBI_13_TO_23(src, dst, gPDU1, gDLCx, gNonGlobal, gFalse, pgis);  
+}
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout (FAIL)
+// 3: DLC<=8 (FAIL)
+// 4: pgis inconsistent (FAIL)
+void CTF_A04_16_Glob_Response_PDU1_DLCx(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CT_A04_COMBI_13_TO_23(src, dst, gPDU1, gDLCx, gGlobal, gFalse, pgis);
+}
+
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout (FAIL)
+// 3: DLC>8 (FAIL)
+// 4: pgis inconsistent (FAIL)
+void CTF_A04_17_P2P_Response_PDU2_DLC8(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CT_A04_COMBI_13_TO_23(src, dst, gPDU2, gDLC8, gNonGlobal, gFalse, pgis);
+}
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout (FAIL)
+// 3: DLC>8 (FAIL)
+// 4: pgis inconsistent (FAIL)
+void CTF_A04_18_Glob_Response_PDU2_DLC8(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CT_A04_COMBI_13_TO_23(src, dst, gPDU2, gDLC8, gGlobal, gFalse, pgis);
+}
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout (FAIL)
+// 3: DLC<=8 (FAIL)
+// 4: pgis inconsistent (FAIL)
+void CTF_A04_19_P2P_Response_PDU2_DLCx(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CT_A04_COMBI_13_TO_23(src, dst, gPDU2, gDLCx, gNonGlobal, gFalse, pgis);
+}
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout (FAIL)
+// 3: DLC<=8 (FAIL)
+// 4: pgis inconsistent (FAIL)
+void CTF_A04_20_Glob_Response_PDU2_DLCx(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CT_A04_COMBI_13_TO_23(src, dst, gPDU2, gDLCx, gGlobal, gFalse, pgis);
+}
+
+// ==============================================================================================================
+// A04_21_Response_Timing
+// ==============================================================================================================
+//
+// this is a combined test-sequence designed directly in the .vtt-Tree.
+// it executes A04_13 - A04_20 that implies the timing, and suceeds when all of the tests are passed.
+//
+//
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: NACK missing (timeout) (FAIL)
+// 3: NACK received, but not sent globally (FAIL)
+// 4: pgis inconsistent (FAIL)
+void CTF_A04_22_P2P_NACK(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CT_A04_COMBI_13_TO_23(src, dst, gPDU_BOTH, gDLC8, gNonGlobal, gTrue, pgis);
+}
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Global Request answered with NACK (FAIL)
+// 3: Global Request answered with P2P NACK (FAIL)
+// 4: pgis inconsistent (FAIL)
+void CTF_A04_23_Glob_NACK(byte src, struct gPGAttrs pgis[long])
+{
+  CT_A04_COMBI_13_TO_23(src, gc_BC_ADDR, gPDU_BOTH, gDLC8, gGlobal, gTrue, pgis);
+}
+
+
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout waiting for expected reaction for DM3  (FAIL)
+// 3: Timeout waiting for expected reaction for DM11  (FAIL)
+// 4: ACK/NACK was not sent to global address (destination specific) (FAIL)
+// 5: DUT answers with wrong ACK control byte. (FAIL)
+// 6: ACK contains wrong PGN (FAIL)
+// 7: Wrong Acknowledged address in payload (FAIL)
+void CTF_A04_24_Applicaple_ACK_Response(byte src, byte dst)
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  char reportText[1024];
+  char errText[1024];
+  dword timeout;
+  byte prio;
+  dword pgn[2];
+  byte n;
+  char sDM[2][10];
+  byte expectedCtrlWord;
+  byte noReactFuncPath[2];
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  
+  // init vars...
+  prio = gc_PRIO_DEFAULT;
+  timeout =  gc_TIMEOUT_TR; // 200ms.
+  pgn[0] = gc_PGN_DM03;
+  pgn[1] = gc_PGN_DM11;
+  snprintf(sDM[0], elcount(sDM[0]), "DM03");
+  snprintf(sDM[1], elcount(sDM[1]), "DM11");
+  noReactFuncPath[0] = 2;
+  noReactFuncPath[1] = 3;
+  
+  // step 1/2
+  for (n=0; n<2; n++)
+  {
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) (%s) from DUT %d (0x%.02X)...", src, src, pgn[n], pgn[n], sDM[n], dst, dst);
+    if (n==0) CT_STEP_BEGIN(-2, reportText); else CT_STEP_BEGIN(reportText);
+    
+    // ACK or NACK wrong pgn or destination leads to timeout. (p2p allowed)
+    pgR.dlc = gc_J1939_PG_DLC_MAX;
+    if (CT_Request_And_Await_ANY_ACK(pgR, errText, pgn[n], src, dst, prio, timeout, 1))
+    {
+      // expected ACK type. pos ack.
+      if ( (pgR.byte(0) != gc_ACK_CTRL_WORD_ACK) && (pgR.byte(0) != gc_ACK_CTRL_WORD_NACK) )
+      {
+        // ... but other ack type sent
+        snprintf(errText, elcount(errText), "DUT answers with wrong control byte. (got %d, expected %d or %d)", pgR.byte(0),  gc_ACK_CTRL_WORD_ACK, gc_ACK_CTRL_WORD_NACK);
+        CT_STEP_END_FAIL(5, errText);
+        break; // leave on fail (!)
+      }
+      else
+      {
+        // ACK type ok.
+        // check ACK dst addr
+        if (pgR.da != gc_BC_ADDR)
+        {
+          snprintf(errText, elcount(errText), "Unexpected destination specific ACK detected.");
+          CT_STEP_END_FAIL(4, errText);
+          break; // leave on fail (!)
+        }
+        else
+        {
+          // dst ok...
+          // chk pgn...
+          byte ackCW,ackDst;
+          dword ackPgn;
+          CT_GET_ACK_INFO_EX(pgR.qword(0), ackCW, ackPgn, ackDst);
+          if (ackPgn != pgn[n])
+          {
+            snprintf(errText, elcount(errText), "PGN in ACK response is wrong. (got: 0x%.05X, expected: 0x%.05X)", ackPgn, pgn[n]);
+            CT_STEP_END_FAIL(6, errText);
+            break; // leave on fail.
+          }
+          
+          // ACK/NACK detected for given pgn. OK.
+          // check Acknowledged Address in payload...
+          if (ackDst != src)
+          {
+            snprintf(errText, elcount(errText), "Wrong Acknowledged address in payload. (got: 0x%.05X, expected: 0x%.05X)", ackDst, src);
+            CT_STEP_END_FAIL(7, errText);
+            break; // leave on fail.
+          }
+          CT_STEP_END_PASS(1);
+        }
+      }
+    }
+    else
+    {
+      // DM timeout.
+      snprintf(reportText, elcount(reportText), "%s not answered within 200ms.\n%s", sDM[n], errText);
+      CT_STEP_END_FAIL(noReactFuncPath[n], reportText);
+      break; // leave on fail (!)
+    }
+  }
+}
+
+
+
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout waiting for expected reaction.(FAIL)
+// 3: ACK was not sent to global address (destination specific) (FAIL)
+// 4: ACK control word is not DENY (FAIL)
+// 5: ACK's PGN wrong (FAIL)
+// 6: PGI inconsistency (FAIL)
+// 7: No PGIs given (e.g. not available) (INCONCLUSIVE)
+void CTF_A04_25_ACK_DENY(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  char reportText[1024];
+  char errText[1024];
+  dword timeout;
+  byte prio;
+  dword pgn;
+  byte ok;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  timeout = gc_TIMEOUT_TR;
+  prio = gc_PRIO_DEFAULT;
+  
+  // precondition. check pgis.
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(7, pgis)) return;
+  ok = 1;
+  for( long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k], gExpResp_DENY) || CT_IsCyclic(pgis[k]) || CT_IsPdu2(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(6, pgis[k], "non cyclic ACK DENY producing PG of type PDU1");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on error.
+
+  // start report looping over all given pgis.
+  CT_LOOP(-pgis.size());
+  for( long k: pgis )
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // BEGIN STEP
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X)...", src, src, pgn, pgn, dst, dst);
+    CT_STEP_BEGIN(-1, reportText);
+    
+    // do the request...and await any ack.
+    // do not wait for DENY explicitely, else for wrong control-word there is a timeout.
+    pgR.dlc = gc_J1939_PG_DLC_MAX;
+    if (CT_Request_And_Await_ANY_ACK(pgR, errText, pgn, src, dst, prio, timeout, 1))
+    {
+      CT_STEP_END_PASS(0);
+      if (pgR.byte(0) != gc_ACK_CTRL_WORD_DENY)
+      {
+        CT_STEP_END_FAIL(4, "ACK's control word is not DENY, as expected.");
+        break; // leave on fail.
+      }
+      if (pgR.da != gc_BC_ADDR)
+      {
+        snprintf(errText, elcount(errText), "Unexpected destination specific ACK detected.");
+        CT_STEP_END_FAIL(3, errText);
+        break;
+      }
+      else
+      {
+        byte ackCW,ackDst;
+        dword ackPgn;
+        CT_GET_ACK_INFO_EX(pgR.qword(0), ackCW, ackPgn, ackDst);
+        if (ackPgn != pgn)
+        {
+          snprintf(errText, elcount(errText), "PGN in ACK response is wrong. (got: 0x%.05X, expected: 0x%.05X)", ackPgn, pgn);
+          CT_STEP_END_FAIL(5, errText);
+          break; // leave on fail.
+        }
+          
+        // ACK/NACK detected for given pgn. OK.
+        CT_STEP_END_PASS(1);
+      }
+    }
+    else
+    {
+      // requesting error
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errText, timeout);
+      break; // leave on fail.
+    }
+    
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+  }  
+}
+
+
+
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout waiting for expected reaction.(FAIL)
+// 3: ACK was not sent to global address (destination specific) (FAIL)
+// 4: ACK control word is not BUSY (FAIL)
+// 5: ACK pgn wrong. (FAIL)
+// 6: PGI inconsistency (FAIL)
+// 7: No PGIs given (e.g. not available) (INCONCLUSIVE)
+void CTF_A04_26_ACK_BUSY(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  char reportText[1024];
+  char errText[1024];
+  dword timeout;
+  byte prio;
+  dword pgn;
+  byte ok;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  timeout = gc_TIMEOUT_TR;
+  prio = gc_PRIO_DEFAULT;
+  
+  // precondition. check pgis.
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(7, pgis)) return;
+  ok = 1;
+  for( long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k], gExpResp_BUSY) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(6, pgis[k], "non cyclic ACK BUSY producing PG of type PDU1");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on error.
+  
+  // start report looping over all given pgis.
+  CT_LOOP(-pgis.size());
+  for( long k: pgis )
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // BEGIN STEP
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X)...", src, src, pgn, pgn, dst, dst);
+    CT_STEP_BEGIN(-1, reportText);
+    
+    // do the request...and await any ack.
+    // do not wait for BUSY explicitely, else for wrong control-word there is a timeout.
+    pgR.dlc = gc_J1939_PG_DLC_MAX;
+    if (CT_Request_And_Await_ANY_ACK(pgR, errText, pgn, src, dst, prio, timeout, 1))
+    {
+      CT_STEP_END_PASS(0);
+      if ( pgR.byte(0) != gc_ACK_CTRL_WORD_BUSY)
+      {
+        CT_STEP_END_FAIL(4, "ACK's control word is not BUSY, as expected.");
+        break; // leave on fail.
+      }
+      // ACK type ok.
+      if (pgR.da != gc_BC_ADDR)
+      {
+        snprintf(errText, elcount(errText), "Unexpected destination specific ACK detected.");
+        CT_STEP_END_FAIL(3, errText);
+        break; // leave on fail (!)
+      }
+      else
+      {
+        byte ackCW,ackDst;
+        dword ackPgn;
+        CT_GET_ACK_INFO_EX(pgR.qword(0), ackCW, ackPgn, ackDst);
+        if (ackPgn != pgn)
+        {
+          snprintf(errText, elcount(errText), "PGN in ACK response is wrong. (got: 0x%.05X, expected: 0x%.05X)", ackPgn, pgn);
+          CT_STEP_END_FAIL(5, errText);
+          break; // leave on fail.
+        }
+        // ACK/NACK detected for given pgn. OK.
+        CT_STEP_END_PASS(1);
+      }
+    }
+    else
+    {
+      // requesting error
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errText, timeout);
+      break; // leave on fail.
+    }
+    
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+  }  
+}
+
+
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout waiting for expected reaction.(FAIL)
+// 3: ACK was not sent to global address (destination specific) (FAIL)
+// 4: ACK control word is wrong (FAIL)
+// 5: ACK pgn wrong (FAIL)
+// 6: Unexpected ACK Address (FAIL)
+// 7: PGI inconsistency (FAIL)
+void CTF_A04_27_ACK_Address(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  char reportText[1024];
+  char errText[1024];
+  dword timeout;
+  byte prio;
+  dword pgn;
+  byte ok;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  timeout = gc_TIMEOUT_TR;
+  prio = gc_PRIO_DEFAULT;
+  
+  
+  // precondition. check pgis.
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(7, pgis)) return;
+  ok = 1;
+  for( long k: pgis)
+  {
+    if (!CT_IsAckPos(pgis[k]) && !CT_IsAckNeg(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(7, pgis[k], "positive or negative ACK producing PGN");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on error.
+  
+  // start report looping over all given pgis.
+  CT_LOOP(-pgis.size());
+  for( long k: pgis )
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // BEGIN STEP
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X)...", src, src, pgn, pgn, dst, dst);
+    CT_STEP_BEGIN(-1, reportText);
+    
+    // do the request...and await any ack.
+    pgR.dlc = gc_J1939_PG_DLC_MAX;
+    if (CT_Request_And_Await_ANY_ACK(pgR, errText, pgn, src, dst, prio, timeout, 1))
+    {
+      CT_STEP_END_PASS(0);
+      
+      // depending of the pgi, check control word.
+      if (CT_IsAckPos(pgis[k]) && !CT_IsAckPos(pgR))
+      {
+        CT_STEP_END_FAIL(4, "Control word of response is not ACK, as expected");
+        break;
+      }
+      
+      if (CT_IsAckNeg(pgis[k]) && !CT_IsAckNeg(pgR))
+      {
+        CT_STEP_END_FAIL(4, "Control word of response is not NACK, as expected");
+        break;
+      }
+      
+      // ACK type ok.
+      if (pgR.da != gc_BC_ADDR)
+      {
+        snprintf(errText, elcount(errText), "Unexpected destination specific ACK detected.");
+        CT_STEP_END_FAIL(3, errText);
+        break; // leave on fail (!)
+      }
+      else
+      {
+        // ACK/NACK detected for given pgn. OK.
+        byte ackCW,ackDst;
+        dword ackPgn;
+        CT_GET_ACK_INFO_EX(pgR.qword(0), ackCW, ackPgn, ackDst);
+        
+        // check the PGN
+        if (ackPgn != pgn)
+        {
+          snprintf(errText, elcount(errText), "PGN in ACK response is wrong. (got %.05X, expected %.05X)", ackPgn, pgn);
+          CT_STEP_END_FAIL(5, errText);
+          break; // leave on fail.
+        }
+        
+        // check the address byte of the response to be the address of the receiver node.
+        if (ackDst != src)
+        {
+          snprintf(errText, elcount(errText), "Wrong address in ACK payload. (got %d, expected %d)", ackDst, dst);
+          CT_STEP_END_FAIL(6, errText);
+          break; // leave on fail.
+        }
+        CT_STEP_END_PASS(1);
+      }
+    }
+    else
+    {
+      // requesting error
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errText, timeout);
+      break; // leave on fail.
+    }
+    
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+  }  
+}
+
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout waiting for expected reaction.(FAIL)
+// 3: PGI inconsistency.
+void CTF_A04_COMBI_28_TO_30(byte src, byte dst, struct gPGAttrs pgis[long], enum gXferType xferType, enum gExpResp expResp)
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  char reportText[1024];
+  char errText[1024];
+  dword timeout;
+  byte prio;
+  dword pgn;
+  byte ok;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  timeout = gc_TIMEOUT_TR;
+  prio = gc_PRIO_DEFAULT;
+  
+  // precondition. check pgis.
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(3, pgis)) return;
+  ok = 1;
+  for( long k: pgis)
+  {
+    if (CT_ExpRespContains(expResp, gExpResp_PG) && (!CT_IsReq(pgis[k])) )
+    {
+      CT_STEP_PGI_CFG_ERROR(3, pgis[k], "requestable PGN");
+      ok = 0;
+    }
+    else if (CT_ExpRespContains(expResp, gExpResp_NACK) && (!CT_IsNonReq(pgis[k])) )
+    {
+      CT_STEP_PGI_CFG_ERROR(3, pgis[k], "non requestable PGN");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on error.
+  
+  // start report looping over all given pgis.
+  CT_LOOP(-pgis.size());
+  for( long k: pgis )
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // BEGIN STEP
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X)...", src, src, pgn, pgn, dst, dst);
+    CT_STEP_BEGIN(-1, reportText);
+    
+    // do the request...and await the answer...
+    pgR.dlc = gc_J1939_PG_DLC_MAX;
+    if (CT_Request2_And_Await_Response(pgR, errText, pgis[k], src, dst, timeout, prio, xferType) == 0)
+    {
+      CT_STEP_END_PASS(1);
+    }
+    else
+    {
+      // requesting error
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errText, timeout);
+      break; // leave on fail.
+    }
+    
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+  }  
+}
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout waiting for expected reaction.(FAIL)
+// 3: PGI inconsistency.
+void CTF_A04_28_Request2_Xfer_PGN_Yes(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CTF_A04_COMBI_28_TO_30(src, dst, pgis, gXferYes, gExpResp_PG);
+}
+
+
+
+
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout waiting for expected reaction.(FAIL)
+// 3: PGI inconsistency.
+void CTF_A04_29_Request2_Xfer_PGN_No(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CTF_A04_COMBI_28_TO_30(src, dst, pgis, gXferNo, gExpResp_PG);
+}
+
+
+
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout waiting for expected reaction.(FAIL)
+// 3: PGI inconsistency.
+void CTF_A04_30_Response2_NACK(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CTF_A04_COMBI_28_TO_30(src, dst, pgis, gXferYes, gExpResp_NACK);
+}
+
+
+
+
+
+// ==============================================================================================================
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: DUT unexpectedly reacts on a foreign communication. (FAIL)
+void CTF_A04_31_ThirdParty_Requests(byte src, byte dst)
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  byte n;
+  char reportText[1024];
+  char errText[1024];
+  dword timeout;
+  byte prio;
+  dword pgn;
+  byte ok;
+  word resBuf[long];
+  float tns;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  timeout = gc_TIMEOUT_TR;
+  prio = gc_PRIO_DEFAULT;
+  
+  CT_STEP_BEGIN(-3, "Start a huge communication with other nodes...");
+  for (n = 0; n<=0xEF; n++)
+  {
+    pgn = n<<8;
+    if (n != dst) CT_SendRequest(pgn, src, n);
+    CT_WAIT(10);
+  }
+  for (n = 0; n<10; n++)
+  {
+    pgn = 0xF000 | n;
+    if (n != dst) CT_SendRequest(pgn, src, n+0xF0);
+    CT_WAIT(10);
+  }
+  CT_STEP_END_PASS(1);
+    
+  CT_STEP_BEGIN("Waiting T3 ms...");
+  CT_WAIT(gc_TIMEOUT_T3);
+  
+  MsgBuf_StopRecording();
+  
+  CT_WAIT(1000);
+  
+  CT_STEP_BEGIN("Checking any reaction from the DUT...");
+  CT_Find_All_In_MsgBuf(resBuf, 0, 0, dst, src, gc_CANID_BITMASK_SRC_DST);
+  
+  if (resBuf.size()>0)
+  {
+    tns = (float)(gMsgBuf[resBuf[0]].time_ns)/(float)1000000000;
+    snprintf(errText, elcount(errText), "DUT unexpectedly responded to third party communication at %.06fs.", tns);
+    CT_STEP_END_FAIL(2, errText);
+    return; // leave on fail.
+  }
+  
+  CT_STEP_END_PASS(1);
+  CT_WAIT(1000); // wait for all trace errors until next test is going to run.
+}

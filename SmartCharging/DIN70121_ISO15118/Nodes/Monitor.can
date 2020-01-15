@@ -1,0 +1,268 @@
+/*@!Encoding:1252*/
+includes
+{
+}
+
+variables
+{
+  enum SmartChargingMessageIDs
+  {
+    InvalidMessage = 0,
+    SECCDiscoveryReq = 1,
+    SECCDiscoveryRes = 2,
+    SupportedAppProtocolReq = 3,
+    SupportedAppProtocolRes = 4,
+    SessionSetupReq = 5,
+    SessionSetupRes = 6,
+    ServiceDiscoveryReq = 7,
+    ServiceDiscoveryRes = 8,
+    ServiceDetailReq = 9,
+    ServiceDetailRes = 10,
+    PaymentServiceSelectionReq = 11,
+    PaymentServiceSelectionRes = 12,
+    PaymentDetailsReq = 13,
+    PaymentDetailsRes = 14,
+    ContractAuthentiationReq = 15,
+    ContractAuthentiationRes = 16,
+    ChargeParameterDiscoveryReq = 17,
+    ChargeParameterDiscoveryRes = 18,
+    PowerDeliveryReq = 19,
+    PowerDeliveryRes = 20,
+    ChargingStatusReq = 21,
+    ChargingStatusRes = 22,
+    MeteringReceiptReq = 23,
+    MeteringReceiptRes = 24,
+    CableCheckReq = 25,
+    CableCheckRes = 26,
+    PreChargeReq = 27,
+    PreChargeRes = 28,
+    CurrentDemandReq = 29,
+    CurrentDemandRes = 30,
+    WeldingDetectionReq = 31,
+    WeldingDetectionRes = 32,
+    SessionStopReq = 33,
+    SessionStopRes = 34,
+    CertificateUpdateReq = 35,
+    CertificateUpdateRes = 36,
+    CertificateInstallationReq = 37,
+    CertificateInstallationRes = 38,
+    CmSLACParamReq = 101,
+    CmSLACParamCnf = 102,
+    CmStartAttenCharInd = 103,
+    CmMNBCSoundInd = 105,
+    CmAttenProfileInd = 107,
+    VsAttenChar = 109,
+    CmAttenCharInd = 111,
+    CmAttenCharRsp = 112,
+    CmValidateReq = 113,
+    CmValidateCnf = 114,
+    CmSLACMatchReq = 115,
+    CmSLACMatchCnf = 116,
+    CmSetKeyReq = 117,
+    CmSetKeyCnf = 118,
+    VsSetKeyReq = 119,
+    VsSetKeyCnf = 120,
+    CmAmpMapReq = 121,
+    CmAmpMapCnf = 122,
+    VsPILinkStatusReq = 123,
+    VsPILinkStatusCnf = 124,
+    StLinkStatusReq = 125,
+    StLinkStatusCnf = 126,
+    VsNwInfoReq = 127,
+    VsNwInfoCnf = 128
+  };  
+
+  int stateResults[12];   // stores response codes
+  
+  char gProtocolPanelName[9] = "Protocol";
+  dword writeTab;  // Sink identifier
+}
+
+on start
+{
+  ClearProtocolPanel();  
+    
+  @sysvar::Common::SysSlacState = 0;
+  @sysvar::Common::SysProtocolBar = 0; 
+}
+
+on sysvar SCC::Monitor::Common::LastMessageType
+{
+  enum SmartChargingMessageIDs state;
+  int progressBarPosition;
+  
+  char labelNameOK[50];  
+  char labelNameNOK[50];
+  char responseCode[100];
+  
+  char chargeState[10];
+  
+  if (@this <= 0)
+  {
+    state = InvalidMessage; 
+  }
+  else
+  {
+    state = (enum SmartChargingMessageIDs) @this; 
+  }
+  
+  progressBarPosition = @sysvar::Common::SysProtocolBar;
+  
+  switch (state)
+  {
+    case InvalidMessage:
+      // Nothing
+      progressBarPosition = 0;
+      ClearProtocolPanel();
+      break;
+    case SECCDiscoveryReq:
+      progressBarPosition = 2;
+      break;
+      
+    // V2G messages
+    case SupportedAppProtocolReq: 
+    case SessionSetupReq:
+      progressBarPosition = 3;
+      break;
+    case ServiceDiscoveryReq:
+    case ServiceDetailReq:
+      progressBarPosition = 4;
+      break;      
+    case PaymentServiceSelectionReq:
+      progressBarPosition = 5;
+      break;      
+    case CertificateUpdateReq:
+    case CertificateInstallationReq:      
+      progressBarPosition = 6;
+      break;      
+    case PaymentDetailsReq: 
+    case ContractAuthentiationReq:
+      progressBarPosition = 7;
+      break;      
+    case ChargeParameterDiscoveryReq:
+      progressBarPosition = 8;
+      break;
+    case CableCheckReq:
+    case PreChargeReq:
+      progressBarPosition = 9;
+      break;        
+    case MeteringReceiptReq:
+    case CurrentDemandReq:
+    case ChargingStatusReq:
+      progressBarPosition = 10;
+      break;  
+    case SessionStopReq:
+    case WeldingDetectionReq:    
+      progressBarPosition = 11;
+      break;   
+    case PowerDeliveryReq:   
+      sysGetVariableString(sysvar::SCC::Monitor::Request_Parameters::ChargeProgress, chargeState, 10);
+      if (strncmp(chargeState, "Start", 10) == 0)
+      { 
+        progressBarPosition = 9;
+      }
+      else if (strncmp(chargeState, "Stop", 10) == 0)
+      { 
+        progressBarPosition = 11;
+      }
+      break;
+      
+    // SLAC Messages
+    case CmSLACParamReq:
+      ClearProtocolPanel();
+      progressBarPosition = 1;
+      @sysVar::Common::SysSlacState = 1;  
+      break;
+    case CmStartAttenCharInd:
+      @sysVar::Common::SysSlacState = 2;  
+      break;
+    case CmAttenCharInd:
+      @sysVar::Common::SysSlacState = 3;  
+      break;
+    case CmValidateReq:
+      @sysVar::Common::SysSlacState = 4;  
+      break;
+    case CmSLACMatchReq:
+      @sysVar::Common::SysSlacState = 5;  
+      break;  
+    default:
+      // Ignore
+      break;
+  }  
+  
+  if (0 <= progressBarPosition)
+  {
+    // set progress bar on panel
+    @sysvar::Common::SysProtocolBar = progressBarPosition; 
+    
+    // show/hide result labels
+    if ((3 <= progressBarPosition) && (state < 100) && ((state % 2) == 0))
+    {          
+      // update response code label
+      snprintf(labelNameOK, 50, "TResult%iOK", progressBarPosition); 
+      snprintf(labelNameNOK, 50, "TResult%iNOK", progressBarPosition);
+      
+      sysGetVariableString(sysvar::SCC::Monitor::Response_Parameters::ResponseCode, responseCode, elCount(responseCode));
+  
+      // check if a FAIL was already written, then do not overwrite
+      if (stateResults[progressBarPosition] != 0)
+      {         
+        if (strncmp(responseCode, "OK", 2) == 0)
+        {    
+          setControlVisibility(gProtocolPanelName, labelNameNOK, 0);
+          setControlVisibility(gProtocolPanelName, labelNameOK, 1);     
+  
+          stateResults[progressBarPosition] = 1;
+        }
+        else
+        {
+          setControlVisibility(gProtocolPanelName, labelNameOK, 0);
+          setControlVisibility(gProtocolPanelName, labelNameNOK, 1);       
+          
+          stateResults[progressBarPosition] = 0;
+        }   
+      }
+    }
+  }  
+}
+
+ClearProtocolPanel()
+{
+  int i;
+  for (i = 0; i < 12; ++i)  
+  {
+    stateResults[i] = -1;
+  }
+  
+  SetControlVisibility(gProtocolPanelName, "TResult1OK",  0);
+  SetControlVisibility(gProtocolPanelName, "TResult1NOK", 0);
+  SetControlVisibility(gProtocolPanelName, "TResult2OK",  0);
+  SetControlVisibility(gProtocolPanelName, "TResult2NOK", 0);
+  SetControlVisibility(gProtocolPanelName, "TResult3OK",  0);
+  SetControlVisibility(gProtocolPanelName, "TResult3NOK", 0);
+  SetControlVisibility(gProtocolPanelName, "TResult4OK",  0);
+  SetControlVisibility(gProtocolPanelName, "TResult4NOK", 0);
+  SetControlVisibility(gProtocolPanelName, "TResult5OK",  0);
+  SetControlVisibility(gProtocolPanelName, "TResult5NOK", 0);
+  SetControlVisibility(gProtocolPanelName, "TResult6OK",  0);
+  SetControlVisibility(gProtocolPanelName, "TResult6NOK", 0);
+  SetControlVisibility(gProtocolPanelName, "TResult7OK",  0);
+  SetControlVisibility(gProtocolPanelName, "TResult7NOK", 0);
+  SetControlVisibility(gProtocolPanelName, "TResult8OK",  0);
+  SetControlVisibility(gProtocolPanelName, "TResult8NOK", 0);
+  SetControlVisibility(gProtocolPanelName, "TResult9OK",  0);
+  SetControlVisibility(gProtocolPanelName, "TResult9NOK", 0);
+  SetControlVisibility(gProtocolPanelName, "TResult10OK",  0);
+  SetControlVisibility(gProtocolPanelName, "TResult10NOK", 0);
+  SetControlVisibility(gProtocolPanelName, "TResult11OK",  0);
+  SetControlVisibility(gProtocolPanelName, "TResult11NOK", 0); 
+  
+  SetControlVisibility(gProtocolPanelName, "CertAuthOK", 0);
+  SetControlVisibility(gProtocolPanelName, "CertAuthNOK", 0);
+  SetControlVisibility(gProtocolPanelName, "CertUpdateOK", 0);
+  SetControlVisibility(gProtocolPanelName, "CertUpdateNOK", 0);
+  SetControlVisibility(gProtocolPanelName, "CertChargeParOK", 0);
+  SetControlVisibility(gProtocolPanelName, "CertChargeParNOK", 0);
+  SetControlVisibility(gProtocolPanelName, "CertChargeLoopOK", 0);
+  SetControlVisibility(gProtocolPanelName, "CertChargeLoopNOK", 0);
+}

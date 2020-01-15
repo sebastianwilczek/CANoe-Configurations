@@ -1,0 +1,1261 @@
+/*@!Encoding:1252*/
+/*
+ * Version 2.0
+ *
+ * Copyright 2019 - Vector Informatik GmbH
+ *
+ * This CAPL model simulates a File Server client ECU (ISO11783 Part 13)
+ *
+*/
+
+includes
+{
+  #include "..\CAPL\FileServerCommon.cin"
+}
+
+variables
+{
+  //
+  // Global variables for communication
+  //
+  int   gECUAddress   = kNullAddr;         // Address of the WSM
+  char  gECULabel[32] = "FSBrowser";        // Label for output to write window
+  byte 	gNewDir = 0;
+
+  // File Server access variables
+  BYTE        FS_Address      = kNullAddr; // Address of the File Server ECU
+  LONG        FS_FileHandle   = 0;         // Handle of the opened file or directory
+  DWORD       FS_LastStatus   = 0;         // Time of last received status message
+  BYTE        FS_TAN          = 0;         // Transaction number
+  msTimer     FS_MaintainTimer;            // Timer for maintenance message
+  msTimer     FS_TimeoutTimer;             // Timer for File Server observation
+  pg FSC      FS_Response = { DLC = 1785 };// Last received File Server Client command
+  pg CFS      FS_Request  = { DLC = 1785 };// Last sent File Server message
+  char        FS_PendingMoveFile_Name[100];
+  int         FS_PendingFileIndex;
+
+  char        gPanelName[32] = "FS Client - Browser"; // Title of the panel
+  char        gFileNames[100][14];                    // File names
+  dword       gFileInfo[100][8];                      // File attributes, size, date & time
+  long        gFileCount     = 0;                     // Number of files in gFileName and gFileInfo
+  long        gScrollPos     = 0;
+
+  byte        gSupportedFSVersion = kVersionSecondIS;
+  byte        gFSRequestState     = kNoRequestInProcess;  // State of the request
+  int         gDbgLevel           = kDbgWarning; // Set debug level for output to write window
+  
+  msTimer     tmrDelayInit;
+}
+
+on preStart
+{
+  setWriteDbgLevel( gDbgLevel );
+
+  EcuInit(); // initialize global variables
+  InitPanel();
+}
+
+InitPanel()
+{
+    sysSetVariableInt(sysvar::FileServerBrowser::Line1, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::FileName1, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileSize1, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime1, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileIcon1, 0 );
+    enableControl( gPanelName, "Open1", 0 );
+    enableControl( gPanelName, "Delete1", 0 );
+    enableControl( gPanelName, "Rename1", 0 );
+
+    sysSetVariableInt(sysvar::FileServerBrowser::Line2, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::FileName2, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileSize2, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime2, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileIcon2, 0 );
+    enableControl( gPanelName, "Open2", 0 );
+    enableControl( gPanelName, "Delete2", 0 );
+    enableControl( gPanelName, "Rename2", 0 );
+
+    sysSetVariableInt(sysvar::FileServerBrowser::Line3, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::FileName3, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileSize3, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime3, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileIcon3, 0 );
+    enableControl( gPanelName, "Open3", 0 );
+    enableControl( gPanelName, "Delete3", 0 );
+    enableControl( gPanelName, "Rename3", 0 );
+
+    sysSetVariableInt(sysvar::FileServerBrowser::Line4, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::FileName4, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileSize4, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime4, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileIcon4, 0 );
+    enableControl( gPanelName, "Open4", 0 );
+    enableControl( gPanelName, "Delete4", 0 );
+    enableControl( gPanelName, "Rename4", 0 );
+
+    sysSetVariableInt(sysvar::FileServerBrowser::Line5, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::FileName5, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileSize5, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime5, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileIcon5, 0 );
+    enableControl( gPanelName, "Open5", 0 );
+    enableControl( gPanelName, "Delete5", 0 );
+    enableControl( gPanelName, "Rename5", 0 );
+}
+
+on start
+{
+  EcuStartUp();
+//  setTimer(tmrDelayInit, 1000);
+}
+
+on timer tmrDelayInit
+{
+  fsReadDirectoryContent( "~/", 0 );
+}
+
+// File Server Maintenance Timer
+on timer FS_MaintainTimer
+{
+  if ((Iso11783IL_GetState() == kActive) && (FS_Address != kNullAddr)) 
+  {
+    if (FS_LastStatus + 600000 > timeNow()) // timeout after 6 sec.
+    { 
+      FS_Request.sa = Iso11783IL_GetAddress();
+      FS_Request.da = FS_Address;
+      FS_Request.dlc = 8;
+      FS_Request.FSClientCommand = CFS.FSClientCommand::ConnectionMaintenance;
+      FS_Request.CM_VersionNumber = gSupportedFSVersion;
+      FS_Request.word(2)  = 0xFFFF;
+      FS_Request.dword(4) = 0xFFFFFFFF;
+      output(FS_Request);
+
+      setTimer( FS_MaintainTimer, 2000 );
+    }
+    else 
+    {
+      // missing Status message from File Server for more than 6 seconds
+      FS_Address      = kNullAddr;
+      gFSRequestState = kNoRequestInProcess; 
+      cancelTimer( FS_TimeoutTimer );
+      
+      writeDbgLevel( kDbgInfo, "<%s> Status message of File Server is missing for more than 6 seconds.");          
+    }
+  }
+  else if (Iso11783IL_GetState() == kClaiming)
+  {
+    setTimer( FS_MaintainTimer, 10 );    
+  }
+}
+
+// Timout timer for File Server requests
+on timer FS_TimeoutTimer
+{
+  // No response from the File Server received.
+  // Abort the current request.
+
+  gFSRequestState = kNoRequestInProcess;
+
+  panelUpdateState();
+}
+
+// Client to File Server message
+on pg CFS
+{
+  if ((this.sa == Iso11783IL_GetAddress()) && (this.dir == Tx)) // Message sent by this client
+  {
+    // set request state but ignore maintenance message
+    if (this.byte(0) != CFS.FSClientCommand::ConnectionMaintenance) 
+    {
+      gFSRequestState = kWaitingForResponse;
+    }
+  }
+}
+
+// File Server to Client message
+on pg FSC
+{
+  if (this.da == Iso11783IL_GetAddress())
+  {
+    FS_Response = this;
+    fsOnResponse();
+  }
+  else if (this.da == kGlobalAddr)
+  {
+    if (this.byte(0) == FSC.FSServerCommand::FileServerStatus) 
+    {
+      if (this.SA != FS_Address) 
+      {
+        FS_Address = this.SA;
+        cancelTimer( FS_MaintainTimer );
+        cancelTimer( FS_TimeoutTimer );
+        if (Iso11783IL_GetState() == kActive) 
+        {
+          setTimer( FS_MaintainTimer, 1 );
+        }
+      }
+      FS_LastStatus = timeNow();
+    }
+  }
+}
+
+// Open directory in line 1
+on sysvar sysvar::FileServerBrowser::Show1
+{
+  if (@this) 
+  {
+    OpenDirectory(0);
+  }
+}
+
+// Open directory in line 2
+on sysvar sysvar::FileServerBrowser::Show2
+{
+  if (@this) 
+  {
+    OpenDirectory(1);
+  }
+}
+
+// Open directory in line 3
+on sysvar sysvar::FileServerBrowser::Show3
+{
+  if (@this) 
+  {
+    OpenDirectory(2);
+  }
+}
+
+// Open directory in line 4
+on sysvar sysvar::FileServerBrowser::Show4
+{
+  if (@this) 
+  {
+    OpenDirectory(3);
+  }
+}
+
+// Open directory in line 5
+on sysvar sysvar::FileServerBrowser::Show5
+{
+  if (@this) 
+  {
+    OpenDirectory(4);
+  }
+}
+
+// Rename file or  directory in line 1
+on sysvar sysvar::FileServerBrowser::Rename1
+{
+  if (@this) 
+  {
+    RenameFile(0);
+  }
+}
+
+// Rename file or  directory in line 2
+on sysvar sysvar::FileServerBrowser::Rename2
+{
+  if (@this) 
+  {
+    RenameFile(1);
+  }
+}
+
+// Rename file or  directory in line 3
+on sysvar sysvar::FileServerBrowser::Rename3
+{
+  if (@this) 
+  {
+    RenameFile(2);
+  }
+}
+
+// Rename file or  directory in line 4
+on sysvar sysvar::FileServerBrowser::Rename4
+{
+  if (@this) 
+  {
+    RenameFile(3);
+  }
+}
+
+// Rename file or  directory in line 5
+on sysvar sysvar::FileServerBrowser::Rename5
+{
+  if (@this) 
+  {
+    RenameFile(4);
+  }
+}
+
+// Delete file or directory in line 1
+on sysvar sysvar::FileServerBrowser::Delete1
+{
+  if (@this) 
+  {
+    DeleteFile(0);
+  }
+}
+
+// Delete file or directory in line 2
+on sysvar sysvar::FileServerBrowser::Delete2
+{
+  if (@this) 
+  {
+    DeleteFile(1);
+  }
+}
+
+// Delete file or directory in line 3
+on sysvar sysvar::FileServerBrowser::Delete3
+{
+  if (@this) 
+  {
+    DeleteFile(2);
+  }
+}
+
+// Delete file or directory in line 4
+on sysvar sysvar::FileServerBrowser::Delete4
+{
+  if (@this) 
+  {
+    DeleteFile(3);
+  }
+}
+
+// Delete file or directory in line 5
+on sysvar sysvar::FileServerBrowser::Delete5
+{
+  if (@this) 
+  {
+    DeleteFile(4);
+  }
+}
+
+// Read a directory on the File Server
+on sysvar sysvar::FileServerBrowser::GetDirectory
+{
+  char path[kMaxPath];
+
+  if (@this) 
+  {
+    sysGetVariableString(sysvar::FileServerBrowser::CurrentDirectory, path, elCount(path));
+    fsReadDirectoryContent( path, 0 );
+  } 
+}
+
+// Scroll list up 
+on sysvar sysvar::FileServerBrowser::ScrollUp
+{
+  if (@this) 
+  {
+    if (gScrollPos > 0) 
+    {
+      gScrollPos--;
+      panelUpdateList();
+      panelUpdateState();
+    }
+  }
+}
+
+// Scroll list dowm 
+on sysvar sysvar::FileServerBrowser::ScrollDown
+{
+  if (@this) 
+  {
+    if (gScrollPos < gFileCount-5) 
+    {
+      gScrollPos++;
+      panelUpdateList();
+      panelUpdateState();
+    }
+  }
+}
+
+// Read a directory on the File Server
+on sysvar sysvar::FileServerBrowser::DirUp
+{
+  char path[kMaxPath];
+
+  if (@this) 
+  {
+    fsReadDirectoryContent( "..", 0 );
+  }
+}
+
+/*
+ * Create a new directory on the File Server
+ */
+on sysvar sysvar::FileServerBrowser::NewDirectory
+{
+  char path[kMaxPath];
+  char length;
+
+  if (@this) 
+  {
+    sysGetVariableString(sysvar::FileServerBrowser::CurrentDirectory, path, elCount(path));
+
+    length = strlen(path);
+
+    if (path[length-1] != 92) {
+      path[length] = 92;
+      path[length+1] = 0;
+    }
+
+    fsNewDirectory( path, 0 );
+  }
+}
+
+
+///////////////////////////////////////////////////////////////
+// Callbacks
+///////////////////////////////////////////////////////////////
+
+// A commanded address PG was received.
+long Iso11783IL_OnCA(long newAddress)
+{  
+  return 1;
+}
+
+// An error is reported
+void Iso11783IL_OnError( LONG errorCode, LONG param )
+{
+  writeDbgLevel( kDbgError, "<%s> ERROR %i", gECULabel, errorCode );
+}
+
+// Internal state of the client has been changed
+void Iso11783IL_OnChangedState( long state )
+{ 
+  switch (state)
+  {
+    case kInitialized:
+      break;
+    case kClaiming:
+      break;
+    case kActive:
+      writeDbgLevel( kDbgInfo, "<%s> online with address %d", gECULabel, Iso11783IL_GetAddress() );
+      if (FS_Address != kNullAddr)
+      {
+        // send maintenance message if server status already has been received
+        setTimer( FS_MaintainTimer, 1 );
+      }
+      break;
+    case kStopped:
+      cancelTimer( FS_MaintainTimer );
+      cancelTimer( FS_TimeoutTimer );
+      FS_Address = kNullAddr;
+      break;
+    case kSuspended:
+      break;
+    default:
+      break;
+  }
+}
+
+///////////////////////////////////////////////////////////////
+// Functions
+///////////////////////////////////////////////////////////////
+
+// Initialize all global variables in this function
+void EcuInit()
+{
+  FS_Address = kNullAddr;
+}
+
+// Call this function to connect the node to the bus
+void EcuStartUp()
+{
+  long result;
+  result = Iso11783IL_ControlStart();
+  if (result != kSuccess)
+  {
+    writeDbgLevel( kDbgInfo, "<%s> function 'EcuStartUp' failed (error %i)", gECULabel, result);
+  }
+
+	sysSetVariableString(sysvar::FileServerBrowser::CurrentDirectory, "~\\");
+}
+
+// Call this function to disconnect the node from the bus
+void EcuShutDown()
+{
+  Iso11783IL_ControlStop();
+  cancelTimer( FS_MaintainTimer );
+}
+
+void DeleteFile(byte lineIndex)
+{
+  char path[kMaxPath];
+  char delPath[kMaxPath];
+  long i;
+
+  i = gScrollPos + lineIndex;
+
+  if (i >= gFileCount) return; // invalid index
+  FS_PendingFileIndex = i;
+  
+  sysGetVariableString(sysvar::FileServerBrowser::CurrentDirectory, path, elcount(path));
+
+  if (strncmp( path, "\\", kMaxPath) == 0) {
+    snprintf( delPath, elCount(delPath), "\\%s", gFileNames[i] );
+  }
+  else {
+    snprintf( delPath, elCount(delPath), "%s\\%s", path, gFileNames[i] );
+  }
+
+  if (gFileInfo[i][0] & 0x10) 
+  {
+    fsDeleteFile( delPath, 0 );
+  }
+  else 
+  {
+    fsDeleteFile( delPath, 0 );
+  }
+}
+
+void OpenDirectory(byte lineIndex)
+{
+  char path[kMaxPath];
+  char newPath[kMaxPath];
+  long i;
+
+  i = gScrollPos + lineIndex;
+
+  if (i > gFileCount) return; // invalid index
+  
+  sysGetVariableString(sysvar::FileServerBrowser::CurrentDirectory, path, elcount(path));
+  if (strncmp( path, "\\", kMaxPath) == 0) 
+  {
+    snprintf( newPath, elCount(newPath), "\\%s", gFileNames[i] );
+  }
+  else 
+  {
+    snprintf( newPath, elCount(newPath), "%s\\%s", path, gFileNames[i] );
+  }
+  fsReadDirectoryContent( newPath, 0 );
+}
+
+void RenameFile(byte lineIndex)
+{
+  char path[kMaxPath];
+  char renamePath[kMaxPath];
+  char newPath[kMaxPath];
+  char newFilename[14];
+  long i;
+
+  i = gScrollPos + lineIndex;
+
+  if (i < gFileCount) 
+  {
+    sysGetVariableString(sysvar::FileServerBrowser::CurrentDirectory, path, elcount(path) );
+    switch (lineIndex)
+    {
+      case 0: sysGetVariableString(sysvar::FileServerBrowser::FileName1, newFilename, elcount(newFilename) ); break;
+      case 1: sysGetVariableString(sysvar::FileServerBrowser::FileName2, newFilename, elcount(newFilename) ); break;
+      case 2: sysGetVariableString(sysvar::FileServerBrowser::FileName3, newFilename, elcount(newFilename) ); break;
+      case 3: sysGetVariableString(sysvar::FileServerBrowser::FileName4, newFilename, elcount(newFilename) ); break;
+      case 4: sysGetVariableString(sysvar::FileServerBrowser::FileName5, newFilename, elcount(newFilename) ); break;
+      default: return; // unexpected index
+    }
+
+    if (strncmp( path, "\\", kMaxPath) == 0) 
+    {
+      snprintf( renamePath, elCount(renamePath), "\\%s", gFileNames[i] );
+      snprintf( newPath, elCount(newPath), "\\%s", newFilename );
+    }
+    else 
+    {
+      snprintf( renamePath, elCount(renamePath), "%s\\%s", path, gFileNames[i] );
+      snprintf( newPath, elCount(newPath), "%s\\%s", path, newFilename );
+    }
+
+    FS_PendingFileIndex = i;
+    snprintf(FS_PendingMoveFile_Name, elCount(FS_PendingMoveFile_Name), newFilename);
+    
+    fsMoveFile(renamePath, newPath, 0);
+  }  
+}
+
+// Update the state of the controls
+void panelUpdateState()
+{
+  int buttonEnable;
+
+  buttonEnable = (gFSRequestState == kNoRequestInProcess) ? 1 : 0;
+
+  enableControl( gPanelName, "RefreshButton", buttonEnable );
+  enableControl( gPanelName, "DirUpButton", buttonEnable );
+
+  enableControl( gPanelName, "UpButton", buttonEnable && (gScrollPos > 0) );
+  enableControl( gPanelName, "DownButton", buttonEnable && (gScrollPos < gFileCount-5) );
+}
+
+// Update file list
+void panelUpdateList()
+{
+  long i;
+  char text[32];
+
+  i = gScrollPos;
+
+  // Line 1
+  if (i < gFileCount) 
+  {
+    sysSetVariableInt(sysvar::FileServerBrowser::Line1, i+1 );
+    sysSetVariableString(sysvar::FileServerBrowser::FileName1, gFileNames[i] );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileSize1, gFileInfo[i][7] );
+
+    snprintf( text, elCount(text), "%d-%d-%d %.2d:%.2d:%.2d",
+              gFileInfo[i][1], gFileInfo[i][2], gFileInfo[i][3], 
+              gFileInfo[i][4], gFileInfo[i][5], gFileInfo[i][6] );
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime1, text );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileIcon1, (gFileInfo[i][0] & 0x10) ? 2 : 1 );
+    enableControl( gPanelName, "Open1", (gFileInfo[i][0] & 0x10) ? 1 : 0 );
+    enableControl( gPanelName, "Delete1", 1 );
+    enableControl( gPanelName, "Rename1", 1 );
+  }
+  else 
+  {
+    sysSetVariableInt(sysvar::FileServerBrowser::Line1, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::FileName1, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileSize1, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime1, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileIcon1, 0 );
+    enableControl( gPanelName, "Open1", 0 );
+    enableControl( gPanelName, "Delete1", 0 );
+    enableControl( gPanelName, "Rename1", 0 );
+  }
+
+  // Line 2
+  i++;
+  if (i < gFileCount) 
+  {
+    sysSetVariableInt(sysvar::FileServerBrowser::Line2, i+1 );
+    sysSetVariableString(sysvar::FileServerBrowser::FileName2, gFileNames[i] );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileSize2, gFileInfo[i][7] );
+
+    snprintf( text, elCount(text), "%d-%d-%d %.2d:%.2d:%.2d",
+              gFileInfo[i][1], gFileInfo[i][2], gFileInfo[i][3], 
+              gFileInfo[i][4], gFileInfo[i][5], gFileInfo[i][6] );
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime2, text );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileIcon2, (gFileInfo[i][0] & 0x10) ? 2 : 1 );
+    enableControl( gPanelName, "Open2", (gFileInfo[i][0] & 0x10) ? 1 : 0 );
+    enableControl( gPanelName, "Delete2", 1 );
+    enableControl( gPanelName, "Rename2", 1 );
+  }
+  else 
+  {
+    sysSetVariableInt(sysvar::FileServerBrowser::Line2, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::FileName2, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileSize2, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime2, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileIcon2, 0 );
+    enableControl( gPanelName, "Open2", 0 );
+    enableControl( gPanelName, "Delete2", 0 );
+    enableControl( gPanelName, "Rename2", 0 );
+  }
+
+  // Line 3
+  i++;
+  if (i < gFileCount) 
+  {
+    sysSetVariableInt(sysvar::FileServerBrowser::Line3, i+1 );
+    sysSetVariableString(sysvar::FileServerBrowser::FileName3, gFileNames[i] );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileSize3, gFileInfo[i][7] );
+
+    snprintf( text, elCount(text), "%d-%d-%d %.2d:%.2d:%.2d",
+              gFileInfo[i][1], gFileInfo[i][2], gFileInfo[i][3], 
+              gFileInfo[i][4], gFileInfo[i][5], gFileInfo[i][6] );
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime3, text );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileIcon3, (gFileInfo[i][0] & 0x10) ? 2 : 1 );
+    enableControl( gPanelName, "Open3", (gFileInfo[i][0] & 0x10) ? 1 : 0 );
+    enableControl( gPanelName, "Delete3", 1 );
+    enableControl( gPanelName, "Rename3", 1 );
+  }
+  else 
+  {
+    sysSetVariableInt(sysvar::FileServerBrowser::Line3, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::FileName3, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileSize3, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime3, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileIcon3, 0 );
+    enableControl( gPanelName, "Open3", 0 );
+    enableControl( gPanelName, "Delete3", 0 );
+    enableControl( gPanelName, "Rename3", 0 );
+  }
+
+  // Line 4
+  i++;
+  if (i < gFileCount) 
+  {
+    sysSetVariableInt(sysvar::FileServerBrowser::Line4, i+1 );
+    sysSetVariableString(sysvar::FileServerBrowser::FileName4, gFileNames[i] );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileSize4, gFileInfo[i][7] );
+
+    snprintf( text, elCount(text), "%d-%d-%d %.2d:%.2d:%.2d",
+              gFileInfo[i][1], gFileInfo[i][2], gFileInfo[i][3], 
+              gFileInfo[i][4], gFileInfo[i][5], gFileInfo[i][6] );
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime4, text );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileIcon4, (gFileInfo[i][0] & 0x10) ? 2 : 1 );
+    enableControl( gPanelName, "Open4", (gFileInfo[i][0] & 0x10) ? 1 : 0 );
+    enableControl( gPanelName, "Delete4", 1 );
+    enableControl( gPanelName, "Rename4", 1 );
+  }
+  else 
+  {
+    sysSetVariableInt(sysvar::FileServerBrowser::Line4, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::FileName4, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileSize4, 0 );
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime4, "" );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileIcon4, 0 );
+    enableControl( gPanelName, "Open4", 0 );
+    enableControl( gPanelName, "Delete4", 0 );
+    enableControl( gPanelName, "Rename4", 0 );
+  }
+
+  // Line 5
+  i++;
+  if (i < gFileCount) 
+  {
+    sysSetVariableInt(sysvar::FileServerBrowser::Line5, i+1 );
+    sysSetVariableString(sysvar::FileServerBrowser::FileName5, gFileNames[i] );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileSize5, gFileInfo[i][7] );
+
+    snprintf( text, elCount(text), "%d-%d-%d %.2d:%.2d:%.2d",
+              gFileInfo[i][1], gFileInfo[i][2], gFileInfo[i][3], 
+              gFileInfo[i][4], gFileInfo[i][5], gFileInfo[i][6] );
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime5, text );
+    sysSetVariableInt(sysvar::FileServerBrowser::FileIcon5, (gFileInfo[i][0] & 0x10) ? 2 : 1 );
+    enableControl( gPanelName, "Open5", (gFileInfo[i][0] & 0x10) ? 1 : 0 );
+    enableControl( gPanelName, "Delete5", 1 );
+    enableControl( gPanelName, "Rename5", 1 );
+  }
+  else 
+  {
+    @sysvar::FileServerBrowser::Line5 =0;
+    sysSetVariableString(sysvar::FileServerBrowser::FileName5, "" );
+    @sysvar::FileServerBrowser::FileSize5 = 0;
+    sysSetVariableString(sysvar::FileServerBrowser::DateTime5, "" );
+    @sysvar::FileServerBrowser::FileIcon5 = 0;
+    enableControl( gPanelName, "Open5", 0 );
+    enableControl( gPanelName, "Delete5", 0 );
+    enableControl( gPanelName, "Rename5", 0 );
+  }
+}
+
+/*
+ * Sends a Request to the File Server. The data is taken from
+ * the global RX_FSRequest variable.
+ *
+ * return - 1 = request was put to send queue
+ *          0 = a request is pending
+ */
+int fsSendRequest(pg CFS request)
+{
+  char txBuffer[1785];
+  long size;
+
+  if (gFSRequestState == kNoRequestInProcess) 
+  {
+    gFSRequestState = kRequestSending;
+ 
+    request.sa = Iso11783IL_GetAddress(); 
+    request.da = FS_Address;
+    if (request.dlc <8)
+    {
+      request.dlc = 8;
+    }
+    output(request);
+
+    setTimer( FS_TimeoutTimer, 1500 );
+    panelUpdateState();
+    return 1;
+  }
+  else 
+  {
+    return 0;
+  }
+}
+
+
+
+/*
+ * A response from the File Server was received.
+ */
+void fsOnResponse()
+{
+  char path[kMaxPath];
+  char data[200];
+  int i, fileIndex;
+
+  if (Iso11783IL_GetState() != kActive) return;
+
+  if (FS_Address == kNullAddr) 
+  {
+    return;
+  }
+
+  // check TAN
+  if (FS_Response.OF_TAN != FS_Request.OF_TAN) 
+  {
+    // wrong TAN, ignore it !
+    return;
+  }
+
+  // request complete
+  if ((gFSRequestState > kNoRequestInProcess) && (FS_Response.FSServerCommand == FS_Request.FSClientCommand)) 
+  {
+    cancelTimer( FS_TimeoutTimer );
+    gFSRequestState = kNoRequestInProcess; 
+  }
+
+  sysSetVariableString(sysvar::FileServerBrowser::ErrorText, "");
+
+  // dispatch command
+  switch(FS_Response.FSServerCommand) 
+  {
+    case kOpenFile:
+      if (FS_Response.OF_ErrorCode == 0) 
+      {
+        FS_FileHandle = FS_Response.OF_Handle;
+      }
+      else 
+      {
+        fsOnError(FS_Response.OF_ErrorCode);
+      }
+	  	if (gNewDir == 0)
+      {
+      	fsReadDirectoryContent( "", FS_Response.OF_ErrorCode );
+      }
+	  	if (gNewDir == 1)
+      {
+	  		gNewDir = 0;
+      }
+      break;
+    case kSeekFile:
+      if (FS_Response.SF_ErrorCode == 0) 
+      {
+      }
+      else 
+      {
+        fsOnError(FS_Response.SF_ErrorCode);
+      }
+      break;
+    case kReadFile:
+      if ((FS_Response.RF_ErrorCode == 0) || (FS_Response.RF_ErrorCode == 45)) 
+      {
+        fsReadDirectoryContent( "", FS_Response.RF_ErrorCode ); 
+      }
+      else 
+      {
+        fsOnError(FS_Response.RF_ErrorCode);
+      }
+      break;
+    case kWriteFile:
+      if (FS_Response.WF_ErrorCode == 0) 
+      {
+      }
+      else 
+      {
+        fsOnError(FS_Response.WF_ErrorCode);
+      }
+      break;
+    case kCloseFile:
+      fsReadDirectoryContent( "", FS_Response.CF_ErrorCode ); 
+      if (FS_Response.CF_ErrorCode == 0) 
+      {
+        FS_FileHandle = 0;
+      }
+      else 
+      {
+        fsOnError(FS_Response.CF_ErrorCode);
+      }
+      break;
+    case kMoveFile:
+      if (FS_Response.MF_ErrorCode == 0) 
+      {
+        for(i = 0; i < 14;i++)
+        {
+          gFileNames[FS_PendingFileIndex][i] = FS_PendingMoveFile_Name[i];
+          FS_PendingMoveFile_Name[i] = 0;
+        }
+        FS_PendingFileIndex = -1;
+        
+      }
+      else 
+      {
+        fsOnError(FS_Response.MF_ErrorCode);
+      }
+      break;
+    case kDeleteFile:
+      if (FS_Response.MF_ErrorCode == 0) 
+      {
+        if (FS_PendingFileIndex >= 0)
+        {
+          for(fileIndex = FS_PendingFileIndex; fileIndex < 99; fileIndex ++)
+          {
+            for(i = 0; i < 14;i++)
+            {
+              gFileNames[fileIndex][i] = gFileNames[fileIndex + 1][i];
+            }
+            for(i = 0; i < 8;i++)
+            {
+              gFileInfo[fileIndex][i] = gFileInfo[fileIndex + 1][i];
+            }
+          }
+          FS_PendingFileIndex = -1;
+          PanelUpdateList();
+        }
+      }
+      else 
+      {
+        fsOnError(FS_Response.MF_ErrorCode);
+      }
+      break;      
+    case kGetFileAttributes: // Get File Attribute
+      if (FS_Response.GA_ErrorCode == 0) 
+      {
+      }
+      else 
+      {
+        fsOnError(FS_Response.GA_ErrorCode);
+      }
+      break;
+    case kSetFileAttributes: // Set File Attribute
+      if (FS_Response.SA_ErrorCode == 0) 
+      {
+      }
+      else 
+      {
+        fsOnError(FS_Response.SA_ErrorCode);
+      }
+      break;
+    case kGetFileDateTime: // Get Date and Time
+      if (FS_Response.FDT_ErrorCode == 0) 
+      {
+      }
+      else 
+      {
+        fsOnError(FS_Response.FDT_ErrorCode);
+      }
+      break;
+    case kGetCurrentDirectory:
+      if (FS_Response.GCD_ErrorCode == 0) 
+      {
+        fsReadDirectoryContent( "", FS_Response.GCD_ErrorCode ); 
+      }
+      else 
+      {
+        fsOnError(FS_Response.GCD_ErrorCode);
+      }
+      break;
+    case kChangeCurrentDirectory:
+      fsReadDirectoryContent( "", FS_Response.CCD_ErrorCode ); 
+      if (FS_Response.CCD_ErrorCode != 0) 
+      {
+        fsOnError(FS_Response.CCD_ErrorCode);
+      }
+      break;
+    default:   // invalid command
+      break;
+  }
+
+  panelUpdateState();
+}
+
+/*
+ * Read directory content On the File Server
+ *
+ * return - 1 = success
+ * path   - Path of the new current directory
+ */
+int fsReadDirectoryContent( char path[], BYTE status )
+{
+  long i, length;
+  long state = 0;
+  char dirPath[kMaxPath];
+  long offset;
+  long maxentries = 0;
+  
+  if (gFSRequestState == kNoRequestInProcess) 
+  {
+    switch(state) 
+    {
+      case 0:
+        length = strlen( path );
+
+        FS_Request.FSClientCommand     = 0x11; // change current directory
+        FS_Request.CCD_TAN             = ++FS_TAN;
+		    FS_Request.CCD_PathName        = length;
+        FS_Request.DLC                 = 4 + length;
+
+        for( i = 0; i < length; i++ ) {
+          FS_Request.byte(4+i) = path[i];
+        }
+        state = 1;
+
+        return fsSendRequest(FS_Request);
+      case 1:
+        if (status != 0) 
+        {
+          state = 0;
+          return 0;
+        }
+        else 
+        {
+          FS_Request.FSClientCommand = 0x10;
+          FS_Request.GCD_TAN         = ++FS_TAN;
+          FS_Request.DLC             = 2;
+          state = 2;
+        }
+        return fsSendRequest(FS_Request);
+      case 2:
+        if (status != 0) 
+        {
+          state = 0;
+          return 0;
+        }
+        else 
+        {
+          // set directory
+          for( i = 13; i < FS_Response.DLC; i++ ) 
+          {
+            dirPath[i-13] = FS_Response.byte(i);
+          }
+          dirPath[i-13] = 0;
+          sysSetVariableString(sysvar::FileServerBrowser::CurrentDirectory, dirPath );
+
+          // open directory
+          FS_Request.FSClientCommand = 0x20; // open directory
+
+  		    FS_Request.OF_TAN                 = ++FS_TAN;
+      	  FS_Request.OF_FlagExclusiveAccess = 0;
+      	  FS_Request.OF_FlagAppend          = 0;
+      	  FS_Request.OF_FlagCreateNew       = 0;
+  		    FS_Request.OF_FlagReadWrite		    = 3;	// open directory for reading
+      	  FS_Request.OF_PathName            = 1;
+
+          FS_Request.DLC     = 5 + 1;
+          FS_Request.byte(5) = '.';
+          state      = 3;
+          gFileCount = 0;
+        }
+        return fsSendRequest(FS_Request);
+      case 3:
+        if (FS_Response.FSServerCommand == 0x22) 
+        {
+		      offset = 5;
+		      maxentries = FS_Response.RF_Count;
+          for(gFileCount = 0; gFileCount <  maxentries; gFileCount++) 
+          {
+		  	    for( i = 0; (i < FS_Response.byte(offset)); i++ ) {
+            	gFileNames[gFileCount][i] = FS_Response.byte(offset+1+i);
+          	}
+  		      gFileNames[gFileCount][i] = 0;
+  		      gFileInfo[gFileCount][0] 	= FS_Response.byte(offset+i+1);
+      		  gFileInfo[gFileCount][3] 	= FS_Response.byte(offset+i+2) & 0x1F;
+      		  gFileInfo[gFileCount][2] 	= ((FS_Response.byte(offset+i+2) & 0xE0) >> 5) + ((FS_Response.byte(offset+i+3) & 0x01) << 3);
+      		  gFileInfo[gFileCount][1] 	= ((FS_Response.byte(offset+i+3) & 0xFE) >> 1) + 1980;
+		  
+      		  gFileInfo[gFileCount][6] 	= (FS_Response.byte(offset+i+4) & 0x1F) >> 1;
+      		  gFileInfo[gFileCount][5] 	= ((FS_Response.byte(offset+i+4) & 0xE0) >> 5) + ((FS_Response.byte(offset+i+5) & 0x07) << 3);
+      		  gFileInfo[gFileCount][4] 	= ((FS_Response.byte(offset+i+5) & 0xF8) >> 3);
+
+      		  gFileInfo[gFileCount][7] 	= FS_Response.byte(offset+i+6) + (FS_Response.byte(offset+i+7) << 8) + (FS_Response.byte(offset+i+8) << 16) + (FS_Response.byte(offset+i+9) << 24);
+      		  offset += 10 + FS_Response.byte(offset);
+		      }
+		
+          gFileCount++;
+        }
+
+        if ((status != 45) && (status != 0) && (gFileCount == 0)) 
+        {
+          state = 0;
+          return 0;
+        }
+        else if (status != 0) 
+        {
+          FS_Request.FSClientCommand = 0x25; // close file
+          FS_Request.CF_TAN         = ++FS_TAN;
+          FS_Request.CF_Handle      = FS_FileHandle;
+          FS_Request.DLC            = 3;
+          state = 4;
+        }
+
+		    gFileCount--;
+
+        if ((FS_Request.FSClientCommand == 0x20)) {
+          FS_Request.FSClientCommand = 0x22; // read directory (file)
+          FS_Request.RF_TAN          = ++FS_TAN;
+          FS_Request.RF_Handle       = FS_FileHandle;
+		      FS_Request.RF_Count		     = 100;
+          FS_Request.DLC             = 6;
+          FS_Request.RF_ReportHiddenFiles = 0;
+        }
+        else 
+        {
+          FS_Request.FSClientCommand = 0x24; // close file
+          FS_Request.CF_TAN          = ++FS_TAN;
+          FS_Request.CF_Handle       = FS_FileHandle;
+          FS_Request.DLC             = 3;
+          state = 4;
+        }
+        return fsSendRequest(FS_Request);
+      case 4:
+        state      = 0;
+        gScrollPos = 0;
+        panelUpdateList();
+        return 1;
+    }
+    return 0;
+  }
+  else 
+  {
+    return 0;
+  }
+}
+
+
+/*
+ * Create a new directory on the File Server
+ *
+ * return - 1 = success
+ * path   - Path of the new directory
+ * mode   - Mode of the new directory
+ */
+int fsNewDirectory( char path[], BYTE mode )
+{
+  long i, length;
+
+  if (gFSRequestState == kNoRequestInProcess) 
+  {
+    length = strlen( path );
+
+    FS_Request.FSClientCommand 				= 0x20; // Open file with path set to directory
+    FS_Request.OF_TAN          				= ++FS_TAN;
+		FS_Request.OF_FlagExclusiveAccess = 0;
+		FS_Request.OF_FlagAppend  			  = 0;
+		FS_Request.OF_FlagCreateNew   		= 1;  // create new
+		FS_Request.OF_FlagReadWrite				= 3;	// open directory for reading
+		FS_Request.OF_PathName            = length;
+    FS_Request.DLC             				= 5 + length;
+
+    for( i = 0; i < length; i++ ) {
+      FS_Request.byte(5+i) = path[i];
+    }
+
+		gNewDir = 1;
+    return fsSendRequest(FS_Request);
+  }
+  else {
+    return 0;
+  }
+}
+
+/*
+ * Move / Delete / Copy file on the File Server
+ *
+ * return - 1 = success
+ * path   - Path of the file
+ */
+int fsMoveFile( char srcpath[], char destpath[], BYTE mode)
+{
+  long i, l, srclength, destlength;
+
+  if (gFSRequestState == kNoRequestInProcess) 
+  {
+    srclength = strlen( srcpath );
+    destlength = strlen( destpath );
+
+    FS_Request.FSClientCommand 							= 0x30; // move file
+    FS_Request.MF_TAN          							= ++FS_TAN;
+    FS_Request.MF_MoveModeCopy 							= (mode & 0x01);
+    FS_Request.MF_MoveModeForce 						= ((mode & 0x02) >> 1);
+    FS_Request.MF_MoveModeRecursive 				= ((mode & 0x04) >> 2);
+    FS_Request.MF_SourcePathNameLength 			= srclength;
+    FS_Request.MF_DestinationPathNameLength = destlength; // delete file
+    FS_Request.DLC             							= 7 + srclength + destlength;
+
+    for( i = 0; i < srclength; i++ ) {
+      FS_Request.byte(7+i) = srcpath[i];
+    }
+
+    for (l = 0; l  < destlength; l++) {
+      FS_Request.byte(7+i+l) = destpath[l];
+    }
+    return fsSendRequest(FS_Request);
+  }
+  else {
+    return 0;
+  }
+}
+
+/*
+ * Move / Delete / Copy file on the File Server
+ *
+ * return - 1 = success
+ * path   - Path of the file
+ */
+int fsDeleteFile( char path[], BYTE mode)
+{
+  long i, length;
+
+  if (gFSRequestState == kNoRequestInProcess) 
+  {
+    length = strlen( path );
+
+    FS_Request.FSClientCommand 				= 0x31; // delete file
+    FS_Request.DF_TAN          				= ++FS_TAN;
+    FS_Request.DF_DeleteMode          = (mode & 0x01);
+    FS_Request.DF_DeleteModeForce 		= ((mode & 0x02) >> 1);
+    FS_Request.DF_DeleteModeRecursive = ((mode & 0x04) >> 2);
+    FS_Request.DF_PathName 		        = length;
+    FS_Request.DLC             				= 5 + length;
+
+    for( i = 0; i < length; i++ ) {
+      FS_Request.byte(5+i) = path[i];
+    }
+    
+    return fsSendRequest(FS_Request);
+  }
+  else {
+    return 0;
+  }
+}
+
+void fsOnError( BYTE status)
+{
+  char text[200];
+  if (status != 0) 
+  {
+    switch(FS_Response.OF_ErrorCode) 
+    {
+      case 1: snprintf( text, elCount(text), "Access Denied (0x%x)"                     , status ); break;
+      case 2: snprintf( text, elCount(text), "Invalid Access (0x%x)"                    , status ); break;
+      case 3: snprintf( text, elCount(text), "Too many files open (0x%x)"               , status ); break;
+      case 4: snprintf( text, elCount(text), "File, path or volume not found (0x%x)"    , status ); break;
+      case 5: snprintf( text, elCount(text), "Invalid Handle (0x%x)"                    , status ); break;
+      case 6: snprintf( text, elCount(text), "Invalid given source name (0x%x)"         , status ); break;
+      case 7: snprintf( text, elCount(text), "Invalid given destination name (0x%x)"    , status ); break;
+      case 8: snprintf( text, elCount(text), "Volume out of free space (0x%x)"          , status ); break;
+      case 9: snprintf( text, elCount(text), "Failure during a write operation (0x%x)"  , status ); break;
+      case 10:snprintf( text, elCount(text), "Media is not present  (0x%x)"             , status ); break;
+      case 11:snprintf( text, elCount(text), "Failure during a read operation (0x%x)"   , status ); break;
+      case 12:snprintf( text, elCount(text), "Function not supported (0x%x)"            , status ); break;
+      case 13:snprintf( text, elCount(text), "Volume is possibly not initialized (0x%x)", status ); break;
+      case 42:snprintf( text, elCount(text), "Invalid request length (0x%x)"            , status ); break;
+      case 43:snprintf( text, elCount(text), "Out of memory (0x%x)"                     , status ); break;
+      case 44:snprintf( text, elCount(text), "Any other error (0x%x)"                   , status ); break;
+      case 45:snprintf( text, elCount(text), "End of file reached (0x%x)"               , status ); break;
+      default:snprintf( text, elCount(text), "File Server Error, status 0x%x"           , status ); break;
+    }
+    sysSetVariableString(sysvar::FileServerBrowser::ErrorText, text);
+    panelUpdateState();
+    return;
+  }
+}
+
+
+
+

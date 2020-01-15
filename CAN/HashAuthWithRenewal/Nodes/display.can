@@ -1,0 +1,137 @@
+/*@!Encoding:1252*/
+variables 
+{
+  const long kOFF = 0;
+  const long kON = 1;
+
+  int gDebugCounter = 0;
+  
+  int groupId = 1;
+  int counter = 0;
+  int keyCounter = 0;
+  int64 presharedKey = 84364362;
+  int64 generatedKey;
+}
+
+on preStart
+{
+  generatedKey = generateKey(presharedKey, 0);
+  write("ENGINE: First generated key: %d", generatedKey);
+}
+
+on start
+{
+  setwriteDbgLevel(0); // set DbgLevel = 1 to get more information in Write-Window 
+  write("Press key 1 to set DbgLevel = 1 for more information in the Write-Window");
+  write("Press key 0 to set DbgLevel = 0 for less information in the Write-Window");
+}
+
+on message BrakeState
+{
+  if(hash(this.BrakePressure) != this.Hash)
+  {
+    write("DISPLAY: Hash Unmatch. Potential compromised ECU"); 
+  } else {
+    counter++;
+    
+    // engine state received
+    if (this.BrakePressure > 0)
+    {
+      @sysvar::Lights::BrakeLight = 1;
+    } else {
+      @sysvar::Lights::BrakeLight = 0;
+    }
+  }
+}
+
+on message KeyRenew
+{
+  if(this.Counter == keyCounter+1)
+  {
+    if(keyRenewHash(generatedKey, this.RandomValue, keyCounter+1) == this.Hash)
+    {
+      keyCounter++;
+      generatedKey = generateKey(generatedKey, this.RandomValue);
+      write("DISPLAY: New generated key is %d", generatedKey);
+    } else {
+      write("DISPLAY: Key Renewal Hash mismatch, ignoring key renewal"); 
+    }
+  } else {
+    write("DISPLAY: Counter out of sync, ignoring key renewal"); 
+  }
+}
+
+on message LightState 
+{
+  gDebugCounter++;
+
+  if (this.dir == RX)
+  {
+    SetLightDsp(this.HeadLight,this.FlashLight);
+
+    if(gDebugCounter == 10)
+    {
+      writeDbgLevel(1,"LightState RX received by node %NODE_NAME%");
+      gDebugCounter = 0;
+    }    
+  }
+  else
+  {
+    if(gDebugCounter == 10)
+    {
+      writeDbgLevel(1,"Error: LightState TX received by node %NODE_NAME%"); 
+      gDebugCounter = 0; 
+    }
+  }
+}
+
+SetLightDsp (long headLight, long hazardFlasher)
+{
+  if(headLight == kON) 
+  {
+    if(hazardFlasher == kON) 
+    {
+      @sysvar::Lights::LightDisplay = 7;
+    } 
+    else if(hazardFlasher == kOFF) 
+    {
+      @sysvar::Lights::LightDisplay = 4;
+    }
+  }
+  else if(headLight == kOFF) 
+  {
+    if(hazardFlasher == kON)  
+    {
+      @sysvar::Lights::LightDisplay = 3;
+    } 
+    else if(hazardFlasher == kOFF) 
+    {
+      @sysvar::Lights::LightDisplay = 0; 
+    }
+  }
+}
+
+on key '0'
+{
+  setwriteDbgLevel(0);
+}
+
+on key '1'
+{
+  setwriteDbgLevel(1);
+}
+
+int64 hash(int64 data)
+{
+  return (groupId + generatedKey + counter + data) * 5325 % 16777216;
+}
+
+int64 keyRenewHash(int64 genKey, int64 rValue, int c)
+{
+  return (genKey + rValue + c) * 5325 % 16777216;
+}
+
+int64 generateKey(int64 previousKey, int64 randomValue)
+{
+  return (previousKey + randomValue + keyCounter) % 100000000;
+}

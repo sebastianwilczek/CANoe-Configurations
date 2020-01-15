@@ -1,0 +1,145 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "Baudrate.cin"
+}
+
+variables
+{
+  float gFlashingBaudRate = 500000; // this is the increased baud rate during flashing
+  char  gFlashpack[400] = "flashpacks\\demo.vflashpack";
+}
+
+void MainTest()
+{
+  // the baud rate is read out and saved before switching to the flashing-baud-rate
+  float testingBaudRate1;
+  float testingBaudRate2;
+
+  TestModuleTitle("vFlash Automation Demo: 'Sophisticated Use Case'");
+  TestModuleDescription("A simple example of how to use the 'Sophisticated Use Case' for flashing a flashpack.");
+
+  // increase baud rate for flashing (if necessary). Remember the old testing baud rate.
+  testingBaudRate1 = SetBaudRate(gFlashingBaudRate, 1);
+  testingBaudRate2 = SetBaudRate(gFlashingBaudRate, 2);
+
+  // Do the flashing
+  PerformanceOptimizedUseCase();
+
+  // Reset baud rate after flashing to the old testing baud rate (if necessary).
+  SetBaudRate(testingBaudRate1, 1);
+  SetBaudRate(testingBaudRate2, 2);
+}
+
+testcase PerformanceOptimizedUseCase()
+{
+  long result;
+
+  TestCaseTitle("PerformanceOptimizedUseCase", "PerformanceOptimizedUseCase flashing one flashpack step by step");
+
+  // Do the flashing (SophisticatedUseCase)
+  vFlashInitialize();
+  
+  testWaitForTextEvent("flashing done", 600000);
+}
+
+// Will be called when the vFlashGetLastErrorMessage() has been called
+void vFlashErrorMessage(char msg[])
+{
+  write(msg);
+}
+
+// Will be called when vFlash is initialized
+void vFlashInitCompleted(long statusCode)
+{
+  if (statusCode == 0)
+  {
+    vFlashLoad(gFlashpack);
+  }
+  else
+  {
+    testCaseFail();
+    vFlashGetLastErrorMessage();
+  }
+}
+
+// Will be called when project loading is completed
+void vFlashLoadCompleted(long statusCode)
+{
+  if (statusCode == 0)
+  {
+    //vFlashActivateNetwork();
+    vFlashStart();
+  }
+  else
+  {
+    testCaseFail();
+    vFlashGetLastErrorMessage();
+    vFlashDeinitialize();
+  }
+}
+
+// Will be called when the FlexRay Network is activated
+void vFlashNetworkActivated(long statusCode)
+{
+  if (statusCode == 0)
+  {
+    vFlashStart();
+  }
+  else
+  {
+    testCaseFail();
+    vFlashGetLastErrorMessage();
+    vFlashDeinitialize();
+  }
+}
+
+// Will be called when project unloading is completed
+void vFlashUnloadCompleted(long statusCode)
+{
+  if (statusCode == 0)
+  {
+    vFlashDeinitialize();
+  }
+  else
+  {
+    testCaseFail();
+    vFlashGetLastErrorMessage();
+    vFlashDeinitialize();
+  }
+}
+
+// Will be called when vFlash has been stopped manually
+void vFlashStopped(long statusCode)
+{
+  vFlashUnload();
+}
+
+// Will be called when vFlash is deinitialized
+void vFlashDeinitCompleted(long statusCode)
+{
+  TestSupplyTextEvent("flashing done");
+}
+
+// Will be called when the vFlash Status changed
+void vFlashStatusCallback(DWORD statusCode)
+{
+  if (statusCode == 0)
+  {
+    write("Flashing successfully finished");
+    vFlashUnload();
+  }
+  else
+  {
+    testCaseFail();
+    vFlashGetLastErrorMessage();
+    write("Flashing failed: %d", statusCode);
+    vFlashUnload();
+  }
+}
+
+// Will be called when the flash progress changed
+void vFlashProgressCallback(DWORD progressInPercent, DWORD remainingTimeInS)
+{
+  @vFlash::Progress = progressInPercent;
+}

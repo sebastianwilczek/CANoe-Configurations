@@ -1,0 +1,454 @@
+/*@!Encoding:1252*/
+/*@!Encoding:1252*/
+includes
+{
+  #include "RT_checks.cin"
+}
+
+// ==============================================================================================================
+// generic check for given requestable pgis are working.
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout (FAIL)
+// 3: PGI inconsistency (FAIL)
+void CTF_A03_COMBI_01_TO_03(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  char reportText[1024];
+  char errText[1024];
+  char text[1024];
+  dword timeout;
+  word respDest;
+  byte prio;
+  long n;
+  dword pgn;
+  byte ok;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  prio = gc_PRIO_DEFAULT;
+  timeout =  gc_RESP_TIMEOUT;
+  
+  // precondition. check pgis.
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(3, pgis)) return;
+  ok = 1;
+  for( long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG)) 
+    {
+      CT_STEP_PGI_CFG_ERROR(3, pgis[k], "requestable PG");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on error.
+  
+  n = pgis.size();
+  // start report looping over all given pgis.
+  CT_LOOP(-n);
+  for( long k: pgis )
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // BEGIN STEP
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X)...", src, src, pgn, pgn, dst, dst);
+    CT_STEP_BEGIN(-1, reportText);
+    
+    // do the request...
+    pgR.dlc = gc_J1939_PG_DLC_MAX;
+    if ( CT_Request_And_Await_Response(pgR, pgis[k], errText, src, dst, timeout, prio) != 0)
+    {
+      // requesting error
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errText, timeout);
+      
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+  }
+  
+}
+
+// ==============================================================================================================
+// functionality of the test A3 01 PGN
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout (FAIL)
+// 3: PGI inconsistency (FAIL)
+void CTF_A03_01_PGN(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CTF_A03_COMBI_01_TO_03(src, dst, pgis);
+}
+
+// ==============================================================================================================
+// functionality of the test A3 02 EDP
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout (FAIL)
+// 3: PGI inconsistency (FAIL)
+void CTF_A03_02_EDP(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CTF_A03_COMBI_01_TO_03(src, dst, pgis);
+}
+
+
+// ==============================================================================================================
+// functionality of the test A3 03 DP
+// FuncPath's:
+// 1: Expected Result (PASS)
+// 2: Timeout (FAIL)
+// 3: PGI inconsistency (FAIL)
+void CTF_A03_03_DP(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  CTF_A03_COMBI_01_TO_03(src, dst, pgis);
+}
+
+// ==============================================================================================================
+// functionality of the test A3 04 DLC
+// FuncPath's:
+// 1: Invalid DLC within a Request Message (FAIL)
+// 2: Invalid DLC (<>8) (FAIL)
+// 3: Expected Results (PASS)
+// 4: Timeout (FAIL)
+// 5: PGI inconsistency (FAIL)
+void CTF_A03_04_DLC(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  char reportText[1024];
+  char errText[1024];
+  char text[255];
+  char fn[255]="CTF_A03_04_DLC";
+  int64 ts;
+  dword msgPgn;
+  word i;
+  struct MsgBufEntry msg;
+  dword msgId;
+  byte ok;
+  word bi[long];
+  dword timeout;
+  byte prio;
+  dword pgn;
+  long n;
+
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // precondition. check pgis.
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  ok = 1;
+  for( long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k], gExpResp_PG)) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable PG");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on error.
+  
+  n = pgis.size();
+  
+  // start report looping over all given pgis.
+  CT_LOOP(-n);
+  for( long pk: pgis )
+  {
+    pgn = pgis[pk].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // BEGIN STEP
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X)...", src, src, pgn, pgn, dst, dst);
+    ts = CT_STEP_BEGIN(-1, reportText);
+    
+    // do the request...
+    pgR.dlc = gc_J1939_PG_DLC_MAX;
+    MsgBuf_StartRecording();
+    if ( CT_Request_And_Await_Response(pgR, pgis[pk], errText, src, dst, timeout, prio) == 0)
+    {
+      CT_STEP_END_PASS(0);
+      
+      // just wait some seconds to get some more messages
+      testWaitForTimeout(2*gc_RESP_TIMEOUT);
+      
+      // step 2/2
+      CT_STEP_BEGIN("Verify DUT DLC's...");
+      
+      MsgBuf_StopRecording();
+      
+      // for all messages in buffer from DUT (dst)
+      if ( CT_Find_All_In_MsgBuf(bi, ts, dst) )
+      {
+        ok = 1;
+        for ( long k: bi )
+        {
+          i=bi[k];
+          MsgBuf_Copy(msg, gMsgBuf[i]);
+          if (msg.isJ1939WideEvent) continue; // skip j1939 frames...
+          msgId = CT_GetId(msg);
+          msgPgn = CT_GetPGN(msg);
+          snprintf(text, elcount(text), "Verify T=%.6f, Msg=0x%.08X, PGN=%d(0x%.05X), DLC=%d", CT_Ns2Sec(msg.time_ns), msgId, msgPgn, msgPgn, msg.dlc);
+          CT_Info(@CT::DEBUG::CHECKS, fn, text);
+          if (msgPgn == gc_PGN_RQST)
+          {
+            // check if this message has a dlc of 3...
+            if (msg.dlc != 3)
+            {
+              // it's a REQUEST MESSAGE (the only one with dlc 3) but has no dlc of 3 ;-/
+              snprintf(errText, elcount(errText), "T=%.6f, Msg=0x%.08X, PGN=%d(0x%.05X): DLC=%d (expected %d). ", CT_Ns2Sec(msg.time_ns), msgId, msgPgn, msgPgn, msg.dlc, 3);
+              CT_STEP_END_FAIL(1, errText);
+              ok = 0;
+              return;
+            }
+          }
+          else
+          {
+            // it's a normal message. it has to be contain of dlc == 8.
+            if ( msg.dlc != 8 )
+            {
+              snprintf(errText, elcount(errText), "T=%.6f, Msg=0x%.08X, PGN=%d(0x%.05X): DLC=%d (expected %d). ", CT_Ns2Sec(msg.time_ns), msgId, msgPgn, msgPgn, msg.dlc, 8);
+              CT_STEP_END_FAIL(2, errText);
+              ok = 0;
+              return;
+            }
+          }
+        }
+        if (ok) CT_STEP_END_PASS(3);
+        
+      }
+    }
+    else
+    {
+      // requesting error
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(4, errText, timeout);
+    }
+    
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+  }  
+}
+
+// ==============================================================================================================
+// functionality of the test A3 05 DataByteOrder
+// FuncPath's:
+// 1: Expected Results (PASS)
+// 2: Wrong Databyte order (FAIL)
+// 3: Timeout (FAIL)
+void CTF_A03_05_DataByteOrder(byte srcReq, byte dstReq, byte srcResp, byte dstResp)
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  char reportText[1024];
+  char errText[1024];
+  dword timeout;
+  byte prio;
+  struct gPGAttrs pgi;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  timeout = gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // build up pgi for the address claim to request.
+  CT_GetPGI_AC(pgi);
+  
+  // ==================
+  // step 1/2
+  // ==================
+  snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests Address Claim PGN %d (0x%.05X) from  DUT %d (0x%.02X)...", srcReq, srcReq, gc_PGN_AC, gc_PGN_AC, dstReq, dstReq);
+  CT_STEP_BEGIN(-2, reportText);
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  if ( CT_Request_And_Await_Response_MiscNodes(pgR, pgi, errText, srcReq, dstReq, srcResp, dstResp, timeout, prio) == 0)
+  {
+    CT_STEP_END_PASS(0);
+    
+    // ==================
+    // step 2/2
+    // ==================
+    CT_STEP_BEGIN("Verify byte ordering (Device name in data bytes of the address claim response)...");
+    if (pgR.qword(0) == gDUT_DevName)
+    {
+      CT_STEP_END_PASS(1);
+    }
+    else
+    {
+      snprintf(errText, elcount(errText), "Data Bytes are 0x%llX (expected 0x%llX)", pgR.qword(0), gDUT_DevName);
+      CT_STEP_END_FAIL(2, errText);
+    }
+  }
+  else
+  {
+    // requesting error
+    CT_STEP_END_Failed_To_Detect_Requested_PGN(3, errText, timeout);
+  }  
+}
+
+// ==============================================================================================================
+// functionality of the test A3 06 DataPadding
+// FuncPath's:
+// 1: Transport Protocol with DLC=8 used (FAIL)
+// 2: Expected Results (PASS)
+// 3: Data Padding failure (FAIL)
+// 4: DM1 with DLC>8 (INCONCLUSIVE)
+// 5: Timeout (FAIL)
+// 6: DM01 seems to be not supported due answered with NACK (INCONCLUSIVE)
+void CTF_A03_06_DataPadding(byte srcReq, byte dstReq, byte srcResp, byte dstResp)
+{
+  char fn[255] = "CTF_A03_06_DataPadding";
+  word bufIndices[long];
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  pg* pgTPEOM = {dlc=gc_J1939_PG_DLC_MAX};
+  char reportText[1024];
+  char errText[1024];
+  dword testStepTime;
+  dword timeout;
+  dword pgn;
+  byte prio;
+  
+  struct gPGAttrs pgi_DM01;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  pgTPEOM.dlc = gc_J1939_PG_DLC_MAX;
+  timeout = gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  
+  // ==================
+  // Precondition
+  // ==================
+  
+  // build up pgi for DM01
+  CT_GetPGI_DM01( pgi_DM01, gDLC8 ); // after clear the response has a dlc of 8.
+  
+  // ==================
+  // step 1/3
+  // ==================
+  pgn = gc_PGN_DM11;
+  snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests DM11 to clear error memory of DUT %d (0x%.02X)...", srcReq, srcReq, srcResp, srcResp);
+  CT_STEP_BEGIN(-3, reportText);
+  // result of the clr-mem request does not matter in this point. Just do it. If it will fail, subsequently the DM01 check may be failed.
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  CT_Request_And_Await_NACK_Or_ACK( pgR, errText, pgn, srcReq, srcResp, prio, timeout, 1); // ACK or NACK allowed - also destination specific.
+  testWaitForTimeout(timeout); // give a bit time to clear memory.
+  CT_STEP_END_PASS(0, errText);
+  
+  // ==================
+  // step 2/3
+  // ==================
+  snprintf(reportText, elcount(reportText), "Request DM01 with PGN %d (0x%.05X) to DUT %d (0x%.02X) with no diagnostic errors. This leads DM01 to contain 2 padding bytes...", gc_PGN_DM01, gc_PGN_DM01, srcResp, srcResp);
+  testStepTime = CT_STEP_BEGIN(reportText);
+  
+  // send and await DM01...
+  pgn = gc_PGN_DM01;
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  if ( CT_Request_And_Await_Response_MiscNodes(pgR, pgi_DM01, errText, srcReq, dstReq, srcResp, gc_BC_ADDR, timeout, prio) >= 0)
+  {
+    CT_STEP_END_PASS(0);
+    
+    // for response with DLC=8... // "nearly" defect TP used with DLC8 but 2 sequences and "proper" ending.
+    if (pgR.dlc == 8)
+    {
+      long msgBufIdx;
+      // check if TP was used... (check to find a tp-request from the responding node - the DUT)...
+      if (CT_CHECK_BUF_TP_USED(msgBufIdx, testStepTime, pgn, srcResp, dstResp))
+      {
+        // if tp was used. this is an error (and may also be not allowed to send dlc8 with tp...
+        CT_STEP_END_FAIL(1, "Transport protocol used for a message with DLC=8. This is neither allowed, nor expected in this case.");
+      }
+      else
+      {
+        // NO TP was used...
+        
+        // ==================
+        // Step 3/3
+        // ==================
+        CT_STEP_BEGIN("Verify pad bytes...");
+        snprintf(reportText, elcount(reportText), "Last two data bytes in response: 0x%X, 0x%X", pgR.byte(6), pgR.byte(7));
+        CT_Info(@CT::DEBUG::CHECKS, fn, reportText);
+        
+        // check padding-bytes... (last 2 bytes in payload)
+        if ( (pgR.byte(6)==0xFF) && (pgR.byte(7) == 0xFF) )
+        {
+          CT_STEP_END_PASS(2);
+        }
+        else
+        {
+          snprintf(errText, elcount(errText), "Last two data bytes in DM1 response are 0x%X, 0x%X (expected 0xFF, 0xFF)", pgR.byte(6), pgR.byte(7));
+          CT_STEP_END_FAIL(3, errText);
+        }
+      }
+    }
+    else
+    {
+      // dlc <> 8. inkonclusive.
+      CT_STEP_END_INCONCLUSIVE(4, "DM1 has DLC<>8. This testcase has a precondition to react on DM1 using DLC=8, to be able to check padding-bytes. So it's not decidable.");
+    }
+  }
+  else
+  {
+    // requesting error (timeout)
+    
+    // check if DUT sent a NACK...
+    if (CT_Check_For_NACKs_In_MsgBuf(bufIndices, testStepTime, srcResp, srcReq, pgn))
+    {
+      CT_STEP_END_INCONCLUSIVE(6, "DM01 seems to be not supported due answered with NACK. This testcase has a precondition to react on DM1 using DLC=8, to be able to check padding-bytes. So it's not decidable.");      
+    }
+    else
+    {
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(5, errText, timeout);
+    }
+  }
+}
+
+// ==============================================================================================================
+// functionality of the test A3 07 Request Scheduling
+// FuncPath's:
+// 1: active testing not possible
+void CTF_A03_07_ReqSched(byte funcPath)
+{
+  CT_STEP_END_INCONCLUSIVE_ActiveTestingNotPossible(funcPath);
+}
+
+// ==============================================================================================================
+// functionality of the test A3 08 Request Retries
+// FuncPath's:
+// 1: active testing not possible
+void CTF_A03_08_ReqRetr(byte funcPath)
+{
+  CT_STEP_END_INCONCLUSIVE_ActiveTestingNotPossible(funcPath);
+}
+
+// ==============================================================================================================
+// functionality of the test A3 09 Correct Interpretation of 'Requested PGN' in Request
+// FuncPath's:
+// 1: active testing not possible
+void CTF_A03_09_ReqInterpret(byte funcPath)
+{
+  CT_STEP_END_INCONCLUSIVE_ActiveTestingNotPossible(funcPath);
+}
+
+// ==============================================================================================================
+// functionality of the test A3 10 Response Time
+// FuncPath's:
+// 1: active testing not possible
+void CTF_A03_10_RespTime(byte funcPath)
+{
+  CT_STEP_END_INCONCLUSIVE_ActiveTestingNotPossible(funcPath);
+}
+
+// ==============================================================================================================
+// functionality of the test A3 11 Device Responds to its own Global Requests
+// FuncPath's:
+// 1: active testing not possible
+void CTF_A03_11_RespOwnGlobReq(byte funcPath)
+{
+  CT_STEP_END_INCONCLUSIVE_ActiveTestingNotPossible(funcPath);
+}
+
+// ==============================================================================================================
+// functionality of the test A3 12 Response Time Support of the Acknowledgement Address data byte for each ACK and NACK  
+// FuncPath's:
+// 1: active testing not possible
+void CTF_A03_12_SupportAckAdrData(byte funcPath)
+{
+  CT_STEP_END_INCONCLUSIVE_ActiveTestingNotPossible(funcPath);
+}
+

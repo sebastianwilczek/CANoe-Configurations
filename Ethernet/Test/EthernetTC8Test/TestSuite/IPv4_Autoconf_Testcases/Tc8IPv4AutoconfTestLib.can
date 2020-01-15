@@ -1,0 +1,1841 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "..\ShareableFolders\CaplLibrary\Tc8TestLib\BasicFunctionsTestLib.cin"
+  #include "..\ShareableFolders\CaplLibrary\StubFunctionLib\Ipv4AutoconfStubFunctions.cin"
+  #include "..\ShareableFolders\CaplLibrary\StubFunctionLib\DhcpStubFunctions.cin"
+  #include "..\ShareableFolders\CaplLibrary\StubFunctionLib\Ipv4StubFunctions.cin"
+}
+
+variables
+{
+ enum DhcpMessageType
+  {
+    kDhcpDiscover = 1,
+    kDhcpOffer = 2,
+    kDhcpRequest = 3,
+    kDhcpDecline = 4,
+    kDhcpAck = 5,
+    kDhcpNak = 6,
+    kDhcpRelease = 7,
+    kDhcpInform = 8
+  };
+  
+    enum DhcpOptions
+  {
+    kPadOption = 0,
+    kRouterOption = 3,
+    kRequestedIpAddress = 50,
+    kIpAddressLeaseTime = 51,
+    kOptionOverload = 52,
+    kMessageType = 53,
+    kServerIdentifier = 54,
+    kParameterRequestList = 55,
+    kMaximumMessageSize = 57,
+    ClientIdentifier = 61,
+    kEndOption = 255
+  };
+  
+    enum OpCode
+  {
+    kBootRequest = 1,
+    kBootReply = 2
+  };
+  
+  int64 gTransactionId;
+  
+  int64 gDIFace0IPLinkLocalAddr; //local ip address of the dut in network byte order
+  char gDIFace0IPLinkLocalAddrString[20]; //local ip address of the dut 
+  
+  int64 gLinkLocalEchoReplyCount1;
+  int64 gLinkLocalEchoReplyCount2;
+  int64 gLinkLocalEchoReplyCount3;
+  int64 gRoutableEchoReplyCount;
+}
+
+/**
+ * This function should be called in the preparation of the test fixture
+ */
+export InitTestFixture()
+{
+  Internal_InitTestFixture(kDynamicConfigurationOfIpv4LinkLocalAddress, "OnEthPacketIpv4Autoconfig");
+}
+
+/**
+ * This function should be called in the preparation of each test case
+ */
+export InitTestCase(char testCaseName[],int testCaseNumber,enum Bool stubFunctionRequired)
+{
+  Internal_InitTestCase(testCaseName, kDynamicConfigurationOfIpv4LinkLocalAddress, "IPv4 Autoconfig", testCaseNumber, stubFunctionRequired);
+}
+
+/**
+ * Function to end a IPv4 test case. The function encapsulates the call of the
+ * UDP 'EndTest' Service Primitive and the corresponding error reporting.
+ */
+export EndTestCase()
+{
+  Internal_EndTestCase();
+}
+
+/**
+ * This function should be called in the completion of the test fixture
+ */
+export EndTestFixture()
+{
+  Internal_EndTestFixture();
+}
+
+/**
+ * This function is called when a message is arriving.
+ */
+void OnEthPacketIpv4Autoconfig(long channel, long dir, long packetHandle)
+{
+  enum Bool match;
+
+  if (ShouldIncomingPacketBeProcessed(channel, dir, packetHandle) == kFalse)
+    return;
+  
+  if(AnswerArpRequestForHost1(packetHandle) == kTrue)
+  {
+    return;
+  }
+
+  match = CompareParameters(packetHandle, channel, gReportOnFailure);
+  if (match == kTrue)
+  {
+    if(IsDhcpMessage(packetHandle) == kTrue)
+    {
+      gTransactionId = EthGetTokenInt64(packetHandle, "dhcpv4", "xid");
+    }
+    EthernetPacketReceived(channel);
+  }
+}
+
+/**
+ * Waits for an incoming DHCPDISCOVER.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+export testfunction WaitForDhcpDiscover(
+  long timeout,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[]
+  )
+{
+  InternalWaitForDhcpDiscover(timeout,
+    1,
+    destMac,
+    srcMac,
+    destIp,
+    srcIp,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals);
+}
+
+
+/**
+ * Waits for an incoming DHCPDISCOVER.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param expectedChannel The channel on which the answer is expected (either eth1Ctx or eth2Ctx)
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param additionalToken an additional dhcp token which is checked
+ * @param additionalTokenValue value of the additional token
+ * @param additionalTokenCheckType checktype of the additional token
+ */
+void InternalWaitForDhcpDiscover(
+  long timeout,
+  dword expectedChannel,
+  char destMac[],
+  char srcMac[],
+  char destIp[],
+  char srcIp[],
+  char additionalToken[],
+  char additionalTokenValue[],
+  enum CheckType additionalTokenCheckType)
+{
+  byte data[4];
+  int64 value;
+  
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x11);          /* Udp Protocol Type */
+  PrepareWaitForUdp(syspar::UdpPortOfDhcpServer, syspar::UdpPortOfDhcpClient);
+  
+  data[0] = (byte) kDhcpDiscover;
+  InternalAddExpectedDataParameter("dhcpv4", "option53.data", data, 1);
+  
+  if(!IsWildcard(additionalTokenValue) && !IsWildcard(additionalToken))
+  {
+   if(IsIpAddressToken(additionalToken) == kTrue)
+   {
+    value = ConvertIpAddressStringToInt64(additionalTokenValue);
+   }
+   else
+   {
+    value = atol(additionalTokenValue);
+   }
+   InternalAddExpectedParameter("dhcpv4",additionalToken,value,additionalTokenCheckType);
+  }
+  
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForDhcpDiscover", "DUT sent DHCPDISCOVER.");
+  else
+    testStepFail("WaitForDhcpDiscover", "DUT didn't send DHCPDISCOVER.");
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an incoming DHCPREQUEST.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param minimumTime The expected packet may not arrive before this time in milliseconds
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ */
+export testfunction WaitForDhcpRequest(
+  long timeout, 
+  char destMac[], 
+  char srcMac[], 
+  char destIp[], 
+  char srcIp[]
+  )
+{
+  byte data[4];
+  int64 value;
+   
+  PrepareWaitForEthernet(destMac, srcMac); 
+  PrepareWaitForIpv4(destIp, srcIp, 0x11);          /* Udp Protocol Type */
+  PrepareWaitForUdp(syspar::UdpPortOfDhcpServer, syspar::UdpPortOfDhcpClient);
+  
+  data[0] = (byte) kDhcpRequest;
+  InternalAddExpectedDataParameter("dhcpv4", "option53.data", data, 1);
+  
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForDhcpRequest", "DUT sent DHCPREQUEST.");
+  else
+    testStepFail("WaitForDhcpRequest", "DUT didn't send DHCPREQUEST.");
+  
+  InternalClearAllParameters();
+}
+
+
+/**
+ * Waits for an incoming ICMP echo reply.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param additionalToken An additional ipv4 token that should be checked.
+ * @param additionalTokenValue The value of the additional token.
+ * @param additionalTokenCheckType The checktype of the additional token.
+ */
+export testfunction WaitForIcmpEchoReply(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	destIp[],
+  char	srcIp[],
+  char  additionalToken[],
+  char  additionalTokenValue[],
+  enum  CheckType additionalTokenCheckType)
+{
+  InternalWaitForIcmpEcho(
+  timeout,
+  destMac,
+  srcMac,
+  destIp,
+  srcIp,
+  additionalToken,
+  additionalTokenValue,
+  additionalTokenCheckType,
+  kFalse);
+}
+
+/**
+ * Waits for an incoming ICMP echo reply or request.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param additionalToken An additional ipv4 token that should be checked.
+ * @param additionalTokenValue The value of the additional token.
+ * @param additionalTokenCheckType The checktype of the additional token.
+ */
+export testfunction WaitForIcmpEchoRequest(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	destIp[],
+  char	srcIp[],
+  char  additionalToken[],
+  char  additionalTokenValue[],
+  enum  CheckType additionalTokenCheckType)
+{
+  InternalWaitForIcmpEcho(
+  timeout,
+  destMac,
+  srcMac,
+  destIp,
+  srcIp,
+  additionalToken,
+  additionalTokenValue,
+  additionalTokenCheckType,
+  kTrue);
+}
+
+/**
+ * Waits for an incoming ICMP echo reply or request.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the packet.
+ * @param srcMac The source MAC address to match the packet.
+ * @param destIp The destination IP address to match the packet.
+ * @param srcIp The source IP address to match the packet.
+ * @param additionalToken An additional ipv4 token that should be checked.
+ * @param additionalTokenValue The value of the additional token.
+ * @param additionalTokenCheckType The checktype of the additional token.
+ * @param isRequest If kTrue: wait for an ICMP echo request, otherwise wait for an ICMP echo reply
+ */
+void InternalWaitForIcmpEcho(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	destIp[],
+  char	srcIp[],
+  char  additionalToken[],
+  char  additionalTokenValue[],
+  enum  CheckType additionalTokenCheckType,
+  enum  Bool isRequest)
+{
+  ReplaceDUTLinkLocalAddress(srcIp);
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  if(isRequest == kTrue)
+    PrepareWaitForIcmp("8");                            /* Echo Request Type */
+  else
+    PrepareWaitForIcmp("0");                            /* Echo Reply Type */
+
+  if(!IsWildcard(additionalToken))
+  {
+    InternalAddExpectedParameter("ipv4", additionalToken, atol(additionalTokenValue), additionalTokenCheckType);
+  }
+  
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForIcmpEchoReply", "DUT sent an ICMPv4 echo reply.");
+  else
+    testStepFail("WaitForIcmpEchoReply", "DUT didn't send an ICMPv4 echo reply.");
+  InternalClearAllParameters();
+}
+
+
+/**
+ * Waits a specific amount of time for an unexpected ICMP Echo Reply on a specific interface.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the unexpected packet.
+ * @param srcMac The source MAC address to match the unexpected packet.
+ * @param destIp The destination IP address to match the unexpected packet.
+ * @param srcIp The source IP address to match the unexpected packet.
+ */
+export testfunction WaitForUnexpectedIcmpEchoReply(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	destIp[],
+  char	srcIp[]
+  )
+{
+  ReplaceDUTLinkLocalAddress(srcIp);
+  
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmp("0");                            /* Echo Reply Type */
+
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+
+  if (WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+    testStepPass("WaitForUnexpectedIcmpEchoReply", "DUT didn't send an ICMP reply.");
+  else
+    testStepFail("WaitForUnexpectedIcmpEchoReply", "DUT sent an ICMP reply.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits a specific amount of time for an unexpected ICMP Echo Reply on a specific interface.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param destMac The destination MAC address to match the unexpected packet.
+ * @param srcMac The source MAC address to match the unexpected packet.
+ * @param destIp The destination IP address to match the unexpected packet.
+ * @param srcIp The source IP address to match the unexpected packet.
+ */
+export testfunction WaitForUnexpectedIcmpEchoRequest(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	destIp[],
+  char	srcIp[]
+  )
+{
+  PrepareWaitForEthernet(destMac, srcMac);
+  PrepareWaitForIpv4(destIp, srcIp, 0x1);           /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmp("8");                            /* Echo Request Type */
+
+  StartObservationOfIncomingPackets(kNoAnswerExpected);
+
+  if (WaitForIncomingPacket(kNoAnswerExpected, timeout) == 0)
+    testStepPass("WaitForUnexpectedIcmpEchoReply", "DUT didn't send an ICMP reply.");
+  else
+    testStepFail("WaitForUnexpectedIcmpEchoReply", "DUT sent an ICMP reply.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits a specific amount of time for an ARP Request.
+ * @param timeout The amount of time in milliseconds to wait
+ * @param senderProtocolAddress The source IP address to match .
+ * @param targetProtocolAddress The destination IP address to match.
+ * @param targetHardwareAddress The destination MAC address to match.
+ */
+export testfunction WaitForArpResponse(
+  long timeout,
+  char senderProtocolAddress[],
+  char targetProtocolAddress[],
+  char targetHardwareAddress[]
+  )
+{
+  InternalWaitForArp(
+    timeout,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    targetHardwareAddress,
+    senderProtocolAddress,
+    targetProtocolAddress,
+    kEquals,
+    syspar::DIface0MacAddr,
+    syspar::Wildcard,
+    kFalse,
+    kResponse,
+    kAnswerExpected,
+    kFalse,
+    "DUT sent an ARP response.",
+    "DUT didn't send an ARP response."
+  );
+}
+
+/**
+ * Waits a specific amount of time for an ARP Request.
+ * @param timeout The amount of time in milliseconds to wait
+ * @param senderProtocolAddress The source IP address to match .
+ * @param targetProtocolAddress The destination IP address to match.
+ * @param targetHardwareAddress The destination MAC address to match.
+ * @param destMac The destination MAC address of the ethernet header.
+ */
+export testfunction WaitForArpResponse(
+  long timeout,
+  char senderProtocolAddress[],
+  char targetProtocolAddress[],
+  char targetHardwareAddress[],
+  char destMac[]
+  )
+{
+  InternalWaitForArp(
+    timeout,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    targetHardwareAddress,
+    senderProtocolAddress,
+    targetProtocolAddress,
+    kEquals,
+    syspar::DIface0MacAddr,
+    destMac,
+    kFalse,
+    kResponse,
+    kAnswerExpected,
+    kFalse,
+    "DUT send an ARP response.",
+    "DUT didn't send an ARP ersponse."
+  );
+}
+
+/**
+ * Waits a specific amount of time for an ARP Request.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param networkmask The subnetmask to match.
+ * @param senderHardwareAddress The source MAC address to match.
+ * @param targetHardwareAddress The destination MAC address to match.
+ * @param senderProtocolAddress The source IP address to match .
+ * @param targetProtocolAddress The destination IP address to not match.
+ * @param ethernetDestMacAdress The destination MAC address of the ethernet header.
+ */
+export testfunction WaitForArpRequestWithUnmatchingTargetProtocolAddress(
+  long timeout,
+  char networkmask[],
+  char senderHardwareAddress[],
+  char targetHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetProtocolAddress[],
+  char ethernetDestMacAdress[]
+  )
+{  
+  InternalWaitForArp(
+    timeout,
+    networkmask,
+    senderHardwareAddress,
+    targetHardwareAddress,
+    senderProtocolAddress,
+    targetProtocolAddress,
+    kNotEquals,
+    syspar::DIface0MacAddr,
+    ethernetDestMacAdress,
+    kFalse,
+    kRequest,
+    kAnswerExpected,
+    kTrue,
+    "DUT sent an ARP request.",
+    "DUT didn't send an ARP request."
+  );
+}
+  
+/**
+ * Waits a specific amount of time for an ARP Request but does not extract the link local IP address.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param networkmask The subnetmask to match.
+ * @param senderHardwareAddress The source MAC address to match.
+ * @param targetHardwareAddress The destination MAC address to match.
+ * @param senderProtocolAddress The source IP address to match .
+ * @param targetProtocolAddress The destination IP address to match.
+ * @param ethernetDestMacAdress The destination MAC address of the ethernet header.
+ */
+export testfunction WaitForArpRequestAndDoNotExtractLinkLocalIP(
+  long timeout,
+  char networkmask[],
+  char senderHardwareAddress[],
+  char targetHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetProtocolAddress[],
+  char ethernetDestMacAdress[]
+  )
+{  
+  InternalWaitForArp(
+    timeout,
+    networkmask,
+    senderHardwareAddress,
+    targetHardwareAddress,
+    senderProtocolAddress,
+    targetProtocolAddress,
+    kEquals,
+    syspar::DIface0MacAddr,
+    ethernetDestMacAdress,
+    kFalse,
+    kRequest,
+    kAnswerExpected,
+    kFalse,
+    "DUT sent an ARP request.",
+    "DUT didn't send an ARP request."
+  );
+}
+  
+/**
+ * Waits a specific amount of time for an ARP Request.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param networkmask The subnetmask to match.
+ * @param senderHardwareAddress The source MAC address to match.
+ * @param targetHardwareAddress The destination MAC address to match.
+ * @param senderProtocolAddress The source IP address to match .
+ * @param targetProtocolAddress The destination IP address to match.
+ * @param ethernetDestMacAdress The destination MAC address of the ethernet header.
+ */
+export testfunction WaitForArpRequest(
+  long timeout,
+  char networkmask[],
+  char senderHardwareAddress[],
+  char targetHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetProtocolAddress[],
+  char ethernetDestMacAdress[]
+  )
+{  
+  InternalWaitForArp(
+    timeout,
+    networkmask,
+    senderHardwareAddress,
+    targetHardwareAddress,
+    senderProtocolAddress,
+    targetProtocolAddress,
+    kEquals,
+    syspar::DIface0MacAddr,
+    ethernetDestMacAdress,
+    kFalse,
+    kRequest,
+    kAnswerExpected,
+    kTrue,
+    "DUT sent an ARP request.",
+    "DUT didn't send an ARP request."
+  );
+}
+
+/**
+ * Waits a specific amount of time for an ARP Request.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param networkmask The subnetmask to match.
+ * @param senderHardwareAddress The source MAC address to match.
+ * @param targetHardwareAddress The destination MAC address to match.
+ * @param senderProtocolAddress The source IP address to match .
+ * @param targetProtocolAddress The destination IP address to match.
+ * @param ethernetDestMacAdress The destination MAC address of the ethernet header.
+ * @param checkValidIpRange Verify that the target IP Address is greater than <169.254.0.255> and less than or equal to <169.254.254.255>.
+ */
+export testfunction WaitForArpRequest(
+  long timeout,
+  char networkmask[],
+  char senderHardwareAddress[],
+  char targetHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetProtocolAddress[],
+  char ethernetDestMacAdress[],
+  enum Bool checkValidIpRange
+  )
+{  
+  InternalWaitForArp(
+    timeout,
+    networkmask,
+    senderHardwareAddress,
+    targetHardwareAddress,
+    senderProtocolAddress,
+    targetProtocolAddress,
+    kEquals,
+    syspar::DIface0MacAddr,
+    ethernetDestMacAdress,
+    checkValidIpRange,
+    kRequest,
+    kAnswerExpected,
+    kTrue,
+    "DUT sent an ARP request.",
+    "DUT didn't send an ARP request."
+  );
+}
+
+/**
+ * Waits a specific amount of time for three ARP Requests.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param networkmask The subnetmask to match.
+ * @param senderHardwareAddress The source MAC address to match.
+ * @param targetHardwareAddress The destination MAC address to match.
+ * @param senderProtocolAddress The source IP address to match .
+ * @param targetProtocolAddress The destination IP address to match.
+ * @param ethernetDestMacAdress The destination MAC address of the ethernet header.
+ */
+export testfunction WaitForThreeArpRequest(
+  long timeout,
+  char networkmask[],
+  char senderHardwareAddress[],
+  char targetHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetProtocolAddress[],
+  char ethernetDestMacAdress[]
+  )
+{
+  InternalWaitForArp(
+    timeout,
+    networkmask,
+    senderHardwareAddress,
+    targetHardwareAddress,
+    senderProtocolAddress,
+    targetProtocolAddress,
+    kEquals,
+    syspar::DIface0MacAddr,
+    ethernetDestMacAdress,
+    kFalse,
+    kRequest,
+    kThreeAnswersExpected,
+    kTrue,
+    "DUT sent three ARP requests.",
+    "DUT didn't send three ARP requests."
+  );
+}
+
+/**
+ * Waits a specific amount of time for three ARP Probes.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param networkmask The subnetmask to match.
+ * @param senderHardwareAddress The source MAC address to match.
+ * @param targetHardwareAddress The destination MAC address to match.
+ * @param senderProtocolAddress The source IP address to match .
+ * @param targetProtocolAddress The destination IP address to match.
+ * @param ethernetDestMacAdress The destination MAC address of the ethernet header.
+ */
+export testfunction WaitForThreeArpProbeRequest(
+  long timeout,
+  char networkmask[],
+  char senderHardwareAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[],
+  char ethernetDestMacAdress[]
+  )
+{
+  InternalWaitForArp(
+    timeout,
+    networkmask,
+    senderHardwareAddress,
+    targetHardwareAddress,
+    syspar::AllZeroIPAddress,
+    targetProtocolAddress,
+    kEquals,
+    syspar::DIface0MacAddr,
+    ethernetDestMacAdress,
+    kFalse,
+    kRequest,
+    kThreeAnswersExpected,
+    kTrue,
+    "DUT sent three ARP probes.",
+    "DUT didn't send three ARP probes."
+  );
+}
+
+/**
+ * Waits a specific amount of time for two ARP Requests.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param networkmask The subnetmask to match.
+ * @param senderHardwareAddress The source MAC address to match.
+ * @param targetHardwareAddress The destination MAC address to match.
+ * @param senderProtocolAddress The source IP address to match .
+ * @param targetProtocolAddress The destination IP address to match.
+ * @param ethernetDestMacAdress The destination MAC address of the ethernet header.
+ */
+export testfunction WaitForTwoArpRequest(
+  long timeout,
+  char networkmask[],
+  char senderHardwareAddress[],
+  char targetHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetProtocolAddress[],
+  char ethernetDestMacAdress[]
+  )
+{
+  InternalWaitForArp(
+    timeout,
+    networkmask,
+    senderHardwareAddress,
+    targetHardwareAddress,
+    senderProtocolAddress,
+    targetProtocolAddress,
+    kEquals,
+    syspar::DIface0MacAddr,
+    ethernetDestMacAdress,
+    kFalse,
+    kRequest,
+    kTwoAnswersExpected,
+    kTrue,
+    "DUT sent two ARP requests.",
+    "DUT didn't send two ARP requests."
+  );
+}
+
+/**
+ * Waits a specific amount of time for an unexpected ARP Request.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param networkmask The subnetmask to match.
+ * @param senderHardwareAddress The source MAC address to match.
+ * @param targetHardwareAddress The destination MAC address to match.
+ * @param senderProtocolAddress The source IP address to match .
+ * @param targetProtocolAddress The destination IP address to match.
+ * @param srcMac The source MAC address of the ethernet header.
+ * @param destMac The destination MAC address of the ethernet header.
+ */
+export testfunction WaitForUnexpectedArpRequest(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	senderHardwareAddress[],
+  char	senderProtocolAddress[],
+  char	targetHardwareAddress[],
+  char	targetProtocolAddress[],
+  char  networkmask[]
+  )
+{
+  write("================================");
+  InternalWaitForArp(
+    timeout,
+    networkmask,
+    senderHardwareAddress,
+    targetHardwareAddress,
+    senderProtocolAddress,
+    targetProtocolAddress,
+    kEquals,
+    srcMac,
+    destMac,
+    kFalse,
+    kRequest,
+    kNoAnswerExpected,
+    kFalse,
+    "DUT didn't send an ARP request.",
+    "DUT sent an ARP request."
+  );
+}
+
+/**
+ * Waits a specific amount of time for an unexpected ARP Request.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param networkmask The subnetmask to match.
+ * @param senderHardwareAddress The source MAC address to match.
+ * @param targetHardwareAddress The destination MAC address to match.
+ * @param senderProtocolAddress The source IP address to match .
+ * @param targetProtocolAddress The destination IP address to match.
+ * @param srcMac The source MAC address of the ethernet header.
+ * @param destMac The destination MAC address of the ethernet header.
+ */
+export testfunction WaitForUnexpectedArpResponse(
+  long	timeout,
+  char	destMac[],
+  char	srcMac[],
+  char	senderHardwareAddress[],
+  char	senderProtocolAddress[],
+  char	targetHardwareAddress[],
+  char	targetProtocolAddress[],
+  char 	networkmask[]
+  )
+{
+  InternalWaitForArp(
+    timeout,
+    networkmask,
+    senderHardwareAddress,
+    targetHardwareAddress,
+    senderProtocolAddress,
+    targetProtocolAddress,
+    kEquals,
+    srcMac,
+    destMac,
+    kFalse,
+    kResponse,
+    kNoAnswerExpected,
+    kFalse,
+    "DUT didn't send an ARP response.",
+    "DUT sent an ARP response."
+  );
+}
+
+/**
+ * Waits a specific amount of time for zero, one, two or three ARP Requests or Replies.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param networkmask The subnetmask to match.
+ * @param senderHardwareAddress The source MAC address to match.
+ * @param targetHardwareAddress The destination MAC address to match.
+ * @param senderProtocolAddress The source IP address to match .
+ * @param targetProtocolAddress The destination IP address to match.
+ * @param ethernetSourceMacAdress The source MAC address of the ethernet header.
+ * @param ethernetDestMacAdress The destination MAC address of the ethernet header.
+ * @param checkValidIpRange Verify that the target IP Address is greater than <169.254.0.255> and less than or equal to <169.254.254.255>.
+ * @param operation The ARP operation. Can be request or response.
+ * @param expectedResult How many Arp packets are expected.
+ * @param extractLinkLocalIP kTrue if the link local IP should be extracted.
+ * @param positiveResult The description of testStepPass.
+ * @param negativeResult The description of testStepFail.
+ */
+void InternalWaitForArp(
+  long timeout,
+  char networkmask[],
+  char senderHardwareAddress[],
+  char targetHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetProtocolAddress[],
+  enum CheckType targetProtocolAddressCheckType,
+  char ethernetSourceMacAdress[],
+  char ethernetDestMacAdress[],
+  enum Bool checkValidIpRange,
+  enum ArpOperation operation,
+  enum ExpectedResult expectedResult,
+  enum Bool extractLinkLocalIP,
+  char positiveResult[],
+  char negativeResult[]
+  )
+{
+  gAutoAnswerArpRequests = kFalse;
+  
+  //Replace the dut local address placeholder
+  ReplaceDUTLinkLocalAddress(senderProtocolAddress);
+  ReplaceDUTLinkLocalAddress(targetProtocolAddress);
+  
+  PrepareWaitForArp(
+    ethernetDestMacAdress,
+    ethernetSourceMacAdress,
+    operation,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress,
+    targetProtocolAddressCheckType);
+    
+  AddNetworkMaskDataParameter(networkmask);
+  
+  if(checkValidIpRange == kTrue)
+  {
+    InternalAddExpectedParameter("arp", "protDestinationAddr", ConvertIpAddressStringToInt64(syspar::LinkLocalLowerBoundIP), kGreaterThan);
+    InternalAddExpectedParameter("arp", "protDestinationAddr", ConvertIpAddressStringToInt64(syspar::LinkLocalUpperBoundIP), kLessThanOrEqual);
+  }
+  
+  InternalSetExtractedParameter("arp", "protDestinationAddr", kExtractInt64);
+  
+  
+  StartObservationOfIncomingPackets(expectedResult);
+  if (WaitForIncomingPacket(expectedResult, timeout) == 0)
+  {
+      if(extractLinkLocalIP == kTrue)
+      {
+        //Extract the DUTs local IP address as Int64 and string
+        gDIFace0IPLinkLocalAddr = gExtractingParameters[gExtractingParametersCount - 1].Value;
+        ConvertIpAddressInt64ToString(gDIFace0IPLinkLocalAddr, gDIFace0IPLinkLocalAddrString);
+        write("Local link IP address of DUT set to %s", gDIFace0IPLinkLocalAddrString);
+      }
+      testStepPass("WaitForArp", positiveResult);
+  }
+  else
+  {
+      testStepFail("WaitForArp", negativeResult);
+  }
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Wait for several arp requests with given max and min interval times.
+ * @param timeout The time to wait in milliseconds.
+ * @param ethernetDestMacAdress The subnetmask to match.
+ * @param ethernetSourceMacAdress A parameter to match.
+ * @param senderHardwareAddress A parameter to match.
+ * @param targetHardwareAddress A parameter to match.
+ * @param senderProtocolAddress A parameter to match.
+ * @param targetProtocolAddress A parameter to match.
+ * @param lastTimeIntervalMinimum The minimum time interval between the last two messages.
+ * @param lastTimeIntervalMaximum The maximum time interval between the last two messages.
+ * @param secondLastTimeIntervalMinimum The minimum time interval between the second last and last message. Set to zero to ignore.
+ * @param secondLastTimeIntervalMaximum The maximum time interval between the second last and last message. Set to zero to ignore.
+ * @param messageName The message type in string format. e.g. "ARP request"
+ */
+export testfunction WaitForSeveralArpRequests(
+  long timeout,
+  char networkmask[],
+  char ethernetDestMacAdress[],
+  char ethernetSourceMacAdress[],
+  char senderHardwareAddress[],
+  char targetHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetProtocolAddress[],
+  long lastTimeIntervalMinimum,
+  long lastTimeIntervalMaximum,
+  long secondLastTimeIntervalMinimum,
+  long secondLastTimeIntervalMaximum
+  )
+{  
+  //Replace the dut local address placeholder
+  ReplaceDUTLinkLocalAddress(senderProtocolAddress);
+  ReplaceDUTLinkLocalAddress(targetProtocolAddress);
+  
+  PrepareWaitForArp(
+    ethernetDestMacAdress,
+    ethernetSourceMacAdress,
+    kRequest,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+  
+  AddNetworkMaskDataParameter(networkmask);
+  
+  WaitForSeveralMessages(
+    timeout,
+    lastTimeIntervalMinimum,
+    lastTimeIntervalMaximum,
+    secondLastTimeIntervalMinimum,
+    secondLastTimeIntervalMaximum,
+    "ARP Request");
+}
+
+
+/**
+ * Wait for either a probe with source ip 0.0.0.0 and destination ip <routableIpAddr2> 
+ * or a response with source ip <routableIpAddr2> and destination ip <routableIpAddr1>.
+ * @param timeout The time to wait in milliseconds.
+ * @param networkmask The subnetmask to match.
+ * @param routableIpAddr1 
+ * @param routableIpAddr2 
+ */
+export testfunction WaitForArpProbeOrArpResponse(
+  long timeout,
+  char networkmask[],
+  char routableIpAddr1[],
+  char routableIpAddr2[]
+  )
+{
+//Parameters for ARP probe
+  PrepareWaitForEthernet(syspar::Wildcard, syspar::DIface0MacAddr, 0);
+  InternalAddExpectedParameter("eth", "type", 0x0806, kEquals, 0); /* ARP Ethertype */
+  
+  InternalAddExpectedParameter("arp", "operation", 1); // ARP Request 
+  InternalAddExpectedParameter("arp", "protSourceAddr", 0);
+  InternalAddExpectedParameter("arp", "protDestinationAddr", ConvertIpAddressStringToInt64(routableIpAddr2));
+  
+  //Parameters for ARP request
+  PrepareWaitForEthernet(syspar::Wildcard, syspar::DIface0MacAddr, 1);
+  InternalAddExpectedParameter("eth", "type", 0x0806, kEquals, 1); /* ARP Ethertype */
+  
+  InternalAddExpectedParameter("arp", "operation", 2, kEquals, 1); // ARP Reply 
+  InternalAddExpectedParameter("arp", "protSourceAddr", ConvertIpAddressStringToInt64(routableIpAddr2), kEquals, 1);
+  InternalAddExpectedParameter("arp", "protDestinationAddr", ConvertIpAddressStringToInt64(routableIpAddr1), kEquals, 1);  
+	
+  AddNetworkMaskDataParameter(networkmask);
+  
+  StartObservationOfIncomingPackets(kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForArpProbeOrArpResponse", "DUT sent an ARP Probe or Response.");
+  else
+    testStepFail("WaitForArpProbeOrArpResponse", "DUT didn't send an ARP Probe or Response.");
+  InternalClearAllParameters();
+}
+
+/**
+ * Sends a DHCPACK message with router option set to IP address of the server either in file or in sname field
+ * @param serverMacAddress MAC address of the server
+ * @param serverIpAddress IP Address of the server
+ * @param assigendIpAddress IP Address offered to the client
+ * @param fillOptionWithPadding If this is non-zero, options will be filled with paddings until size of options equals this param
+ * @param leaseTimeSeconds The lease time in seconds
+ * @param routerOptionField Token in which the router option should be placed: either "serverName" or "file"
+ * @param endOptionInRouterOptionField if kTrue an end option will be added to the field given in routerOptionField
+ * @param overloadType The type of the overload option in the normal options field
+ */
+export testfunction SendDhcpAck(
+  char sourceIpAddress[],
+  char yiaddr[],
+  word leaseTimeSeconds
+  )
+{
+  long p,result;
+  
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+  
+  p = EthInitPacket("dhcpv4");
+  
+  result = EthSetTokenInt64(p, "eth", "source", ConvertMacAddressStringToInt64(syspar::Host1Mac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src %d",result);
+  
+  result = EthSetTokenInt64(p, "eth", "destination", ConvertMacAddressStringToInt64(syspar::DIface0MacAddr));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d",result);
+  
+  result = EthSetTokenInt64(p, "ipv4", "source", ConvertIpAddressStringToInt64(sourceIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src %d",result);
+  
+  result = EthSetTokenInt64(p, "ipv4", "destination", ConvertIpAddressStringToInt64(yiaddr));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest %d",result);
+  
+  result = EthSetTokenInt64(p, "dhcpv4", "operation", (byte) kBootReply);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp operation %d",result);
+
+  result = EthSetTokenInt64(p, "dhcpv4", "xid", gTransactionId);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp xid %d",result);
+  
+  result = EthSetTokenInt64(p, "dhcpv4", "yourAddr", ConvertIpAddressStringToInt64(yiaddr));
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp youraddr %d",result);
+  
+  result = EthSetTokenInt64(p, "dhcpv4", "serverAddr", ConvertIpAddressStringToInt64(sourceIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp serverAddr %d",result);
+  
+  EthAddToken(p, "dhcpv4", "magicCookie");
+  
+  AddMessageTypeOption(p, kDhcpAck);
+  AddLeaseTimeOption(p, leaseTimeSeconds);
+  EthAddToken(p, "dhcpv4", "option255");
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthOutputPacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthReleasePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+}
+
+
+  /**
+  * Sends a Dhcp Offer Message to the DUT with an IP address lease time option.
+  * @param sourceIpAddress The source IP address.
+  * @param yiaddr Your IP address from the DHCP header.
+  * @param leaseTime The lease time of the added IP address lease time option.
+  */
+export testfunction SendDhcpOffer(
+  char sourceIpAddress[],
+  char yiaddr[],
+  word leaseTimeSeconds
+  )
+{
+  long p,result, totalOptionsLength;
+  
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+
+  p = EthInitPacket("dhcpv4");
+  
+  result = EthSetTokenInt64(p, "eth", "source", ConvertMacAddressStringToInt64(syspar::Host1Mac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src %d", result);
+  
+  result = EthSetTokenInt64(p, "eth", "destination", ConvertMacAddressStringToInt64(syspar::MacAddressBroadcast));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d", result);
+  
+  result = EthSetTokenInt64(p, "ipv4", "source", ConvertIpAddressStringToInt64(sourceIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src %d", result);
+  
+  result = EthSetTokenInt64(p, "ipv4", "destination", ConvertIpAddressStringToInt64(syspar::IpAddressBroadcast));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest %d", result);
+  
+  result = EthSetTokenInt64(p, "dhcpv4", "operation", (byte) kBootReply);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp operation %d", result);
+  
+  result = EthSetTokenInt64(p, "dhcpv4", "yourAddr", ConvertIpAddressStringToInt64(yiaddr));
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp youraddr %d", result);
+  
+  result = EthSetTokenInt64(p, "dhcpv4", "xid", gTransactionId);
+  if(result != 0) write("Error @ EthSetTokenInt64 dhcp xid %d",result);
+  
+  EthAddToken(p, "dhcpv4", "magicCookie");
+  totalOptionsLength = 4; // size of magic cookie
+  
+  write("leasetime is %d", leaseTimeSeconds);
+  
+  totalOptionsLength += AddMessageTypeOption(p, kDhcpOffer);
+  totalOptionsLength += AddLeaseTimeOption(p, leaseTimeSeconds);
+  
+  totalOptionsLength++; //end option. will be added after the paddings
+    
+  EthAddToken(p, "dhcpv4", "option255");
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d", result);
+  
+  result = EthOutputPacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d", result);
+  
+  result = EthReleasePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d", result);
+}
+
+  /**
+  * Sends an ICMP Echo Request.
+  * @param srcIpAddress The source IP address.
+  * @param destIpAddress The destination IP address. Defaults to the link local address of the DUT
+  * @param srcMac The source MAC Address.
+  * @param destMac The destination MAC Address.
+  */
+export testfunction SendIcmpEchoRequest(
+  char	srcIpAddress[],
+  char	destIpAddress[],
+  char	srcMac[],
+  char	destMac[]
+  )
+{
+  InternalSendIcmpEchoRequest(srcIpAddress, destIpAddress, srcMac, destMac);
+}
+
+  /**
+  * Sends an ICMP Echo Request.
+  * @param sourceIpAddress The source IP address.
+  * @param destIpAddress The destination IP address. Defaults to the link local address of the DUT
+  * @param srcMac The source MAC Address.
+  * @param destMac The destination MAC Address.
+  */
+void InternalSendIcmpEchoRequest(
+  char	srcIpAddress[],
+  char	destIpAddress[],
+  char	srcMac[],
+  char	destMac[]
+  )
+{
+  long p,result;
+  
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+  
+  //Replace the dut local address placeholder
+  ReplaceDUTLinkLocalAddress(destIpAddress);
+  
+  p = EthInitPacket("icmpv4","echo");
+
+  if(IsWildcard(destMac))
+  {
+    result = EthSetTokenInt64(p, "eth", "destination", ConvertMacAddressStringToInt64(syspar::DIface0MacAddr));
+  }
+  else
+  {
+   result = EthSetTokenInt64(p, "eth", "destination", ConvertMacAddressStringToInt64(destMac));
+  }
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d", result);
+  
+  if(IsWildcard(srcMac))
+  {
+    result = EthSetTokenInt64(p, "eth", "source", ConvertMacAddressStringToInt64(syspar::Host1Mac));
+  }
+  else
+  {
+   result = EthSetTokenInt64(p, "eth", "source", ConvertMacAddressStringToInt64(srcMac));
+  }
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src %d", result);
+  
+  result = EthSetTokenInt64(p, "ipv4",  "destination", ConvertIpAddressStringToInt64(destIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 dest %d", result);
+  
+  result = EthSetTokenInt64(p, "ipv4",  "source", ConvertIpAddressStringToInt64(srcIpAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 ipv4 src %d", result);
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthOutputPacket(p);
+  if(result != 0) write("Error @ EthOutputPacket %d",result);
+  
+  result = EthReleasePacket(p);
+  if(result != 0) write("Error @ EthReleasePacket %d",result);
+}
+
+
+/**
+ * Sends an ARP request.
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ */
+export testfunction SendArpRequest(
+  char destMac[],
+  char srcMac[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  InternalSendArpRequest(
+    destMac,
+    srcMac,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+}
+
+
+/**
+ * Sends multiple ARP requests.
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ * @param requestsCount The amount of requests to send.
+ */
+export testfunction SendMultipleArpRequests(
+  char destMac[],
+  char srcMac[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[],
+  int requestsCount)
+{
+  int i;
+  for(i = 0; i < requestsCount; i++)
+  {
+    InternalSendArpRequest(
+      destMac,
+      srcMac,
+      syspar::Wildcard,
+      syspar::Wildcard,
+      syspar::Wildcard,
+      syspar::Wildcard,
+      senderHardwareAddress,
+      senderProtocolAddress,
+      targetHardwareAddress,
+      targetProtocolAddress); 
+  }
+}
+
+  /**
+  * Sends ICMP echo requests to the DUT for 20 seconds and counts the responses.
+  */
+export testfunction SendICMPEchoRequestsAndCountResponses()
+{
+  dword startTime;
+  PrepareWaitForEthernet(syspar::Host1Mac, syspar::DIface0MacAddr);
+  PrepareWaitForIpv4(syspar::AIface0IpLinkLocalAddr, gDIFace0IPLinkLocalAddrString, 0x1); /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmp("0");  /* Echo Reply Type */
+  
+  StartObservationOfIncomingPackets(kWaitUntilTimeout); //Max value for signed int16
+
+  //Send echo requests
+  startTime = timeNow();
+  while(timeNow() - startTime < 20e5) //times are in 10^-5 seconds. Total time: 20 seconds
+  {
+    InternalSendIcmpEchoRequest(
+        syspar::AIface0IpLinkLocalAddr,
+        gDIFace0IPLinkLocalAddrString,
+        syspar::Host1Mac,
+        syspar::DIface0MacAddr);
+    testWaitForTimeout(100);
+  }
+  
+  gLinkLocalEchoReplyCount1 = gExpectedParametersMatches[0];
+  InternalClearAllParameters();
+}
+
+  /**
+  * Sends ICMP Echo Requests to the DUT via the link local and the routable ip address.
+  * Also counts the responses.
+  */
+export testfunction SendDifferentICMPEchoRequestsAndCountResponses()
+{
+  dword startTime;
+  enum Bool sendLocal; //Where to send the next echo request
+    
+  sendLocal = kFalse;
+
+  //Set up expected parameters for both messages
+  PrepareWaitForEthernet(syspar::Host1Mac, syspar::DIface0MacAddr);
+  PrepareWaitForIpv4(syspar::Wildcard, syspar::Wildcard, 0x1); /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmp("0");  /* Echo Reply Type */
+
+  CopyExpectedParameters(0, 1);
+  
+  //Set up expected parameters for the echo replies with linklocal address (regular parameter)
+  InternalAddExpectedParameter("ipv4", "source", gDIFace0IPLinkLocalAddr, kEquals, 0);
+  InternalAddExpectedParameter("ipv4", "destination", ConvertIpAddressStringToInt64(syspar::AIface0IpLinkLocalAddr), kEquals, 0);
+  
+  //Set up expected parameters for the echo replies with routable address (alternative parameter)
+  InternalAddExpectedParameter("ipv4", "source", ConvertIpAddressStringToInt64(syspar::RoutableIpAddr2), kEquals, 1);
+  InternalAddExpectedParameter("ipv4", "destination", ConvertIpAddressStringToInt64(syspar::RoutableIpAddr1), kEquals, 1);
+  
+  StartObservationOfIncomingPackets(kWaitUntilTimeout);
+
+  //Send echo requests
+  startTime = timeNow();
+  while(timeNow() - startTime < 20e5) //times are in 10^-5 seconds. Total time: 20 seconds
+  {
+    //Alternate sending to the linklocal and the routable address.
+    if(sendLocal == kTrue)
+    {      
+      InternalSendIcmpEchoRequest(
+        syspar::AIface0IpLinkLocalAddr,
+        gDIFace0IPLinkLocalAddrString,
+        syspar::Host1Mac,
+        syspar::DIface0MacAddr);
+      sendLocal = kFalse;
+    }
+    else
+    {
+      InternalSendIcmpEchoRequest(
+        syspar::RoutableIpAddr1,
+        syspar::RoutableIpAddr2,
+        syspar::Host1Mac,
+        syspar::DIface0MacAddr);
+      sendLocal = kTrue;
+    }
+    testWaitForTimeout(100); //Wait 100ms before sending the next packet
+  }
+  
+  //Save the amount of matches
+  //write("gLinkLocalEchoReplyCount1=%d ", gLinkLocalEchoReplyCount1);
+  //write("gExpectedParametersMatches[0]=%d", gExpectedParametersMatches[0]);
+  //write("gExpectedParametersMatches[1]=%d",gExpectedParametersMatches[1]);
+  gLinkLocalEchoReplyCount2 = gLinkLocalEchoReplyCount1 + gExpectedParametersMatches[0];
+  gRoutableEchoReplyCount = gExpectedParametersMatches[1];
+  
+  InternalClearAllParameters();
+}
+
+  /**
+  * Sends three types of ICMP echo requests.
+  * 1: From the link local address of the tester to the link local address of the DUT.
+  * 2: From an unused link local address to the link local address of the DUT.
+  * 3: From the routable ip address of the tester to the routable ip address of the DUT.
+  * Then counts the responses.
+  */
+export testfunction SendThreeTypesOfIcmpEchoRequestsAndCountResponses()
+{
+  dword startTime;
+  int current;
+    
+  current = 0;
+
+  //Set up expected parameters for both messages
+  PrepareWaitForEthernet(syspar::Host1Mac, syspar::DIface0MacAddr);
+  PrepareWaitForIpv4(syspar::Wildcard, syspar::Wildcard, 0x1); /* ICMPv4 Protocol Type */
+  PrepareWaitForIcmp("0");  /* Echo Reply Type */
+
+  CopyExpectedParameters(0, 1);
+  CopyExpectedParameters(0, 2);
+  
+  //Set up expected parameters for the echo replies with linklocal address (regular parameter)
+  InternalAddExpectedParameter("ipv4", "source", gDIFace0IPLinkLocalAddr, kEquals, 0);
+  InternalAddExpectedParameter("ipv4", "destination", ConvertIpAddressStringToInt64(syspar::AIface0IpLinkLocalAddr), kEquals, 0);
+  
+  //Set up expected parameters for the echo replies with linklocal+1 address (alternative parameter 1)
+  InternalAddExpectedParameter("ipv4", "source", gDIFace0IPLinkLocalAddr, kEquals, 1);
+  InternalAddExpectedParameter("ipv4", "destination", ConvertIpAddressStringToInt64(syspar::AIface0IpLinkLocalAddrPlus1), kEquals, 1);
+  
+  //Set up expected parameters for the echo replies with routable address (alternative parameter 2)
+  InternalAddExpectedParameter("ipv4", "source", ConvertIpAddressStringToInt64(syspar::RoutableIpAddr2), kEquals, 2);
+  InternalAddExpectedParameter("ipv4", "destination", ConvertIpAddressStringToInt64(syspar::RoutableIpAddr1), kEquals, 2);
+  
+  StartObservationOfIncomingPackets(kWaitUntilTimeout);
+
+  //Send echo requests
+  startTime = timeNow();
+  while(timeNow() - startTime < 20e5) //times are in 10^-5 seconds. Total time: 20 seconds
+  {
+    //Alternate sending to the linklocal and the routable address.
+    if(current == 0)
+    {      
+      InternalSendIcmpEchoRequest(
+        syspar::AIface0IpLinkLocalAddr,
+        gDIFace0IPLinkLocalAddrString,
+        syspar::Host1Mac,
+        syspar::DIface0MacAddr);
+      
+    }
+    else if(current == 1)
+    {
+      InternalSendIcmpEchoRequest(
+        syspar::AIface0IpLinkLocalAddrPlus1,
+        gDIFace0IPLinkLocalAddrString,
+        syspar::Host1Mac,
+        syspar::DIface0MacAddr);
+    }
+    else if(current == 2)
+    {
+      InternalSendIcmpEchoRequest(
+        syspar::RoutableIpAddr1,
+        syspar::RoutableIpAddr2,
+        syspar::Host1Mac,
+        syspar::DIface0MacAddr);
+    }
+    current++;
+    if(current > 2)
+    {
+      current = 0;
+    }
+    testWaitForTimeout(100); //Wait 100ms before sending the next packet
+  }
+  
+  //Save the amount of matches
+  //write("gExpectedParametersMatches[0] = %d", gExpectedParametersMatches[0]);
+  //write("gExpectedParametersMatches[1] = %d", gExpectedParametersMatches[1]);
+  //write("gExpectedParametersMatches[2] = %d", gExpectedParametersMatches[2]);
+  gLinkLocalEchoReplyCount2 = gLinkLocalEchoReplyCount1 + gExpectedParametersMatches[0];
+  gLinkLocalEchoReplyCount3 = gExpectedParametersMatches[1];
+  gRoutableEchoReplyCount = gExpectedParametersMatches[2];
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Verify that gLinkLocalEchoReplyCount2 > gLinkLocalEchoReplyCount1
+ */
+export testfunction VerifyReplyCountTwoBiggerThanOne()
+{
+  if(gLinkLocalEchoReplyCount2 > gLinkLocalEchoReplyCount1)
+    testStepPass("VerifyReplyCountTwoBiggerThanOne", "Reply Count 2 bigger than Reply Count 1");
+  else
+    testStepFail("VerifyReplyCountTwoBiggerThanOne", "Reply Count 2 is not bigger than Reply Count 1");
+  testStep("VerifyReplyCountTwoBiggerThanOne", "LINK_LOCAL_ECHO_REPLY_COUNT1 = %d", gLinkLocalEchoReplyCount1);
+  testStep("VerifyReplyCountTwoBiggerThanOne", "LINK_LOCAL_ECHO_REPLY_COUNT2 = %d", gLinkLocalEchoReplyCount2);
+}
+
+/**
+ * Verify that ROUTABLE_ECHO_REPLY_COUNT is greater than 0
+ */
+export testfunction VerifyReplyCountBiggerThanZero()
+{
+  if(gLinkLocalEchoReplyCount1 > 0)
+    testStepPass("VerifyReplyCountBiggerThanZero", "Reply Count 1 bigger than zero");
+  else
+    testStepFail("VerifyReplyCountBiggerThanZero", "Reply Count 1 is not bigger than zero");
+  testStep("VerifyReplyCountBiggerThanZero", "LINK_LOCAL_ECHO_REPLY_COUNT1 = %d", gLinkLocalEchoReplyCount1);
+}
+/**
+ * Verify that ROUTABLE_ECHO_REPLY_COUNT is greater than 0
+ */
+export testfunction VerifyReplyCountThreeBiggerThanZero()
+{
+  if(gLinkLocalEchoReplyCount3 > 0)
+    testStepPass("VerifyReplyCountThreeBiggerThanZero", "Reply Count 3 bigger than zero");
+  else
+    testStepFail("VerifyReplyCountThreeBiggerThanZero", "Reply Count 3 is not bigger than zero");
+  testStep("VerifyReplyCountBiggerThanZero", "LINK_LOCAL_ECHO_REPLY_COUNT3 = %d", gLinkLocalEchoReplyCount3);
+}
+
+/**
+ * Verify that ROUTABLE_ECHO_REPLY_COUNT is greater than 0
+ */
+export testfunction VerifyRoutableReplyCountBiggerThanZero()
+{
+  if(gRoutableEchoReplyCount > 0)
+    testStepPass("VerifyRoutableReplyCountBiggerThanZero", "Routable Reply Count bigger than zero (ROUTABLE_ECHO_REPLY_COUNT = %d)", gRoutableEchoReplyCount);
+  else
+    testStepFail("VerifyRoutableReplyCountBiggerThanZero", "Routable Reply Count bigger than zero (ROUTABLE_ECHO_REPLY_COUNT = %d)", gRoutableEchoReplyCount);
+}
+
+/**
+ * Sends an ARP response.
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ */
+export testfunction SendArpResponse(
+  char destMac[],
+  char srcMac[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  InternalSendArpResponse(
+    destMac,
+    srcMac,
+    senderHardwareAddress,
+    senderProtocolAddress,
+    targetHardwareAddress,
+    targetProtocolAddress);
+}
+
+/**
+ * Sends an ARP response.
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ */
+void InternalSendArpResponse(
+  char destMac[],
+  char srcMac[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  long p;
+
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+
+  p = EthInitPacket("arp");
+
+  if(IsWildcard(destMac))
+    EthSetTokenInt64(p, "eth", "destination", ConvertMacAddressStringToInt64(syspar::MacAddressBroadcast));
+  else
+    EthSetTokenInt64(p, "eth", "destination", ConvertMacAddressStringToInt64(destMac));
+  
+  if(IsWildcard(srcMac))
+    EthSetTokenInt64(p, "eth", "source", ConvertMacAddressStringToInt64(syspar::Host1Mac));
+  else
+    EthSetTokenInt64(p, "eth", "source", ConvertMacAddressStringToInt64(srcMac));
+  
+  EthSetTokenInt64(p, "arp", "hwSize", 6);
+  EthSetTokenInt64(p, "arp", "protSize", 4);
+  EthSetTokenInt64(p, "arp", "operation", kResponse);
+  
+  if(IsWildcard(senderHardwareAddress))
+    EthSetTokenInt64(p, "arp", "hwSourceAddr", ConvertMacAddressStringToInt64(syspar::Host1Mac));
+  else
+    EthSetTokenInt64(p, "arp", "hwSourceAddr", ConvertMacAddressStringToInt64(senderHardwareAddress));
+  
+  if(IsLinkLocalIpAddress(senderProtocolAddress))
+    EthSetTokenInt64(p, "arp", "protSourceAddr", ConvertIpAddressStringToInt64(gDIFace0IPLinkLocalAddrString));
+  else
+    EthSetTokenInt64(p, "arp", "protSourceAddr", ConvertIpAddressStringToInt64(senderProtocolAddress));
+  
+  if(IsWildcard(targetHardwareAddress))
+    EthSetTokenInt64(p, "arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(syspar::MacAddressZeros));
+  else
+    EthSetTokenInt64(p, "arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(targetHardwareAddress));
+  
+  if(IsLinkLocalIpAddress(targetProtocolAddress))
+    EthSetTokenInt64(p, "arp", "protDestinationAddr", ConvertIpAddressStringToInt64(gDIFace0IPLinkLocalAddrString));
+  else
+    EthSetTokenInt64(p, "arp", "protDestinationAddr", ConvertIpAddressStringToInt64(targetProtocolAddress));
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  EthCompletePacket(p);
+
+  EthOutputPacket(p);
+  EthReleasePacket(p);
+}
+
+/**
+ * Sends an ARP request.
+ * @param destMac The destination MAC address.
+ * @param srcMac The source MAC address.
+ * @param hardwareType The Type of the hardware address.
+ * @param protocolType The Type of the protocol address.
+ * @param hardwareAddressLength The length of the hardware address.
+ * @param protocolAddressLength The length of the protocol address.
+ * @param senderHardwareAddress The sender hardware address.
+ * @param senderProtocolAddress The sender protocol address.
+ * @param targetHardwareAddress The target hardware address.
+ * @param targetProtocolAddress The target protocol address.
+ */
+void InternalSendArpRequest(
+  char destMac[],
+  char srcMac[],
+  char hardwareType[],
+  char protocolType[],
+  char hardwareAddressLength[],
+  char protocolAddressLength[],
+  char senderHardwareAddress[],
+  char senderProtocolAddress[],
+  char targetHardwareAddress[],
+  char targetProtocolAddress[])
+{
+  long p, result;
+
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+
+  p = EthInitPacket("arp");
+
+  ReplaceDUTLinkLocalAddress(senderProtocolAddress);
+  ReplaceDUTLinkLocalAddress(targetProtocolAddress);
+  
+  if(IsWildcard(destMac))
+    result = EthSetTokenInt64(p, "eth", "destination", ConvertMacAddressStringToInt64(syspar::MacAddressBroadcast));
+  else
+    result = EthSetTokenInt64(p, "eth", "destination", ConvertMacAddressStringToInt64(destMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth dest error code=%d", result);
+  
+  if(IsWildcard(srcMac))
+    result = EthSetTokenInt64(p, "eth", "source", ConvertMacAddressStringToInt64(syspar::Host1Mac));
+  else
+    result = EthSetTokenInt64(p, "eth", "source", ConvertMacAddressStringToInt64(srcMac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth src error code=%d", result);
+  
+  result = EthSetTokenInt64(p, "arp", "operation", kRequest);
+  if(result != 0) write("Error @ EthSetTokenInt64 arp opcode error code=%d", result);
+  
+  if (IsWildcard(hardwareType)) 
+    result = EthSetTokenInt64(p, "arp", "hwType", 1);
+  else 
+    result = EthSetTokenInt64(p, "arp", "hwType", atol(hardwareType));
+  if(result != 0) write("Error @ EthSetTokenInt64 arp hw type error code=%d", result);
+  
+  if (IsWildcard(protocolType)) 
+    result = EthSetTokenInt64(p, "arp", "protType", 0x0800);
+  else 
+    result = EthSetTokenInt64(p, "arp", "protType", atol(protocolType));
+  if(result != 0) write("Error @ EthSetTokenInt64 arp prottype error code=%d", result);
+  
+  if (IsWildcard(hardwareAddressLength)) 
+    result = EthSetTokenInt64(p, "arp", "hwSize", 6);
+  else
+    result = EthSetTokenInt64(p, "arp", "hwSize", atol(hardwareAddressLength));
+  if(result != 0) write("Error @ EthSetTokenInt64 arp hwsize error code=%d", result);
+  
+  if (IsWildcard(protocolAddressLength)) 
+    result = EthSetTokenInt64(p, "arp", "protSize", 4);
+  else
+    result = EthSetTokenInt64(p, "arp", "protSize", atol(protocolAddressLength));
+  if(result != 0) write("Error @ EthSetTokenInt64 arp protsize error code=%d", result);
+  
+  if(IsWildcard(senderHardwareAddress))
+    result = EthSetTokenInt64(p, "arp", "hwSourceAddr", ConvertMacAddressStringToInt64(syspar::Host1Mac));
+  else
+    result = EthSetTokenInt64(p, "arp", "hwSourceAddr", ConvertMacAddressStringToInt64(senderHardwareAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 arp sender hw addr error code=%d", result);
+  
+  result = EthSetTokenInt64(p, "arp", "protSourceAddr", ConvertIpAddressStringToInt64(senderProtocolAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 arp sender prot addr error code=%d", result);
+  
+  if(IsWildcard(targetHardwareAddress))
+    result = EthSetTokenInt64(p, "arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(syspar::MacAddressZeros));
+  else
+    result = EthSetTokenInt64(p, "arp", "hwDestinationAddr", ConvertMacAddressStringToInt64(targetHardwareAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 arp target hw addr error code=%d", result);
+  
+  result = EthSetTokenInt64(p, "arp", "protDestinationAddr", ConvertIpAddressStringToInt64(targetProtocolAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 arp target prot addr error code=%d", result);
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket error code=%d", result);
+
+  result = EthOutputPacket(p);
+  if(result != 0) write("Error @ EthOutputPacket error code=%d", result);
+  
+  result = EthReleasePacket(p);
+  if(result != 0) write("Error @ EthReleasePacket error code=%d", result);
+}
+
+/**
+ * Adds the message type dhcp option to an ethernet packet
+ * @param packetHandle handle of the ethernet packet
+ * @param type the type of dhcp packet
+ * @returns size of the option in bytes
+ */
+long AddMessageTypeOption(long packetHandle,enum DhcpMessageType type)
+{
+  byte data[1];
+  data[0] = (byte) type;
+  AddOption(packetHandle, kMessageType, data, elcount(data));
+  return 3;
+}
+
+/**
+ * Adds the lease time dhcp option to an ethernet packet
+ * @param packetHandle handle of the ethernet packet
+ * @param leaseTimeSeconds the lease time
+ * @returns size of the option in bytes
+ */
+long AddLeaseTimeOption(long packetHandle, dword leaseTimeSeconds)
+{
+  byte data[4];
+  data.Dword(0) = swapDword(leaseTimeSeconds);
+  AddOption(packetHandle, kIpAddressLeaseTime, data, elcount(data));
+  return 6;
+}
+
+/* Adds a dhcp option to an ethernet packet
+ * @param packetHandle handle of the ethernet packet
+ * @param option the option that should be added
+ * @param data the data of the option
+ * @param dataLength size of the data array
+ */
+void AddOption(long packetHandle, enum DhcpOptions option, byte data[], int dataLength)
+{
+  long result;
+  char tempstr[128];
+  
+  snprintf(tempstr, elcount(tempstr), "option%d", (byte) option);
+  result = EthAddToken(packetHandle, "dhcpv4", tempstr);
+  if (result != 0) write("Error @ EthAddToken %d", result);
+  
+  snprintf(tempstr, elcount(tempstr), "option%d.data", (byte) option);
+  // Do not use EthResizeToken! Otherwise, adding the option won't work
+  result = EthSetTokenData(packetHandle, "dhcpv4", tempstr, dataLength, data);
+  if (result != 0) write("Error @ EthSetTokenData %d", result);
+}
+
+/**
+  * Adds an expected parameter checking the first two bytes of the protDestinationAddr against the networkmask.
+  */
+void AddNetworkMaskDataParameter(char networkmask[])
+{
+  if(!isWildcard(networkmask))
+  {
+    byte bytemask[16];
+    int64 ip;
+    //write("network mask is not wildcard");
+    ip = ipGetAddressAsNumber(networkmask);
+    bytemask.dword(0) = (dword)ip;
+    InternalAddExpectedDataParameter("arp", "protDestinationAddr", bytemask, 2, kFalse, 0, kEquals);
+  }
+}
+
+
+/**
+ * Compares the address with syspar::DIface0IpLinkLocalAddr.
+ * @param address The address
+ */
+enum Bool IsLinkLocalIpAddress(char address[])
+{
+  if(strncmp(address, syspar::DIface0IpLinkLocalAddr, strlen(syspar::DIface0IpLinkLocalAddr)) == 0)
+    return kTrue;
+  return kFalse;
+}
+
+/**
+ * Compares the address with syspar::DIface0IpLinkLocalAddr and replaces it with the actual address.
+ * @param address The address
+ */
+void ReplaceDUTLinkLocalAddress(char address[])
+{
+  if(IsLinkLocalIpAddress(address) == kTrue)
+  {
+    if(gDIFace0IPLinkLocalAddrString[0] == '\0')
+    {
+      write("Internal Error: Attempting to replace an empty link local address.");
+      testStepFail("Internal Error: Attempting to replace an empty link local address.");
+    }
+    strncpy(address, gDIFace0IPLinkLocalAddrString, elcount(gDIFace0IPLinkLocalAddrString));
+  }
+}

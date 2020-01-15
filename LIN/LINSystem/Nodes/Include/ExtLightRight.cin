@@ -1,0 +1,76 @@
+/*@@var:*/
+variables
+{
+  const long kLIN_CHANNEL     = 1;
+  const long kSTEP            = 2;
+  const long kACTIVE          = 1;
+  const long kINACTIVE        = 0;
+  const long kSTART_MSG_VALUE = 0;
+  const long kMAX_MSG_VALUE   = 20;
+
+  Byte gBasis1 = 0;
+  Byte gBasis2 = 0; 
+
+  long gMSG_Counter   = kMAX_MSG_VALUE;
+  long gTurnIndActive = kINACTIVE;
+}
+/*@@end*/
+
+/*@@caplFunc:GetLightStatus():*///function
+byte GetLightStatus ()
+{
+  if(gTurnIndActive == kACTIVE)
+  {
+    if(gMSG_Counter == kMAX_MSG_VALUE)
+    {
+      gBasis2 = gBasis2 == kINACTIVE ? kACTIVE : kINACTIVE;
+      gBasis2 = gBasis2 << 1;
+      gMSG_Counter = kSTART_MSG_VALUE;
+    }
+    gMSG_Counter++;
+  }  
+  
+  return (gBasis1 | gBasis2);      
+}
+/*@@end*/
+
+/*@@changeSignal:GWE_01::GWE_DrivingLight:*/
+on signal GWE_01::GWE_DrivingLight
+{
+  byte dlStatus;
+
+  dlStatus = $GWE_01::GWE_DrivingLight;
+  gBasis1 = (byte)dlStatus << kSTEP;
+
+  $DLFRight_01::DLFR_CurvesLight = dlStatus;
+}
+/*@@end*/
+
+/*@@changeSignal:GWE_01::GWE_TurnIndicationRight:*/
+on signal GWE_01::GWE_TurnIndicationRight
+{
+  if($GWE_01::GWE_TurnIndicationRight == kINACTIVE && 
+     $GWE_01::GWE_WarningLight   == kACTIVE)  return;
+
+  gTurnIndActive = $GWE_01::GWE_TurnIndicationRight;
+
+  if(gTurnIndActive == kINACTIVE) gBasis2 = kINACTIVE;
+}
+/*@@end*/
+
+/*@@changeSignal:GWE_01::GWE_WarningLight:*/
+on signal GWE_01::GWE_WarningLight
+{
+  if($GWE_01::GWE_TurnIndicationRight == kACTIVE && 
+     $GWE_01::GWE_WarningLight   == kINACTIVE)  return;
+  
+  if($GWE_01::GWE_WarningLight == kACTIVE) gBasis2 = kINACTIVE; 
+
+  gTurnIndActive = $GWE_01::GWE_WarningLight;
+
+  if(gTurnIndActive == kINACTIVE) gBasis2 = kINACTIVE;
+
+  gMSG_Counter = kSTART_MSG_VALUE;
+}
+/*@@end*/
+

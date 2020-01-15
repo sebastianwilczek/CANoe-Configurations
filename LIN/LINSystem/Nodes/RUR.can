@@ -1,0 +1,111 @@
+/*@@var:*/
+variables
+{
+  const long kUNLOCKED  = 0x01;
+  const long kLOCKED    = 0x00;
+  const long kOPEN      = 0x01;
+  const long kCLOSE     = 0x00;
+  const long kACTIVE    = 0x01;
+  const long kINACTIVE  = 0x00;
+
+  msTimer tFadeBrightnessUP;
+  msTimer tFadeBrightnessDOWN;
+
+  const long kBRIGHTNESS_RATE   = 50;
+  const long kWAIT_TO_DOWN_LESS = 2000;  // in ms
+  const long kWAIT_TO_DOWN_MORE = 5000;  // in ms
+
+  long kUpIsActive = 0;
+  long kDownIsActive = 0;
+}
+/*@@end*/
+
+/*@@changeSignal:GWI_CentralLockingSystem:*/
+on signal GWI_CentralLockingSystem
+{
+  if(this == kUNLOCKED)
+  {
+    if(!kUpIsActive)
+    { 
+      kUpIsActive   = kACTIVE;
+      kDownIsActive = kINACTIVE;
+      cancelTimer(tFadeBrightnessUP);
+      setTimer(tFadeBrightnessUP,kBRIGHTNESS_RATE);
+    }
+  }
+  else if(this == kLOCKED)
+  {
+    if(!kDownIsActive)
+    { 
+      kDownIsActive = kACTIVE;
+      kUpIsActive   = kINACTIVE;
+      cancelTimer(tFadeBrightnessDOWN);
+      setTimer(tFadeBrightnessDOWN,kBRIGHTNESS_RATE);  
+    }
+  }
+}
+/*@@end*/
+
+/*@@timer:tFadeBrightnessUP:*/
+on timer tFadeBrightnessUP
+{
+  if($RUR_01::RUR_Brightness < 60)
+  {
+    SetBrightness(+1);
+    cancelTimer(tFadeBrightnessUP);
+    SetTimer(tFadeBrightnessUP,kBRIGHTNESS_RATE);
+  }
+  if($RUR_01::RUR_Brightness == 60)
+  {
+    kUpIsActive = kINACTIVE;
+    cancelTimer(tFadeBrightnessDOWN);
+    SetTimer(tFadeBrightnessDOWN,kWAIT_TO_DOWN_MORE);
+  }
+}
+/*@@end*/
+
+/*@@timer:tFadeBrightnessDOWN:*/
+on timer tFadeBrightnessDOWN
+{
+  if($RUR_01::RUR_Brightness > 0 && $GWI_DoorState == kCLOSE)
+  {
+    SetBrightness(-1);
+    cancelTimer(tFadeBrightnessDOWN);
+    SetTimer(tFadeBrightnessDOWN,kBRIGHTNESS_RATE);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:SetBrightness(int):*///function
+SetBrightness(int value)
+{
+  $RUR_01::RUR_Brightness = $RUR_01::RUR_Brightness + value;
+}
+/*@@end*/
+
+/*@@changeSignal:GWI_DoorState:*/
+on signal GWI_DoorState
+{
+  if(this == kOPEN)
+  {
+    if(!kUpIsActive)
+    { 
+      kUpIsActive   = kACTIVE;
+      kDownIsActive = kINACTIVE;
+      cancelTimer(tFadeBrightnessUP);
+      setTimer(tFadeBrightnessUP,kBRIGHTNESS_RATE);
+    }
+  }
+  else if(this == kCLOSE)
+  {
+    if(!kDownIsActive)
+    { 
+      kDownIsActive = kACTIVE;
+      kUpIsActive   = kINACTIVE;
+      cancelTimer(tFadeBrightnessDOWN);
+      setTimer(tFadeBrightnessDOWN,kWAIT_TO_DOWN_LESS);  
+    }
+  }
+}
+/*@@end*/
+

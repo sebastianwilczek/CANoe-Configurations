@@ -1,0 +1,171 @@
+/*@!Encoding:1252*/
+includes
+{
+  
+}
+
+variables
+{
+  // separate SPI byte signals, 2 byte each for one direction (MOSI or MISO) 
+  byte gSignalValue1;
+  dword gSignalValue2;
+  byte gSignalValue3;
+  dword gSignalValue4;
+  
+  
+  // byte arrays, filled by SPI byte signals, transferred to Master and Slave port
+  byte gMasterTxBuffer[5] = {0x00, 0x00, 0x00, 0x00, 0x00};
+  byte gSlaveTxBuffer[5] = {0x00, 0x00, 0x00, 0x00, 0x00};
+  
+  
+  // return codes to check correct execution of CAPL functions from SPI feature
+  long gRetCode1 = 0;
+  long gRetCode2 = 0;
+  long gRetCode3 = 0;
+  long gRetCode4 = 0;
+  long gRetCode5 = 0;
+  long gRetCode6 = 0;
+  
+  
+  // CAPL timer to trigger periodic transmission of data on SPI
+  msTimer SPIMasterCommunicationTimer;
+  msTimer SPISlaveCommunicationTimer; 
+  msTimer AnimateSPIData;
+}
+
+
+on preStart
+{
+  // update variables during startup 
+  @SPI_Communication::Sysvar_Master_MOSI_Signal_1 = 0;
+  @SPI_Communication::Sysvar_Master_MOSI_Signal_2 = 0;
+  @SPI_Communication::Sysvar_Master_MISO_Signal_1 = 0;
+  @SPI_Communication::Sysvar_Master_MISO_Signal_2 = 0;
+  @SPI_Communication::Sysvar_Slave_MOSI_Signal_1 = 0;
+  @SPI_Communication::Sysvar_Slave_MOSI_Signal_2 = 0;
+  @SPI_Communication::Sysvar_Slave_MISO_Signal_1 = 0;
+  @SPI_Communication::Sysvar_Slave_MISO_Signal_2 = 0;
+  gSignalValue1 = sysGetVariableInt(sysvar::SPI_Communication::Sysvar_Master_MOSI_Signal_1);
+  gSignalValue2 = sysGetVariableInt(sysvar::SPI_Communication::Sysvar_Master_MOSI_Signal_2); 
+  gSignalValue3 = sysGetVariableInt(sysvar::SPI_Communication::Sysvar_Slave_MISO_Signal_1);  
+  gSignalValue4 = sysGetVariableInt(sysvar::SPI_Communication::Sysvar_Slave_MISO_Signal_2);
+  }
+
+
+on start
+{ 
+  write("\n");
+  writeDbgLevel(15,"SPIBasic Demo has to use VTSystem with VT2710 module and real wired SPI ports");
+  write("\n");
+  // start periodic CAPL timer events 
+  setTimerCyclic (SPIMasterCommunicationTimer, 50);
+  setTimerCyclic (SPISlaveCommunicationTimer, 50);
+  setTimerCyclic (AnimateSPIData, 100);
+  
+  // to run that configuration, a real VTSystem with additional VT2710 module is necessary at least.
+  if (isSimulated())
+  {
+    writeDbgLevel(15,"!!! Demo can't run in simulated mode!, Simulation stopped !!!");
+    StopCANoe();    
+  }  
+}
+
+
+on timer SPIMasterCommunicationTimer
+{  
+  // transfer signal values into byte array for Master port 
+  gRetCode1 = sensorInsertInteger(gMasterTxBuffer, 5, gSignalValue1, 0, 8, 1);
+  gRetCode2 = sensorInsertInteger(gMasterTxBuffer, 5, gSignalValue2, 8, 32, 1);
+  
+  
+  // cyclic transfer of byte array to Master port and trigger transmission
+  gRetCode3 = sensorQueueMosiData("SENSOR::SPI::Master_Port::Slave1",gMasterTxBuffer,40);
+  if (gRetCode3 != 0)
+    write ("QueueMosiData --> ErrorCode = %d", gRetCode5);  
+}
+
+
+on timer SPISlaveCommunicationTimer
+{  
+  // transfer signal values into byte array for Slave port 
+  gRetCode4 = sensorInsertInteger(gSlaveTxBuffer, 5, gSignalValue3, 0, 8, 1);
+  gRetCode5 = sensorInsertInteger(gSlaveTxBuffer, 5, gSignalValue4, 8, 32, 1);  
+  
+  
+  // cyclic transfer of byte array to Slave port and trigger transmission 
+  gRetCode6 = sensorQueueMisoData("SENSOR::SPI::Slave_Port::Slave1",gSlaveTxBuffer,40);
+  if (gRetCode6 != 0)
+    write ("QueueMisoData --> ErrorCode = %d", gRetCode6);  
+}
+
+
+on timer AnimateSPIData
+{  
+  // to see minum communication on SPI nus, the second MISO signal is incremented each 100ms
+  sysSetVariableInt(sysvar::SPI_Communication::Sysvar_Slave_MISO_Signal_2, (sysGetVariableInt(sysvar::SPI_Communication::Sysvar_Slave_MISO_Signal_2)+1));
+  
+  if (sysGetVariableInt(sysvar::SPI_Communication::Sysvar_Slave_MISO_Signal_2) > 255)
+    sysSetVariableInt(sysvar::SPI_Communication::Sysvar_Slave_MISO_Signal_2,0);   
+ }
+
+
+on sysvar sysvar::SPI_Communication::Sysvar_Master_MOSI_Signal_1
+{
+  // update of internal variables triggered by changed sysvar from panel
+  gSignalValue1 = (dword)sysGetVariableInt(sysvar::SPI_Communication::Sysvar_Master_MOSI_Signal_1);
+}
+
+
+on sysvar sysvar::SPI_Communication::Sysvar_Master_MOSI_Signal_2
+{
+  // update of internal variables triggered by changed sysvar from panel 
+  gSignalValue2 = (dword)sysGetVariableInt(sysvar::SPI_Communication::Sysvar_Master_MOSI_Signal_2); 
+}
+
+
+on sysvar sysvar::SPI_Communication::Sysvar_Slave_MISO_Signal_1
+{
+  // update of internal variables triggered by changed sysvar from panel
+  gSignalValue3 = (dword)sysGetVariableInt(sysvar::SPI_Communication::Sysvar_Slave_MISO_Signal_1); 
+}
+
+
+on sysvar sysvar::SPI_Communication::Sysvar_Slave_MISO_Signal_2
+{
+  // update of internal variables triggered by changed sysvar from panel
+  gSignalValue4 = (dword)sysGetVariableInt(sysvar::SPI_Communication::Sysvar_Slave_MISO_Signal_2);
+}
+
+
+on sysvar SENSOR::SPI::Master_Port::Slave1::Master_Node_Frame1.MISO_Signals.MISO_Signal1
+{ 
+  //update of panel variable triggered by changed sysvar from SPI bus
+  @SPI_Communication::Sysvar_Master_MISO_Signal_1 = @SENSOR::SPI::Master_Port::Slave1::Master_Node_Frame1.MISO_Signals.MISO_Signal1;
+}
+
+
+on sysvar SENSOR::SPI::Master_Port::Slave1::Master_Node_Frame1.MISO_Signals.MISO_Signal2
+{
+   //update of panel variable triggered by changed sysvar from SPI bus
+  @SPI_Communication::Sysvar_Master_MISO_Signal_2 = @SENSOR::SPI::Master_Port::Slave1::Master_Node_Frame1.MISO_Signals.MISO_Signal2;
+}
+
+
+on sysvar SENSOR::SPI::Slave_Port::Slave1::Slave_Node_Frame1.MOSI_Signals.MOSI_Signal1
+{
+   //update of panel variable triggered by changed sysvar from SPI bus
+  @SPI_Communication::Sysvar_Slave_MOSI_Signal_1 = @SENSOR::SPI::Slave_Port::Slave1::Slave_Node_Frame1.MOSI_Signals.MOSI_Signal1;   
+}
+
+
+on sysvar SENSOR::SPI::Slave_Port::Slave1::Slave_Node_Frame1.MOSI_Signals.MOSI_Signal2
+{
+   //update of panel variable triggered by changed sysvar from SPI bus
+  @SPI_Communication::Sysvar_Slave_MOSI_Signal_2 = @SENSOR::SPI::Slave_Port::Slave1::Slave_Node_Frame1.MOSI_Signals.MOSI_Signal2;
+}
+
+void StopCANoe()
+{
+  stop();
+}
+

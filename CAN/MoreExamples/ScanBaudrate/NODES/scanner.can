@@ -1,0 +1,145 @@
+/*@@var:*/
+variables 
+{
+  msTimer tStep;
+  msTimer tActivateIL;
+
+  int     gStep = 0;
+  int     gTimeout        = 1000;
+  int     gMsgCounter     = 0;
+  int     gStartUp        = 0; 
+  int     gILIsRunning	  = 0;
+
+  const int gGREY        = 1;
+  const int gRED         = 0;
+  const int gGREEN       = 2;
+  const int gMAX_SCANS   = 8;
+  const int gMAX_RX_MSG  = 10;
+  const int gTrue        = 1;
+  const int gFalse       = 0;
+
+}
+/*@@end*/
+
+/*@@timer:tStep:*/
+on timer tStep
+{
+  if(gStep == gMAX_SCANS) 
+  {
+    cancelTimer(tStep);
+    SysSetVariableString(sysvar::ScanBaudrate::ScanInfo,"Baudrate scan not successful");
+    SysSetVariableString(sysvar::ScanBaudrate::ShowBaudrate,"");
+    @sysvar::ScanBaudrate::Scans = gMAX_SCANS;
+    @sysvar::ScanBaudrate::ScanLED = gRED;
+    @sysvar::ScanBaudrate::ComLED = gRED;
+    EnableControl("ScanBaudrateActive","StartScan",1);
+  }
+  else
+  {
+    gStep = gStep + 1;
+    @sysvar::ScanBaudrate::Scans = gStep;
+    ShowBaudrate(gStep);
+    setTimer(this,gTimeout);
+  }
+}
+/*@@end*/
+
+/*@@msg:0x123:*/
+on message 0x123
+{
+  cancelTimer(tStep);
+  @sysvar::ScanBaudrate::Scans = gMAX_SCANS;
+  SysSetVariableString(sysvar::ScanBaudrate::ScanInfo,"Baudrate scan successful"); 
+  @sysvar::ScanBaudrate::ScanLED = gGREEN;
+  @sysvar::ScanBaudrate::ComLED = gGREEN;
+  EnableControl("ScanBaudrateActive","StartScan",1);
+
+  if(gILIsRunning == gFalse)
+  {  
+    cancelTimer(tActivateIL);
+    SetTimer(tActivateIL,gTimeout);
+  }
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // Initialization of CANoe Interaction Layer 
+  ILControlInit(); 
+}
+/*@@end*/
+
+/*@@caplFunc:ShowBaudrate(int):*///function
+ShowBaudrate (int step)
+{
+  switch(step)
+  {
+    case 1: SysSetVariableString(sysvar::ScanBaudrate::ShowBaudrate,"Baudrate: 33.333 [BTR0 = 0x09, BTR1 = 0x6f]"); break;
+    case 2: SysSetVariableString(sysvar::ScanBaudrate::ShowBaudrate,"Baudrate: 50.000 [BTR0 = 0x07, BTR1 = 0x2f]"); break;
+    case 3: SysSetVariableString(sysvar::ScanBaudrate::ShowBaudrate,"Baudrate: 83.333 [BTR0 = 0x03, BTR1 = 0x6f]"); break;
+    case 4: SysSetVariableString(sysvar::ScanBaudrate::ShowBaudrate,"Baudrate: 100.000 [BTR0 = 0x03, BTR1 = 0x2f]"); break;
+    case 5: SysSetVariableString(sysvar::ScanBaudrate::ShowBaudrate,"Baudrate: 125.000 [BTR0 = 0x03, BTR1 = 0x1c]"); break;
+    case 6: SysSetVariableString(sysvar::ScanBaudrate::ShowBaudrate,"Baudrate: 250.000 [BTR0 = 0x01, BTR1 = 0x1c]"); break;
+    case 7: SysSetVariableString(sysvar::ScanBaudrate::ShowBaudrate,"Baudrate: 500.000 [BTR0 = 0x00, BTR1 = 0x1c]"); break;
+    case 8: SysSetVariableString(sysvar::ScanBaudrate::ShowBaudrate,"Baudrate: 1000.000 [BTR0 = 0x00, BTR1 = 0x14]"); break;   
+  }
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  EnableControl("ScanBaudrateActive","StartScan",1); 
+}
+/*@@end*/
+
+/*@@stop:StopMeasurement:*/
+on stopMeasurement
+{
+  EnableControl("ScanBaudrateActive","StartScan",1); 
+}
+/*@@end*/
+
+/*@@timer:tActivateIL:*/
+on timer tActivateIL
+{
+  // Start of transmition via CANoe Interaction Layer 
+  ILControlStart(); 
+  gILIsRunning = gTrue;
+}
+/*@@end*/
+
+/*@@sysvarUpdate:ScanBaudrate::StartScanBaudrate:*/
+on sysvar_update sysvar::ScanBaudrate::StartScanBaudrate
+{
+  long ret;
+   
+  if(!@sysvar::ScanBaudrate::StartScanBaudrate) 
+  {
+    EnableControl("ScanBaudrateActive","StartScan",0);
+    return;
+  }
+  // Baudrate scanner checks different baudrates and tries to send a message through the channel
+  // Info: This function is only available with CANcardX and CANcradXL
+  ret = ScanBaudrateActive(2,0x123,0,0,gTimeout);  
+  
+  if(ret == 0)
+  {
+    if(gStartUp != gFalse)
+  {
+    ILControlStop(); 
+    gILIsRunning = gFalse;
+    }
+    gStartUp     = gTrue;
+    gStep        = 1;
+    ShowBaudrate (gStep);
+    SysSetVariableString(sysvar::ScanBaudrate::ScanInfo,"Scanning.......");
+    @sysvar::ScanBaudrate::Scans = gStep;
+    @sysvar::ScanBaudrate::ScanLED = gGREEN;   
+    @sysvar::ScanBaudrate::ComLED = gGREY;
+    setTimer(tStep,gTimeout);
+  }
+}
+/*@@end*/
+

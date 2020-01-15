@@ -1,0 +1,367 @@
+/*@@includes:*/
+includes
+{
+  // include DLL with file streaming extensions
+  // path relative to this CAPL file
+  #pragma library ("MostSyncStrmFromFile.dll")
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  //
+  // This CAPL program applies the CAPL DLL MostSyncStrmFromFile.dll
+  // to route data to synchronous MOST channels.
+  // 
+
+  // channel of MOST interface
+  long  gChannel        = 1;
+  // name of extension DLL for streaming (path relative to cfg file)
+  char  gDllName[200]    = "MostSyncStrmFromFile.dll";
+  // streaming direction
+  char  gDirection      = TX;
+  // latency: 0 (short reaction time, high CPU load)...
+  //          4 (slow reaction time, low CPU load)
+  char  gLatency        = 0;
+
+  // default file to stream data from
+  char  gDefaultFile[200] = "TestSamples.bin";
+
+
+  // streaming states (see OnMostSyncStrmState)
+  const int kClosed  = 1;
+  const int kOpened  = 2;
+  const int kStarted = 3;
+  const int kStopped = 4;
+
+  // streaming errors (see OnMostSyncStrmError)
+  const int kOK                          =   0;
+  const int kOpenFailed                  =   1;
+  const int kCloseFailed                 =   2;
+  const int kStartFailed                 =   3;
+  const int kStopFailed                  =   4;
+  const int kDriverCallFailed            =  10; // call of the bus interface driver failed
+  const int kDirectionNotSupported       =  11; // the streaming direction is not supported by the client
+  const int kNumSyncChannelsNotSupported =  12; // the number of streaming channels is not supported by the client
+  const int kOptionsNotSupported         =  13; // the streaming options are not supported by the client
+  const int kLatencyNotSupported         =  14; // the suggested latency is not supported by the client
+  const int kInvalidInterface            =  15;
+  const int kBufferUnderrunHW            =  40; // 0-data was streamed (TX only)
+  const int kBufferUnderrunClient        =  41; // client didn't provide buffer in time (TX only)
+  const int kBufferOverflowHW            =  42; // synchr data got lost (RX only)
+  const int kBufferOverflowClient        =  43; // client didn't provide buffer in time (RX only)
+  const int kBufferErrorClient           =  44; // streaming client was unable to prepare/process a buffer
+  const int kBufferErrorStart            =  45; // no buffers provided at start of streaming (TX: 0-data was streamed; RX: data got lost)
+  const int kBufferErrorStop             =  46; // buffer underrun or overflow reported after the stream has been stopped
+  const int kNotEnoughBW                 =  51; // The desired bandwidth for a Tx stream cannot be allocated.
+  const int kNetOff                      =  52; // NetInterface is in state NetOff. No streaming is possible. In case streaming was activated it is automatically stopped. Additionally a Tx stream is closed. 
+  const int kConfigNotOK                 =  53; // The Network Configuration state switched to ‘NotOk’. Any active streaming is stopped. Additionally a Tx stream is closed. 
+  const int kCLDisappeared               =  54; // Any connection label from the Rx stream disappeared, thus streaming is automatically stopped.
+  const int kINICSocketError             =  55; // INIC reported a socket connection error for the Tx stream. Streaming is automatically stopped and stream is closed.
+  const int kDeviceModeBypass            =  56; // INIC’s bypass was closed by application request. With closed bypass no streaming is possible, so streaming will be stopped automatically. Additionally a Tx stream is closed.
+  const int kNIStateNotNetOn             =  57; // NetInterface is not in NetOn, thus no streaming is possible. This error might be reported when opening the Tx stream. 
+  const int kINICBusy                    =  58; // INIC is currently busy processing other requests. The application may perform a retry.
+  const int kCLMissing                   =  59; // One or more connection labels are missing when trying to start the Rx stream.
+  const int kNumBytesMismatch            =  60; // The number of bytes per MOST frame given by the application does not match the number of bytes actually given by the connection labels for the Rx stream.
+  const int kINICCommunicationError      =  61; // A communication error with INIC occurred. 
+  const int kUnlock                      =  70; // Rx streaming stopped due to an unlock event. As soon as lock is re-gained streaming will be continued.
+  const int kUnknownError                = 255; 
+
+  // specific file states reported from MostSyncStrmFromFile.dll
+  // see OnMostSyncStrmFFState
+  const int kFileState_Closed       = 0;
+  const int kFileState_Opened       = 1;
+
+  // specific errors reported from MostSyncStrmFromFile.dll
+  // see OnMostSyncStrmFFError
+  const int kFileError_NoFile       = 1;
+  const int kFileError_OpenFailed   = 2;
+  const int kFileError_ReadError    = 4;
+  const int kFileError_EndOfFile    = 5; // no more file data available (this does not mean that the streaming of the file data is complete)
+  const int kFileError_DataStreamed = 6; // streaming of file data completed
+
+  // width of the data
+  int       gNumBytesPerFrame;
+  const int kMaxNumBytesPerFrame = 152;
+
+  // handle for synchronous channel streaming
+  dword gHandle;             
+
+
+  char  gNodeName[40]     = "StreamFromFile_150";  // name this node
+  char  gPanelName[40]    = "Stream From File";
+
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // initialize extension DLL for file streaming
+  // binds the CAPL node exclusively to the DLL
+  gHandle = mostSyncStrmInit(gChannel, gDirection, gDllName);
+
+  if(0 == gHandle)
+    write("%s: Initialization of streaming client failed (%s)", gNodeName, gDllName);
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncStrmError(dword,long):*///callback
+void OnMostSyncStrmError(dword handle, long errorcode)
+{
+  // this callback reports a general streaming error
+  //write("%s: Error %d occured while streaming", gNodeName, errorcode);
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncStrmState(dword,long):*///callback
+void OnMostSyncStrmState(dword handle, long state)
+{
+  // state of a stream is reported
+
+  if(handle != gHandle)
+    return;
+
+  @sysvar::StreamFF::State = state;
+
+  if(state == kStopped)
+  {
+    // clear pending buffers
+    mostSyncStrmClearAllBuffers(gHandle);
+  }
+  else if(state == kClosed)
+  {
+    @sysvar::StreamFF::Label = 0;
+  }
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  char strFileAbs[400];
+  
+  if(gHandle == 0)
+  {
+    writeLineEx(0,3,"Streaming not possible!");
+    writeLineEx(0,3,"Please check you have a VN2610 interface box connected!");
+    stop();
+  }
+
+  @sysvar::StreamFF::State = kClosed;
+  EnableDisableControls();
+
+  // get absolute file path from relative file (relative to configuration file)
+  if(-1 == getAbsFilePath(gDefaultFile, strFileAbs, elcount(strFileAbs)))
+    return;
+
+  sysSetVariableString(sysvar::StreamFF::FileName, strFileAbs);
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncStrmFFError(long,char[]):*///callback
+void OnMostSyncStrmFFError(long fileerror, char file[])
+{
+  // this callback of the streaming dll
+  // reports a specific streaming error
+
+  switch(fileerror)
+  {
+  case kFileError_NoFile:
+    write("%s: No file specified", gNodeName);
+    break;
+  case kFileError_OpenFailed:
+    write("%s: Failed to open file %s", gNodeName, file);
+    break;
+  case kFileError_ReadError:
+    write("%s: Failed to read data from file", gNodeName);
+    break;
+  case kFileError_EndOfFile:
+    write("%s: End of file reached", gNodeName);
+    break;
+  case kFileError_DataStreamed:
+    write("%s: File data streamed", gNodeName);
+    if(!@sysvar::StreamFF::Repeat)
+    {
+      // stop automatically if file is streamed completely
+      mostSyncStrmStop(gHandle);
+    }
+    break;
+  default:
+    write("%s: Streaming DLL file error %d", gNodeName, fileerror);
+    break;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncStrmFFState(long,char[]):*///callback
+void OnMostSyncStrmFFState(long filestate, char file[])
+{
+  // this callback of the streaming dll
+  // reports a specific streaming state
+  
+  if(filestate == kFileState_Closed)
+  {
+    write("%s: File closed: %s", gNodeName, file);
+  }
+  else if(filestate == kFileState_Opened)
+  {
+    write("%s: File opened: %s", gNodeName, file);
+  }
+
+
+}
+/*@@end*/
+
+/*@@caplFunc:SetFile():*///function
+SetFile()
+{
+  // set file to stream from
+  char absPath[260];
+  char file[260];
+
+  sysGetVariableString(sysvar::StreamFF::FileName, file, elcount(file));
+
+  getAbsFilePath(file, absPath, elcount(absPath));
+
+  MostSyncStrmFFSetFile(absPath);
+
+  MostSyncStrmFFSetRepeat(@StreamFF::Repeat != 0);
+}
+/*@@end*/
+
+/*@@sysvarChange:StreamFF::Open:*/
+on sysvar StreamFF::Open
+{
+  long ret;
+  if(@this)
+    return;
+
+  // copy width
+  gNumBytesPerFrame = @StreamFF::NumBytesPerFrame;
+  
+  if((gNumBytesPerFrame < 1) || (gNumBytesPerFrame > kMaxNumBytesPerFrame))
+  {
+    write("%s: Bytes per frame not specified correctly", gNodeName);
+    return;
+  }
+
+  ret = mostSyncStrmOpen(gHandle, gNumBytesPerFrame, 0, gLatency);
+
+  if(ret != 0)
+    write("%s: Failed to open stream", gNodeName); 
+}
+/*@@end*/
+
+/*@@caplFunc:EnableDisableControls():*///function
+void EnableDisableControls()
+{
+  // switch user controls on/off
+
+  int state;
+  state = @sysvar::StreamFF::State;
+
+  if(state == kClosed)
+  {
+    enableControl(gPanelName, "Open", @StreamFF::NumBytesPerFrame > 0);
+  }
+  else
+  {
+    enableControl(gPanelName, "Open",  0);
+  }
+
+  enableControl(gPanelName, "Start", state == kOpened || state == kStopped);
+  enableControl(gPanelName, "Stop",  state == kStarted);
+  enableControl(gPanelName, "Close", state == kOpened || state == kStopped);
+  enableControl(gPanelName, "NumBytesPerFrame", state == kClosed);
+}
+/*@@end*/
+
+/*@@stop:StopMeasurement:*/
+on stopMeasurement
+{
+  @sysvar::StreamFF::State = 0;
+  EnableDisableControls();
+}
+/*@@end*/
+
+/*@@sysvarChange:StreamFF::Close:*/
+on sysvar StreamFF::Close
+{
+  if(@this)
+    return;
+
+  mostSyncStrmClose(gHandle);
+}
+/*@@end*/
+
+/*@@sysvarChange:StreamFF::Repeat:*/
+on sysvar StreamFF::Repeat
+{
+  MostSyncStrmFFSetRepeat(@this != 0);
+}
+/*@@end*/
+
+/*@@sysvarChange:StreamFF::Start:*/
+on sysvar StreamFF::Start
+{
+  long ret;
+  word  labels[8];       // dummy to satisfy the API
+  word  labelWidths[8];  // dummy
+ 
+  if(@this)
+    return;
+
+  // set file path
+  SetFile();
+
+  // start streaming
+  ret = mostSyncStrmStart(gHandle, labels, labelWidths, 1);
+  if(ret != 0)
+    write("%s: Failed to start stream (%d)", gNodeName, ret);
+}
+/*@@end*/
+
+/*@@sysvarChange:StreamFF::State:*/
+on sysvar StreamFF::State
+{
+  EnableDisableControls();
+}
+/*@@end*/
+
+/*@@sysvarChange:StreamFF::Stop:*/
+on sysvar StreamFF::Stop
+{
+  if(@this)
+    return;
+
+  mostSyncStrmStop(gHandle);
+}
+/*@@end*/
+
+/*@@mostAllocTable:OnMostAllocTable():*/
+OnMostAllocTable()
+{
+  // allocation table changed
+}
+/*@@end*/
+
+/*@@caplFunc:OnMostSyncStrmTxLabel(dword,long,long,long):*///callback
+void OnMostSyncStrmTxLabel(dword handle, long errorInfo, long label, long labelWidth)
+{
+  // label of Tx stream is reported
+  if(handle != gHandle)
+    return;
+
+  if(errorInfo == 0)
+  {
+    @sysvar::StreamFF::Label = label;
+  }
+  else
+  {
+    @sysvar::StreamFF::Label = 0;
+  }
+}
+/*@@end*/
+

@@ -1,0 +1,76 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "MGCU.cin"
+}
+
+/*
+ * GalleyMaster - MGCU Galley Master System        Version 1.0
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Pr) Created 
+ */
+variables
+{
+  char gGalleyMaster_NodeName[32] = "Galley Master";   // Name of the node, is used for output to write window
+  
+  const byte kGalleyMaster_LevelId  = 0;
+  const byte kGalleyMaster_DeviceId = 0;
+}
+
+on start
+{
+  MGCU_PowerUp();
+}
+
+on preStart
+{
+  strncpy(gNode_FuncRO         , GalleyMaster.CFG2_0_0_GAIN_REMOTE_FUNCTION, 32);
+  strncpy(gNode_FuncPC_CENTR   , GalleyMaster.CFG2_1_0_CENTRALIZED_POWER_CONTR, 32);
+  strncpy(gNode_FuncPC_DECENTR , GalleyMaster.CFG2_2_0_DECENTRALIZED_POWER_CON, 32);
+  strncpy(gNode_FuncDIAG       , GalleyMaster.CFG2_3_0_DIAGNOSIS_FUNCTION, 32);
+
+  gNode_LevelId                = kGalleyMaster_LevelId;  // fix
+  gNode_DeviceId               = kGalleyMaster_DeviceId; // fix
+
+  gNode_NM_STA_CycleTimeMs     = GalleyMaster.MGCUCFG10_8_0_TIMER_STA_MGCU;
+  gNode_NM_STA_TimeoutTimeMs   = GalleyMaster.MGCUCFG10_8_1_TIMER_STA_TIMEOUT_;
+
+  gNode_CounterDeltaInc        = GalleyMaster.MGCUCFG12_0_0_MGCU_COUNTER_DELTA;
+  gNode_CounterDeltaDec        = GalleyMaster.MGCUCFG12_0_1_MGCU_COUNTER_DELTA;
+  gNode_CounterThreshold       = GalleyMaster.MGCUCFG12_0_2_MGCU_COUNTER_THRES;
+
+  gNode_SequenceTimeoutMs      = GalleyMaster.MGCUCFG10_2_0_SEQUENCE_TIMEOUT_T;
+}
+
+on preStop
+{
+  MGCU_PowerDown();
+}
+
+void OnNode_NMAvailabilityChanged(BYTE levelId, BYTE deviceId, int newAvailability)
+{
+}
+
+void OnMGCU_ChangeState (int oldState, int newState)
+{
+}
+
+void OnMGCU_PBR(BYTE prio, BYTE levelId, BYTE deviceId, BYTE codeExt, BYTE sysId, message * msg)
+{
+  // first primitive version => always allow
+  message PBM msgPBM;
+  byte data[8];
+
+  if(gMGCU_State == kMGCUStateOperational) {
+
+  	msgPBM.PBM_PBMax = ((message PBR)msg).PBR_NominalPB;
+  	msgPBM.PBM_Time  = ((message PBR)msg).PBR_NeededTimeWithNominalPB;
+
+    CAN_GetDataFromMessage(msgPBM, data);
+    Node_SendMessageRx(ARINC812_GetPrioFromId(msgPBM.id), ARINC812_GetMsgCodeFromId(msgPBM.id), levelId, deviceId, ARINC812_GetCodeExtFromId(msgPBM.id), msgPBM.dlc, data);
+  } // if operational
+}
+

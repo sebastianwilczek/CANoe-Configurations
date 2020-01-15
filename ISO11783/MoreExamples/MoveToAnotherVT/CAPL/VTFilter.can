@@ -1,0 +1,92 @@
+/*@!Encoding:1252*/
+variables
+{
+  qword lastWSMaintenance[255];
+  qword lastVTStatus[255];
+  qword lastAuxInputMaintenance[255];
+  dword lastAuxInputStatus[long];
+}
+
+on start
+{
+  int pos;
+  for(pos = 0; pos < 255; pos++)
+  {
+    lastWSMaintenance[pos] = 0;
+    lastVTStatus[pos] = 0;
+    lastAuxInputMaintenance[pos] = 0;
+  }
+}
+
+on pg *
+{
+//  output(this);
+}
+
+on pg 0xe700x
+{
+  switch (this.byte(0)) 
+  {
+    case 0x23: // Maintenance message
+    {
+      if(lastAuxInputMaintenance[this.sa] != this.qword(0))
+      {
+        lastAuxInputMaintenance[this.sa] = this.qword(0);
+        output(this);
+      }
+    }
+    break;
+
+    case 0xff: // Maintenance message
+    {
+      if(lastWSMaintenance[this.sa] != this.qword(0))
+      {
+        lastWSMaintenance[this.sa] = this.qword(0);
+        output(this);
+      }
+    }
+    break;
+    
+    default:
+      output(this);
+      break;
+  }
+}
+
+on pg 0xe600x
+{
+  dword auxInputObjId;
+  int byteWithErrorFlags = -1;
+  int vtCommand;
+  
+  byteWithErrorFlags = -1;
+
+  vtCommand = this.byte(0);
+  switch (vtCommand) 
+  {
+    case 0xfe:  //VT Status  message
+    if(lastVTStatus[this.sa] != this.qword(0))
+    {
+      lastVTStatus[this.sa] = this.qword(0);
+      output(this);
+    }
+    break;
+    
+    case 0x26: // Aux Input Status
+    {
+      auxInputObjId =  this.word(1) << 0 | this.sa << 16;
+      if((lastAuxInputStatus.containsKey(auxInputObjId) == 0) ||
+        (lastAuxInputStatus[auxInputObjId] != this.dword(3)))
+      {
+        lastAuxInputStatus[auxInputObjId] = this.dword(3);
+        output(this);
+      }
+    }
+    break;
+    
+    default:
+      output(this);
+      break;
+  }
+}
+

@@ -1,0 +1,382 @@
+/*@!Encoding:1252*/
+variables
+{
+  // ------------------------------------------------
+  // File information
+  // Copyright         : 2019, Vector Informatik GmbH
+  // ------------------------------------------------
+
+  // Globals for "NMTMaster" device
+  BYTE gNodeId          = 1;                   // Node ID
+  char gNodeLabel[256] = "Master";             // Label for debug output
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  msTimer   gSystemTimer;
+  const int kSystemTime = 100;
+
+  // control word bits for drives
+  const int kSwitchOn        = 0x01;
+  const int kDisableVoltage  = 0x02;
+  const int kQuickStop       = 0x04;
+  const int kEnableOperation = 0x08;
+  const int kResetFault      = 0x80;
+
+  // status word bits for drives
+  const int kBitReadyToSwitchOn     = 0x0001;
+  const int kBitSwitchedOn          = 0x0002;
+  const int kBitOperationEnable     = 0x0004;
+  const int kBitFault               = 0x0008;
+  const int kBitVoltageDisabled     = 0x0010;
+  const int kBitQuickStop           = 0x0020;
+  const int kBitSwitchOnDisabled    = 0x0040;
+  // General global variables
+  int gDbgLevel         = kDbgWarning; // Set debug level for output to write window
+
+  // management of the PTO
+  const word kPtoDisabled = 0;
+  const word kPtoRequest  = 1;
+  const word kPtoWaitForFeedback = 2;
+  const word kPtoRunning  = 20;
+  const word kPtoShuttingDown = 21;
+
+  word gPTOStatus = kPtoDisabled;
+}
+
+on start
+{
+  NodeStart();
+}
+
+on sysvar CANopen::CANopen::Master::Control::CommunicationState
+{
+  switch(@this)
+  {
+    case 0: // Not active
+      writeDbgLevel(kDbgInfo, "<%s>: Changed state to 'Not active'", gNodeLabel);
+      @sysvar::GUIControls::NMTMaster_CommState = 3;
+      break;
+    case 4: // Stopped
+      writeDbgLevel(kDbgInfo, "<%s>: Changed state to 'Stopped'", gNodeLabel);
+      @sysvar::GUIControls::NMTMaster_CommState = 3;
+      break;
+    case 5: // Operational
+      writeDbgLevel(kDbgInfo, "<%s>: Changed state to 'Operational'", gNodeLabel);
+      @sysvar::GUIControls::NMTMaster_CommState = 1;
+      break;
+    case 6: // Reset Node
+      writeDbgLevel(kDbgInfo, "<%s>: 'Reset Node' command received", gNodeLabel);
+      @sysvar::GUIControls::NMTMaster_CommState = 3;
+      break;
+    case 7: // Reset Communication
+      writeDbgLevel(kDbgInfo, "<%s>: 'Reset Communication' command received", gNodeLabel);
+      @sysvar::GUIControls::NMTMaster_CommState = 3;
+      break;
+    case 127: // Preoperational
+      writeDbgLevel(kDbgInfo, "<%s>: Changed state to 'Preoperational'", gNodeLabel);
+      @sysvar::GUIControls::NMTMaster_CommState = 2;
+      break;
+    default:
+      writeDbgLevel(kDbgInfo, "<%s>: Changed state (?)", gNodeLabel);
+      break;
+  }
+}
+
+void NodeStart ()
+{
+  @sysvar::GUIControls::NMTMaster_LadderLock = 1;
+  @sysvar::GUIControls::NMTMaster_SupportLock = 0;
+
+  CANopenInternalNMTCommand(0, 1);
+  setTimer( gSystemTimer, kSystemTime );
+  writeDbgLevel( kDbgInfo, "<%s> Start up node with ID %d", gNodeLabel, gNodeId ); 
+}
+
+void TrySetVelocity(sysvarInt* sysVarStatus, sysvarInt* sysVelocity, int velocity, char text[])
+{
+  // set target velocity of drive only, if it is on state 'operation enable'
+  if (@sysVarStatus & kBitOperationEnable)
+  {
+    @sysVelocity = velocity;
+  }
+  else
+  {
+    writeDbgLevel( kDbgError, "<%s> ERROR: %s is not 'Operation enable'", gNodeLabel, text); 
+  }
+}
+
+void SetLadderVelocity(int val, int velocity)
+{
+  if (@sysvar::GUIControls::NMTMaster_LadderLock == 0 && gPTOStatus == kPtoRunning)
+  {
+    TrySetVelocity(sysvar::CANopen::CANopen::Master::Inputs16bit::statusword_ladder,
+                   sysvar::CANopen::CANopen::Master::NetVarInt16In::vl_target_velocity_ladder,
+                   val == 1 ? velocity : 0,
+                   "ladder");
+  }
+}
+
+void SetSupportVelocity(int val, int velocity)
+{
+  if (@sysvar::GUIControls::NMTMaster_SupportLock == 0 && gPTOStatus == kPtoRunning)
+  {
+    TrySetVelocity(sysvar::CANopen::CANopen::Master::Inputs16bit::statusword_support_front,
+                   sysvar::CANopen::CANopen::Master::NetVarInt16In::vl_target_velocity_sup_front,
+                   val == 1 ? velocity : 0,
+                   "front support");
+
+    TrySetVelocity(sysvar::CANopen::CANopen::Master::Inputs16bit::statusword_support_rear,
+                   sysvar::CANopen::CANopen::Master::NetVarInt16In::vl_target_velocity_sup_rear,
+                   val == 1 ? velocity : 0,
+                   "rear support");
+  }
+}
+
+on sysvar CANopen::CANopen::Master::NetVarUInt8Out::Ladder_Up
+{
+  SetLadderVelocity(@this, 1000);
+}
+
+on sysvar CANopen::CANopen::Master::NetVarUInt8Out::Ladder_Down
+{
+  SetLadderVelocity(@this, -1000);
+}
+
+byte SetErrorMessage()
+{
+  // current gear == 0 ?
+  if(sysGetVariableInt(sysvar::CANopen::CANopen::Master::NetVarInt8Out::CurrentGearValue)!=0)
+  {
+    error("Gear must be 0");
+    return 1;
+  }
+  // park brake set?
+  else if(sysGetVariableInt(sysvar::CANopen::CANopen::Master::NetVarUInt8Out::ParkBrakeDemandValue)==0)
+  {
+    error("Park Brake not set");
+    return 1;
+  }
+  // engine running?
+  else if(sysGetVariableInt(sysvar::CANopen::CANopen::Master::Inputs16bit::EngineSpeed)<300)
+  {
+    error("Engine not running");
+    return 1;
+  }
+  // speed == 0?
+  else if(sysGetVariableInt(sysvar::CANopen::CANopen::Master::Inputs16bit::wheel_based_vehicle_speed_value)!=0)
+  {
+    error("Vehicle must not move");
+    return 1;
+  }
+  else
+  {
+    error("");
+    return 0;
+  }
+}
+
+void SetAngle()
+{
+  float angle;
+
+  // ladder control
+  angle = @sysvar::GUIControls::LadderAngle;
+  angle += (sysGetVariableInt(sysvar::CANopen::CANopen::Master::Inputs16bit::velocity_demand_ladder) * 0.00001 * kSystemTime);
+  if ((angle < 0.0) || (angle > 60.0))
+  {
+    sysSetVariableInt(sysvar::CANopen::CANopen::Master::NetVarInt16In::vl_target_velocity_ladder, 0 ); // set target velocity to 0 [rpm]
+  }
+  angle = range( angle, 0.0, 60.0 );
+  @sysvar::GUIControls::LadderAngle = angle;
+  @sysvar::GUIControls::BitmapLadder = (int)angle / 15;
+}
+
+void CalcAndSetSupport()
+{
+  float pos;
+  // front support control
+  pos = @sysvar::GUIControls::ControlPanel_SupportPosFront;
+  pos -= (@sysvar::CANopen::CANopen::Master::Inputs16bit::velocity_demand_support_front * 0.000001 * kSystemTime);
+  if ((pos < 0.0) || (pos > 1.0))
+  {
+    @sysvar::CANopen::CANopen::Master::NetVarInt16In::vl_target_velocity_sup_front = 0;// set target velocity to 0 [rpm]
+  }
+  pos = range( pos, 0.0, 1.0 );
+  @sysvar::GUIControls::ControlPanel_SupportPosFront = pos;
+  @sysvar::GUIControls::BitmapSupportFront = (int)(3 - pos * 3);
+
+  // rear support control
+  pos = @sysvar::GUIControls::ControlPanel_SupportPosRear;
+  pos -= (@sysvar::CANopen::CANopen::Master::Inputs16bit::velocity_demand_support_rear * 0.000001 * kSystemTime);
+  if ((pos < 0.0) || (pos > 1.0))
+  {
+    @sysvar::CANopen::CANopen::Master::NetVarInt16In::vl_target_velocity_sup_rear = 0; // set target velocity to 0 [rpm]
+  }
+  pos = range( pos, 0.0, 1.0 );
+  @sysvar::GUIControls::ControlPanel_SupportPosRear = pos;
+  @sysvar::GUIControls::BitmapSupportRear = (int)(3 - pos * 3);
+}
+
+void LockLadder()
+{
+  // lock mechanism for ladder
+  dword r;
+  r = (@sysvar::GUIControls::ControlPanel_SupportPosFront > 0.1) && (@sysvar::GUIControls::ControlPanel_SupportPosRear > 0.1);
+  {
+    @sysvar::GUIControls::NMTMaster_LadderLock = r > 0 ? 1 : 0;
+  }
+}
+
+void LockSupport()
+{
+  // lock mechanism for support
+  @sysvar::GUIControls::NMTMaster_SupportLock = @sysvar::GUIControls::LadderAngle > 1.0 ? 1 : 0 ;
+}
+
+void CalcAndSetGetPower()
+{
+  float rqPower,powerScale;
+  rqPower = abs(@sysvar::CANopen::CANopen::LadderDrive::vl_velocity_demand); // ladder needs some power
+  powerScale = @sysvar::CANopen::CANopen::Master::RqEngSpeedPowerScale;            // scale factor
+	if(powerScale<1)
+    powerScale=1;
+	else if(powerScale>10)
+    powerScale=10;
+  rqPower = rqPower*powerScale; // scaling
+  @sysvar::CANopen::CANopen::Master::NetVarUInt16In::requested_engine_speed_value = rqPower; // request EngSpeed 
+}
+
+void UpdatePTO()
+{
+  // PTO request status machine
+  switch(gPTOStatus)
+  {
+    case kPtoDisabled: 
+  	  @sysvar::GUIControls::ControlPanel_PTOavail = 0;
+      if(@sysvar::CANopen::CANopen::Master::NetVarUInt8Out::NetVarUInt8Out7 == 1)
+  	  {
+  	    SetPtoStatus(kPtoRequest);
+      }
+  	  break;
+    case kPtoRequest:
+      if (SetErrorMessage() == 1) break;
+  	  // enable PTO
+      @sysvar::CANopen::CANopen::Master::NetVarUInt8In::first_clutch_dependent_PTO_switch_Bit_1 = 1;
+  	  // now wait for the PTO feedback
+  	  SetPtoStatus(kPtoWaitForFeedback);
+	    break;
+    case kPtoWaitForFeedback:
+	    // PTO available?
+      if (@sysvar::CANopen::CANopen::Master::NetVarUInt8Out::first_engine_mounted_PTO_feedback_Bit_1 == 0)
+      {
+        break;
+      }
+      SetPtoStatus(kPtoRunning);  
+	    break;
+  	case kPtoRunning:
+  	  @sysvar::GUIControls::ControlPanel_PTOavail = 1;
+  	  CalcAndSetGetPower();
+  	  if (@sysvar::CANopen::CANopen::Master::NetVarUInt8Out::NetVarUInt8Out7 == 0)
+      {
+  	    if(@sysvar::GUIControls::ControlPanel_SupportPosFront >0.9 && @sysvar::GUIControls::ControlPanel_SupportPosRear > 0.9)
+        {
+   	    	SetPtoStatus(kPtoShuttingDown);
+  		  }
+      }
+  	  break;
+  	case kPtoShuttingDown: 
+  	  // slow down
+      @sysvar::CANopen::CANopen::Master::NetVarUInt16In::requested_engine_speed_value = 0;
+  	  // disable PTO
+      @sysvar::CANopen::CANopen::Master::NetVarUInt8In::first_clutch_dependent_PTO_switch_Bit_1 = 0;
+  	  SetPtoStatus(kPtoDisabled);
+  	  break;
+  	default: 
+  	  break;
+  }
+}
+
+on timer gSystemTimer
+{
+  SetAngle();
+  CalcAndSetSupport();
+  LockLadder();
+  LockSupport();
+  UpdatePTO();
+  // restart the system timer
+  setTimer( gSystemTimer, kSystemTime );
+}
+
+void SetControlWord(dword status, sysvarInt* sysVarControlWord)
+{
+  if ((status & kBitSwitchOnDisabled) && !(status & kBitReadyToSwitchOn))
+    {
+    // the drive is in state 'switch on disabled' -> shutdown command
+    @sysVarControlWord = kBitQuickStop|kDisableVoltage;
+  }
+  else if ((status & kBitReadyToSwitchOn) && !(status & kBitSwitchedOn))
+    {
+    // the drive is in state 'ready to switch on' -> switch on command
+    @sysVarControlWord = kBitQuickStop|kDisableVoltage|kSwitchOn;
+  }
+  else if ((status & kBitSwitchedOn) && !(status & kBitOperationEnable))
+    {
+    // the drive is in state 'switched on' ->  enable operation command
+    @sysVarControlWord = kBitQuickStop|kDisableVoltage|kSwitchOn|kEnableOperation;
+  }
+}
+
+// Received status word of ladder drive
+on sysvar CANopen::CANopen::Master::Inputs16bit::statusword_ladder
+{
+  SetControlWord(@this, sysvar::CANopen::CANopen::Master::NetVarUInt16In::controlword_ladder);
+}
+
+// Received status word of rear support drive
+on sysvar CANopen::CANopen::Master::Inputs16bit::statusword_support_rear
+{
+  SetControlWord(@this, sysvar::CANopen::CANopen::Master::NetVarUInt16In::controlword_sup_rear);
+}
+
+// Received status word of front support drive
+on sysvar CANopen::CANopen::Master::Inputs16bit::statusword_support_front
+{
+  SetControlWord(@this, sysvar::CANopen::CANopen::Master::NetVarUInt16In::controlword_sup_front);
+}
+
+on sysvar CANopen::CANopen::Master::NetVarUInt8Out::Support_Down
+{
+  SetSupportVelocity(@this, 500);
+}
+
+on sysvar CANopen::CANopen::Master::NetVarUInt8Out::Support_Up
+{
+  SetSupportVelocity(@this, -500);
+}
+
+float range( float value, float min, float max )
+{
+  if (value < min) {
+    return min;
+  }
+  else if (value > max) {
+    return max;
+  }
+  return value;
+}
+
+SetPtoStatus (word status)
+{
+  if(gPTOStatus!=status)
+    write("PTOStatus: %u",status);
+  gPTOStatus = status;
+}
+
+error (char s[])
+{
+  sysSetVariableString(sysvar::GUIControls::ErrorMessage, s);
+}

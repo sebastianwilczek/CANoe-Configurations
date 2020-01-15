@@ -1,0 +1,197 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "include/Avb.cin"
+  #include "include/Media.cin"
+}
+
+variables
+{    
+  dword gListener_Handle[2],
+        gAudioRendererHandle,
+        gSinkWriterHandle;
+}
+
+on start
+{
+  dword ret;
+  
+  ret = AvbSetProperty("StreamReservation", 0);
+    
+  if (StopIfError(ret, "AvbSetProperty") != 0)
+  {
+    return;
+  }
+  
+  gListener_Handle[0] = AvbOpenListener();
+    
+  if (CheckHandleAndStopIfError(gListener_Handle[0], "AvbOpenListener") != 0)
+  {
+    return;
+  }
+  
+  gAudioRendererHandle = MediaCreateAudioRenderer();
+  
+  if (MediaCheckHandleAndStopIfError(gAudioRendererHandle, "MediaCreateAudioRenderer") != 0)
+  {
+    write("Please attach a speaker or headphone to playback audio.");
+    return;
+  }
+    
+  gSinkWriterHandle = MediaCreateSinkWriterFromMediaSink(gAudioRendererHandle);
+   
+  if (MediaCheckHandleAndStopIfError(gSinkWriterHandle, "MediaCreateSinkWriterFromMediaSink") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbListen(gListener_Handle[0], "OnAvbListen");
+    
+  if (StopIfError(ret, "AvbListen") != 0)
+  {
+    return;
+  }
+}
+
+on preStop
+{
+  dword ret;  
+  
+  if (gSinkWriterHandle != 0)
+  {   
+    ret = MediaReleaseSinkWriter(gSinkWriterHandle);
+
+    if (MediaStopIfError(ret, "MediaReleaseSinkWriter") != 0)
+    {
+      return;
+    }
+    
+    gSinkWriterHandle = kInvalidHandle;
+  }
+  
+  if (gAudioRendererHandle != 0)
+  {
+    ret = MediaReleaseAudioRenderer(gAudioRendererHandle);
+    
+    if (MediaStopIfError(ret, "MediaReleaseAudioRenderer") != 0)
+    {
+      return;
+    }
+  }
+  
+  if (gListener_Handle[1] != 0)
+  {
+    ret = AvbCloseListener(gListener_Handle[1]);
+    
+    if (StopIfError(ret, "AvbCloseListener") != 0)
+    {
+      return;
+    }
+  
+    gListener_Handle[1] = kInvalidHandle;
+  }
+  
+  if (gListener_Handle[0] != 0)
+  {
+    ret = AvbCloseListener(gListener_Handle[0]);
+    
+    if (StopIfError(ret, "AvbCloseListener") != 0)
+    {
+      return;
+    }
+  
+    gListener_Handle[0] = kInvalidHandle;
+  }
+}
+
+void OnAvbListen(dword listenerHandle, dword result)
+{
+  dword ret;
+  
+  if (result != kAvbOK)
+  {
+    WriteErrorAndStop(result, "OnAvbListen");
+    return;
+  }
+  
+  gListener_Handle[1] = AvbAccept(listenerHandle);
+  
+  if (CheckHandleAndStopIfError(gListener_Handle[1], "AvbAccept") != 0)
+  {
+    return;
+  }
+  
+  Receive();
+}
+
+void OnAvbReceive(dword listenerHandle2, dword result, int buffer[], dword length)
+{  
+  dword mediaTypeHandle;
+  int64 startTimeNs;
+  
+  if (result == kAvbInsufficientBuffer)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: insufficient buffer, data truncated...", result);
+  }
+  else if (result == kAvbPresentationTimeLessThanPacketTime)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: presentation time is less than global PTP time at packet reception...", result);
+  }
+  else if (result != 0)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: result is %d", result);
+    Stop();
+    return;
+  }
+  
+  if (mediaTypeHandle == 0)
+  {
+    mediaTypeHandle = AvbGetMediaType(listenerHandle2);
+    
+    if (MediaCheckHandleAndStopIfError(mediaTypeHandle, "AvbGetMediaType") != 0)
+    {
+      return;
+    }
+    
+    result = MediaSetMediaType(gSinkWriterHandle, 0, mediaTypeHandle);
+     
+    if (MediaStopIfError(result, "MediaSetMediaType") != 0)
+    {
+      return;
+    }
+    
+    if (startTimeNs == 0)
+    {
+      startTimeNs = timeNowNs();
+    }
+  }
+  
+  result = MediaWrite(gSinkWriterHandle, 0, timeNowNs() - startTimeNs, buffer, length);
+  
+  if (MediaStopIfError(result, "MediaWrite") != 0)
+  {
+    return;
+  }
+  
+  Receive();
+}
+
+void Receive()
+{
+  int buffer[10240];
+  dword ret, length;
+  
+  length = elCount(buffer);
+  
+  ret = AvbReceive(gListener_Handle[1], buffer, length, "OnAvbReceive");
+  
+  if (StopIfError(ret, "AvbReceive") != kAvbOK)
+  {
+    return;
+  }
+  
+  if (ret != kAvbIoPending)
+  {
+    OnAvbReceive(gListener_Handle[1], ret, buffer, length);
+  }
+}

@@ -1,0 +1,357 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "J1939.can" 
+}
+
+/*
+ * IC - Instrument Cluster                         Version 1.2
+ *
+ * Copyright 2005, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Jr) Created 
+ * 1.1 (Jr) Use J1939 Interaction Layer now
+ * 1.2 (Wfk) J1939ILControlStop(1) suppresses 'Cannot Claim Address'
+ */
+variables
+{
+  // Constants
+  const float kPI              = 3.1415;
+  const float kVehicleWeight   = 20000;  // Vehicle weight in [kg]
+  const float kWheelRadius     = 0.4;    // Wheel radius in [m]
+  const float kMaxEngineSpeed  = 2400.0; // Max. engine speed [rpm]
+  const float kIdleEngineSpeed =  600.0; // Idle engine speed [rpm]
+
+  // ECU information
+  char gNodeName[32]     = "IC";   // Name of the node, is used for output to write window
+  char gECUID[40]        = "V-IC006-04*PON0610052*POWERTRAIN*TECU*";
+  char gSOFT[32]         = "\003V1.0*REV-A-CAPL*2006-10-05*";
+  char gVI[32]           = "VECTOR2006-10-05X*";
+
+  // communication variables
+  pg EEC1_EMS  RX_EEC1;                   // RX Buffer: EEC1
+  pg CCVS_EMS  RX_CCVS;                   // RX Buffer: CCVS
+  pg DM1       RX_DM1;                    // RX_Buffer: DM1
+
+  // simulation variables
+  DWORD    gLEDState[100];                // LED state of DM1 for all nodes in the network
+
+  // System timer
+  const int   kSystemTime    = 100;                  // System time in [ms]
+  const float kSystemTimeSec = kSystemTime / 1000.0; // System time in [sec]
+  msTimer     SystemTimer;                           // System timer
+}
+
+on start
+{
+  if ((@sysvar::Powertrain::IC::ILEnable == 1) && (getValue(EnvIgnitionSwitch) >= 1)) {
+    ICStartUp();
+  }
+}
+
+/*
+ * This system timer calculates the simulated values.
+ */
+on timer SystemTimer
+{
+  BYTE freq[4] = { 0x00, 0x00, 0x08, 0x02 };
+  BYTE ledFrequency;
+  WORD ledFreq;
+  WORD led;
+
+  float vehicleSpeed;
+  float axleSpeed;
+  float transmissionRatio;
+  float engineSpeed;
+  float driveForce;
+  float brakeForce;
+  float engineTorque;
+  float brakePedal;
+  int   recalc;
+
+  //
+  // update LEDs
+  //
+
+  ledFrequency++;
+
+  // update envVars
+  if (RX_EEC1.EngSpeed <= 0xff00) {
+    putValue( EnvIC_EngineSpeed , RX_EEC1.EngSpeed.phys );
+  }
+
+  if (RX_CCVS.WheelBasedVehicleSpeed <= 0xff00) {
+    putValue( EnvIC_VehicleSpeed, RX_CCVS.WheelBasedVehicleSpeed.phys );
+  }
+
+  if (timeNow() < 50000) {
+    // on start, active all LEDs
+    putValue( EnvIC_AmberWarningLamp, 1 );
+    putValue( EnvIC_ProtectLamp, 1 );
+    putValue( EnvIC_RedStopLamp, 1 );
+  }
+  else {
+    ledFreq = getLEDState();
+    led     = (ledFreq & 0x000f);
+    putValue( EnvIC_ProtectLamp, ((led == 1) || (ledFrequency & freq[led])) ? 1 : 0 );
+    led     = ((ledFreq >> 4) & 0x000f);
+    putValue( EnvIC_AmberWarningLamp, ((led == 1) || (ledFrequency & freq[led])) ? 1 : 0 );
+    led     = ((ledFreq >> 8) & 0x000f);
+    putValue( EnvIC_RedStopLamp, ((led == 1) || (ledFrequency & freq[led])) ? 1 : 0 );
+  }
+
+  //
+  // calculate vehicle speed
+  //
+
+  // get values
+  transmissionRatio = getValue( EnvTECU_GearRatio );           // [%]
+  vehicleSpeed      = getValue( EnvVehicleSpeed ) / 3.6;       // [m/s]
+  engineTorque      = getValue( EnvEMS_Torque );               // [Nm]
+  brakePedal        = getValue( EnvEBS_BrakePedalPos ) / 10.0; // [%]
+  engineSpeed       = getValue( EnvEMS_EngineSpeed );          // [rpm]
+
+  // calculate forward force
+  driveForce    = 0;
+  if (   (transmissionRatio > 0) 
+      && (engineSpeed < kMaxEngineSpeed) )
+  {
+    driveForce += engineTorque / transmissionRatio * kWheelRadius * 0.2;
+  }
+  brakeForce    = brakePedal * 60000; // brake force
+  brakeForce   += (vehicleSpeed * vehicleSpeed) * 8; // Air resistance
+  driveForce   -= brakeForce;
+
+  // calculate simulated values
+  vehicleSpeed += (driveForce / kVehicleWeight) * kSystemTimeSec;
+  if (vehicleSpeed < 0) {
+    vehicleSpeed  = 0;
+  }
+  axleSpeed = vehicleSpeed / 2 * kWheelRadius * kPI;
+
+  // calculate engine speed
+  if (transmissionRatio > 0) {
+    engineSpeed = utilRange( axleSpeed / transmissionRatio, kIdleEngineSpeed, kMaxEngineSpeed);
+  }
+
+  // update envVars
+  putValue( EnvVehicleSpeed, vehicleSpeed * 3.6 );
+  putValue( EnvTECU_OutputShaftSpeed, axleSpeed );
+  putValue( EnvTECU_InputShaftSpeed, engineSpeed );
+  if (transmissionRatio > 0) {
+    putValue( EnvEMS_EngineSpeed, engineSpeed );
+    putValue( EnvEMS_TorqueTakeoff, brakeForce * 0.2 );
+  }
+  else {
+    putValue( EnvEMS_TorqueTakeoff, 0 );
+  }
+
+
+  setTimer( SystemTimer, kSystemTime );
+}
+
+/*
+ * Shut down IC
+ */
+void ICShutDown()
+{
+  J1939ILControlStop(1);
+
+  cancelTimer( SystemTimer );
+
+  @sysvar::Powertrain::IC::ILEnable = 0;
+}
+
+/*
+ * Start up IC
+ *
+ * Begin address claiming. After successfully claiming
+ * an address, start sending cyclic messages.
+ */
+void ICStartUp()
+{
+  @sysvar::Powertrain::IC::ILEnable = 1;
+
+  if(J1939ILGetState() != 2)//don'tstart if already 'Active'
+    J1939ILControlStart();
+
+  cancelTimer( SystemTimer );
+  setTimer( SystemTimer, kSystemTime );
+}
+
+on preStart
+{
+  J1939ILControlInit();  
+}
+
+/*
+ * Handle error frame
+ */
+on errorFrame
+{
+  
+}
+
+/*
+ * Handle EEC1 message
+ */
+on pg EEC1_EMS
+{
+  if (!J1939ILAcceptRxPG(this)) return;
+
+  // copy data to RX buffer
+  RX_EEC1.SA = this.SA;
+  RX_EEC1.DWORD(0) = this.DWORD(0);
+  RX_EEC1.DWORD(4) = this.DWORD(4);
+}
+
+/*
+ * Handle CCVS message
+ */
+on pg CCVS_EMS
+{
+  if (!J1939ILAcceptRxPG(this)) return;
+
+  // copy data to RX buffer
+  RX_CCVS.SA = this.SA;
+  RX_CCVS.DWORD(0) = this.DWORD(0);
+  RX_CCVS.DWORD(4) = this.DWORD(4);
+}
+
+/*
+ * Handle DM1 message
+ */
+on pg DM1
+{
+  if (!J1939ILAcceptRxPG(this)) return;
+
+  // copy data to RX buffer
+  RX_DM1.SA = this.SA;
+  RX_DM1.DWORD(0) = this.DWORD(0);
+  RX_DM1.DWORD(4) = this.DWORD(4);
+
+  if (RX_DM1.SA < elCount(gLEDState)) {
+    gLEDState[RX_DM1.SA] = this.WORD(0);
+  }
+}
+
+/*
+ * Get LED state of DM1
+ */
+WORD getLEDState()
+{
+  int i;
+  WORD state;
+  int  freq, freq1, freq2, freq3, freq4;
+
+  state = 0x0000;
+  for( i = 0; i < elCount(gLEDState); i++ ) {
+    // protect lamp
+    freq1 = ((gLEDState[i] & 0x3) == 1) ? 1 : 0;
+    freq  = ((gLEDState[i] >> 8) & 0x3);
+    if ((freq1 == 1) && (freq < 2)) {
+      freq1 += (freq + 1);
+    }
+    // amber warning lamp
+    freq2 = ((gLEDState[i] & 0xC) == 0x04) ? 1 : 0;
+    freq  = ((gLEDState[i] >> 10) & 0x3);
+    if ((freq2 == 1) && (freq < 2)) {
+      freq2 += (freq + 1);
+    }
+    // red stop lamp
+    freq3 = ((gLEDState[i] & 0x30) == 0x10) ? 1 : 0;
+    freq  = ((gLEDState[i] >> 12) & 0x3);
+    if ((freq3 == 1) && (freq < 2)) {
+      freq3 += (freq + 1);
+    }
+    // malfunction lamp
+    freq4 = ((gLEDState[i] & 0xC0) == 0x40) ? 1 : 0;
+    freq  = ((gLEDState[i] >> 14) & 0x3);
+    if ((freq4 == 1) && (freq < 2)) {
+      freq4 += (freq + 1);
+    }
+
+    if (freq1 > (state & 0x0f)) {
+      state = (state & 0xfff0) | freq1;
+    }
+    if (freq2 > ((state >> 4) & 0x0f)) {
+      state = (state & 0xff0f) | (freq2 << 4);
+    }
+    if (freq3 > ((state >> 8) & 0x0f)) {
+      state = (state & 0xf0ff) | (freq3 << 8);
+    }
+    if (freq4 > ((state >> 12) & 0x0f)) {
+      state = (state & 0x0fff) | (freq4 << 12);
+    }
+  }
+
+  return state;
+}
+
+on envVar EnvIgnitionSwitch
+{
+  if (getValue(this) == 1) {
+    ICStartUp(); 
+  }
+  else if (getValue(this) == 0) {
+    ICShutDown();
+  }
+}
+
+on sysvar sysvar::Powertrain::IC::ILEnable
+{
+  if (@this == 1 ) {
+    ICStartUp();
+  }
+  else {
+    ICShutDown();
+  }
+}
+
+/*
+ * IL has changed its state
+ *
+ * state - 0 = Initialized
+ *         1 = Claiming
+ *         2 = Active
+ *         3 = Stopped
+ *         4 = Suspended
+ */
+void J1939ILOnChangedState( LONG state )
+{
+  switch( state ) {
+    case 1: // Claiming
+//      write( "<%s> Claiming", gNodeName );
+      break;
+    case 2: // Active
+//      write( "<%s> Active", gNodeName );
+      break;
+    case 3: // Stopped
+//      write( "<%s> Stopped", gNodeName );
+      break;
+    case 4: // Suspended
+//      write( "<%s> Suspended", gNodeName );
+      break;
+  }
+}
+
+/*
+ * IL has sent a message
+ */
+void J1939ILOnError( LONG errorCode, LONG additionalParam )
+{
+  write( "<%s> Error %d, additional %d", gNodeName, errorCode, additionalParam );
+}
+
+/*
+ * Clip the value to the range of min and max
+ */
+float utilRange( float value, float min, float max )
+{
+  if (value < min) return min;
+  if (value > max) return max;
+
+  return value;
+}
+

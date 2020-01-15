@@ -1,0 +1,529 @@
+/*@!Encoding:1252*/
+includes
+{
+  
+}
+
+variables
+{
+  pg* pgCHM = {DLC =    3};
+  pg* pgBHM = {DLC =    2};
+
+  pg* pgCRM = {DLC =    8};
+  pg* pgBRM = {DLC =   49};
+
+  pg* pgBCP = {DLC =   13};
+  pg* pgBRO = {DLC =    1};
+  pg* pgCML = {DLC =    8};
+  pg* pgCTS = {DLC =    7};
+  pg* pgCRO = {DLC =    1};
+
+  ////////////////////////////////////////////////
+  // charging
+  //
+  //BCL {DLC =    5}
+  float lastVoltageBCL = 6553.5;
+  float lastCurrentBCL = 6153.5;
+  byte lastChargeModeBCL = 0xFF;
+  //BCS {DLC =    9}
+  float lastVoltageBCS = 6553.5;
+  float lastCurrentBCS = 6153.5;
+  word lastTimeBCS = 0xFFFF;
+  byte lastSOC_BCS = 0xFF;
+  //BMT {DLC = 1785}
+  byte lastMinTempBMT = 0xFF;
+  byte lastMaxTempBMT = 0x0;
+  //BSM {DLC =    7}
+  byte lastMinTempBSM = 0xFF;
+  byte lastMaxTempBSM = 0xFF;
+  word lastStateBSM = 0xFF;
+  //CCS {DLC =    8}
+  float lastVoltageCCS = 6553.5;
+  float lastCurrentCCS = 6153.5;
+  word lastTimeCCS = 0xFFFF;
+  byte lastStateCCS = 0xFF;
+  
+  pg* pgBSP = {DLC = 1785};
+  pg* pgBMV = {DLC = 1785};
+  /////////////////////////////////////////////////////////////////  
+  
+  pg* pgBST = {DLC =    4};
+  pg* pgCST = {DLC =    4};
+
+  pg* pgBSD = {DLC =    7};
+  pg* pgCSD = {DLC =    8};
+
+  pg* pgBEM = {DLC =    4};
+  pg* pgCEM = {DLC =    4};
+  
+  const word pgnBCL = 0x1000;
+  const word pgnBCP =  0x600;
+  const word pgnBCS = 0x1100;
+  const word pgnBEM = 0x1E00;
+  const word pgnBHM = 0x2700;
+  const word pgnBMT = 0x1600;
+  const word pgnBMV = 0x1500;
+  const word pgnBRM =  0x200;
+  const word pgnBRO =  0x900;
+  const word pgnBSD = 0x1C00;
+  const word pgnBSM = 0x1300;
+  const word pgnBSP = 0x1700;
+  const word pgnBST = 0x1900;
+  const word pgnCCS = 0x1200;
+  const word pgnCEM = 0x1F00;
+  const word pgnCHM = 0x2600;
+  const word pgnCML =  0x800;
+  const word pgnCRM =  0x100;
+  const word pgnCRO =  0xA00;
+  const word pgnCSD = 0x1D00;
+  const word pgnCST = 0x1A00;
+  const word pgnCTS =  0x700;
+}
+
+void InitCCS()
+{
+  lastVoltageCCS = 6553.5;
+  lastCurrentCCS = 6153.5;
+  lastTimeCCS = 0xFFFF;
+  lastStateCCS = 0xFF;
+}
+
+void InitBSM()
+{
+  lastMinTempBSM = 0xFF;
+  lastMaxTempBSM = 0xFF;
+  lastStateBSM = 0xFF;
+}
+
+void InitBMT()
+{
+  lastMinTempBMT = 0xFF;
+  lastMaxTempBMT = 0x0;
+}
+
+void InitBCL()
+{
+  lastVoltageBCL = 6553.5;
+  lastCurrentBCL = 6153.5;
+  lastChargeModeBCL = 0xFF;
+}
+
+void InitBCS()
+{
+  lastVoltageBCS = 6553.5;
+  lastCurrentBCS = 6153.5;
+  lastTimeBCS = 0xFFFF;
+  lastSOC_BCS = 0xFF;
+}
+
+on start
+{
+  InitHandshakeMessages();
+  InitRecognitionMessages();
+  InitParameterConfigurationMessages();
+  InitChargingMessages();
+  InitEndOfChargingMessages();
+  InitErrorMessages();
+}
+
+void InitHandshakeMessages()
+{
+  InitPg(pgCHM, pgnCHM);
+  InitPg(pgBHM, pgnBHM);
+}
+
+void InitRecognitionMessages()
+{
+  InitPg(pgCRM, pgnCRM);
+  InitPg(pgBRM, pgnBRM);
+}
+
+void InitParameterConfigurationMessages()
+{
+  InitPg(pgBCP, pgnBCP);
+  InitPg(pgBRO, pgnBRO);
+  InitPg(pgCML, pgnCML);
+  InitPg(pgCRO, pgnCRO);
+  InitPg(pgCTS, pgnCTS);
+}
+
+void InitChargingMessages()
+{
+  InitBCL();
+  InitBCS();
+  InitBMT();
+  InitBSM();
+  InitCCS();
+  InitPg(pgBMV, pgnBMV);
+  InitPg(pgBSP, pgnBSP);
+}
+
+void InitEndOfChargingMessages()
+{
+  InitPg(pgBST, pgnBST);
+  InitPg(pgCST, pgnCST);
+  InitPg(pgBSD, pgnBSD);
+  InitPg(pgCSD, pgnCSD);
+}
+
+void InitErrorMessages()
+{
+  InitPg(pgBEM, pgnBEM);
+  InitPg(pgCEM, pgnCEM);
+}
+
+//Initialisation of PGN and Payload
+void InitPG(pg* pgToInit, word pgnToSet)
+{
+  int pos;
+  
+  pgToInit.PGN = pgnToSet;
+  for(pos = 0; pos < pgToInit.dlc; pos++)
+  {
+    pgToInit.byte(pos) = 0xFF;
+  }
+}
+
+//Compare the current pg with the last seen;
+//Block if no changes 
+void BlockPgnIfNotChanged(pg * pgLast, pg * pgToCheck, qword mask)
+{
+  int pos, length, different;
+  byte temp1, temp2, temp3;
+  pg * pgTemp = {dlc = 1785};
+
+  //if the legth is different, then the messages are different, too
+  if(pgLast.dlc != pgToCheck.dlc)
+  {
+    pgLast = pgToCheck;
+    pgLast.dlc = pgToCheck.dlc;
+    output(pgToCheck);
+    return;
+  }
+  
+  length = pgToCheck.dlc;
+  //apply the mask on the pgToCheck
+  pgTemp = pgToCheck;
+  if(mask != 0xFFFFFFFFFFFFFFFFll)
+  {
+    for(pos = 0; pos < _min(length, 8); pos++)
+    {
+      temp1 = pgTemp.byte(pos);
+      temp2 = GetByteReverted(mask, pos);
+      temp3 = temp1 & temp2;
+      pgTemp.byte(pos) = temp3;
+    }
+  }
+  //if both messages have the same length, we have to compare byte by byte
+  different = 0;
+  for(pos = 0; pos < length; pos++)
+  {
+    if(pgLast.byte(pos) != pgTemp.byte(pos))
+    {
+      pgLast.byte(pos) = pgTemp.byte(pos);
+      different = 1;
+    }
+  }
+  
+  if(different == 1)
+  {
+    // Different => update the last seen data (consider the mask!) and forward original message
+    pgLast = pgTemp;
+    output(pgToCheck);
+  }
+  
+  return;
+}
+  
+byte GetByteReverted(qword data, byte posReverted)
+{
+  data = data << (posReverted * 8);
+  data = data >> (7 * 8);
+  return (byte)data;
+}
+
+void BlockBcsIfNotChanged(pg * newBCS)
+{
+  float minDiffVoltage = 0.05, minDiffCurrent = 0.05;
+  float newVoltage = 6553.5;
+  float newCurrent = 6153.5;
+  word newTime = 0xFFFF;
+  byte newSOC = 0xFF;
+  
+  newVoltage = newBCS.word(0) * 0.1;
+  newCurrent = newBCS.word(2) * 0.1 - 400;
+  newSOC = newBCS.byte(6);
+  newTime = newBCS.byte(7);
+  
+  if(((newVoltage + lastVoltageBCS != 0) && (abs((newVoltage - lastVoltageBCS) / (newVoltage + lastVoltageBCS)) > minDiffVoltage))
+      || ((newCurrent + lastCurrentBCS != 0) && (abs((newCurrent - lastCurrentBCS) /(newCurrent + lastCurrentBCS)) > minDiffCurrent))
+      || (abs(newTime - lastTimeBCS) >= 10)
+      || (abs(newSOC - lastSOC_BCS) >= 10)
+    )
+  {
+    lastVoltageBCS = newVoltage;
+    lastCurrentBCS = newCurrent;
+    lastTimeBCS = newTime;
+    lastSOC_BCS = newSOC;
+    output(newBCS);
+  }
+}
+
+void BlockCcsIfNotChanged(pg * newCCS)
+{
+  float minDiffVoltage = 0.05, minDiffCurrent = 0.05;
+  float newVoltage = 6553.5;
+  float newCurrent = 6153.5;
+  word newTime = 0xFFFF;
+  byte newState = 0xFF;
+  
+  newVoltage = newCCS.word(0) * 0.1;
+  newCurrent = newCCS.word(2) * 0.1 - 400;
+  newTime = newCCS.byte(4);
+  if(newCCS.dlc == 7) //different for GBT27930/2015 and GBT27930/2011
+  {
+    newState = newCCS.byte(6) & 0x3;
+  }
+  
+  if(((newVoltage + lastVoltageCCS != 0) && (abs((newVoltage - lastVoltageCCS) / (newVoltage + lastVoltageCCS)) > minDiffVoltage))
+      || ((newCurrent + lastCurrentCCS != 0) && (abs((newCurrent - lastCurrentCCS) /(newCurrent + lastCurrentCCS)) > minDiffCurrent))
+      || (abs(newTime - lastTimeCCS) >= 10)
+      || (abs(newState - lastStateCCS) >= 10)
+    )
+  {
+    lastVoltageCCS = newVoltage;
+    lastCurrentCCS = newCurrent;
+    lastTimeCCS = newTime;
+    lastStateCCS = newState;
+    output(newCCS);
+  }
+}
+
+void BlockBclIfNotChanged(pg * newBCL)
+{
+  float minDiffVoltage = 0.05, minDiffCurrent = 0.05;
+  float newVoltage = 6553.5;
+  float newCurrent = 6153.5;
+  byte newChargeMode = 0xFF;
+
+  newVoltage = newBCL.word(0) * 0.1;
+  newCurrent = newBCL.word(2) * 0.1 - 400;
+  newChargeMode = newBCL.byte(4);
+
+  if(((newVoltage + lastVoltageBCL != 0) && (abs((newVoltage - lastVoltageBCL) / (newVoltage + lastVoltageBCL)) > minDiffVoltage))
+      || ((newCurrent + lastCurrentBCL != 0) && (abs((newCurrent - lastCurrentBCL) /(newCurrent + lastCurrentBCL)) > minDiffCurrent))
+      || (abs(newChargeMode - lastChargeModeBCL) > 0)
+    )
+  {
+    lastVoltageBCL = newVoltage;
+    lastCurrentBCL = newCurrent;
+    lastChargeModeBCL = newChargeMode;
+    output(newBCL);
+  }
+}
+
+void BlockBsmIfNotChanged(pg * newBSM)
+{
+  int minDiffTemp = 2;
+  byte newMinTemp = 0xFF;
+  byte newMaxTemp = 0xFF;
+  word newState = 0xFF;
+
+  newMaxTemp = newBSM.byte(1);
+  newMinTemp = newBSM.byte(3);
+  newState = newBSM.word(5);
+
+  if( (abs(newMaxTemp - lastMaxTempBSM) > minDiffTemp) ||
+      (abs(newMinTemp - lastMinTempBSM) > minDiffTemp) ||
+      (abs(newState - lastStateBSM) > 0)
+    )
+  {
+    lastMaxTempBSM = newMaxTemp;
+    lastMinTempBSM = newMinTemp;
+    lastStateBSM = newState;
+    output(newBSM);
+  }
+}
+
+void BlockBmtIfNotChanged(pg * newBMT)
+{
+  byte newMinTemp = 0xFF;
+  byte newMaxTemp = 0x0;
+  int pos;
+  
+  for(pos = 0; pos < newBMT.dlc; pos++)
+  {
+    if(newBMT.byte(pos) < newMinTemp)
+      newMinTemp = newBMT.byte(pos);
+    if(newBMT.byte(pos) > newMaxTemp)
+      newMaxTemp = newBMT.byte(pos);
+  }
+  if(newMinTemp != lastMinTempBMT || newMaxTemp != lastMaxTempBMT)
+  {
+    lastMinTempBMT = newMinTemp;
+    lastMaxTempBMT = newMaxTemp;
+    output(newBMT);
+  }
+}
+
+void BlockBemIfNotChanged(pg * newBEM)
+{
+  int pos;
+  dword lastSeen = 0;
+  dword curTime;
+  
+  curTime = newBEM.time;
+  if(curTime - lastSeen > 100000)
+  {
+    // Pause more than 1 sec => new error
+    lastSeen = curTime;
+    pgBEM = newBEM;
+    output(newBEM);
+    return;
+  }
+  lastSeen = curTime;
+  
+  if(newBEM.dlc != pgBEM.dlc)
+  {
+    pgBEM = newBEM;
+    output(newBEM);
+    return;
+  }
+  
+  for(pos = 0; pos < newBEM.dlc; pos++)
+  {
+    if(newBEM.byte(pos) != pgBEM.byte(pos))
+    {
+      pgBEM = newBEM;
+      output(newBEM);
+      return;
+    }
+  }
+  return;
+}
+
+void BlockCemIfNotChanged(pg * newCEM)
+{
+  int pos;
+  dword lastSeen = 0;
+  dword curTime;
+  
+  curTime = newCEM.time;
+  if(curTime - lastSeen > 100000)
+  {
+    // Pause more than 1 sec => new error
+    lastSeen = curTime;
+    pgCEM = newCEM;
+    output(newCEM);
+    return;
+  }
+  lastSeen = curTime;
+  
+  if(newCEM.dlc != pgCEM.dlc)
+  {
+    pgCEM = newCEM;
+    output(newCEM);
+    return;
+  }
+  
+  for(pos = 0; pos < newCEM.dlc; pos++)
+  {
+    if(newCEM.byte(pos) != pgCEM.byte(pos))
+    {
+      pgCEM = newCEM;
+      output(newCEM);
+      return;
+    }
+  }
+  return;
+}
+
+on pg *
+{
+  dword id, id2;
+  
+  id = this.id;
+  id2 = id & 0x80000000;
+  if(id2 != 0x80000000)
+    return;
+  if(this.SA != 0x56 && this.SA != 0xF4)
+    return;
+  if(this.DA != 0x56 && this.DA != 0xF4)
+    return;
+
+  switch(this.pgn)
+  {
+    case pgnCHM:
+    case pgnBHM:
+    case pgnBRM:
+    case pgnCRM:
+      InitChargingMessages();
+      InitEndOfChargingMessages();
+      break;
+
+    case pgnBCP:
+    case pgnBRO:
+    case pgnCML:
+    case pgnCRO:
+    case pgnCTS:
+      InitHandshakeMessages();
+      break;
+
+    case pgnBCL:
+    case pgnBCS:
+    case pgnBMT:
+    case pgnBMV:
+    case pgnBSM:
+    case pgnBSP:
+    case pgnCCS:
+      InitRecognitionMessages();
+      break; 
+    
+    case pgnBST:
+    case pgnBSD:
+    case pgnCSD:
+    case pgnCST:
+      InitParameterConfigurationMessages();
+      break;
+
+    case pgnBEM:
+    case pgnCEM:
+      InitHandshakeMessages();
+      InitRecognitionMessages();
+      InitParameterConfigurationMessages();
+      InitChargingMessages();
+      InitEndOfChargingMessages();
+      break;
+  }
+
+  
+  switch(this.pgn)
+  {
+    case pgnBCL: BlockBclIfNotChanged(this);                              break; 
+    case pgnBCP: BlockPgnIfNotChanged(pgBCP, this, 0xFFFFFFFFFFFFFFFFll); break;
+    case pgnBCS: BlockBcsIfNotChanged(this);                              break; 
+    case pgnBHM: BlockPgnIfNotChanged(pgBHM, this, 0xFFFFFFFFFFFFFFFFll); break;
+    case pgnBMT: BlockBmtIfNotChanged(this);                              break;
+    case pgnBMV: BlockPgnIfNotChanged(pgBMV, this, 0xFFFFFFFFFFFFFFFFll); break;
+    case pgnBRM: BlockPgnIfNotChanged(pgBRM, this, 0xFFFFFFFFFFFFFFFFll); break;
+    case pgnBRO: BlockPgnIfNotChanged(pgBRO, this, 0xFFFFFFFFFFFFFFFFll); break;
+    case pgnBSD: BlockPgnIfNotChanged(pgBSD, this, 0xFFFFFFFFFFFFFFFFll); break;
+    case pgnBSM: BlockBsmIfNotChanged(this);                              break; 
+    case pgnBSP: BlockPgnIfNotChanged(pgBSP, this, 0xFFFFFFFFFFFFFFFFll); break;
+    case pgnBST: BlockPgnIfNotChanged(pgBST, this, 0xFFFFFFFFFFFFFFFFll); break;
+    case pgnCCS: BlockCcsIfNotChanged(this);                              break; 
+    case pgnCHM: BlockPgnIfNotChanged(pgCHM, this, 0xFFFFFFFFFFFFFFFFll); break;
+    case pgnCML: BlockPgnIfNotChanged(pgCML, this, 0xFFFFFFFFFFFFFFFFll); break;
+    case pgnCRM: BlockPgnIfNotChanged(pgCRM, this, 0xFFFFFFFFFFFFFFFFll); break;
+    case pgnCRO: BlockPgnIfNotChanged(pgCRO, this, 0xFFFFFFFFFFFFFFFFll); break;
+    case pgnCSD: BlockPgnIfNotChanged(pgCSD, this, 0xFFFFFFFFFFFFFFFFll); break;
+    case pgnCST: BlockPgnIfNotChanged(pgCST, this, 0xFFFFFFFFFFFFFFFFll); break;
+    case pgnCTS: BlockPgnIfNotChanged(pgCTS, this, 0x00F0FFFFFFFFFFFFll); break;
+
+    case pgnBEM: BlockBemIfNotChanged(this);                              break;
+    case pgnCEM: BlockCemIfNotChanged(this);                              break;
+    
+    default:     output(this);                      break;
+
+  }
+}

@@ -1,0 +1,152 @@
+/*@@var:*/
+variables
+{
+  /*
+
+  This module tests the start and the end of a MOST High transfer on
+  the Asynchronous channel.
+
+  The following CAPL APIs are demonstrated:
+  - usage of MOST High symbols in TestWaitForMostPkt
+  - usage of MOST High parameters in TestWaitForMostPkt
+  - TestJoinMostPktEvent
+  - TestGetWaitEventMostPkt (make packet data of a resolved wait condition accessible)
+  - MostPktGetData (retrieve packet data)
+
+  Note:
+  The test may fail if the default transmission parameters has been 
+  changes since measurement start or if a MOST High connection is
+  already active.
+
+  */
+   
+}
+/*@@end*/
+
+/*@@testcase:TC_TransferStart():*/
+testcase TC_TransferStart()
+{
+  // In this test case the start of a MOST High transfer is initiated and tested.
+
+  long frAckLo = -1;
+  long oldTxSize;
+
+  // Stimulation:
+  // Force a MOST High transfer from Device1 to Device2 by pushing 
+  // the 'Fill&Send' button programmatically.
+  oldTxSize = @sysvar::TxSysVar::FrameSize_1;
+  if (oldTxSize > 500)
+  {
+    //Make sure that at least two DATA FRAMES are sent
+    @sysvar::TxSysVar::FrameSize_1 = 500;
+  }
+  @sysvar::TxSysVar::FillSize_1 = 1000;
+  @sysvar::FillData_1 = 1;
+
+  // wait for a connection request
+  if(TestWaitForMostPkt("Navigation.Waypoints.Status(REQUEST CONNECTION)", -1, 200) > 0)
+    TestStepPass("1", "REQUEST CONNECTION seen");
+  else
+    TestStepFail("1", "Timeout while waiting for REQUEST CONNECTION");
+
+  // wait for READY FOR DATA
+  if(TestWaitForMostPkt("Navigation.Waypoints.Status(READY FOR DATA)", -1, 200) > 0)
+    TestStepPass("2", "READY FOR DATA seen");
+  else
+    TestStepFail("2", "Timeout while waiting for READY FOR DATA");
+
+  // wait for 0-FRAME with the following parameters:
+  //   FrAckLo=="don't care", SegID==0, Options==1, BlockCnt==0
+  if(TestWaitForMostPkt("Navigation.Waypoints.Status(0-FRAME(*,0,1,0))", -1, 200) > 0)
+  {
+    // extract FrAckLo for later usage
+    if(0 == TestGetWaitEventMostPkt())  
+    {
+      // TestGetWaitEventMostPkt() makes packet data accessible by the packet API (MostPkt...)
+      byte buffer[20];
+      MostPktGetData(buffer, 8); // copy data
+      frAckLo = buffer[7];
+    }
+
+    TestStepPass("3", "0-FRAME seen (FrAckLo=%02X)", frAckLo);
+  }
+  else
+    TestStepFail("3", "Timeout while waiting for 0-FRAME");
+
+  // wait for first two DATA FRAMEs
+  TestJoinMostPktEvent("Navigation.Waypoints.Status(DATA FRAME(1))", -1); // FrAckHi=1
+  TestJoinMostPktEvent("Navigation.Waypoints.Status(DATA FRAME(2))", -1); // FrAckHi=2 
+  if(TestWaitForAllJoinedEvents(1000) > 0)
+  {
+    // compare FrAckLo
+    // note: this is a demonstration how to access the event data after 
+    // TestWaitForAllJoinedEvents has been fulfilled
+    if(TestGetWaitEventMostPkt(1) == 0) // get packet that resolved the first condition
+    {
+      // copy the whole packet to a local buffer
+      byte buffer[2000];
+      MostPktGetData(buffer, MostPktDlc());  
+
+      // compare FrAckLo data byte with FrAckLo of 0-FRAME
+      if(buffer[7] == frAckLo)
+        TestStepPass("4", "FrAckLo of first DATA FRAME OK");
+      else
+        TestStepFail("4", "FrAckLo of first DATA FRAME differs from FrAcLo of 0-FRAME");
+    }
+    else
+    {
+      TestStepFail("4", "Access to data of first DATA FRAME failed");
+    }
+  }
+  else
+  {
+    TestStepFail("4", "Missing DATA FRAME packet"); 
+  }
+
+  // reset the stimulation button  
+  @sysvar::FillData_1 = 0;
+  @sysvar::TxSysVar::FrameSize_1 = oldTxSize;
+}
+/*@@end*/
+
+/*@@mainTest:MainTest():*/
+void MainTest()
+{
+  TC_TransferStart();
+  TC_TransferEnd();
+}
+/*@@end*/
+
+/*@@testcase:TC_TransferEnd():*/
+testcase TC_TransferEnd()
+{
+  // This test case tests the end of a MOST High transfer 
+  // and the termination of a connection.
+
+  int i;
+
+  // wait for first HOLD CONNECTION
+  if(TestWaitForMostPkt("Navigation.Waypoints.Status(HOLD CONNECTION Tx)", -1, 10000) > 0)
+    TestStepPass("1", "HOLD CONNECTION seen");
+  else
+    TestStepFail("1", "Timeout while waiting for HOLD CONNECTION");
+
+  // wait for first END CONNECTION
+  if(TestWaitForMostPkt("Navigation.Waypoints.Status(END CONNECTION Tx)", -1, 10000) > 0)
+    TestStepPass("2", "first END CONNECTION seen");
+  else
+    TestStepFail("2", "Timeout while waiting for first END CONNECTION");
+
+  // wait for 4 more END CONNECTION packets
+  for(i = 0; i < 4; ++i)
+  {
+    if(TestWaitForMostPkt("Navigation.Waypoints.Status(END CONNECTION Tx)", -1, 500) > 0)
+      TestStepPass("3", "END CONNECTION %d seen", i+2);
+    else
+      TestStepFail("3", "Timeout while waiting for END CONNECTION %d", i+2);
+  }
+
+  TestWaitForTimeOut(200);
+}
+/*@@end*/
+

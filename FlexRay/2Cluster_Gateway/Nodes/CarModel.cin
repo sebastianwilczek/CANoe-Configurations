@@ -1,0 +1,210 @@
+/*@!Encoding:1252*/
+variables
+{
+  int gGear                   = 1;            // 0 == reverse; 1 == neutral; 2 - 6 = forward
+  
+  double gBreakPressure;
+  double gPedal;                              // requested power of the system ( 0 - 100)
+  double gCarSpeed;                           // meter/sec
+  double gEngSpeed;                           // revolution/sec
+  double gEngForce;                           // Newton
+
+  const double kMass              = 800.0;    // kg
+  const double kAirFriction       = 0.6;      // F = kFriction*v*v
+  const double kRollingFriction   = 100.0;    // Newton
+
+  // differential equations (systemClock)
+  const int kDeltaT           = 10;           // sampling rate of engine [ms]
+  const double kDeltaTInSec   = kDeltaT / 1000.0;
+
+  msTimer tSystemClockTimer;                  // timer for calculations of the dynamic system model
+}
+
+on timer tSystemClockTimer
+{  
+  CalcModel();
+
+  setTimer(tSystemClockTimer, kDeltaT);   
+}
+
+double CalcEngSpeed(double speed, int gear)
+{
+  // in Newton
+  double engSpeed, ratio;
+  
+  if ((gear < 0) || (gear > 6)) runError(1002,55);
+
+  ratio = EngSpeedToSpeedRatio(gear);
+  engSpeed = speed * ratio;
+
+  if (engSpeed > 100) engSpeed = 100;
+  return engSpeed;
+}
+
+double EngSpeedToSpeedRatio(int gear) 
+{
+  return (7-gear) * 1.0;
+}
+
+double Force(double engSpeed, double power, int gear)
+{
+  // gear==0: idle gear 
+  // force in Newton
+  // power in kW
+  double reducedEngSpeed, force;
+
+  double kGearForceFactor[7] =    { 18.0,  // max at 100 kW  
+                                    0.0, 
+                                    50.0,  // max at 150 kW  
+                                    36.0,  // max at 100 kW
+                                    20.0,  // max at 120 kW
+                                    18.0,  // max at 100 kW   
+                                    30.0   // max at 100 kW 
+                                    };
+  double kMaxGearForce[7] = {3000, 0.0, 5500, 4600, 4200, 3500, 3000 };
+
+  //   reducedEngSpeed = engSpeed - kNormalEngSpeed;
+  if ((gear < 0) || (gear > 6)) runError(1001,55);
+
+  force = power * ( kGearForceFactor[gear] );
+
+  // limit force   
+  if( force > kMaxGearForce[gear]) 
+  {
+    force = kMaxGearForce[gear];
+  }
+  return force;
+}
+
+double CalcAccelerationForce(double force, double friction_force, double break_pressure)
+{
+  double brakePressure, accelerationForce;
+
+  if (gPressAcceleratorPedal  == cPEDAL_PRESSURE)
+  {
+    accelerationForce = force - friction_force - break_pressure;
+  }
+  else
+  {
+    if (gPressAcceleratorPedal == cNoPEDAL_PRESSURE)
+    {
+      if (break_pressure > 0)  
+        brakePressure = break_pressure - 1000;
+      else 
+        brakePressure = 0.0;     
+
+      accelerationForce = (force - friction_force - (1000.0 + brakePressure));
+    }
+  }
+
+  return accelerationForce;
+}
+
+void CalcModel ()
+{
+  // timer for calculations of the dynamic system model
+  double power, idle, frictionForce, accelerationForce;
+  double correspondingEngineSpeed, ratio;
+
+  ////////////////////////
+  // read from signals
+  ////////////////////////
+  //gCarSpeed = $CarSpeed;
+  //gCarSpeed = gCarSpeed / 2.1;
+  //write ("gCarSpeed = %f", gCarSpeed);
+
+  gPedal = @PowerTrain::PedalPosition;
+
+
+  if ( ($Gear == 1) && ($CarSpeed > 6) )
+    gGear = gGear;
+  else
+    gGear = $Gear; 
+
+  gBreakPressure = $BrakePressure;
+
+  ////////////////////////
+  // calc model
+  ////////////////////////
+
+  idle = 1;
+
+  if ( gPedal < 6 ) // idle running
+    power = 6 * 1.5; 
+  else 
+    power = gPedal * 1.5;
+  
+  gEngSpeed = CalcEngSpeed(gCarSpeed,gGear);
+  gEngForce = Force(gEngSpeed,power,gGear);
+  frictionForce = (kAirFriction*gCarSpeed*gCarSpeed)
+                  + ( 1.0 * gCarSpeed )
+                  + kRollingFriction;
+
+  accelerationForce = CalcAccelerationForce(gEngForce,frictionForce,gBreakPressure);
+
+  // workaround for error
+  if ( accelerationForce != 0.0 ) 
+    gCarSpeed = gCarSpeed + (( accelerationForce / kMass) * kDeltaTInSec);  
+
+  // reset idle indicator
+  if ( accelerationForce >= -1.0 ) 
+    idle = 0;
+
+  ////////////////////////
+  // check stationary condition
+  ////////////////////////
+
+  if ( gCarSpeed < 0 )
+    gCarSpeed = 0.0;
+
+  if ( gGear != 1 )   
+  {
+    correspondingEngineSpeed = CalcEngSpeed(gCarSpeed,gGear);
+    ratio = EngSpeedToSpeedRatio(gGear);
+    gCarSpeed = correspondingEngineSpeed / ratio;
+  }
+  else 
+    gEngSpeed = gPedal;    
+
+  ////////////////////////
+  // write to signals
+  ////////////////////////
+
+  $EngSpeed = gEngSpeed * 75.0;
+  $EngForce = gEngForce;
+  $EngPower = power;
+  $CarSpeed = gCarSpeed * 2.1;
+  $CurGear  = gGear;
+
+  if ( accelerationForce > 0 )
+    $AccelerationForce = accelerationForce;
+
+  if ( idle == 0 ) 
+    $IdleRunning = 1;
+  else 
+    $IdleRunning = 0;
+
+  if ( @PowerTrain::AcceleratorPedal == 1 )
+    @PowerTrain::AcceleratorPedalPressure = gPedal;
+}
+
+void InitModel ()
+{
+  gCarSpeed = 0;
+  gEngForce = 0;
+
+  $EngForce = gEngForce;
+  $CarSpeed = gCarSpeed * 2.1;
+}
+
+void StartModel ()
+{
+  StopModel();
+  setTimer(tSystemClockTimer, kDeltaT);
+}
+
+void StopModel ()
+{
+  cancelTimer(tSystemClockTimer);
+}
+

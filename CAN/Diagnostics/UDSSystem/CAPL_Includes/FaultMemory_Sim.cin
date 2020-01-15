@@ -1,0 +1,375 @@
+/*@!Encoding:1252*/
+variables
+{
+  const cSupportedDTCs = 6;
+
+  enum eFaultmemType gFaultMemType; // The fault memory type needs to match the type defined in the Diagnostic Description!
+  
+  struct sSnapshot {
+    double SupplyVoltage;
+    double InternalVoltage;
+    dword OdometerValue;
+  };
+  
+  struct sFault {
+    dword DTC;  // KWP: 2-byte DTCs, UDS: 3-byte DTCs
+    byte status;
+    byte occurrances;              // Fault occurrances, also indicates number of occupied snapshot array elements
+    struct sSnapshot snapshot[2];  // Snapshot data of first and last fault occurrance
+  };
+  
+  struct sFaultMemory {
+    word storedFaults;          // Number of stored faults in the fault memory
+    struct sFault fault[cSupportedDTCs];
+  } gFaultMem;
+  
+  struct sDTCdescription {
+    dword DTC;
+    char DTC_Description[36];
+  };
+  
+  struct sDTCdescription ListOfSupportedDTCs[cSupportedDTCs] =
+    {{0x000001, "Voltage too low"},
+     {0x000002, "Voltage too high"},
+     {0x800001, "Failure in door contact front left"},
+     {0x800002, "Failure in door contact front right"},
+     {0x800003, "Failure in door contact rear left"},
+     {0x800004, "Failure in door contact rear right"}};
+}
+
+void InitFaultmem(enum eFaultmemType faultMemType)
+{
+  word index;
+  
+  switch(faultMemType) {
+    case UDS:
+    case KWP:
+      gFaultMemType=faultMemType;
+      break;
+    default:
+      write("(Faultmem) %NODE_NAME%: Error: Undefined Fault Memory Type!");
+      gFaultMemType=Undefined;
+      break;
+  }
+  
+  gFaultMem.storedFaults=0;
+  @sysvarMember::%NODE_NAME%::FaultMemoryInternal.NumberOfStoredDTCs=gFaultMem.storedFaults;
+  
+  for (index=0; index<cSupportedDTCs; index++) {
+    gFaultMem.fault[index].occurrances=0;
+  }
+  UpdatePanelFaultMemContents();
+}
+
+void AddFault(dword DTC, byte status)
+{
+  word index;
+  
+  if (DTC>0xFFFF && (gFaultMemType==KWP)) {
+    write("(Faultmem) %NODE_NAME%: Error: DTC exceeds allowed value range for KWP!");
+    return;
+  }
+  else {
+    if (@sysvarMember::%NODE_NAME%::FaultMemoryInternal.FaultMemoryActivated) { // Ignore setting DTC if this was disabled
+      index=GetFaultMemIndex(DTC);
+      if (index<cSupportedDTCs) {  // Fault already stored in memory
+        gFaultMem.Fault[index].occurrances++;
+        gFaultMem.Fault[index].status|=status;  // Just for this example, does not make much sense
+        gFaultMem.Fault[index].Snapshot[1].SupplyVoltage=@sysvar::ExternalSignals::SupplyVoltage;
+        gFaultMem.Fault[index].Snapshot[1].InternalVoltage=(@sysvar::ExternalSignals::SupplyVoltage>5)?5:@sysvar::ExternalSignals::SupplyVoltage;
+        gFaultMem.Fault[index].Snapshot[1].OdometerValue=@sysvar::ExternalSignals::OdometerValue;
+      }
+      else {
+        for (index=0; index<cSupportedDTCs; index++) {
+          if (0==gFaultMem.Fault[index].occurrances) {  // Memory slot not yet used
+            gFaultMem.storedFaults++;
+            @sysvarMember::%NODE_NAME%::FaultMemoryInternal.NumberOfStoredDTCs=gFaultMem.storedFaults;
+            gFaultMem.Fault[index].occurrances=1;
+            gFaultMem.Fault[index].DTC=DTC;
+            gFaultMem.Fault[index].status=status;
+            gFaultMem.Fault[index].Snapshot[0].SupplyVoltage=@sysvar::ExternalSignals::SupplyVoltage;
+            gFaultMem.Fault[index].Snapshot[0].InternalVoltage=(@sysvar::ExternalSignals::SupplyVoltage>5)?5:@sysvar::ExternalSignals::SupplyVoltage;
+            gFaultMem.Fault[index].Snapshot[0].OdometerValue=@sysvar::ExternalSignals::OdometerValue;
+            UpdatePanelFaultMemContents();
+            return;
+          }
+        }
+      }
+    }
+  }
+}
+
+void UpdatePanelFaultMemContents()
+{
+  char tempstr[200];
+  char DTCstr[40];
+  word storagePosition;
+  
+  strncpy(tempstr, "", elcount(tempstr));
+  for (storagePosition=0; storagePosition<cSupportedDTCs; storagePosition++) {
+    if (gFaultMem.Fault[storagePosition].occurrances>0) {
+      snprintf(DTCstr, elcount(DTCstr), "%s\n", ListOfSupportedDTCs[GetFaultIndex(gFaultMem.Fault[storagePosition].DTC)].DTC_Description);
+      strncat(tempstr,DTCstr,elCount(tempstr));
+    }
+  }
+  putValueToControl("%NODE_NAME%", "StoredDTCs", tempstr);
+}
+
+// Return Index of fault in from list of supported DTCs
+word GetFaultIndex(dword DTC)
+{
+  word index;
+  
+  for (index=0; index<cSupportedDTCs; index++) {
+    if (ListOfSupportedDTCs[index].DTC==DTC) {
+      return(index);
+    }
+  }
+  return(0xFFFF);
+}
+
+// Return index in Fault memory, if DTC was already stored
+word GetFaultMemIndex(dword DTC)
+{
+  word index;
+  
+  for (index=0; index<cSupportedDTCs; index++) {
+    if ((gFaultMem.Fault[index].DTC==DTC) && gFaultMem.Fault[index].occurrances>0) {
+      return(index);
+    }
+  }
+  return(0xFFFF);
+}
+
+void AddFaultByIndex(word DTC_Index)
+{
+  AddFault(ListOfSupportedDTCs[DTC_Index].DTC, 0x21); // Statusbyte = Test failed | Test failed since last clear
+}
+
+void RemoveFault(dword DTC)
+{
+  word storagePosition;
+  
+  for (storagePosition=0; storagePosition<cSupportedDTCs; storagePosition++) {
+    if (gFaultMem.Fault[storagePosition].DTC == DTC) {
+      gFaultMem.Fault[storagePosition].occurrances=0;
+      gFaultMem.storedFaults=(gFaultMem.storedFaults>0) ? gFaultMem.storedFaults-1 : 0;
+      @sysvarMember::%NODE_NAME%::FaultMemoryInternal.NumberOfStoredDTCs=gFaultMem.storedFaults;
+    }
+  }
+  UpdatePanelFaultMemContents();
+}
+
+
+on diagRequest %NODE_NAME%.ControlDTCSetting_Off
+{
+  diagResponse this resp;
+
+  refreshS3Timer();
+  @sysvarMember::%NODE_NAME%::FaultMemoryInternal.FaultMemoryActivated=0;
+  diagSendPositiveResponse(resp);
+}
+
+on diagRequest %NODE_NAME%.ControlDTCSetting_On
+{
+  diagResponse this resp;
+
+  refreshS3Timer();
+  @sysvarMember::%NODE_NAME%::FaultMemoryInternal.FaultMemoryActivated=1;
+  diagSendPositiveResponse(resp);
+}
+
+on diagRequest %NODE_NAME%.FaultMemory_Clear
+{
+  diagResponse this resp;
+  long toBeClearedDTC;
+  
+  refreshS3Timer();
+  toBeClearedDTC=diagGetParameter(this, "GroupOfDtc");
+  if (0xFFFFFF == toBeClearedDTC) {
+    InitFaultmem(gFaultMemType);
+  }
+  else {
+    RemoveFault(toBeClearedDTC);
+  }
+  diagSendPositiveResponse(resp);
+}
+
+on diagRequest %NODE_NAME%.FaultMemory_ReadNumber
+{
+  diagResponse this resp;
+  byte statusMask;
+  word k;
+  double DTC_count;
+  
+  refreshS3Timer();
+  DTC_count=0;
+
+  if (!strncmp("%NODE_NAME%", "DoorFL", 6)) {            // DoorFL ==> CDD
+    statusMask=(byte)diagGetParameter(this, "DTCStatusMask");
+    diagSetParameter(resp, "DTCStatusAvailabilityMask", statusMask);
+  }
+  else {                                                 // DoorFR ==> PDX
+    statusMask=((byte)diagGetParameter(this, "TestFailed") |
+                (byte)diagGetParameter(this, "TestFailedThisMonitoringCycle") << 1 |
+                (byte)diagGetParameter(this, "PendingDtc") << 2 |
+                (byte)diagGetParameter(this, "ConfirmedDtc") << 3 |
+                (byte)diagGetParameter(this, "TestNotCompletedSinceLastClear") << 4 |
+                (byte)diagGetParameter(this, "TestFailedSinceLastClear") << 5 |
+                (byte)diagGetParameter(this, "TestNotCompletedThisMonitoringCycle") << 6 |
+                (byte)diagGetParameter(this, "WarningIndicatorRequested") << 7);
+    diagSetParameter(resp, "DtcStatusbyte", statusMask);
+  }
+  
+  for (k=0; k<cSupportedDTCs; k++) {
+    if ((gFaultMem.Fault[k].status & statusMask) && (gFaultMem.Fault[k].occurrances>0)) {
+      DTC_count++;
+    }
+  }
+  diagSetParameter(resp, "DTCCount", DTC_count);
+  diagSendPositiveResponse(resp);
+}
+
+on diagRequest %NODE_NAME%.FaultMemory_ReadAllSupported
+{
+  diagResponse this resp;
+  word faultIndex;
+  
+  refreshS3Timer();
+  for (faultIndex=0; faultIndex<cSupportedDTCs; faultIndex++) {
+    diagSetComplexParameter(resp, "ListOfDTCAndStatus", faultIndex, "DTC", ListOfSupportedDTCs[faultIndex].DTC);
+    diagSetComplexParameter(resp, "ListOfDTCAndStatus", faultIndex, "statusOfDTC", 0x21);
+  }
+  
+  diagSendPositiveResponse(resp);
+}
+
+on diagRequest %NODE_NAME%.FaultMemory_ReadAllIdentified
+{
+  byte rawFaultMemContents[cSupportedDTCs*4]; // Worst case: UDS 4byte per DTC (KWP only needs 3 byte per DTC)
+  byte statusMask;
+  diagResponse this resp;
+  word k;
+  word faultIndex;
+  double ret;
+  
+  refreshS3Timer();
+  
+  statusMask=0;
+  if (!strncmp("%NODE_NAME%", "DoorFL", 6)) {            // DoorFL ==> CDD
+    statusMask=diagGetParameter(this, "DtcStatusbyte");  
+  }
+  else {                                                 // DoorFR ==> PDX
+    statusMask=((byte)diagGetParameter(this, "TestFailed") |
+                (byte)diagGetParameter(this, "TestFailedThisMonitoringCycle") << 1 |
+                (byte)diagGetParameter(this, "PendingDtc") << 2 |
+                (byte)diagGetParameter(this, "ConfirmedDtc") << 3 |
+                (byte)diagGetParameter(this, "TestNotCompletedSinceLastClear") << 4 |
+                (byte)diagGetParameter(this, "TestFailedSinceLastClear") << 5 |
+                (byte)diagGetParameter(this, "TestNotCompletedThisMonitoringCycle") << 6 |
+                (byte)diagGetParameter(this, "WarningIndicatorRequested") << 7);
+  }
+
+  // diagResize(resp, 2+((word)gFaultMemType+1)*gFaultmem.storedFaults);     // necessary in older CANoe versions
+  ret=diagSetParameter(resp, "DtcStatusbyte", statusMask);
+  
+  faultIndex=0;
+  for (k=0; k<cSupportedDTCs; k++) {
+    if (gFaultMem.Fault[k].occurrances>0 && (gFaultMem.Fault[k].status & statusMask)) {
+      diagSetComplexParameter(resp, "ListOfDTC", faultIndex, "DTC", gFaultMem.Fault[k].DTC);
+      diagSetComplexParameter(resp, "ListOfDTC", faultIndex, "DtcStatusbyte", gFaultMem.Fault[k].status);
+      // If you want to access a single bit in the status byte, you may do this in case of a CDD e.g. in the following way:
+      // diagSetComplexParameter(resp, "ListOfDTC", faultIndex, "StatusOfDtc.ConfirmedDtc", (gFaultMem.Fault[k].status>>3) & 0x1);
+      faultIndex++;
+    }
+  }
+  diagSendPositiveResponse(resp);
+}
+
+on diagRequest %NODE_NAME%.FaultMemory_Read_extended_data_record
+{
+  diagResponse this resp;
+  dword DTC;
+  word faultMemIndex;
+  byte dataRecordNumber;
+  
+  refreshS3Timer();
+  DTC=diagGetParameter(this, "DTC");
+  faultMemIndex=GetFaultMemIndex(DTC);
+  if (faultMemIndex<cSupportedDTCs) {
+    dataRecordNumber=(byte)diagGetParameter(this, "DTCExtendedDataRecordNumber_CommonDiagnostics_Data_Object_Defaul");
+    if (1==dataRecordNumber || 0xFF==dataRecordNumber) {
+      diagSetParameter(resp, "DTC", DTC);
+      diagSetParameter(resp, "StatusOfDTC", gFaultMem.Fault[faultMemIndex].status);
+      diagSetParameter(resp, "DTCExtendedDataRecordNumber_Data_Object_PR", 1);
+      // Use first snapshot from environment data for the response
+      diagSetParameter(resp, cParamAccessPhysical, "ExtDataOdometerValue", gFaultMem.Fault[faultMemIndex].snapshot[0].OdometerValue);
+      diagSetParameter(resp, cParamAccessPhysical, "ExtDataVoltage", gFaultMem.Fault[faultMemIndex].snapshot[0].SupplyVoltage);
+      diagSendPositiveResponse(resp);
+      return;
+    }
+  }
+  diagSendNegativeResponse(resp, cNRC_ConditionsNotCorrectOrRequestSequenceError);
+}
+
+on diagRequest %NODE_NAME%.FaultMemory_Read_snapshot_by_DTC
+{
+  diagResponse this resp;
+  dword DTC;
+  long ret;
+  word faultMemIndex;
+  word snapshotIndex;
+  word numberOfSnapshots;
+  
+  refreshS3Timer();
+  DTC=diagGetParameter(this, "DTC");
+  if (DTC>0) {
+    faultMemIndex=GetFaultMemIndex(DTC);
+    if (faultMemIndex<cSupportedDTCs) {  // If DTC is stored
+      ret=diagGetParameter(this, "DTCSnapshotRecordNumber_CommonDiagnostics_Data_Object");
+      if (0xFF==ret) {    
+        numberOfSnapshots=(gFaultMem.Fault[faultMemIndex].occurrances>1)?2:1;
+        diagResize(resp, 1+1+(word)gFaultMemType+1+2+numberOfSnapshots*6);     // SID + LID + DTC + Status + snapshot header + snapshots
+        diagSetParameter(resp, "DTC", DTC);
+        diagSetParameter(resp, "StatusOfDTC", gFaultMem.Fault[faultMemIndex].status);
+        for (snapshotIndex=0;snapshotIndex<numberOfSnapshots;snapshotIndex++) {
+          diagSetComplexParameter(resp, "ListOfDTCSnapshotRecord", snapshotIndex, "DTCSnapshotRecordNumber_CommonDiagnostics_Data_Object", snapshotIndex+1);
+          diagSetComplexParameter(resp, "ListOfDTCSnapshotRecord", snapshotIndex, "DTCSnapshotRecordNumberOfIdentifiers", 2);
+          diagSetComplexParameter(resp, cParamAccessPhysical, "ListOfDTCSnapshotRecord", snapshotIndex, "OdometerValue", gFaultMem.Fault[faultMemIndex].snapshot[snapshotIndex].OdometerValue);
+          diagSetComplexParameter(resp, cParamAccessPhysical, "ListOfDTCSnapshotRecord", snapshotIndex, "SupplyVoltage", gFaultMem.Fault[faultMemIndex].snapshot[snapshotIndex].SupplyVoltage);
+          diagSetComplexParameter(resp, cParamAccessPhysical, "ListOfDTCSnapshotRecord", snapshotIndex, "InternalVoltage", gFaultMem.Fault[faultMemIndex].snapshot[snapshotIndex].InternalVoltage);
+        }
+        diagSendPositiveResponse(resp);
+      }
+      else {
+        if (ret>0) {
+          if (gFaultMem.Fault[faultMemIndex].occurrances>=ret) { // read single snapshot
+            diagResize(resp, 1+1+(word)gFaultMemType+1+2+6);     // SID + LID + DTC + Status + snapshot header + one snapshot
+            diagSetParameter(resp, "DTC", DTC);
+            diagSetParameter(resp, "StatusOfDTC", gFaultMem.Fault[faultMemIndex].status);
+            snapshotIndex=ret-1;
+            diagSetComplexParameter(resp, "ListOfDTCSnapshotRecord", 0, "DTCSnapshotRecordNumber_CommonDiagnostics_Data_Object", snapshotIndex+1);
+            diagSetComplexParameter(resp, "ListOfDTCSnapshotRecord", 0, "DTCSnapshotRecordNumberOfIdentifiers", 2);
+            diagSetComplexParameter(resp, cParamAccessPhysical, "ListOfDTCSnapshotRecord", 0, "OdometerValue", gFaultMem.Fault[faultMemIndex].snapshot[snapshotIndex].OdometerValue);
+            diagSetComplexParameter(resp, cParamAccessPhysical, "ListOfDTCSnapshotRecord", 0, "SupplyVoltage", gFaultMem.Fault[faultMemIndex].snapshot[snapshotIndex].SupplyVoltage);
+            diagSetComplexParameter(resp, cParamAccessPhysical, "ListOfDTCSnapshotRecord", snapshotIndex, "InternalVoltage", gFaultMem.Fault[faultMemIndex].snapshot[snapshotIndex].InternalVoltage);
+            diagSendPositiveResponse(resp);
+          }
+          else {
+            diagSendNegativeResponse(resp, cNRC_RequestOutOfRange); 
+          }
+        }
+        else {
+          diagSendNegativeResponse(resp, cNRC_RequestOutOfRange); 
+        }
+      }
+    }
+    else {
+      diagSendNegativeResponse(resp, cNRC_ConditionsNotCorrectOrRequestSequenceError);
+    }
+  }
+  else {
+    diagSendNegativeResponse(resp, cNRC_RequestOutOfRange); 
+  }
+}
+

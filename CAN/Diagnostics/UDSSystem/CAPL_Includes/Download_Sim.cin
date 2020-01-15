@@ -1,0 +1,147 @@
+/*@!Encoding:1252*/
+
+variables
+{
+  dword gDownloadSize = 0;
+  dword gDownloadReceived = 0;
+  byte  gDownloadCounter = 1;
+  dword gDownloadMaxBlockSize = 0x00000400; // only 1024 Bytes to reduce application timeout
+  int gIsSecondDataTransfer=0;
+}
+
+on sysvar sysvar::%NODE_NAME%::SecurityStatus
+{
+  if (Unlocked!=@this) {
+    gIsSecondDataTransfer=0;
+  }
+}
+
+on diagRequest %NODE_NAME%.Download_Stop
+{
+  diagResponse this resp;
+
+  @sysvar::%NODE_NAME%::DownloadInProgress = 0;
+
+  refreshS3Timer();
+  DiagSendPositiveResponse( resp);
+}
+
+on diagRequest %NODE_NAME%.Download_Transmit
+{
+  diagResponse this resp;
+
+  refreshS3Timer();
+  refreshSessionTimer();
+
+  if ( !@sysvar::%NODE_NAME%::DownloadInProgress)
+  {
+    writeLineEx( 0, 1, "%NODE_NAME%: Download service is not active!");
+
+    // The download service is not active
+    DiagSendNegativeResponse( this, cNRC_RequestSequenceError);
+    return;
+  }
+  @sysvar::%NODE_NAME%::BlockSequenceCounter=DiagGetParameter( this, "blockSequenceCounter");
+
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "blockSequenceCounter", @sysvar::%NODE_NAME%::BlockSequenceCounter);
+  DiagSendResponse( resp);
+}
+
+
+on diagRequest %NODE_NAME%.Download_Request
+{
+  byte  addressAndLengthFormatIdentifier;
+  dword addressFormatSize;
+  dword memoryFormatSize;
+  dword memorySpecSize;
+  byte  memorySpec[8];
+  long  i;
+  dword address = 0;
+  byte  blockSpec[4];
+  diagResponse this resp;
+
+  refreshS3Timer();
+  if (Unlocked!=@sysvar::%NODE_NAME%::SecurityStatus || ProgrammingSession!=@sysvar::%NODE_NAME%::CurrentSession)
+  {
+    DiagSendNegativeResponse( this, cNRC_SecurityAccessDenied);
+    return;
+  }
+
+  addressAndLengthFormatIdentifier = DiagGetParameter( this, "ALFID");
+  addressFormatSize = ( addressAndLengthFormatIdentifier & 0xF0) >> 4;
+  memoryFormatSize = addressAndLengthFormatIdentifier & 0x0F;
+  memorySpecSize = addressFormatSize + memoryFormatSize;
+  if ( addressFormatSize > 4 || memoryFormatSize > 4)
+  {
+    DiagSendNegativeResponse( this, cNRC_RequestOutOfRange);
+    return;
+  }
+
+  if ( DiagGetParameterRaw( this, "MA_MS_", memorySpec, memorySpecSize) != 0)
+  {
+    DiagSendNegativeResponse( this, cNRC_IncorrectMessageLengthOrInvalidFormat);
+    return;
+  }
+
+  for ( i = 0; i < addressFormatSize; ++i)
+  {
+    address <<= 8;
+    address += memorySpec[i];
+  }
+
+  gDownloadSize = 0;
+  for ( ; i < memorySpecSize; ++i)
+  {
+    gDownloadSize <<= 8;
+    gDownloadSize += memorySpec[i];
+  }
+
+  writeLineEx( 0, 1, "%NODE_NAME%: Received download request at address 0x%08X with size 0x%08X bytes", address, gDownloadSize);
+  
+  @sysvar::%NODE_NAME%::DownloadInProgress = 1;
+  
+  gDownloadReceived = 0;
+  gDownloadCounter = 1;
+  refreshSessionTimer();
+  
+  // Set the parameters in the response.
+  DiagSetParameter( resp, "LFID", 0x40); // LengthFormatIdentifier
+  blockSpec[0] = ( byte)( ( gDownloadMaxBlockSize >> 24) & 0xFF);
+  blockSpec[1] = ( byte)( ( gDownloadMaxBlockSize >> 16) & 0xFF);
+  blockSpec[2] = ( byte)( ( gDownloadMaxBlockSize >>  8) & 0xFF);
+  blockSpec[3] = ( byte)( ( gDownloadMaxBlockSize >>  0) & 0xFF);
+
+  diagResize(resp,2+elcount(blockSpec));
+  for (i=0;i<elcount(blockSpec);i++) {
+    DiagSetPrimitiveByte( resp, i+2, blockSpec[i]); // MaxNumberOfBlockLength
+  }
+  DiagSendPositiveResponse( resp);
+}
+
+on diagRequest %NODE_NAME%.Routine_Control::*
+{
+  diagResponse this resp;
+  byte buffer_RoutineID_02[5] = {0x71, 0x01, 0x02, 0x02, 0x00};
+  byte buffer_RoutineID_FF_Seq1[5] = {0x71, 0x01, 0xFF, 0x00, 0x00};
+  byte buffer_RoutineID_FF_Seq2[5] = {0x71, 0x01, 0xFF, 0x01, 0x00};
+
+  if (DiagGetPrimitiveByte(this,2)==0x02) {   // If Routine ID == 0x2 use corresponding buffer
+    diagResize(resp, elcount(buffer_RoutineID_02));
+    diagSetPrimitiveData(resp, buffer_RoutineID_02, elcount(buffer_RoutineID_02));
+  }
+  else {                                      
+    if (gIsSecondDataTransfer) {             // Assume Routine ID == 0xFF and use buffer depending on data transfer sequence
+      diagResize(resp, elcount(buffer_RoutineID_FF_Seq2));
+      diagSetPrimitiveData(resp, buffer_RoutineID_FF_Seq2, elcount(buffer_RoutineID_FF_Seq2));
+      gIsSecondDataTransfer=0;
+    }
+    else {
+      diagResize(resp, elcount(buffer_RoutineID_FF_Seq1));
+      diagSetPrimitiveData(resp, buffer_RoutineID_FF_Seq1, elcount(buffer_RoutineID_FF_Seq1));
+      gIsSecondDataTransfer=1;
+    }
+  }
+
+  diagSendPositiveResponse(resp);
+}

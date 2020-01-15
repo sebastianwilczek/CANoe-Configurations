@@ -1,0 +1,81 @@
+/*@!Encoding:1252*/
+variables
+{
+  byte gIsSleeping; // indicates current mode (Sleep/Awake)
+}
+
+on sysvar LIN::Motor1_TransmActive
+{
+  if (@this==1) {
+    linActivateResps();
+  }
+  else if (@this==0) {
+    linDeactivateResps();
+  }
+}
+
+on start
+{
+  gIsSleeping = 0; // on measurement start the system is awake
+}
+
+void SetInterbyteSpace( dword interByte)
+{
+  // frames published by this slave
+  linFrame Motor1State_Cycl frame1;  
+  linFrame Motor1State_Event frame2;
+  
+  dword arrayOfSixteenthBits[9];
+  dword dwNone=0, dwSixteenthBits;
+
+  dwSixteenthBits = interByte*16;
+
+  arrayOfSixteenthBits[0] = dwNone;  // in-frame-response (before first data byte)
+  arrayOfSixteenthBits[1] = dwSixteenthBits;  // between 1-2 in 1/16th of bit time
+  arrayOfSixteenthBits[2] = dwSixteenthBits;  // between 2-3 in 1/16th of bit time
+  arrayOfSixteenthBits[3] = dwSixteenthBits;  // between 3-4 in 1/16th of bit time
+  arrayOfSixteenthBits[4] = dwSixteenthBits;  // between 4-5 in 1/16th of bit time
+  arrayOfSixteenthBits[5] = dwSixteenthBits;  // between 5-6 in 1/16th of bit time
+  arrayOfSixteenthBits[6] = dwSixteenthBits;  // between 6-7 in 1/16th of bit time
+  arrayOfSixteenthBits[7] = dwSixteenthBits;  // between 7-8 in 1/16th of bit time
+  arrayOfSixteenthBits[8] = dwNone;  // between 8-CS in 1/16th of bit time
+
+  linSetInterByteSpaces(frame1.id, arrayOfSixteenthBits);
+  linSetInterByteSpaces(frame2.id, arrayOfSixteenthBits);
+}
+
+on sysvar LIN::Motor1_InterbyteSpace
+{
+  dword ibSpace; // in bits
+
+  ibSpace = @this;
+
+  // verify the allowed range - maximum of 15,93 bits can be set
+  if (ibSpace < 15) {
+    SetInterbyteSpace(ibSpace);
+  }
+}
+
+on sysvar LIN::Motor1_SendWakeup
+{
+  if (1==gIsSleeping)
+  {
+    gIsSleeping = 0;
+    linSendWakeup(150, 1, @LIN::Motor1_WakeupLength);
+  }
+}
+
+on sysvar LIN::Motor1_RespErr
+{
+  if(@this == 1)
+  {
+    linSetRespError(1);
+  }
+}
+
+on sysvar LIN::Master_SendSleepCmd
+{
+  // Just set the indicator flag here. The actual Sleep Cmd is sent by Master
+  gIsSleeping = 1;
+}
+

@@ -1,0 +1,469 @@
+/*@@includes:*/
+includes
+{
+  #include "MostDefs.cin"
+  #include "FCatDefs.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+//
+// Simulation of a simple disc player control.
+//
+// The program demonstrates how to apply the Shadow Service and 
+// Notification Shadow Service in simulated controller applications.
+//
+variables
+{
+  // Application phase
+  const byte kAppOff      = 0; // no power; no communication
+  const byte kAppOn       = 1; // power on
+  const byte kAppShutdown = 2; // power on; shutdown started
+  byte  gAppPhase = kAppOff;
+
+  // Property shadow: VectorSystemManager.CurrentAudioSource
+  // currently active sound source
+  const byte kSourceIdNone        = 0;
+  const byte kSourceIdDiscPlayer  = 1;
+  const byte kSourceIdTuner       = 2;
+  byte       gCurrentAudioSource = kSourceIdNone;
+
+  // Property shadow: AudioDiskPlayer.DeckStatus
+  byte  gDeckStatus = 0xFF;
+
+
+  //
+  // FBlock shadows
+  //
+
+  // VectorSystemManager InstId
+  long gInstId_VSM = -1; // -1: InstID not known yet
+  // VectorSystemManager properties of interest
+  word gShadowProp_VSM[1] = {
+     kFct_VSM_CurrentAudioSource };
+
+  // AudioDiskPlayer InstId
+  long gInstId_ADP = -1; // -1: InstID not known yet
+  // AudioDiskPlayer properties of interest
+  word gShadowProp_ADP[3] = {
+     kFct_ADP_DeckStatus
+    ,kFct_ADP_TimePosition
+    ,kFct_ADP_TrackPosition };
+}
+/*@@end*/
+
+/*@@sysvarChange:AC::Button_Eject:*/
+on sysvar AC::Button_Eject
+{
+  if(!@this)
+    return;
+  if(gAppPhase != kAppOn) 
+    return;
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+    return;
+  
+  if(gDeckStatus == 4) // unloaded
+  {
+    // load magazine
+    mostAmsOutput(mostGetChannel(), "AudioDiskPlayer.DeckStatus.Set(Load)", gInstId_ADP);
+  }
+  else
+  {
+    // unload magazine
+    mostAmsOutput(mostGetChannel(), "AudioDiskPlayer.DeckStatus.Set(Unload)", gInstId_ADP);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:AC::Button_Init:*/
+on sysvar AC::Button_Init
+{
+  if(!@this)
+    return;
+  if(gAppPhase == kAppOff)
+  {
+    // wake the MOST ring
+    mostWakeUp(mostGetChannel(), 500);
+  }
+  else if(gAppPhase == kAppOn)
+  {
+    if(gCurrentAudioSource == kSourceIdDiscPlayer)
+      return;
+
+    // activate disc player
+    SwitchAudioSource(kSourceIdDiscPlayer);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:AC::Button_Pause:*/
+on sysvar AC::Button_Pause
+{
+  if(!@this)
+    return;
+  if(gAppPhase != kAppOn) 
+    return;
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+    return;
+
+  // set mode to 'Play'
+  mostAmsOutput(mostGetChannel(), "AudioDiskPlayer.DeckStatus.Set(Pause)", gInstId_ADP);
+}
+/*@@end*/
+
+/*@@sysvarChange:AC::Button_Play:*/
+on sysvar AC::Button_Play
+{
+  if(!@this)
+    return;
+  if(gAppPhase != kAppOn) 
+    return;
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+    return;
+
+  // set mode to 'Play'
+  mostAmsOutput(mostGetChannel(), "AudioDiskPlayer.DeckStatus.Set(Play)", gInstId_ADP);
+}
+/*@@end*/
+
+/*@@sysvarChange:AC::Button_Stop:*/
+on sysvar AC::Button_Stop
+{
+  if(!@this)
+    return;
+  if(gAppPhase != kAppOn) 
+    return;
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+    return;
+  
+  // set mode to 'Play'	
+  mostAmsOutput(mostGetChannel(), "AudioDiskPlayer.DeckStatus.Set(Stop)", gInstId_ADP);
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  // React on node messages from connected channel only; ignore spy messages
+  mostApplicationNode();
+
+  // enable FBlock requests
+  // node will poll the Network Master for addresses of these FBlocks after ConfigOk
+  mostAsShdEnable(kFB_VSM, kInstIdBroadcast);
+  mostAsShdEnable(kFB_ADP, kInstIdBroadcast);
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.TimePosition.Status (0x31201C):*/
+on mostAMSMessage AudioDiskPlayer.TimePosition.Status
+{
+  // receives time of track from AudioDiskPlayer and
+  // updates the time display
+  long min,sec,milliSec;
+  char timeString[20];
+
+  if(mostParamIsAvailable(this, "Data.TrackTime"))
+  {
+    milliSec = mostParamGet(this, "Data.TrackTime");
+    sec = milliSec / 1000;
+    min = sec / 60;
+    sec = sec - (min*60);
+  
+    snprintf(timeString, elcount(timeString), "%02d:%02d", min, sec);
+  
+    sysSetVariableString(sysvar::AC::Display_Time, timeString);
+  }  
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.TrackPosition.Status (0x31202C):*/
+on mostAMSMessage AudioDiskPlayer.TrackPosition.Status
+{
+  @sysvar::AC::Display_Track = this.Track;
+}
+/*@@end*/
+
+/*@@sysvarChange:AC::Button_Reset:*/
+on sysvar AC::Button_Reset
+{
+  if(!@this)
+    return;
+  if(gAppPhase != kAppOn) 
+    return;
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+    return;
+
+  // deactivate existing audio source
+  SwitchAudioSource(kSourceIdNone);
+}
+/*@@end*/
+
+/*@@mostAsRegistry:OnMostAsRegistry(long):*/
+OnMostAsRegistry(long rgtype)
+{
+  // The event procedure indicates a change in the 
+  // Local FBlock list or Bus Registry
+ 
+  if(gAppPhase != kAppOn) 
+    return;
+
+  if(rgtype == kBusRegistry)
+  {
+    // Bus Registy has changed -> re-configure FBlock shadows
+    ConfigureShadowFBlocks();
+  }
+}
+/*@@end*/
+
+/*@@mostAmsMsg:AudioDiskPlayer.DeckStatus.Status (0x31200C):*/
+on mostAMSMessage AudioDiskPlayer.DeckStatus.Status
+{
+  gDeckStatus = this.DeckStatus;
+}
+/*@@end*/
+
+/*@@caplFunc:GetInstIdOfFirstFBlock(byte):*///function
+long GetInstIdOfFirstFBlock(byte fblockId)
+{
+  // Finds the first FBlock with fblockId in the Bus Registry
+  // and returns its InstId.
+  // Returns -1 if FBlock is not available.
+
+  long i;
+  if(mostGetNetState() != kNetStateConfigOk)
+    return -1;
+
+  for(i = 0; i < MostAsRgGetSize(kBusRegistry); ++i)
+  {
+    if(MostAsRgGetFBlockID(kBusRegistry, i) == fblockId)
+    {
+       return MostAsRgGetInstID(kBusRegistry, i);
+    }
+  }
+  return -1;
+}
+/*@@end*/
+
+/*@@mostNetState:OnMostNetState(long,long):*/
+OnMostNetState(long oldstate, long newstate)
+{
+  if(newstate == kNetStatePowerOff)
+  {
+    AppExit();
+  }
+
+  ConfigureShadowFBlocks();
+}
+/*@@end*/
+
+/*@@caplFunc:ConfigureShadowFBlocks():*///function
+void ConfigureShadowFBlocks()
+{
+  // Configures the shadow FBlocks of interest.
+  // Therefore the properties of interest will be registered at the
+  // Notification Shadow Service, which registers the device in the
+  // Notification Matrix of the FBlocks as soon as the FBlock is
+  // known to the device.
+
+  long instId_VSM, instId_ADP;
+
+
+  // check InstIds of VectorSystemManager shadow
+  instId_VSM = GetInstIdOfFirstFBlock(kFB_VSM);
+
+  if(instId_VSM != gInstId_VSM)
+  {
+    // InstId has changed; update entries in notification matrix
+    if(gInstId_VSM != -1) // unregister old
+      ConfigureShadowProperties(kFB_VSM, gInstId_VSM, gShadowProp_VSM, 0);
+    if(instId_VSM != -1) // register new
+      ConfigureShadowProperties(kFB_VSM, instId_VSM, gShadowProp_VSM, 1);
+    
+    gInstId_VSM = instId_VSM; // set new InstId
+
+    // invalidate shadowed properties
+    CurrentAudioSourceChanged(kSourceIdNone);
+  }
+
+
+  // check InstIds of AudioDiskPlayer shadow
+  instId_ADP = GetInstIdOfFirstFBlock(kFB_ADP);
+
+  if(instId_ADP != gInstId_ADP)
+  {
+    // InstId has changed; update entries in notification matrix
+    if(gInstId_ADP != -1) // unregister old
+      ConfigureShadowProperties(kFB_ADP, gInstId_ADP, gShadowProp_ADP, 0);
+    if(instId_ADP != -1) // register new
+      ConfigureShadowProperties(kFB_ADP, instId_ADP, gShadowProp_ADP, 1);
+    
+    gInstId_ADP = instId_ADP; // set new InstId
+
+    // invalidate shadowed properties
+    gDeckStatus = 0xFF;
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ConfigureShadowProperties(byte,byte,word[],long):*///function
+void ConfigureShadowProperties(byte fblockId, byte instId, word shadowProp[], long init)
+{
+  // Registers/unregisters properties at the Notification Shadow Service.
+  // Service will send Notification.Set(SetFunction/ClearFunction) as soon
+  // as the FBlock is known to this device.
+ 
+  long i;
+
+  if(init)
+  {
+    // register properties in Notification Shadow Service
+    for(i = 0; i < elcount(shadowProp); ++i)
+    {
+      mostAsNtfShdFunctionEnable(fblockId, instId, shadowProp[i]);
+    }
+  }
+  else
+  {
+    // unregister properties from Notification Shadow Service
+    for(i = 0; i < elcount(shadowProp); ++i)
+    {
+      mostAsNtfShdFunctionDisable(fblockId, instId, shadowProp[i]);
+    }
+  }
+}
+/*@@end*/
+
+/*@@mostNetOn:OnMostNetOn():*/
+OnMostNetOn()
+{
+  AppInit();
+}
+/*@@end*/
+
+/*@@caplFunc:AppExit():*///function
+void AppExit()
+{
+  // Called on final exit of the application.
+
+  if(gAppPhase == kAppOff)
+    return;
+
+  // power off
+  gAppPhase = kAppOff;
+
+  // reset the user interface
+  EnableControls(0);
+}
+/*@@end*/
+
+/*@@caplFunc:AppInit():*///function
+void AppInit()
+{
+  // Called on first start of the application.
+
+  if(gAppPhase == kAppOn)
+    return;
+
+  // application has started now
+  gAppPhase = kAppOn;
+
+  // initialize FBlock shadows
+  ConfigureShadowFBlocks();
+
+  EnableControls(1);
+}
+/*@@end*/
+
+/*@@mostAmsMsg:VectorSystemManager.CurrentAudioSource.Status (0xD0D01C):*/
+on mostAMSMessage VectorSystemManager.CurrentAudioSource.Status
+{
+  // Stores value of the property and updates the user interface
+
+  byte currentSourceId;
+
+  if((gAppPhase != kAppOn) && (gAppPhase != kAppShutdown))
+    return;
+
+  CurrentAudioSourceChanged(this.SourceID);
+}
+/*@@end*/
+
+/*@@caplFunc:SwitchAudioSource(byte):*///function
+void SwitchAudioSource(byte sourceID)
+{
+  // Activates a audio source.
+
+  mostAmsMessage VectorSystemManager.SwitchAudioSource.StartResultAck msg;
+
+  // VectorSystemManager available
+  if(gInstId_VSM == -1)
+    return;
+
+  // assemble message
+  msg.SenderHandle = mostGetNodeAdr(mostGetChannel());
+  msg.SourceID = sourceID;
+  output(msg);
+
+  // note: the application will be notified through 
+  // VectorSystemManager.CurrentAudioSource on completion.
+}
+/*@@end*/
+
+/*@@caplFunc:CurrentAudioSourceChanged(byte):*///function
+void CurrentAudioSourceChanged(byte sourceId)
+{
+  // Stores value of the shadowed property VectorSystemManager.CurrentAudioSource
+  // and updates the user interface
+
+  if(gCurrentAudioSource == sourceId)
+    return;
+
+  // store value of property
+  gCurrentAudioSource = sourceId;
+}
+/*@@end*/
+
+/*@@caplFunc:EnableControls(long):*///function
+EnableControls(long enable)
+{
+  long color;
+  if(enable)
+    color = 0x000000;
+  else
+    color = 0xE7E7E7;
+  setControlForeColor("Audio Console", "Track", color);
+  setControlForeColor("Audio Console", "Time", color);
+}
+/*@@end*/
+
+/*@@sysvarChange:HU::Button_LowTraffic:*/
+on sysvar HU::Button_LowTraffic
+{
+  // In order to have less traffic on MOST, this environment variable disables/enables 
+  // all cyclic messages by removing the functions from the Notification Shadow servcie.
+
+  mostAmsMessage * msg;
+  long i;
+
+  if(gAppPhase != kAppOn) 
+    return;
+
+  if(@this == 1)
+  {
+    // clear from Notification Matrix
+    if(gInstId_ADP != -1)
+    {
+      mostAsNtfShdFunctionDisable(kFB_ADP, gInstId_ADP, kFct_ADP_TimePosition);
+    }
+  }
+  else
+  {
+    // set in Notification Matrix
+    if(gInstId_ADP != -1)
+    {
+      mostAsNtfShdFunctionEnable(kFB_ADP, gInstId_ADP, kFct_ADP_TimePosition);
+    }
+  }
+}
+/*@@end*/
+

@@ -1,0 +1,1040 @@
+/*@!Encoding:1252*/
+/*
+DEMO: VT7900 with VT7870 Application Board for vehicle/EVSE - communication
+*/
+
+variables
+{
+  // compare bits (bit mask) to link capacity relays with bits of SysPanelControl_Capacity 
+  const int compareBIT0 = 1;  //00000001
+  const int compareBIT1 = 2;  //00000010
+  const int compareBIT2 = 4;  //...
+  const int compareBIT3 = 8;
+  const int compareBIT4 = 16;
+  const int compareBIT5 = 32; //00100000
+
+  mstimer Tdetect;  
+  mstimer TswitchS2;  
+  
+  const int cDelay_S2 = 100;
+
+  int plugPresent = 0;
+  int maxCableAmp = 0;
+  
+  mstimer tContactors;
+  const int cDelayContactors = 1000;
+}
+
+
+// Vehicle Simulation
+
+on timer Tdetect
+{  
+  State_Detection();   // detect IEC61851 state  
+  PlugPresent_Detection();
+  
+  setTimer(Tdetect, 500);
+}
+
+void Setup_VT7870asEV()
+{  
+  // No PWM Generator function
+  @Mapped::SysMapped_StimDutyCycle = 0;   // set PWM to 100%
+  @Mapped::SysMapped_StimVoltageHigh = 0;
+  @Mapped::SysMapped_StimVoltageLow  = 0;
+  @Mapped::SysMapped_StimFrequency = 0;   // frequency 1 kHz
+
+  // Relais
+  @Mapped::SysMapped_RelayK1 =1;  // PP --> set during runtime
+  @Mapped::SysMapped_RelayK2 =1;  // 2k7 resistance of Plug Present function
+  @Mapped::SysMapped_RelayK3 =0;
+  @Mapped::SysMapped_RelayK4 =0;
+  @Mapped::SysMapped_RelayK5 =0;
+  @Mapped::SysMapped_RelayK6 =0;
+  @Mapped::SysMapped_RelayK7 =0;
+  @Mapped::SysMapped_RelayK8 =0;
+  @Mapped::SysMapped_RelayK9 =1;  // EV resistance R2 & R3
+  @Mapped::SysMapped_RelayK10=0;  // diode bypass 
+  @Mapped::SysMapped_RelayK11=1;  // R2
+  @Mapped::SysMapped_RelayK12=0;
+  @Mapped::SysMapped_RelayK13=0;
+  @Mapped::SysMapped_RelayK14=0;  // switch S2 later
+  @Mapped::SysMapped_RelayK15=0;  // R3a or R3b (R3b --> ventilation)
+  @Mapped::SysMapped_RelayK16=1;  // Config R3b
+  @Mapped::SysMapped_RelayK17=0;
+  @Mapped::SysMapped_RelayK18=0;
+  @Mapped::SysMapped_RelayK19=1;  // Config R3a
+  @Mapped::SysMapped_RelayK20=0;
+  @Mapped::SysMapped_RelayK21=0;
+  @Mapped::SysMapped_RelayK22=0;
+  @Mapped::SysMapped_RelayK23=1;  // PLC Communication
+  @Mapped::SysMapped_RelayK24=1;  // PLC Communication
+  @Mapped::SysMapped_RelayK25=0;
+  @Mapped::SysMapped_RelayK26=1;  // CP_EVSE
+  @Mapped::SysMapped_RelayK27=1;  // CP_EV --> set during runtime
+  @Mapped::SysMapped_RelayK28=1;  // PE
+  @Mapped::SysMapped_RelayK29=0;
+  @Mapped::SysMapped_RelayK30=0;
+  @Mapped::SysMapped_RelayK31=0;
+  @Mapped::SysMapped_RelayK32=0;
+  @Mapped::SysMapped_RelayK33=0;
+  @Mapped::SysMapped_RelayK34=0;
+  @Mapped::SysMapped_RelayK35=0;
+  @Mapped::SysMapped_RelayK36=0;
+  @Mapped::SysMapped_RelayK37=0;
+}
+
+void Open_S2()
+{ 
+  @Mapped::SysMapped_RelayK14 = 0;
+  write("%d VT_Control: S2 opening!", TimeNow());
+}
+
+void Close_S2()
+{
+  // this functions sets the s2 switch (EV emulation), when the cable is plugged and PWM duty cycle is < 96%
+  
+  if (@EV::Control::SysEV_Connected && @Mapped::SysMapped_MeasDutyCycle < 96) // 
+  {
+    @Mapped::SysMapped_RelayK14 = 1;
+    write("%d VT_Control: S2 closing!", TimeNow());    
+  }
+  else
+  {
+    write("%d VT_Control: Error closing S2! Cable not plugged or EVSE not ready!", TimeNow() / 10000);
+  }
+}
+
+on sysvar PanelControl::SysPanelControl_VehicleState_A
+{
+  if (@this)
+  {
+    // Status LED
+    @PanelControl::SysPanelControl_EV_Simu_ON = 1;
+    @PanelControl::SysPanelControl_EVSE_Simu_ON = 0;
+    
+    // set string for connection state A display
+    setEV_StateDisplay('A');    
+  
+    // deactivate old state buttons
+    ResetOldButtons('A');
+        
+    OpenSelectedRelays();
+  }
+  else
+  {
+    CheckStateButtons(); // If no new State is chose open all => basic state
+  }
+}
+
+// Vehicle State B [ICE 61851-1 page: 35]
+// R2 detected
+
+on sysvar PanelControl::SysPanelControl_VehicleState_B
+{
+  if (@this)
+  {    
+    // Status LED
+    @PanelControl::SysPanelControl_EV_Simu_ON = 1;
+    @PanelControl::SysPanelControl_EVSE_Simu_ON = 0;
+    
+    // set string for connection state B display
+    setEV_StateDisplay('B');
+
+    // deactivate old state buttons
+    ResetOldButtons('B');
+    
+    // have to be 1
+    @Mapped::SysMapped_RelayK26 = 1;
+    @Mapped::SysMapped_RelayK9 = 1;  
+    
+    @Mapped::SysMapped_RelayK28 = 1;
+    
+    ControlToleranceR2();  // control tolerance relay of R2   
+    OpenSelectedRelays(); 
+  }
+  else
+  {
+    CheckStateButtons();   // if no new state is chosen, open all => basic state 
+  }
+}
+
+// Vehicle State C [ICE 61851-1 page: 35]
+// R3 = 1,3 kOhm -> Charging area ventilation is required
+
+on sysvar PanelControl::SysPanelControl_VehicleState_C
+{
+  if (@this)
+  {    
+    // Status LED
+    @PanelControl::SysPanelControl_EV_Simu_ON = 1;
+    @PanelControl::SysPanelControl_EVSE_Simu_ON = 0;
+    
+    // set string for connection state C display
+    setEV_StateDisplay('C');
+
+    // deactivate old state buttons
+    ResetOldButtons('C');
+    
+    // have to be 1
+    @Mapped::SysMapped_RelayK26=1;
+    @Mapped::SysMapped_RelayK9=1;  
+    
+    @Mapped::SysMapped_RelayK28=1;
+    @Mapped::SysMapped_RelayK14=1;
+    
+    ControlToleranceR2();   // control tolerance relay of R2
+    ControlToleranceR3a();  // control tolerance relay of R3a
+          
+    OpenSelectedRelays(); 
+  }
+  else
+  {
+    CheckStateButtons();   // if no new State is chosen, open all => basic state
+  }
+}
+
+// Vehicle State D [ICE 61851-1 page: 35]
+// R3 = 270 Ohm -> Charging area ventilation required
+
+on sysvar PanelControl::SysPanelControl_VehicleState_D
+{
+  if (@this)
+  {     
+    // Status LED
+    @PanelControl::SysPanelControl_EV_Simu_ON = 1;
+    @PanelControl::SysPanelControl_EVSE_Simu_ON = 0;
+    
+    // set string for connection state D display
+    setEV_StateDisplay('D');
+
+    // deactivate old state buttons
+    ResetOldButtons('D');
+    
+    // have to be 1
+    @Mapped::SysMapped_RelayK26 = 1;
+    @Mapped::SysMapped_RelayK9 = 1;  
+    @Mapped::SysMapped_RelayK28 = 1;
+    @Mapped::SysMapped_RelayK14 = 1;
+    @Mapped::SysMapped_RelayK15 = 1;
+    
+    ControlToleranceR2();   // Control tolerance relay of R2
+    ControlToleranceR3b();  // Control tolerance relay of R3b          
+    
+    OpenSelectedRelays(); 
+  }
+  else
+  {
+    CheckStateButtons();    // if no new state is chosen, open all => basic state
+  }  
+}
+
+// Vehicle State E [ICE 61851-1 page: 35]
+// Error detected : here pilot short to earth
+
+on sysvar PanelControl::SysPanelControl_VehicleState_E
+{
+  if (@this)
+  {    
+    // Status LED
+    @PanelControl::SysPanelControl_EV_Simu_ON = 1;
+    @PanelControl::SysPanelControl_EVSE_Simu_ON = 0;
+    
+    // set string for connection state E display
+    setEV_StateDisplay('E');
+
+    // deactivate old state buttons
+    ResetOldButtons('E');
+    
+    // have to be 1
+    @Mapped::SysMapped_RelayK26 = 1;
+    @Mapped::SysMapped_RelayK9 = 1;  
+    
+    @Mapped::SysMapped_RelayK28 = 1;
+    @Mapped::SysMapped_RelayK31 = 1;
+    
+    ControlToleranceR2();  // Control tolerance relay of R2          
+    
+    OpenSelectedRelays(); 
+  }
+  else
+  {
+    CheckStateButtons();    // if no new state is chosen, open all => basic state
+  }
+}
+
+// Vehicle State F [ICE 61851-1 page: 35]
+// EVSE not available
+
+on sysvar PanelControl::SysPanelControl_VehicleState_F
+{
+  if (@this)
+  {    
+    // Status LED
+    @PanelControl::SysPanelControl_EV_Simu_ON = 1;
+    @PanelControl::SysPanelControl_EVSE_Simu_ON = 0;
+    
+    // set string for connection state F display
+    setEV_StateDisplay('F');
+
+    // deactivate old state buttons
+    ResetOldButtons('F');
+    
+    // have to be 1
+    @Mapped::SysMapped_RelayK26 = 1;
+    @Mapped::SysMapped_RelayK9 = 1;  
+    @Mapped::SysMapped_RelayK28 = 1;
+    
+    ControlToleranceR2();  // Control tolerance relay of R2        
+    OpenSelectedRelays(); 
+  }
+  else
+  {
+    CheckStateButtons();    // if no new state is chosen, open all => basic state
+  }  
+}
+
+void State_Detection()
+{
+  float Voltage;     
+  float dutyCycle;
+  
+  // ComLevel
+  dutyCycle = @sysvar::Mapped::SysMapped_MeasDutyCycle;
+  
+  @VT_Control::IEC61851_DutyCycle = _round(dutyCycle);
+  
+  // StateDetection
+  Voltage = @Mapped::SysMapped_MeasVoltageHigh;
+  
+  if (11 < Voltage & Voltage < 13)
+  {
+    @VT_Control::IEC61851_State = 1;    
+  }
+  else if(8 < Voltage & Voltage < 10)
+  {
+    @VT_Control::IEC61851_State = 2;
+  }
+  else if (5 < Voltage & Voltage < 7)
+  {
+    @VT_Control::IEC61851_State = 3;
+    // close Power Relais t.b.d.
+  }
+  else if (2 < Voltage & Voltage< 4)
+  {
+    @VT_Control::IEC61851_State = 4;
+    // close Power Relais t.b.d.
+  }
+  else
+  {
+    @VT_Control::IEC61851_State = 0;
+  }
+}
+
+void PlugPresent_Detection()
+{
+  /*  extended voltage values for plug present detection
+  without plug          4,46V
+  13 A coding           3,73V
+  20 A coding           3,11V
+  32 A coding           1,91V
+  63 / 70 A coding      1,13V
+  SAE J1772
+  Switch S3 closed      1,51V
+  Switch S3 open        2,76V
+  */
+  
+  float Voltage = 0;
+  int Phases = 3;   // Number of phases
+  int plugPresent_old = 0;  // output only on change!
+    
+  Voltage = @Mapped::SysMapped_MeasPPVoltage;
+  if (Voltage > 4)
+  {
+    plugPresent = 0;
+    maxCableAmp = 0;
+    
+    if (plugPresent != plugPresent_old)
+      write("No plug present");
+    
+    plugPresent_old = plugPresent;
+  }
+  else if (3.9 > Voltage & Voltage > 3.5)
+  {
+    plugPresent = 1;
+    maxCableAmp = 13;
+    
+    if (plugPresent != plugPresent_old)
+      write("[%6.3f] Plug present: 13A", (timeNow()/100000.0));
+    
+    plugPresent_old = plugPresent;
+  }
+  else if (3.3 > Voltage & Voltage > 2.9)
+  {
+    plugPresent = 1;
+    maxCableAmp = 20;
+    
+    if (plugPresent != plugPresent_old)
+      write("Plug present: 20A");
+    
+    plugPresent_old = plugPresent;
+  }
+  else if (2.1 > Voltage & Voltage > 1.7)
+  {
+    plugPresent = 1;
+    maxCableAmp = 32;
+    
+    if (plugPresent != plugPresent_old)
+      write("Plug present: 32A");
+    
+    plugPresent_old = plugPresent;
+  }
+  else if (1.3 > Voltage & Voltage > 0.9)
+  {
+    plugPresent = 1;
+    
+    if (Phases == 3)
+      maxCableAmp = 63;
+    else if (Phases == 1)
+      maxCableAmp = 70;
+    else
+      maxCableAmp = 0;  // number of phases not defined
+    
+    if (plugPresent != plugPresent_old)
+      write("Plug present: 63A");
+    
+    plugPresent_old = plugPresent;
+  }
+  else
+  {
+    plugPresent = 1;
+    maxCableAmp = 0;
+    
+    if (plugPresent != plugPresent_old)
+      write("Plug present: But undefined resistance!");
+    
+    plugPresent_old = plugPresent;
+  }
+  
+  // Start Simulation
+  if (@sysvar::VT_Control::IgnorePP == 0)
+  {
+    @EV::Control::SysEV_Connected =  plugPresent;
+  }
+}
+
+on sysvar VT_Control::IEC61851_State
+{
+  setTimer(tContactors, cDelayContactors);
+}
+
+on timer tContactors
+{
+  if ((3 <= @VT_Control::IEC61851_State) & (@VT_Control::IEC61851_State <= 4))
+  {
+    @VT_Control::EVSE_Contactors = 1;
+    write("Close by tContactors --> State C or D");
+  }
+  else
+  {
+    @VT_Control::EVSE_Contactors = 0;
+  }
+}
+
+// Set basic operation circuit
+on sysvar PanelControl::SysPanelControl_Simulate_EVSE
+{
+  if (@this)
+  {
+    // Status LED
+    @PanelControl::SysPanelControl_EVSE_Simu_ON=1;
+    @PanelControl::SysPanelControl_EV_Simu_ON=0;
+    
+    ResetOldButtons('S');
+    
+    // init charging state
+    @PanelControl::SysPanelControl_ChargingAllowed=0;
+    
+    // set stimulation basic values
+    @Mapped::SysMapped_StimDutyCycle=0;
+    @Mapped::SysMapped_StimFrequency=1000;
+    @Mapped::SysMapped_StimVoltageHigh=12;
+    @Mapped::SysMapped_StimVoltageLow=-12;    
+    
+    // have to be 1
+    @Mapped::SysMapped_RelayK27=1;
+    @Mapped::SysMapped_RelayK10=1;
+    @Mapped::SysMapped_RelayK8=1;
+    @Mapped::SysMapped_RelayK28=1;
+    
+    ControlToleranceR1();        
+    OpenSelectedRelays(); 
+  }
+  else
+  {
+    CheckStateButtons();    // if no new state is chosen, open all => basic state
+    
+    // reset stimulation
+    @Mapped::SysMapped_StimDutyCycle=0;
+    @Mapped::SysMapped_StimFrequency=0;
+    @Mapped::SysMapped_StimVoltageHigh=0;
+    @Mapped::SysMapped_StimVoltageLow=0;
+    @PanelControl::SysPanelControl_ChargingCurrent=0;
+    
+    // only show EVSE charging state if the mode is chose
+    @PanelControl::SysPanelControl_ChargingAllowed=2;
+  }  
+}
+
+// If DC is changed, calculate possible charging current in EVSE simulation
+on sysvar Mapped::SysMapped_StimDutyCycle
+{
+  CalculateCurrentFromDC();
+}
+
+// open, close PLC relais with one button
+on sysvar PanelControl::SysPanelControl_PLC_relais
+{
+  if (@this)
+  {
+    @Mapped::SysMapped_RelayK23=1;
+    @Mapped::SysMapped_RelayK24=1;
+  }
+  else if (@Mapped::SysMapped_RelayK23 == 1 && @Mapped::SysMapped_RelayK24 == 1)
+  {
+    @Mapped::SysMapped_RelayK23=0;
+    @Mapped::SysMapped_RelayK24=0;
+  }
+}
+
+// disable button if one of the two PLC relais is opened
+on sysvar Mapped::SysMapped_RelayK23
+{
+  if (@this == 1 && @Mapped::SysMapped_RelayK24 == 1)
+    @PanelControl::SysPanelControl_PLC_relais = 1;
+  else if (@this != 1)    
+    @PanelControl::SysPanelControl_PLC_relais = 0;      
+}
+
+on sysvar Mapped::SysMapped_RelayK24
+{
+  if (@this == 1 && @Mapped::SysMapped_RelayK23 == 1)
+    @PanelControl::SysPanelControl_PLC_relais = 1;
+  else if (@this != 1)
+    @PanelControl::SysPanelControl_PLC_relais = 0;
+} 
+  
+// Other control functions
+
+// Control capacity byte, every bit [0-5] is connected with one relay
+on sysvar PanelControl::SysPanelControl_Capacity
+{  
+  // compares value of SysPanelControl_Capacity (0-63 -> binary 000000 - 111111) with compare bits
+  // bit 0-5 of SysPanelControl_capacity is connected with the relay
+  // if a bit is set, turn on/off the recommended relay
+  
+  if ((compareBIT0 & @PanelControl::SysPanelControl_Capacity) == 1)
+    @Mapped::SysMapped_RelayK32 = 1;
+  else
+    @Mapped::SysMapped_RelayK32 = 0;
+ 
+  if ((compareBIT1 & @PanelControl::SysPanelControl_Capacity) == 2)
+    @Mapped::SysMapped_RelayK33 = 1;
+  else
+    @Mapped::SysMapped_RelayK33 = 0;
+  
+  if ((compareBIT2 & @PanelControl::SysPanelControl_Capacity) == 4)
+    @Mapped::SysMapped_RelayK34 = 1;
+  else
+    @Mapped::SysMapped_RelayK34 = 0;
+  
+  if ((compareBIT3 & @PanelControl::SysPanelControl_Capacity) == 8)
+    @Mapped::SysMapped_RelayK35 = 1;
+  else
+    @Mapped::SysMapped_RelayK35 = 0;
+  
+  if ((compareBIT4 & @PanelControl::SysPanelControl_Capacity) == 16)
+    @Mapped::SysMapped_RelayK36 = 1;
+  else
+    @Mapped::SysMapped_RelayK36 = 0;
+  
+  if ((compareBIT5 & @PanelControl::SysPanelControl_Capacity) == 32)
+    @Mapped::SysMapped_RelayK37 = 1;
+  else
+    @Mapped::SysMapped_RelayK37 = 0;   
+}
+
+// Set necessary capacity bit value 0-63 -> 6 bit
+on sysvar PanelControl::SysPanelControl_CapacityValue
+{
+  @PanelControl::SysPanelControl_Capacity = @PanelControl::SysPanelControl_CapacityValue / 100;
+}
+  
+// Calculate current from a given DC
+void CalculateCurrentfromDC()
+{
+  if (@Mapped::SysMapped_StimDutyCycle < 3)
+  {
+    @PanelControl::SysPanelControl_ChargingCurrent = 0;
+    @PanelControl::SysPanelControl_ChargingAllowed = 0;
+  }
+  else
+  {
+    if (@Mapped::SysMapped_StimDutyCycle >= 3 && @Mapped::SysMapped_StimDutyCycle <= 7)
+    {
+      @PanelControl::SysPanelControl_ChargingCurrent = 0;
+      @PanelControl::SysPanelControl_ChargingAllowed = 0;
+    }
+    else
+    {
+      if (@Mapped::SysMapped_StimDutyCycle >= 8 && @Mapped::SysMapped_StimDutyCycle < 10)
+      {
+        @PanelControl::SysPanelControl_ChargingCurrent =6;
+        @PanelControl::SysPanelControl_ChargingAllowed =1;
+      }
+      else
+      {
+        if (@Mapped::SysMapped_StimDutyCycle >=10 && @Mapped::SysMapped_StimDutyCycle <= 85)
+        {
+          @PanelControl::SysPanelControl_ChargingCurrent = @Mapped::SysMapped_StimDutyCycle * 0.6;
+          @PanelControl::SysPanelControl_ChargingAllowed = 1;
+        }
+        else
+        {
+          if (@Mapped::SysMapped_StimDutyCycle >85 && @Mapped::SysMapped_StimDutyCycle <= 96)
+          {
+            @PanelControl::SysPanelControl_ChargingCurrent = (@Mapped::SysMapped_StimDutyCycle-64) * 2.5;
+            @PanelControl::SysPanelControl_ChargingAllowed = 1;
+          }
+          else
+          {
+            if (@Mapped::SysMapped_StimDutyCycle >96 && @Mapped::SysMapped_StimDutyCycle <= 97)
+            {
+              @PanelControl::SysPanelControl_ChargingCurrent = 80;
+              @PanelControl::SysPanelControl_ChargingAllowed = 1;
+            }
+            else
+            {
+              @PanelControl::SysPanelControl_ChargingCurrent = 0;
+              @PanelControl::SysPanelControl_ChargingAllowed = 0;
+            }
+          }
+        }
+      }
+    }
+  }                                       
+} 
+  
+// Reset old state buttons if a new one is chosen
+// to use the function give the current state as a char A,B,C,D,E,F,S
+// if you want to clear all buttons use the function with a not defined letter like 'X'
+void ResetOldButtons (char currentButton)
+{    
+  if(currentButton != 'A')
+    @PanelControl::SysPanelControl_VehicleState_A=0;
+
+  if(currentButton != 'B')
+    @PanelControl::SysPanelControl_VehicleState_B=0;
+
+  if(currentButton != 'C')
+    @PanelControl::SysPanelControl_VehicleState_C=0;
+
+  if(currentButton != 'D')
+    @PanelControl::SysPanelControl_VehicleState_D=0;
+
+  if(currentButton != 'E')
+    @PanelControl::SysPanelControl_VehicleState_E=0;
+
+  if(currentButton != 'F')
+    @PanelControl::SysPanelControl_VehicleState_F=0;
+
+  if(currentButton != 'S')  // used for EVSE
+    @PanelControl::SysPanelControl_Simulate_EVSE=0;
+
+  if(@PanelControl::SysPanelControl_Simulate_EVSE == 1)   // if you switch to EVSE, EV display is off
+    setEV_StateDisplay('O');
+}
+
+// Open all relays if no vehicle state button is active
+void CheckStateButtons()
+{  
+ if (@PanelControl::SysPanelControl_VehicleState_A == 0 &&
+     @PanelControl::SysPanelControl_VehicleState_B == 0 &&
+     @PanelControl::SysPanelControl_VehicleState_C == 0 &&
+     @PanelControl::SysPanelControl_VehicleState_D == 0 &&
+     @PanelControl::SysPanelControl_VehicleState_E == 0 &&
+     @PanelControl::SysPanelControl_VehicleState_F == 0 &&
+     @PanelControl::SysPanelControl_Simulate_EVSE == 0)
+  {
+    OpenSelectedRelays();
+    
+    setEV_StateDisplay('O');  // if nothing is on, display no state
+    
+    // Status LEDS off
+    @PanelControl::SysPanelControl_EVSE_Simu_ON=0;
+    @PanelControl::SysPanelControl_EV_Simu_ON=0;    
+  }
+}
+
+// Control tolerance settings of R1
+void ControlToleranceR1()
+{  
+  if (@PanelControl::SysPanelControl_EVSE_Plus3 == 0 &&  // control the tolerance settings of R2
+      @PanelControl::SysPanelControl_EVSE_Minus3 == 0)
+  {
+    @Mapped::SysMapped_RelayK3=1;
+    @Mapped::SysMapped_RelayK4=0;
+    @Mapped::SysMapped_RelayK5=0;
+  }
+  else if (@PanelControl::SysPanelControl_EVSE_Plus3 == 1)
+  {
+    @Mapped::SysMapped_RelayK5=1;
+    @Mapped::SysMapped_RelayK3=0;
+    @Mapped::SysMapped_RelayK4=0;
+  }
+  else
+  {
+    @Mapped::SysMapped_RelayK4=1;
+    @Mapped::SysMapped_RelayK3=0;
+    @Mapped::SysMapped_RelayK5=0;
+  }
+}
+
+// Control tolerance settings of R2
+void ControlToleranceR2()
+{
+  if (@PanelControl::SysPanelControl_Vehicle_Plus3 == 0 &&
+      @PanelControl::SysPanelControl_Vehicle_Minus3 == 0)
+  {
+    @Mapped::SysMapped_RelayK11=1;
+    @Mapped::SysMapped_RelayK13=0;
+    @Mapped::SysMapped_RelayK12=0;
+  }
+  else if (@PanelControl::SysPanelControl_Vehicle_Plus3 == 1)
+  {
+    @Mapped::SysMapped_RelayK13=1;
+    @Mapped::SysMapped_RelayK11=0;
+    @Mapped::SysMapped_RelayK12=0;
+  }
+  else
+  {
+    @Mapped::SysMapped_RelayK12=1;
+    @Mapped::SysMapped_RelayK13=0;
+    @Mapped::SysMapped_RelayK11=0;
+  }
+}
+
+// Control tolerance settings of R3a
+void ControlToleranceR3a()
+{ 
+  if (@PanelControl::SysPanelControl_Vehicle_Plus3 == 0 &&  
+      @PanelControl::SysPanelControl_Vehicle_Minus3 == 0)
+  {
+    @Mapped::SysMapped_RelayK19=1;
+    @Mapped::SysMapped_RelayK20=0;
+    @Mapped::SysMapped_RelayK21=0;
+  }
+  else if (@PanelControl::SysPanelControl_Vehicle_Plus3 == 1)
+  {
+    @Mapped::SysMapped_RelayK21=1;
+    @Mapped::SysMapped_RelayK19=0;
+    @Mapped::SysMapped_RelayK20=0;
+  }
+  else
+  {
+    @Mapped::SysMapped_RelayK20=1;
+    @Mapped::SysMapped_RelayK19=0;
+    @Mapped::SysMapped_RelayK21=0;
+  }  
+}
+
+// Control tolerance settings of R3b
+void ControlToleranceR3b()
+{ 
+  if (@PanelControl::SysPanelControl_Vehicle_Plus3 == 0 &&  
+      @PanelControl::SysPanelControl_Vehicle_Minus3 == 0)
+  {
+    @Mapped::SysMapped_RelayK16=1;
+    @Mapped::SysMapped_RelayK17=0;
+    @Mapped::SysMapped_RelayK18=0;
+  }
+  else if (@PanelControl::SysPanelControl_Vehicle_Plus3 == 1)
+  {
+    @Mapped::SysMapped_RelayK18=1;
+    @Mapped::SysMapped_RelayK16=0;
+    @Mapped::SysMapped_RelayK17=0;
+  }
+  else
+  {
+    @Mapped::SysMapped_RelayK17=1;
+    @Mapped::SysMapped_RelayK16=0;
+    @Mapped::SysMapped_RelayK18=0;
+  }  
+}
+
+// Button function to open all relays -> basic state
+on sysvar PanelControl::SysPanelControl_OpenAll
+{
+  if (@this)
+  {
+    OpenAllRelays();
+    
+    // also deactivate State Buttons if active 
+    ResetOldButtons('X');
+      
+    // state displays off
+    setEV_StateDisplay('O');
+      
+    // capacity reset  
+    @PanelControl::SysPanelControl_CapacityValue = 0;
+     
+    // button reset 
+    @PanelControl::SysPanelControl_OpenAll = 0;    
+  }
+}
+
+// Make sure only one tolerance is chose
+on sysvar PanelControl::SysPanelControl_Vehicle_Plus3
+{
+  if (@this)
+  {
+    @PanelControl::SysPanelControl_Vehicle_Minus3 = 0;  // only one tolerance can be active
+  }
+}
+
+on sysvar PanelControl::SysPanelControl_Vehicle_Minus3
+{
+  if (@this)
+  {
+    @PanelControl::SysPanelControl_Vehicle_Plus3 = 0;  // only one tolerance can be active
+  }
+}
+
+// EVSE
+on sysvar PanelControl::SysPanelControl_EVSE_Plus3
+{
+  if (@this)
+  {
+    @PanelControl::SysPanelControl_EVSE_Minus3 = 0;  // only one tolerance can be active
+  }
+  
+  if (@PanelControl::SysPanelControl_Simulate_EVSE == 1)
+    ControlToleranceR1();
+}
+
+on sysvar PanelControl::SysPanelControl_EVSE_Minus3
+{
+  if (@this)
+  {
+    @PanelControl::SysPanelControl_EVSE_Plus3 = 0;   // only one tolerance can be active
+  }
+  
+  if (@PanelControl::SysPanelControl_Simulate_EVSE == 1 )
+    ControlToleranceR1();
+}
+
+// Reset display on stop
+
+// Set state values for EV state display  
+void setEV_StateDisplay(char state)
+{
+  switch(state)
+  {
+    case('A') : {@PanelControl::SysPanelControl_EV_State=0;
+                 @PanelControl::SysPanelControl_EV_Connection_State=0;
+                 @PanelControl::SysPanelControl_EV_S2_State=0;
+                 @PanelControl::SysPanelControl_EV_Charging_State=0;}
+      break;
+    case('B') : {@PanelControl::SysPanelControl_EV_State=1;
+                 @PanelControl::SysPanelControl_EV_Connection_State=1;
+                 @PanelControl::SysPanelControl_EV_S2_State=0;
+                 @PanelControl::SysPanelControl_EV_Charging_State=0;}
+      break;
+    case('C') : {@PanelControl::SysPanelControl_EV_State=2;
+                 @PanelControl::SysPanelControl_EV_Connection_State=1;
+                 @PanelControl::SysPanelControl_EV_S2_State=1;
+                 @PanelControl::SysPanelControl_EV_Charging_State=1;}
+      break;
+    case('D') : {@PanelControl::SysPanelControl_EV_State=3;
+                 @PanelControl::SysPanelControl_EV_Connection_State=1;
+                 @PanelControl::SysPanelControl_EV_S2_State=2;
+                 @PanelControl::SysPanelControl_EV_Charging_State=1;}
+      break;
+    case('E') : {@PanelControl::SysPanelControl_EV_State=4;
+                 @PanelControl::SysPanelControl_EV_Connection_State=1;
+                 @PanelControl::SysPanelControl_EV_S2_State=0;
+                 @PanelControl::SysPanelControl_EV_Charging_State=0;}
+      break;
+    case('F') : {@PanelControl::SysPanelControl_EV_State=5;
+                 @PanelControl::SysPanelControl_EV_Connection_State=1;
+                 @PanelControl::SysPanelControl_EV_S2_State=0;
+                 @PanelControl::SysPanelControl_EV_Charging_State=0;}
+      break;
+    case('O') : {@PanelControl::SysPanelControl_EV_State=6; // EVSE simulation on, EV off
+                 @PanelControl::SysPanelControl_EV_Connection_State=2;
+                 @PanelControl::SysPanelControl_EV_S2_State=3;
+                 @PanelControl::SysPanelControl_EV_Charging_State=2;}
+      break;
+  }  
+}
+ 
+// Synchronization  
+
+on sysvar EV::SysEV_Error
+{
+  Open_S2();
+}
+
+on timer TswitchS2
+{
+  if (@sysvar::EV::VT_Access::SysEV_S2close)
+  {
+    Close_S2();
+  }
+  else
+  {
+    Open_S2();
+  }
+}
+
+on sysvar_change EV::VT_Access::SysEV_S2close
+{
+  settimer(TswitchS2, cDelay_S2);
+}
+
+on sysvar sysvar::EV::Control::SysEV_Connected
+{
+  if (@this)
+  {
+    @Mapped::SysMapped_RelayK1  =1;   // PP
+    @Mapped::SysMapped_RelayK26 =1;   // CP: EVSE
+    @Mapped::SysMapped_RelayK27 =1;   // CP: EV
+  }
+  else
+  {
+    @Mapped::SysMapped_RelayK1  =1;   // PP
+    @Mapped::SysMapped_RelayK26 =1;   // CP: EVSE
+    @Mapped::SysMapped_RelayK27 =1;   // CP: EV
+  }
+}
+
+on start
+{
+  // EV Configuration
+  Setup_VT7870asEV();
+  
+  // start IEC 61851 state supervision
+  setTimer(Tdetect, 10);
+  
+  // switch to polling mode by default
+  @sysvar::Common::SysLinkStatusSimulation = 0;
+}
+
+on preStop
+{
+  OpenAllRelays();
+  
+  // Vehicle state buttons reset
+  ResetOldButtons('X');
+  
+  // Tolerance buttons reset
+  @PanelControl::SysPanelControl_Vehicle_Plus3=0;
+  @PanelControl::SysPanelControl_Vehicle_Minus3=0;
+  @PanelControl::SysPanelControl_EVSE_Minus3=0;
+  @PanelControl::SysPanelControl_EVSE_Plus3=0;
+  
+  // EVSE display reset
+  @PanelControl::SysPanelControl_ChargingAllowed=2;
+  @PanelControl::SysPanelControl_ChargingCurrent=0;
+  
+  // EVSE values reset
+  @Mapped::SysMapped_StimFrequency=0;
+  @Mapped::SysMapped_StimVoltageHigh=0;
+  @Mapped::SysMapped_StimVoltageLow=0;
+  @Mapped::SysMapped_StimDutyCycle=0;
+  
+  // capacity reset
+  @PanelControl::SysPanelControl_CapacityValue=0;  
+}
+
+void OpenSelectedRelays()
+{  
+  @Mapped::SysMapped_RelayK9=0;
+  @Mapped::SysMapped_RelayK1=0;
+  @Mapped::SysMapped_RelayK2=0;
+  @Mapped::SysMapped_RelayK3=0;
+  @Mapped::SysMapped_RelayK4=0;
+  @Mapped::SysMapped_RelayK5=0;
+  @Mapped::SysMapped_RelayK6=0;
+  @Mapped::SysMapped_RelayK7=0;
+  @Mapped::SysMapped_RelayK8=0;
+  @Mapped::SysMapped_RelayK10=0;
+  @Mapped::SysMapped_RelayK11=0;
+  @Mapped::SysMapped_RelayK12=0;
+  @Mapped::SysMapped_RelayK13=0;
+  @Mapped::SysMapped_RelayK14=0;
+  @Mapped::SysMapped_RelayK15=0;
+  @Mapped::SysMapped_RelayK16=0;
+  @Mapped::SysMapped_RelayK17=0;
+  @Mapped::SysMapped_RelayK18=0;
+  @Mapped::SysMapped_RelayK19=0;
+  @Mapped::SysMapped_RelayK20=0;
+  @Mapped::SysMapped_RelayK21=0;
+  @Mapped::SysMapped_RelayK22=0;
+  //@Mapped::SysMapped_RelayK23=0;
+  //@Mapped::SysMapped_RelayK24=0;
+  @Mapped::SysMapped_RelayK25=0;
+  @Mapped::SysMapped_RelayK26=0;
+  @Mapped::SysMapped_RelayK27=0;
+  @Mapped::SysMapped_RelayK28=0;
+  @Mapped::SysMapped_RelayK29=0;
+  @Mapped::SysMapped_RelayK30=0;
+  @Mapped::SysMapped_RelayK31=0;
+//    @Mapped::SysMapped_RelayK32=0;
+//    @Mapped::SysMapped_RelayK33=0;
+//    @Mapped::SysMapped_RelayK34=0;
+//    @Mapped::SysMapped_RelayK35=0;
+//    @Mapped::SysMapped_RelayK36=0;
+//    @Mapped::SysMapped_RelayK37=0;
+}
+
+void OpenAllRelays()
+{  
+  @Mapped::SysMapped_RelayK1=0;
+  @Mapped::SysMapped_RelayK2=0;
+  @Mapped::SysMapped_RelayK3=0;
+  @Mapped::SysMapped_RelayK4=0;
+  @Mapped::SysMapped_RelayK5=0;
+  @Mapped::SysMapped_RelayK6=0;
+  @Mapped::SysMapped_RelayK7=0;
+  @Mapped::SysMapped_RelayK8=0;
+  @Mapped::SysMapped_RelayK9=0;
+  @Mapped::SysMapped_RelayK10=0;
+  @Mapped::SysMapped_RelayK11=0;
+  @Mapped::SysMapped_RelayK12=0;
+  @Mapped::SysMapped_RelayK13=0;
+  @Mapped::SysMapped_RelayK14=0;
+  @Mapped::SysMapped_RelayK15=0;
+  @Mapped::SysMapped_RelayK16=0;
+  @Mapped::SysMapped_RelayK17=0;
+  @Mapped::SysMapped_RelayK18=0;
+  @Mapped::SysMapped_RelayK19=0;
+  @Mapped::SysMapped_RelayK20=0;
+  @Mapped::SysMapped_RelayK21=0;
+  @Mapped::SysMapped_RelayK22=0;
+  @Mapped::SysMapped_RelayK23=0;
+  @Mapped::SysMapped_RelayK24=0;
+  @Mapped::SysMapped_RelayK25=0;
+  @Mapped::SysMapped_RelayK26=0;
+  @Mapped::SysMapped_RelayK27=0;
+  @Mapped::SysMapped_RelayK28=0;
+  @Mapped::SysMapped_RelayK29=0;
+  @Mapped::SysMapped_RelayK30=0;
+  @Mapped::SysMapped_RelayK31=0;
+  @Mapped::SysMapped_RelayK32=0;
+  @Mapped::SysMapped_RelayK33=0;
+  @Mapped::SysMapped_RelayK34=0;
+  @Mapped::SysMapped_RelayK35=0;
+  @Mapped::SysMapped_RelayK36=0;
+  @Mapped::SysMapped_RelayK37=0;
+}

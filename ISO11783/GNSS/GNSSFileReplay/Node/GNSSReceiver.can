@@ -1,0 +1,280 @@
+/*@@var:*/
+variables
+{
+  //
+  // Simulation of a GNSS Receiver using a position file
+  // Version 1.0
+  //
+  // (c) 2002 Vector Informatik GmbH
+  //
+
+  // constants
+  char kNodeLabel[32] = "GNSSReceiver";   // label of the node (for output to write window)  
+  int  kStateStopped  = 0; // simulation is started
+  int  kStateStarted  = 1; // simulation is stopped
+  int  kUnitsMetric   = 0; // meter and kilometer/hour
+  int  kUnitsEnglish  = 1; // yards and miles/hour
+  int  kUnitNautic    = 2; // yards and knots
+  
+  // node
+  char gGNSSReceiverName[8];        // NAME of the node
+  long gGNSSReceiverAddress = 0xfe; // Node address
+
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // Error constants
+  int kErrorNo       = 0;
+
+  // General global variables
+  int  gDbgLevel        = kDbgInfo; // Set debug level for output to write window
+  word gUseTimeInfo     = 0;        // 1 if time info of the file is used, otherwise 0 
+  char gFilePath[10000];             // Path of the position file
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  StartUp();
+}
+/*@@end*/
+
+/*@@stop:StopMeasurement:*/
+on stopMeasurement
+{
+  ShutDown();
+}
+/*@@end*/
+
+/*@@envVar:evCmdStartSim:*/
+on envVar evCmdStartSim
+{
+  if( getValue( evCmdStartSim ) == 1 ) {
+    StartSimulation();
+  }
+}
+/*@@end*/
+
+/*@@envVar:evCmdStopSim:*/
+on envVar evCmdStopSim
+{ 
+  if( getValue( evCmdStopSim ) == 1 ) {
+    StopSimulation();
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ReplayFile(char[]):*/
+ReplayFile( char path[] )
+{
+  if( GNSSAddWpFile( gFilePath, gUseTimeInfo ) != 0 ) {
+    writeDbgLevel( kDbgError, "<%s> Error while loading file \"%s\".", kNodeLabel, gFilePath );
+  } else {
+    if( gUseTimeInfo == 1 ) {
+      GNSSStartSimulation( 2 );
+    } else {
+      GNSSStartSimulation( 0 );
+    }
+  }
+}
+/*@@end*/
+
+/*@@envVar:evSpeed:*/
+on envVar evSpeed
+{
+  float currentSpeed;
+  currentSpeed = getValue( evSpeed );
+  SetSpeed( currentSpeed );
+}
+/*@@end*/
+
+/*@@caplFunc:SetSpeed(float):*/
+SetSpeed( float speed )
+{
+  GNSSSetSpeed( speed );
+
+  writeDbgLevel( kDbgInfo, "<%s> Current speed = %f mph", kNodeLabel, speed );
+}
+/*@@end*/
+
+/*@@envVar:evCmdUseTimeInfo:*/
+on envVar evCmdUseTimeInfo
+{ 
+  gUseTimeInfo = getValue( evCmdUseTimeInfo );
+}
+/*@@end*/
+
+/*@@caplFunc:GNSSOnSetSpeed(float):*/
+GNSSOnSetSpeed (double newSpeed)
+{
+  if( gUseTimeInfo == 1 ) {
+    putValue( evSpeed, newSpeed );
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:StartSimulation():*/
+void StartSimulation()
+{
+  writeDbgLevel( kDbgInfo, "<%s> Start simulation", kNodeLabel );
+
+  gUseTimeInfo = getValue( evCmdUseTimeInfo );
+  write( gFilePath );
+  getValue( evFilePath, gFilePath );
+  write( gFilePath );
+  ReplayFile( gFilePath );
+}
+/*@@end*/
+
+/*@@caplFunc:StopSimulation():*/
+StopSimulation ()
+{
+  writeDbgLevel( kDbgInfo, "<%s> Stop simulation", kNodeLabel );
+
+  GNSSStopSimulation();
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  setWriteDbgLevel( gDbgLevel );
+}
+/*@@end*/
+
+/*@@caplFunc:StartUp():*/
+StartUp()
+{
+  writeDbgLevel( kDbgInfo, "<%s> StartUp", kNodeLabel );
+
+  // init address of this node
+  gGNSSReceiverAddress = GNSSReceiver.NmStationAddress; /* get node address */
+
+  // init deviece name
+  GNSSMakeName( gGNSSReceiverName, 
+                GNSSReceiver.NmJ1939AAC,
+                GNSSReceiver.NmJ1939IndustryGroup,
+                GNSSReceiver.NmJ1939SystemInstance,
+                GNSSReceiver.NmJ1939System,
+                GNSSReceiver.NmJ1939Function,
+                GNSSReceiver.NmJ1939FunctionInstance,
+                GNSSReceiver.NmJ1939ECUInstance,
+                GNSSReceiver.NmJ1939ManufacturerCode,
+                GNSSReceiver.NmJ1939IdentityNumber );
+
+  GNSSStartUp( gGNSSReceiverName, gGNSSReceiverAddress );
+
+  GNSSSetUnits( kUnitsEnglish );
+
+  // set file path
+  GNSSGetAbsFilePath("positions\\logCircle.gns", gFilePath, elcount(gFilePath));
+
+  putValue( evFilePath, gFilePath ); 
+
+  // set speed
+  putValue( evSpeed, 80 );
+
+  InitializePGs();
+}
+/*@@end*/
+
+/*@@caplFunc:ShutDown():*/
+ShutDown()
+{
+  GNSSShutDown();
+}
+/*@@end*/
+
+/*@@caplFunc:GNSSAppAddrClaimed():*/
+//
+// Adress Claimed
+//
+void GNSSAppAddrClaimed()
+{
+}
+/*@@end*/
+
+/*@@caplFunc:GNSSAppCmdAddrIndication(long):*/
+//
+// Commanded address indication
+//
+void GNSSAppCmdAddrIndication( long dataLen )
+{
+}
+/*@@end*/
+
+/*@@caplFunc:GNSSAppErrorIndication(long,long,long):*/
+//
+// Error indication
+//
+void GNSSAppErrorIndication( long errorClass, long errorNumber, long addCode)
+{
+  char strErrClass[32];
+  char strErrInfo[64];
+
+  switch(errorClass) {
+    case 1: snprintf( strErrClass, elCount(strErrClass), "TimeOut" ); break;
+    case 2: snprintf( strErrClass, elCount(strErrClass), "AddressClaiming" ); break;
+    case 3: snprintf( strErrClass, elCount(strErrClass), "CAN Error" ); break;
+    case 4: snprintf( strErrClass, elCount(strErrClass), "System Error" ); break;
+	case 5: snprintf( strErrClass, elCount(strErrClass), "Transport Protocol Error Error" ); break;
+  }
+
+  switch( errorNumber ) {
+    case 0x1: snprintf( strErrInfo, elCount(strErrInfo), "cts error" ); break;
+    case 0x2: snprintf( strErrInfo, elCount(strErrInfo), "peer to peer data timeout" ); break;
+    case 0x3: snprintf( strErrInfo, elCount(strErrInfo), "BAM data timeout" ); break;
+    case 0x4: snprintf( strErrInfo, elCount(strErrInfo), "acknowledge timeout" ); break;
+	case 0x10: snprintf( strErrInfo, elCount(strErrInfo), "lost address claiming or received address claim with higher priority" ); break;
+    case 0x15: snprintf( strErrInfo, elCount(strErrInfo), "init error: node name detected two times" ); break;
+    case 0x17: snprintf( strErrInfo, elCount(strErrInfo), "init error: node address detected two times" ); break;
+    case 0x30: snprintf( strErrInfo, elCount(strErrInfo), "exeption while choosing protokoll BAM or CMDT" ); break;
+    case 0x40: snprintf( strErrInfo, elCount(strErrInfo), "internal data buffer full" ); break;
+    case 0x60: snprintf( strErrInfo, elCount(strErrInfo), "user sends system pg " ); break;
+    case 0x71: snprintf( strErrInfo, elCount(strErrInfo), "transmission abort by receiver" ); break;
+    case 0x72: snprintf( strErrInfo, elCount(strErrInfo), "transmission abort by sender" ); break;
+  }
+
+  writeDbgLevel( kDbgInfo, "<%s> ERROR(0x%x) %s, %s", kNodeLabel, errorNumber, strErrClass, strErrInfo );
+}
+/*@@end*/
+
+int InitializePGs()
+{
+  int res;
+  DWORD enable, disable;
+  enable  = 1;
+  disable = 0;
+
+
+  // GNSS Position Data
+  res = GNSSSetPGSettings( 129029, enable, 255, 6, 1000 );
+  if (res != kErrorNo) return res;
+  
+  // Position Rapid Update
+  res = GNSSSetPGSettings( 129025, enable, 255, 2, 100 );
+  if (res != kErrorNo) return res;
+
+  // COG&SOG RapidUpdate
+  res = GNSSSetPGSettings( 129026, enable, 255, 2, 250 );
+  if (res != kErrorNo) return res;
+
+  // Position delta, high precision rapid update
+  res = GNSSSetPGSettings( 129027, disable, 255, 2, 250 );
+  if (res != kErrorNo) return res;
+
+  // Vehcile Position (J1939)
+  res = GNSSSetPGSettings( 65267, disable, 255, 2, 250 );
+  if (res != kErrorNo) return res;
+
+  // Vehcile Direction Speed (J1939)
+  res = GNSSSetPGSettings( 65256, disable, 255, 2, 250 );
+  if (res != kErrorNo) return res;
+
+  return kErrorNo;
+}

@@ -1,0 +1,948 @@
+/*@!Encoding:1252*/
+/**************************************************************************
+ * FlexRay Cluster Synchronization, Version 1.0
+ *
+ * (C) 2009 Vector Informatik GmbH, Dep. Networks and Distributed Systems
+ **************************************************************************/
+variables
+{
+  // Global Constants:
+  const int    cChannel_1   = 1; // use 1st channel as reference cluster
+  const int    cChannel_2   = 2; // use 2nd channel for clock shifting
+
+  // Global Variables:
+  int          gDebugLevel  = 1; // 0 - 4
+
+  // The required offset between both clusters:
+  double       gCycle0DiffOffset = 0.0; // [ms] range: [0.0, 64 * gFRCycleTime]
+
+  // startup/sync frame that is sent on cChannel_2:
+  FRFrame (10,0,1) syncFrame_2 = { FR_ChannelMask = 1, MsgChannel = cChannel_2, FR_Flags = 3 };
+  // startup/sync frame that is sent on cChannel_1:
+  FRFrame (11,0,1) syncFrame_1 = { FR_ChannelMask = 1, MsgChannel = cChannel_1, FR_Flags = 3 };
+
+  // ATTENTION: Do NOT change anything below this line!
+
+  // Global Internal Constants:
+  const int    cCorrectionPeriodTimeoutFast    = 50;  // [Cycles]
+  const int    cCorrectionStartDelayCyclesFast = 30;  // [Cycles]
+
+  const int    cCorrectionPeriodTimeoutSlow    = 20;  // [Cycles]
+  const int    cCorrectionStartDelayCyclesSlow = 32;  // [Cycles]
+
+  const int    cWatchdogTime  = 200;
+  const int    cPeakResetTime = 1;
+  const int    cBusTimeout    = 2000;
+
+  const double cRelativeDifft_SOC0_FR1FR2     = 1.5625; // in % (do slow shifting)
+  const double cRelativeSmallDifft_SOC_FR1FR2 = 50.0; // in % (stop shifting)
+  const double cRelativeDifft_SOC_FR1FR2      = 1.0; // in % (stop shifting)
+
+  const int    cCycleToTest   = 0;
+
+  // Global Internal Variables:
+  int          gStaticDLC; // [Byte]
+  int          gFRCycleTime; // [us]
+  double       gMacrotickLength; // [us]
+  word         gStaticSlotSize; // [MT]
+  word         gHWDelay = 1000; // [us] for receive + send (VN USB interface)
+
+  byte         currentCycle[2]={0,0};      // current cycle number
+  double       lastSOC0Time[2]={0,0};      // flexray timestamp in [ms]
+  double       lastSOCTime[2]={0,0};       // flexray timestamp in [ms]
+  double       dtSOC0[2]={0,0};            // time between two SOC in [ms]
+  double       difft_SOC0_FR1FR2[2]={0,0}; // time diff between SOC0 of FR1 and FR2 in [ms]
+  double       difft_old[2]={0,0};         // time diff between SOC0 of FR1 and FR2 in [ms]
+  double       difft_SOC_FR1FR2[2]={0,0};  // time diff between SOC of FR1 and FR2 in [ms]
+  int          gDiffSize = 2;              // 2 (big diff) or 1 (small diff) or 0 (no diff)
+
+  double       gDriftOffset_SOC0_FR1FR2 = 0;
+  long         gCalcSteps = 0;
+  byte         gCycleDiff = 0;
+  int          gSOC0_FR1FR2_areDrifting = 0;
+  int          gSOC0_FR1FR2_areDriftingWritten = 0;
+
+  double       gStartTimeOfAutomaticShifting; // [ns]
+  byte         gSpanCycles;
+
+  int          gDoExtClockCorrection = 0;
+  int          gDoClusterSync = 0;
+  int          gDoAutomaticClusterAdjust = 0;
+
+  int          gRate = 0;   // -1, 0, 1
+  int          gOffset = 0; // -1, 0, 1
+
+  msTimer      watchdog;
+  msTimer      peakFR1Reset;
+  msTimer      peakFR2Reset;
+  msTimer      correctionPeriodTimeoutTimer;
+
+  const dword  cSync_NS2S  = 1000000000;
+  const dword  cSync_NS2MS = 1000000;
+  const dword  cSync_US2MS = 1000;
+
+  int          gExpDelayAlreadyDisp = 0;
+}
+
+_calcTimeDiffSOC0 ()
+{
+  difft_SOC0_FR1FR2[1] = difft_SOC0_FR1FR2[0]; // save last value
+  difft_SOC0_FR1FR2[0] = (lastSOC0Time[1] - lastSOC0Time[0]);
+
+  if ((difft_SOC0_FR1FR2[0] * cSync_US2MS) >= 64 * gFRCycleTime)
+  {
+    difft_SOC0_FR1FR2[0] -= ((double)gFRCycleTime * 64 / cSync_US2MS);
+  } else if (difft_SOC0_FR1FR2[0] < 0.0)
+  {
+    difft_SOC0_FR1FR2[0] += ((double)gFRCycleTime / cSync_US2MS);
+  }
+
+  @FRFRSync::Diff_SOC0_FR1FR2 = difft_SOC0_FR1FR2[0];
+
+  if (++gCalcSteps == 3)
+  {
+    gDriftOffset_SOC0_FR1FR2 = difft_SOC0_FR1FR2[0];
+  }
+
+  if (gDriftOffset_SOC0_FR1FR2 != 0)
+  {
+    @FRFRSync::Drift_SOC0_FR1FR2 = difft_SOC0_FR1FR2[0] - gDriftOffset_SOC0_FR1FR2;
+  }
+}
+
+on timer watchdog
+{
+  qword timeout1 = cBusTimeout;
+  qword timeout2 = cBusTimeout;
+  int goodCnt1 = 0;
+  int goodCnt2 = 0;
+
+  if (cBusTimeout > 0)
+  {
+    if((TimeNowNS() / cSync_NS2MS - lastSOCTime[0]) > timeout1)
+    {
+      if (gDebugLevel >= 1)
+        Write("FlexRay StartOfCycle not received on channel %d since %f ms, resetting...", cChannel_1, TimeNowNS()/cSync_NS2MS - lastSOCTime[0]);
+      ResetFlexRayCC(cChannel_1);
+      timeout1 += cBusTimeout;
+      goodCnt1 = 0;
+    }
+    else
+    {
+      goodCnt1++;
+      if (goodCnt1 > ((cBusTimeout / cWatchdogTime) + 1))
+      {
+        timeout1 = cBusTimeout;
+      }
+    }
+    if((TimeNowNS() / cSync_NS2MS - lastSOCTime[1]) > timeout2)
+    {
+      if (gDebugLevel >= 1)
+        Write("FlexRay StartOfCycle not received on channel %d since %f ms, resetting...", cChannel_2, TimeNowNS()/cSync_NS2MS - lastSOCTime[1]);
+      ResetFlexRayCC(cChannel_2);
+      timeout2 += cBusTimeout;
+      goodCnt2 = 0;
+    }
+    else
+    {
+      goodCnt2++;
+      if (goodCnt2 > ((cBusTimeout / cWatchdogTime) + 1))
+      {
+        timeout2 = cBusTimeout;
+      }
+    }
+  }
+  
+  difft_old[1] = difft_old[0]; // save last value
+  difft_old[0] = difft_SOC_FR1FR2[0];
+
+  if (abs(difft_old[0] - difft_old[1]) > 0.1)
+  {
+    gSOC0_FR1FR2_areDrifting = 1;
+    if (gSOC0_FR1FR2_areDrifting != gSOC0_FR1FR2_areDriftingWritten)
+    {
+      if (gDebugLevel >= 4)
+        write("Clusters are drifting...");
+    }
+  }
+  else
+  {
+    gSOC0_FR1FR2_areDrifting = 0;
+    if (gSOC0_FR1FR2_areDrifting != gSOC0_FR1FR2_areDriftingWritten)
+    {
+      if (gDebugLevel >= 4)
+        write("Clusters stopped drifting...");
+    }
+  }
+  gSOC0_FR1FR2_areDriftingWritten = gSOC0_FR1FR2_areDrifting;
+
+  settimer(watchdog,cWatchdogTime);
+}
+
+void _logFR1Cycle (byte cycle, qword theTime /* [ns] */, int correctionFailedCounter)
+{
+  int idx = 0;
+  double prevt;
+
+  currentCycle[idx] = cycle;
+
+  prevt = lastSOC0Time[idx];
+  lastSOCTime[idx] = (double)theTime / cSync_NS2MS;
+
+  if ((cCycleToTest<0) || (cycle == cCycleToTest))
+  {
+    lastSOC0Time[idx] = (double)theTime / cSync_NS2MS;
+    dtSOC0[idx] = lastSOC0Time[idx] - prevt;
+
+    @FRFRSync::DtSOC0_FR1 = dtSOC0[idx];
+
+    //_calcTimeDiffSOC0();
+  }
+  //_calcTimeDiffSOC();
+}
+
+void _logFR2Cycle (byte cycle, qword theTime /* [ns] */, int correctionFailedCounter)
+{
+  int idx = 1;
+  double prevt;
+
+  currentCycle[idx] = cycle;
+
+  prevt = lastSOC0Time[idx];
+  lastSOCTime[idx] = (double)theTime / cSync_NS2MS;
+
+  if ((cCycleToTest<0) || (cycle == cCycleToTest))
+  {
+    lastSOC0Time[idx] = (double)theTime / cSync_NS2MS;
+    dtSOC0[idx] = lastSOC0Time[idx] - prevt;
+
+    @FRFRSync::DtSOC0_FR1 = dtSOC0[idx];
+
+    _calcTimeDiffSOC0();
+  }
+  _calcTimeDiffSOC();
+
+
+  if (correctionFailedCounter != 0)
+  {
+    if (gDebugLevel >= 1)
+      write("#### correctionFailedCounter[%d] = %d", cChannel_2, correctionFailedCounter);
+  }
+}
+
+on timer peakFR1Reset
+{
+  @FRFRSync::PeakSOC_FR1 = 0;
+  @FRFRSync::PeakSOC0_FR1 = 0;
+}
+
+on timer peakFR2Reset
+{
+  @FRFRSync::PeakSOC_FR2 = 0;
+  @FRFRSync::PeakSOC0_FR2 = 0;
+}
+
+on timer correctionPeriodTimeoutTimer
+{
+  _stopExtClockCorrection(); 
+}
+
+on key '+'
+{
+  gRate    = 1;
+  gOffset  = 1;
+  gDoExtClockCorrection = 1 - gDoExtClockCorrection;
+
+  if (gDoExtClockCorrection > 0)
+  {
+    _startExtClockCorrection();
+  }
+  else
+  {
+    _stopExtClockCorrection();
+  }
+}
+
+on key '-'
+{
+  gRate    = -1;
+  gOffset  = -1;
+  gDoExtClockCorrection = 1 - gDoExtClockCorrection;
+
+  if (gDoExtClockCorrection > 0)
+  {
+    _startExtClockCorrection();
+  }
+  else
+  {
+    _stopExtClockCorrection();
+  }
+}
+
+on key ' '
+{
+  if (@FRFRSync::AutoAdjust == 1)
+  {
+    _enableAutoAdjust();
+  }
+  else
+  {
+    _disableAutoAdjust();
+  }
+}
+
+_doClusterSync ()
+{
+  byte reqCycleDiff;
+  int direction = 0;        // must be static!
+  double FRcycle;           // cycle period in [us]
+  double cycle64;           // time for 64 cycles in [ms]
+  double cycle1;            // time for 1 cycle in [ms]
+  double reqInCycleDiffOffset; // [ms]
+  double diff;              // [ms]
+  int lastDiffSize;
+
+  FRcycle = gFRCycleTime;
+  cycle64 = FRcycle * 64.0 / cSync_US2MS;
+  cycle1  = FRcycle / cSync_US2MS;
+
+  // calculate the desired in-cycle offset concerning any cycle:
+  reqCycleDiff = gCycle0DiffOffset / ((double)gFRCycleTime / cSync_US2MS);
+  reqInCycleDiffOffset = gCycle0DiffOffset - (((double)gFRCycleTime / cSync_US2MS) * reqCycleDiff);
+
+  lastDiffSize = gDiffSize;
+
+  gDiffSize = 2;
+  // check if requested offset is nearly reached:
+  if ((direction == -1) && (gCycleDiff == reqCycleDiff-1))
+  {
+    diff = abs(difft_SOC_FR1FR2[0])-reqInCycleDiffOffset;
+    if (diff >= cycle1) diff -= cycle1;
+    if (diff < 0.0) diff += cycle1;
+    if ( diff > (cycle1*cRelativeSmallDifft_SOC_FR1FR2/100.0) )
+    {
+      gDiffSize = 1;
+    }
+  }
+  else if ((direction == 1) && (gCycleDiff == reqCycleDiff-1))
+  {
+    diff = abs(difft_SOC_FR1FR2[0])-reqInCycleDiffOffset;
+    if (diff >= cycle1) diff -= cycle1;
+    if (diff < 0.0) diff += cycle1;
+    if ( diff > (cycle1*cRelativeSmallDifft_SOC_FR1FR2/100.0) )
+    {
+      gDiffSize = 1;
+    }
+  }
+  else
+  {
+    diff = abs(difft_SOC0_FR1FR2[0])-gCycle0DiffOffset;
+    if (diff >= cycle64) diff -= cycle64;
+    if (diff < 0.0) diff += cycle64;
+    if ((gCycleDiff == reqCycleDiff) || ((direction == 1) && (gCycleDiff == reqCycleDiff-1)) || (diff < (cycle64*cRelativeDifft_SOC0_FR1FR2/100.0)) || (diff > (cycle64*(1.0-(cRelativeDifft_SOC0_FR1FR2/100.0)))))
+    {
+      gDiffSize = 1;
+    }
+  }
+
+  if (gDiffSize == 1)
+  {
+    // check if requested offset is reached:
+    diff = abs(difft_SOC_FR1FR2[0])-reqInCycleDiffOffset;
+    if (diff >= cycle1) diff -= cycle1;
+    if (diff < 0.0) diff += cycle1;
+    if ((diff < (cycle1*cRelativeDifft_SOC_FR1FR2/100.0)) || (diff > (cycle1*(1.0-(cRelativeDifft_SOC_FR1FR2/100.0)))))
+    {
+      // clusters are synchronous (according to requested offset):
+      
+      gDiffSize = 0;
+
+      @FRFRSync::IsSynchronous = 2;
+      @FRFRSync::IsNotSynchronous = 1;
+
+      if (gDoClusterSync != 0)
+      {
+        direction = 0;
+        _stopExtClockCorrection();
+
+        if (gDoAutomaticClusterAdjust == 0)
+        {
+          gDoClusterSync = 0;
+        }
+
+        if (diff > (cycle1/2.0)) diff -= cycle1;
+
+        _showShifting(direction, diff);
+        return;
+      }
+    }
+    else
+    {
+      // clusters are NOT synchronous (according to requested offset):
+
+      @FRFRSync::IsSynchronous = 1;
+      @FRFRSync::IsNotSynchronous = 2;
+    }
+  }
+
+  if (gDoClusterSync != 0)
+  {
+    if ((gSOC0_FR1FR2_areDrifting < 2))
+    {
+      diff = abs(difft_SOC0_FR1FR2[0])-gCycle0DiffOffset;
+      if (diff >= cycle64) diff -= cycle64;
+      if (diff < 0.0) diff += cycle64;
+
+      if (diff > (cycle64/2.0))
+      {
+        direction = 1;
+        _startExtClockCorrection();
+        _showShifting(direction, diff);
+      }
+      else if (diff > 0)
+      {
+        direction = -1;
+        _startExtClockCorrection();
+        _showShifting(direction, diff);
+      }
+      else
+      {
+        direction = 0;
+        _stopExtClockCorrection();
+        _showShifting(direction, diff);
+      }
+    }
+
+    gRate    = direction;
+    gOffset  = direction;
+
+    if ((direction != 0) && (lastDiffSize != gDiffSize))
+    {
+      _restartExtClockCorrection();
+    }
+  }
+  else
+  {
+    _stopExtClockCorrection();
+  }
+
+}
+
+_calcTimeDiffSOC ()
+{
+  difft_SOC_FR1FR2[1] = difft_SOC_FR1FR2[0]; // save last value
+  difft_SOC_FR1FR2[0] = (lastSOCTime[1] - lastSOCTime[0]);
+
+  gCycleDiff = (currentCycle[1] - currentCycle[0]) % 64;
+
+  if ((difft_SOC_FR1FR2[0] * cSync_US2MS) >= gFRCycleTime)
+  {
+    difft_SOC_FR1FR2[0] -= ((double)gFRCycleTime / cSync_US2MS);
+    gCycleDiff--;
+  } else if (difft_SOC_FR1FR2[0] < 0.0)
+  {
+    difft_SOC_FR1FR2[0] += ((double)gFRCycleTime / cSync_US2MS);
+    gCycleDiff++;
+  }
+
+  @FRFRSync::CycleDiff_FR1FR2 = (64 - gCycleDiff) % 64;
+  @FRFRSync::Diff_SOC_FR1FR2 = difft_SOC_FR1FR2[0] * cSync_US2MS;
+
+  gCycleDiff = (64 - gCycleDiff) % 64;
+}
+
+on key 'r'
+{
+  CreateRandomOffset();
+}
+
+void LogFRFRSyncStartOfCycle (byte channel, byte cycle, qword nsTime, int correctionFailedCounter)
+{
+  if (channel == cChannel_1)
+  {
+    @FRFRSync::PeakSOC_FR1 = 1;
+
+    if ((cCycleToTest<0) || (cycle == cCycleToTest))
+    {
+      @FRFRSync::PeakSOC0_FR1 = 1;
+    }
+    
+    cancelTimer(peakFR1Reset);
+    setTimer(peakFR1Reset,cPeakResetTime);
+
+    _logFR1Cycle(cycle, nsTime, correctionFailedCounter);
+
+  }
+  else if (channel == cChannel_2)
+  {
+    @FRFRSync::PeakSOC_FR2 = 1;
+
+    if ((cCycleToTest<0) || (cycle == cCycleToTest))
+    {
+      @FRFRSync::PeakSOC0_FR2 = 1;
+    }
+    
+    cancelTimer(peakFR2Reset);
+    setTimer(peakFR2Reset,cPeakResetTime);
+
+    _logFR2Cycle(cycle, nsTime, correctionFailedCounter);
+
+    _doClusterSync();
+
+    if (gDoExtClockCorrection > 0)
+    {
+      FRSetExtOffsetRateControl(cChannel_2, gRate, gOffset);
+    }
+	else
+    {
+      FRSetExtOffsetRateControl(cChannel_2, 0, 0);
+    }
+
+  }
+}
+
+void PreInitFRFRSynchronize ()
+{
+  FRConfiguration clusterCfg;
+
+  if (0)
+  {
+    FRSetPayloadLengthInByte(syncFrame_2, gStaticDLC);
+    FRSetSendFrame(syncFrame_2);
+  }
+
+  if (0)
+  {
+    FRSetPayloadLengthInByte(syncFrame_1, gStaticDLC);
+    FRSetSendFrame(syncFrame_1);
+  }
+
+  // read some cluster parameters:
+  FRGetConfiguration(cChannel_2, clusterCfg);
+  gStaticDLC = clusterCfg.gPayloadLengthStatic * 2;
+  write("FlexRay %d static payload length = %d Byte", cChannel_2, gStaticDLC);
+  gFRCycleTime = clusterCfg.pdMicrotick * clusterCfg.pMicroPerCycle;
+  write("FlexRay %d cycle period = %d us", cChannel_2, gFRCycleTime);
+  gMacrotickLength = clusterCfg.gdMacrotick;
+  write("FlexRay %d Macrotick length = %f us", cChannel_2, gMacrotickLength);
+  gStaticSlotSize = clusterCfg.gdStaticSlot;
+  write("FlexRay %d Static Slot size = %d MT", cChannel_2, gStaticSlotSize);
+
+  if (1)
+  {
+    clusterCfg.pExternOffsetCorrection = 7;
+    clusterCfg.pExternRateCorrection = 7;
+    clusterCfg.pExternCorrectionMode = 0;
+    FRSetConfiguration(cChannel_2, clusterCfg);
+    FRSetExtOffsetRateControl(cChannel_2, 0, 0);
+  }
+
+}
+
+void InitFRFRSynchronize ()
+{
+  FRConfiguration clusterCfg;
+
+  if (0)
+  {
+    FRGetConfiguration(cChannel_2, clusterCfg);
+    clusterCfg.pExternOffsetCorrection = 7;
+    clusterCfg.pExternRateCorrection = 7;
+    clusterCfg.pExternCorrectionMode = 0;
+    FRSetConfiguration(cChannel_2, clusterCfg);
+    FRSetExtOffsetRateControl(cChannel_2, 0, 0);
+  }
+
+  //ResetFlexRayCC(cChannel_1);
+  ResetFlexRayCC(cChannel_2);
+
+  if (isSimulated())
+  {
+    gHWDelay = 0; // The simulation is the ideal case.
+  }
+  setTimer(watchdog, cWatchdogTime);
+
+  @FRFRSync::IsSynchronous = 0;
+  @FRFRSync::IsNotSynchronous = 0;
+
+  _setExpDelayAny(0);
+}
+
+on sysVar FRFRSync::ReqOffset_SOC0_FR1FR2
+{
+  _setRequestedOffsetFromPanel();
+
+  _setExpDelayAny(0);
+}
+
+on sysVar FRFRSync::CreateRndOffset
+{
+  if (@this == 1) CreateRandomOffset();
+}
+
+on sysVar FRFRSync::AutoAdjust
+{
+  if (@FRFRSync::AutoAdjust == 1)
+  {
+    _enableAutoAdjust();
+  }
+  else
+  {
+    _disableAutoAdjust();
+  }
+}
+
+void CreateRandomOffset ()
+{
+  ResetFlexRayCC(cChannel_2);
+  FRSetExtOffsetRateControl(cChannel_2, 0, 0);
+}
+
+void ToggleAdjustingClusterSync ()
+{
+  gDoClusterSync = 1 - gDoClusterSync;
+  
+  if (gDoClusterSync > 0)
+  {
+    gStartTimeOfAutomaticShifting = TimeNowNS();
+    gSpanCycles = gCycleDiff;
+    if (gSpanCycles >= 32)
+      gSpanCycles = 64 - gSpanCycles;
+    if (gDebugLevel >= 1)
+      write("Cluster Synchronization started...");
+  }
+  else
+  {
+    if (gDebugLevel >= 1)
+      write("Cluster Synchronization stopped.");
+  }
+}
+
+void _showShifting (int direction, double lastDiff)
+{
+  int hasWrittenForward = 0;
+  int hasWrittenBackward = 0;
+  int hasWrittenStop = 0;
+  double usedTime;
+
+  if (direction == 1)
+  {
+    if ((gDebugLevel >= 2) && (hasWrittenForward == 0))
+    {
+      write("Cluster %d will be shifted forwards...", cChannel_2);
+      hasWrittenForward = 1;
+      hasWrittenBackward = 0;
+      hasWrittenStop = 0;
+    }
+
+    @FRFRSync::RightShiftState = 1;
+    @FRFRSync::LeftShiftState = 0;
+  }
+  else if (direction == -1)
+  {
+    if ((gDebugLevel >= 2) && (hasWrittenBackward == 0))
+    {
+      write("Cluster %d will be shifted backwards...", cChannel_2);
+      hasWrittenBackward = 1;
+      hasWrittenForward = 0;
+      hasWrittenStop = 0;
+    }
+
+    @FRFRSync::RightShiftState = 0;
+    @FRFRSync::LeftShiftState = 1;
+  }
+  else
+  {
+    if (gDoAutomaticClusterAdjust == 0)
+    {
+      usedTime = (TimeNowNS() - gStartTimeOfAutomaticShifting) / 1000000000.0; // in sec.
+      if (gDebugLevel >= 1)
+      {
+        write("Last diff = %f ms", lastDiff);
+        write("Cluster %d shifting stopped. (used %.3f s for %d cycles)", cChannel_2, usedTime, gSpanCycles);
+        hasWrittenStop = 1;
+        hasWrittenBackward = 0;
+        hasWrittenForward = 0;
+      }
+    }
+    else
+    {
+      if ((gDebugLevel >= 2) && (hasWrittenStop == 0))
+      {
+        write("Cluster %d shifting stopped.", cChannel_2);
+        hasWrittenStop = 1;
+        hasWrittenBackward = 0;
+        hasWrittenForward = 0;
+      }
+    }
+
+    @FRFRSync::RightShiftState = 0;
+    @FRFRSync::LeftShiftState = 0;
+  }
+}
+
+on sysVar FRFRSync::ReqOffset_SOC_FR1FR2
+{
+  _setRequestedOffsetFromPanel();
+
+  _setExpDelayAny(0);
+}
+
+void SetRequestedOffsets (byte cycles, double cycleOffset /* ms */)
+{
+  cycles = cycles % 64;
+  gCycle0DiffOffset = ((cycles * gFRCycleTime) / 1000.0) + cycleOffset;
+  if (gCycle0DiffOffset > (64.0 * gFRCycleTime / 1000.0)) gCycle0DiffOffset = (64.0 * gFRCycleTime) / 1000.0;
+  if (gCycle0DiffOffset < 0.0) gCycle0DiffOffset = 0.0;
+
+  @FRFRSync::DispReqCycleDiff_FR1_FR2 = cycles;
+  @FRFRSync::DispReqOffset_SOC0_FR1FR2 = gCycle0DiffOffset;
+  @FRFRSync::DispReqOffset_SOC_FR1FR2 = cycleOffset * 1000.0;
+}
+
+on sysVar FRFRSync::ReqMinDelayFR1FR2Offset
+{
+  double reqOffset; // [us] range: [0.0, 64 * gFRCycleTime]
+  double cycleOffset; // [ms] range: [0.0, (gFRCycleTime-1)/1000]
+  int cycles;
+
+  if (@this == 1)
+  {
+    // set cycle offset to 1 Cycle + 122 Static Slots:
+    reqOffset = 1 * gFRCycleTime + (gMacrotickLength * gStaticSlotSize * 122);
+    reqOffset -= (gHWDelay / 2);
+    while (reqOffset < 0) reqOffset += gFRCycleTime;
+    while (reqOffset >= 64*gFRCycleTime) reqOffset -= gFRCycleTime;
+    cycles = reqOffset / gFRCycleTime;
+    cycles = cycles % 64;
+    cycleOffset = (reqOffset - (gFRCycleTime * cycles)) / cSync_US2MS;
+
+    @FRFRSync::ReqOffset_SOC0_FR1FR2 = cycles * gFRCycleTime / cSync_US2MS; // [ms]
+    @FRFRSync::ReqOffset_SOC_FR1FR2 = cycleOffset * cSync_US2MS; // [us]
+    //SetRequestedOffsets(0, 0.0);
+
+    @FRFRSync::AutoAdjust = 1;
+
+    _setExpDelayMinFR1FR2();
+  }
+}
+
+on sysVar FRFRSync::ReqMinDelayFR2FR1Offset
+{
+  double reqOffset; // [us] range: [0.0, 64 * gFRCycleTime]
+  double cycleOffset; // [ms] range: [0.0, (gFRCycleTime-1)/1000]
+  int cycles;
+
+  if (@this == 1)
+  {
+    // set cycle offset to 0 Cycle + 15 Static Slots:
+    reqOffset = 0 * gFRCycleTime + (gMacrotickLength * gStaticSlotSize * 15);
+    reqOffset += (gHWDelay * 1);
+    while (reqOffset < 0) reqOffset += gFRCycleTime;
+    while (reqOffset >= 64*gFRCycleTime) reqOffset -= gFRCycleTime;
+    cycles = reqOffset / gFRCycleTime;
+    cycles = cycles % 64;
+    cycleOffset = (reqOffset - (gFRCycleTime * cycles)) / cSync_US2MS;
+
+    @FRFRSync::ReqOffset_SOC0_FR1FR2 = cycles * gFRCycleTime / cSync_US2MS; // [ms]
+    @FRFRSync::ReqOffset_SOC_FR1FR2 = cycleOffset * cSync_US2MS; // [us]
+    //SetRequestedOffsets(0, 0.0);
+
+    @FRFRSync::AutoAdjust = 1;
+
+    _setExpDelayMinFR2FR1();
+  }
+}
+
+on sysVar FRFRSync::ReqEqualMinDelayOffset
+{
+  double reqOffset; // [us] range: [0.0, 64 * gFRCycleTime]
+  double cycleOffset; // [ms] range: [0.0, (gFRCycleTime-1)/1000]
+  int cycles;
+
+  if (@this == 1)
+  {
+    // set cycle offset to 1 Cycle + 0 Static Slots:
+    reqOffset = 1 * gFRCycleTime + (gMacrotickLength * gStaticSlotSize * 0);
+    reqOffset -= (gHWDelay * 0);
+    while (reqOffset < 0) reqOffset += gFRCycleTime;
+    while (reqOffset >= 64*gFRCycleTime) reqOffset -= gFRCycleTime;
+    cycles = reqOffset / gFRCycleTime;
+    cycles = cycles % 64;
+    cycleOffset = (reqOffset - (gFRCycleTime * cycles)) / cSync_US2MS;
+
+    @FRFRSync::ReqOffset_SOC0_FR1FR2 = cycles * gFRCycleTime / cSync_US2MS; // [ms]
+    @FRFRSync::ReqOffset_SOC_FR1FR2 = cycleOffset * cSync_US2MS; // [us]
+    //SetRequestedOffsets(0, 0.0);
+
+    @FRFRSync::AutoAdjust = 1;
+
+    _setExpEqualDelay();
+  }
+}
+
+void _setRequestedOffsetFromPanel ()
+{
+  double reqOffset; // [us] range: [0.0, 64 * gFRCycleTime]
+  double cycleOffset; // [ms] range: [0.0, (gFRCycleTime-1)/1000]
+  int cycles;
+
+  if (0)
+  {
+    // @FRFRSync::ReqOffset_SOC0_FR1FR2 determines really [ms]:
+    reqOffset = (@FRFRSync::ReqOffset_SOC0_FR1FR2 /*[ms]*/ * cSync_US2MS) + @FRFRSync::ReqOffset_SOC_FR1FR2 /*[us]*/;
+    if (reqOffset < 0.0) reqOffset += (64 * gFRCycleTime);
+    if (reqOffset >= (64 * gFRCycleTime)) reqOffset -= (64 * gFRCycleTime);
+
+    cycles = reqOffset / gFRCycleTime;
+    cycles = cycles % 64;
+    cycleOffset = (reqOffset - (gFRCycleTime * cycles)) / cSync_US2MS;
+  }
+  else
+  {
+    // @FRFRSync::ReqOffset_SOC0_FR1FR2 determines only full cycles:
+    cycles = (@FRFRSync::ReqOffset_SOC0_FR1FR2 /*[ms]*/ * cSync_US2MS) / gFRCycleTime;
+    cycles = cycles % 64;
+    cycleOffset = (@FRFRSync::ReqOffset_SOC_FR1FR2 /*[us]*/) / cSync_US2MS;
+  }
+
+  SetRequestedOffsets(cycles, cycleOffset);
+}
+
+on sysVar FRFRSync::ReqZeroOffset
+{
+  if (@this == 1)
+  {
+    // set cycle offset to 0 Cycle + 0 Static Slots:
+    @FRFRSync::ReqOffset_SOC0_FR1FR2 = 0.0; // [ms]
+    @FRFRSync::ReqOffset_SOC_FR1FR2 = 0.0; // [us]
+    //SetRequestedOffsets(0, 0.0);
+
+    _setExpDelayAny(2);
+  }
+}
+
+void _enableAutoAdjust ()
+{
+  gDoAutomaticClusterAdjust = 1;
+  gDoClusterSync = 0;
+  ToggleAdjustingClusterSync();
+}
+
+void _disableAutoAdjust ()
+{
+  gDoAutomaticClusterAdjust = 0;
+  gDoClusterSync = 1;
+  ToggleAdjustingClusterSync();
+}
+
+void _setExpDelayAny (int cnt)
+{
+  if (cnt > 0)
+  {
+    SysSetVariableString(sysvar::FRFRDelay::ExpRoutingDelay_1_2, "nothing");
+    SysSetVariableString(sysvar::FRFRDelay::ExpRoutingDelay_2_1, "nothing");
+    gExpDelayAlreadyDisp = cnt;  
+  }
+  else
+  {
+    if (gExpDelayAlreadyDisp == 0)
+    {
+      SysSetVariableString(sysvar::FRFRDelay::ExpRoutingDelay_1_2, "nothing");
+      SysSetVariableString(sysvar::FRFRDelay::ExpRoutingDelay_2_1, "nothing");
+    }
+    else
+    {
+      gExpDelayAlreadyDisp--;
+    }
+  }
+}
+
+void _setExpDelayMinFR1FR2 ()
+{
+  SysSetVariableString(sysvar::FRFRDelay::ExpRoutingDelay_1_2, "< 2 ms");
+  SysSetVariableString(sysvar::FRFRDelay::ExpRoutingDelay_2_1, "> 8 ms");
+  gExpDelayAlreadyDisp = 2;
+}
+
+void _setExpDelayMinFR2FR1 ()
+{
+  SysSetVariableString(sysvar::FRFRDelay::ExpRoutingDelay_1_2, "> 8 ms");
+  SysSetVariableString(sysvar::FRFRDelay::ExpRoutingDelay_2_1, "< 2 ms");
+  gExpDelayAlreadyDisp = 2;
+}
+
+void _setExpEqualDelay ()
+{
+  SysSetVariableString(sysvar::FRFRDelay::ExpRoutingDelay_1_2, "~ 5 ms");
+  SysSetVariableString(sysvar::FRFRDelay::ExpRoutingDelay_2_1, "~ 5 ms");
+  gExpDelayAlreadyDisp = 2;
+}
+
+void _stopExtClockCorrection ()
+{
+  if (gDoExtClockCorrection != 0)
+  {
+    gDoExtClockCorrection = 0;
+
+    if (gDebugLevel >= 4)
+      write("%10.6f: External Clock Correction is OFF!", TimeNowNS()/cSync_NS2S);
+  }
+  cancelTimer(correctionPeriodTimeoutTimer);
+}
+
+void _startExtClockCorrection ()
+{
+  int startDelayInCycles = cCorrectionStartDelayCyclesSlow;
+  int correctionPeriodTimeout; // [ms]
+
+  if (gDoExtClockCorrection == 0)
+  {
+    if (--startDelayInCycles < 0)
+    {
+      gDoExtClockCorrection = 1;
+
+      if (gDiffSize >= 2)
+      {
+        correctionPeriodTimeout = (cCorrectionPeriodTimeoutFast * gFRCycleTime) / cSync_US2MS;
+        startDelayInCycles = cCorrectionStartDelayCyclesFast;
+      }
+      else
+      {
+        correctionPeriodTimeout = (cCorrectionPeriodTimeoutSlow * gFRCycleTime) / cSync_US2MS;
+        startDelayInCycles = cCorrectionStartDelayCyclesSlow;
+      }
+
+      cancelTimer(correctionPeriodTimeoutTimer);
+      setTimer(correctionPeriodTimeoutTimer, correctionPeriodTimeout);
+
+      if (gDebugLevel >= 4)
+        write("%10.6f: External Clock Correction is ON with diff size = %d!", TimeNowNS()/cSync_NS2S, gDiffSize);
+    }
+  }
+}
+
+void _restartExtClockCorrection ()
+{
+  int correctionPeriodTimeout; // [ms]
+
+  if ( isTimerActive(correctionPeriodTimeoutTimer))
+  {
+    if (gDiffSize >= 2)
+      correctionPeriodTimeout = (cCorrectionPeriodTimeoutFast * gFRCycleTime) / cSync_US2MS;
+    else
+      correctionPeriodTimeout = (cCorrectionPeriodTimeoutSlow * gFRCycleTime) / cSync_US2MS;
+
+    if (gDebugLevel >= 4)
+      write("%10.6f: restarting External Clock Correction with diff size = %d!", TimeNowNS()/cSync_NS2S, gDiffSize);
+
+    cancelTimer(correctionPeriodTimeoutTimer);
+    setTimer(correctionPeriodTimeoutTimer, correctionPeriodTimeout);
+  }
+}
+
+on key 'o'
+{
+  ResetFlexRayCC(cChannel_1);
+}
+

@@ -1,0 +1,940 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "..\ShareableFolders\CaplLibrary\Tc8TestLib\BasicFunctionsTestLib.cin"
+  #include "..\ShareableFolders\CaplLibrary\StubFunctionLib\UdpStubFunctions.cin"
+  #include "..\ShareableFolders\CaplLibrary\StubFunctionLib\Ipv4StubFunctions.cin"
+  #include "..\ShareableFolders\CaplLibrary\StubFunctionLib\IcmpStubFunctions.cin"
+}
+
+variables
+{  
+  byte gLastReceivedPackageHeader[1024];
+  byte gLastReceivedPackagePayload[8];
+  long gLastReceivedPackageHeaderLength; 
+}
+
+/**
+ * This function should be called in the preparation of the test fixture
+ */
+export InitTestFixture()
+{
+  int i;
+  
+  Internal_InitTestFixture(kUdp, "OnEthPacketUdp");
+  
+  // initialize the socket Id for each test case
+  for (i = 0; i < elcount(gSocketId); i++)
+  {
+    gSocketId[i] = -1;
+  }
+}
+
+/**
+ * This function should be called in the completion of the test fixture
+ */
+export EndTestFixture()
+{
+  Internal_EndTestFixture();
+}
+
+/**
+ * Function to start a UDP testcase.
+ */
+export InitTestCase(char testCaseName[], int testCaseNumber, enum Bool testabilityProtocolUsed)
+{
+  Internal_InitTestCase(testCaseName, kUdp, "UDP", testCaseNumber, testabilityProtocolUsed);
+}
+
+/**
+ * Function to end a UDP test case. 
+ */
+export testfunction EndTestCase()
+{
+  Internal_EndTestCase();
+}
+
+
+void OnEthPacketUdp(long channel, long dir, long packetHandle)
+{
+  enum Bool match;
+  
+  if (ShouldIncomingPacketBeProcessed(channel, dir, packetHandle) == kFalse)
+  {
+    return;
+  }
+  if(AnswerArpRequestForHost1(packetHandle) == kTrue)
+  {
+    return;
+  }
+  if(AnswerNdpSolicitation(packetHandle) == kTrue)
+  {
+    return;
+  }
+
+  match = CompareParameters(packetHandle, channel, gReportOnFailure);
+
+  if (match == kTrue)
+  {    
+    //Extract IP header and first 8 bytes of payload
+    //This will be needed for constructing ICMP messages,
+    //where these data shall be attached to the message
+    gLastReceivedPackageHeaderLength = EthGetTokenData(packetHandle, "ipv4", "header", elcount(gLastReceivedPackageHeader), gLastReceivedPackageHeader);
+    EthGetTokenData(packetHandle, "ipv4", "data", 8, gLastReceivedPackagePayload);    
+    write("gLastReceivedPackageHeaderLength: %d", gLastReceivedPackageHeaderLength);
+    EthernetPacketReceived(channel);
+  }
+}
+
+/**
+ * Sends a UDP message
+ * @param TTL The time to live of the IP header
+ * @param srcIpAddress The source IP address
+ * @param destIpAddress The destination IP address
+ * @param timestamp The timestamp of the IP option
+ * @param srcPort The source port
+ * @param destPort The destination port
+ * @param length The length of the message
+ * @param checksum The UDP checksum of the message
+ * @param data The payload of the UDP message
+ * @param truncate kTrue if the message should be truncated
+ */
+export testfunction SendUDPMulticastMessage(
+  char TTL[],
+  char srcIpAddress[],
+  char destIpAddress[],
+  char timestamp[],
+  char srcPort[],
+  char destPort[],
+  char length[],
+  char checksum[],
+  char data[],
+  enum Bool truncate
+  )
+{
+  dword ipv4Addr;
+  byte  ipv6Addr[16];
+  byte  multicastMac[6];
+  char  multicastMacStr[18];
+  
+  if(IsIpv6Address(destIpAddress, ipv6Addr))
+  {
+    multicastMac[0] = 0x33;
+    multicastMac[1] = 0x33;
+    multicastMac[2] = ipv6Addr[12];
+    multicastMac[3] = ipv6Addr[13];
+    multicastMac[4] = ipv6Addr[14];
+    multicastMac[5] = ipv6Addr[15];    
+  }
+  else
+  {
+    ipv4Addr = swapDWord(ipGetAddressAsNumber(destIpAddress));
+    multicastMac[0] = 0x01;
+    multicastMac[1] = 0x00;
+    multicastMac[2] = 0x5E;
+    multicastMac[3] = (ipv4Addr >> 16) & 0x7F;
+    multicastMac[4] = (ipv4Addr >> 8)  & 0xFF;
+    multicastMac[5] = ipv4Addr         & 0xFF;    
+  }
+  
+  snprintf(multicastMacStr, elcount(multicastMacStr), "%02X:%02X:%02X:%02X:%02X:%02X", multicastMac[0], multicastMac[1], multicastMac[2], multicastMac[3] ,multicastMac[4], multicastMac[5]);
+  
+  InternalSendUDPMessage(
+    multicastMacStr,
+    TTL,
+    srcIpAddress,
+    destIpAddress,
+    timestamp,
+    srcPort,
+    destPort,
+    length,
+    checksum,
+    data,
+    truncate,
+    1
+  );
+}
+
+/**
+ * Sends a UDP message
+ * @param TTL The time to live of the IP header
+ * @param srcIpAddress The source IP address
+ * @param destIpAddress The destination IP address
+ * @param timestamp The timestamp of the IP option
+ * @param srcPort The source port
+ * @param destPort The destination port
+ * @param length The length of the message
+ * @param checksum The UDP checksum of the message
+ * @param data The payload of the UDP message
+ * @param truncate kTrue if the message should be truncated
+ */
+export testfunction SendUDPMessage(
+  char TTL[],
+  char srcIpAddress[],
+  char destIpAddress[],
+  char timestamp[],
+  char srcPort[],
+  char destPort[],
+  char length[],
+  char checksum[],
+  char data[],
+  enum Bool truncate
+  )
+{  
+  InternalSendUDPMessage(
+    syspar::DIface0MacAddr,
+    TTL,
+    srcIpAddress,
+    destIpAddress,
+    timestamp,
+    srcPort,
+    destPort,
+    length,
+    checksum,
+    data,
+    truncate,
+    1
+  );
+}
+
+/**
+ * Sends a UDP message
+ * @param TTL The time to live of the IP header
+ * @param srcIpAddress The source IP address
+ * @param destIpAddress The destination IP address
+ * @param srcPort The source port
+ * @param destPort The destination port
+ * @param length The length of the message
+ * @param checksum The UDP checksum of the message
+ * @param data The payload of the UDP message
+ * @param truncate kTrue if the message should be truncated
+ * @param channel The channel on which the message should be sent
+ */
+export testfunction SendUDPMessage(
+  char TTL[],
+  char srcIpAddress[],
+  char destIpAddress[],
+  char timestamp[],
+  char srcPort[],
+  char destPort[],
+  char length[],
+  char checksum[],
+  char data[],
+  enum Bool truncate,
+  int channel
+  )
+{
+  InternalSendUDPMessage(
+    syspar::DIface0MacAddr, 
+    TTL,
+    srcIpAddress,
+    destIpAddress,
+    timestamp,
+    srcPort,
+    destPort,
+    length,
+    checksum,
+    data,
+    truncate,
+    channel
+  );
+}
+
+/**
+ * Sends a UDP message with maximum size (as given in the paramtertable in kMaxUdpLength)
+ * The payload will consist out of zeros
+ * The message will be fragmented if bigger than 1480 bytes
+ * @param srcIpAddress The source IP address
+ * @param destIpAddress The destination IP address
+ * @param srcPort The source port
+ * @param destPort The destination port
+ */
+export testfunction SendUDPMessageMaximumSize(
+  char srcIpAddress[],
+  char destIpAddress[],
+  char srcPort[],
+  char destPort[]
+  )
+{
+  const word kMaxSizePerFragment = 1480;
+  dword maxSize;
+  int i;
+  long packetHandle, result;
+  byte udpHeader[8];
+  word payloadSize;
+  int destIpVersion;
+  
+  destIpVersion = IpVersionOfString(destIpAddress);
+  
+  if(destIpVersion == 4)
+  {
+    maxSize = atol(syspar::MaxUdpLengthIpv4);
+  }
+  else
+  {
+    maxSize = atol(syspar::MaxUdpLengthIpv6);
+  }
+  
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+  
+  for(i = 0; (i*kMaxSizePerFragment) < maxSize; i++)
+  {
+    if(destIpVersion == 4)
+      packetHandle = EthInitPacket("ipv4");
+    else
+      packetHandle = EthInitPacket("ipv6");
+    if(i == 0)
+    {
+      EthInitProtocol(packetHandle, "udp");
+    }
+    write("i = %d, packethandle = %d", i, packetHandle);
+    
+    //Set MAC address
+    result = EthSetTokenInt64(packetHandle, "eth", "destination", ConvertMacAddressStringToInt64(syspar::DIface0MacAddr));
+    if(result != 0) write("Error @ EthSetTokenInt64 eth destination %d", result);
+    result = EthSetTokenInt64(packetHandle, "eth", "source", ConvertMacAddressStringToInt64(syspar::Host1Mac));
+    if(result != 0) write("Error @ EthSetTokenInt64 eth source %d", result);
+
+    //set ip addresses
+    result = EthSetIpAddressToken(packetHandle, "destination", destIpAddress);
+    if(result != 0) write("Error @ EthSetIpAddressToken ipv4 dest %d", result);
+    result = EthSetIpAddressToken(packetHandle, "source", srcIpAddress);
+    if(result != 0) write("Error @ EthSetIpAddressToken ipv4 src %d", result);
+    
+    //set ip protocol
+    if(destIpVersion == 4)
+      result = EthSetTokenInt64(packetHandle, "ipv4", "protocol", 0x11);
+    else
+      result = EthSetTokenInt64(packetHandle, "ipv6", "next", 0x11);
+    if(result != 0) write("Error @ EthSetTokenInt64 ipv4 protocol %d", result);
+    
+    //set fragmentation fields
+    if(destIpVersion == 4)
+    {
+      result = EthSetTokenInt64(packetHandle, "ipv4", "offset", i * kMaxSizePerFragment / 8);
+      if(result != 0) write("Error @ EthSetTokenInt64 ipv4 offset %d", result);
+      if((i+1) * kMaxSizePerFragment < maxSize)
+      {
+        result = EthSetTokenInt64(packetHandle, "ipv4", "flags", 1);
+        if(result != 0) write("Error @ EthSetTokenInt64 ipv4 offset %d", result);
+        payloadSize = kMaxSizePerFragment;
+      }
+      else
+      {
+        payloadSize = maxSize - i*kMaxSizePerFragment;
+      }
+    }
+    else
+    {
+      result = EthAddToken(packetHandle, "ipv6", "fragment");
+      if(result != 0) write("Error @ EthAddToken ipv6 fragment %d", result);
+      result = EthSetTokenInt64(packetHandle, "ipv6", "fragment.offset", i * kMaxSizePerFragment / 8);
+      if(result != 0) write("Error @ EthSetTokenInt64 ipv6 fragment.offset %d", result);
+      
+      else if((i+1) * kMaxSizePerFragment < maxSize)
+      {
+        result = EthSetTokenInt64(packetHandle, "ipv6", "fragment.identification", 10); 
+        if(result != 0) write("Error @ EthSetTokenInt64 ipv6 fragment.identification %d", result);
+        result = EthSetTokenInt64(packetHandle, "ipv6", "fragment.mFlag", 1);
+        if(result != 0) write("Error @ EthSetTokenInt64 ipv6 fragment.mFlag %d", result);
+        payloadSize = kMaxSizePerFragment;
+      }
+      else
+      {
+        payloadSize = maxSize - i*kMaxSizePerFragment;
+      }
+    }
+    
+    if(destIpVersion == 4)
+      result = EthResizeToken(packetHandle, "ipv4", "data", payloadSize*8);
+    else
+      result = EthResizeToken(packetHandle, "ipv6", "data", payloadSize*8);
+    if(result != 0) write("Error @ EthResizeToken %d", result);
+    
+    if (syspar::DIface0VLAN >= 0)
+    {
+      EthAddToken(packetHandle, "eth", "vlanId");
+      EthSetTokenInt(packetHandle, "eth", "vlanId", syspar::DIface0VLAN);
+    }
+    
+    EthCompletePacket(packetHandle);
+    if(i == 0)
+    {
+      udpHeader.Word(0) = swapWord(atol(srcPort));
+      udpHeader.Word(2) = swapWord(atol(destPort));
+      udpHeader.Word(4) = swapWord(maxSize);
+      
+      if(destIpVersion == 4)
+        EthSetTokenData(packetHandle, "ipv4", "data", elcount(udpHeader), udpHeader);
+      else
+        EthSetTokenData(packetHandle, "ipv6", "data", elcount(udpHeader), udpHeader);
+      
+      udpHeader.Word(6) = swapWord(CalculateChecksum(packetHandle, "udp"));
+      
+      if(destIpVersion == 4)
+        EthSetTokenData(packetHandle, "ipv4", "data", elcount(udpHeader), udpHeader);
+      else
+        EthSetTokenData(packetHandle, "ipv6", "data", elcount(udpHeader), udpHeader);
+    }
+    
+    EthOutputPacket(packetHandle);
+    EthReleasePacket(packetHandle);
+  }
+}
+
+export testfunction SendUDPMessage(
+  char TTL[],
+  char srcIpAddress[],
+  char destIpAddress[],
+  char timestamp[],
+  char srcPort[],
+  char destPort[],
+  word length,
+  char checksum[],
+  char data[],
+  enum Bool truncate
+  )
+{
+  char lengthStr[6];
+  snprintf(lengthStr, elcount(lengthStr), "%d", length);
+  InternalSendUDPMessage(
+    syspar::DIface0MacAddr,
+    TTL,
+    srcIpAddress,
+    destIpAddress,
+    timestamp,
+    srcPort,
+    destPort,
+    lengthStr,
+    checksum,
+    data,
+    truncate,
+    1
+  );
+}
+
+/**
+ * Sends a UDP message
+ * @param srcIpAddress The source IP address
+ * @param destIpAddress The destination IP address
+ * @param destPort The destination port
+ * @param length The length of the message
+ * @param data The payload of the message
+ */
+export testfunction SendUDPMessage(
+  char srcIpAddress[],
+  char destIpAddress[],
+  char destPort[],
+  char length[],
+  char data[]
+  )
+{
+  InternalSendUDPMessage(
+    syspar::DIface0MacAddr,
+    syspar::Wildcard,
+    srcIpAddress,
+    destIpAddress,
+    syspar::Wildcard,
+    syspar::TesterUdpPort,
+    destPort,
+    length,
+    syspar::Wildcard,
+    data,
+    kFalse,
+    1
+  );
+}
+
+
+/**
+ * Sends a UDP message
+ * @param TTL The time to live of the ipv4 header or the hop limit of the ipv6 header.
+ * @param srcIpAddress The source IP address.
+ * @param destIpAddress The destination IP address.
+ * @param timestamp A timestamp option of the ipv4 header.
+ * @param srcPort The UDP source port.
+ * @param destPort The UDP destination port.
+ * @param length The UDP length.
+ * @param checksum The UDP checksum.
+ * @param data The UDP payload.
+ * @param truncate If kTrue: Truncates the last byte of the payload.
+ * @param channel The channel on which the message should be sent
+ */
+void InternalSendUDPMessage(
+  char destMacAddress[],
+  char TTL[],
+  char srcIpAddress[],
+  char destIpAddress[],
+  char timestamp[],
+  char srcPort[],
+  char destPort[],
+  char length[],
+  char checksum[],
+  char data[],
+  enum Bool truncate,
+  int channel
+  )
+{
+  long p,result,ipLength;
+  byte timestampData[6];
+  byte buffer[28];
+  int ipVersion;
+  enum Bool isIpv6;
+  
+  if(channel == 1)
+  {
+   SetBusContext(GetBusNameContext("Ethernet_1"));
+  }
+  else if(channel == 2)
+  {
+    SetBusContext(GetBusNameContext("Ethernet 2"));
+  }
+  else
+  {
+    write("Unknown channel %d", channel);
+  }
+  
+  
+  // Determine the Ip version based on the source IP address
+  if(IpVersionOfString(srcIpAddress) == 4)
+  {
+    isIpv6 = kFalse;
+    p = EthInitPacket("ipv4");
+  }
+  else
+  {
+    isIpv6 = kTrue;
+    p = EthInitPacket("ipv6");
+  }
+  
+  EthInitProtocol(p, "udp");
+
+  //Set MAC address
+  result = EthSetTokenInt64(p, "eth", "destination", ConvertMacAddressStringToInt64(destMacAddress));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth destination %lld", result);
+  result = EthSetTokenInt64(p, "eth", "source", ConvertMacAddressStringToInt64(syspar::Host1Mac));
+  if(result != 0) write("Error @ EthSetTokenInt64 eth source %lld", result);
+
+  //set ip addresses
+  result = EthSetIpAddressToken(p, "destination", destIpAddress);
+  if(result != 0) write("Error @ EthSetIpAddressToken ipv4 dest %lld", result);
+  result = EthSetIpAddressToken(p, "source", srcIpAddress);
+  if(result != 0) write("Error @ EthSetIpAddressToken ipv4 src %lld", result);
+  
+  //set udp ports
+  result = EthSetTokenInt64(p, "udp", "destination", atol(destPort));
+  if(result != 0) write("Error @ EthSetTokenInt64 udp dest %lld", result);
+  result = EthSetTokenInt64(p, "udp", "source", atol(srcPort));
+  if(result != 0) write("Error @ EthSetTokenInt64 udp src %lld", result);
+  
+  //Set udp data
+  result = EthResizeToken(p, "udp", "data", strlen(data)*8); //length is in bits
+  if(result != 0) write("Error @ EthResizeToken udp data %d", result);
+  result = EthSetTokenData(p, "udp", "data", strlen(data), data);
+  if(result != 0) write("Error @ EthSetTokenData udp data %d", result);
+  
+  
+  if(!isWildcard(timestamp)) //IPv4 only
+  {
+    byte data[40];
+    char timestampTemp[5];
+    char lengthTemp[5];
+    int64 i;
+    
+    substr_cpy_off(lengthTemp, 2, timestamp, 2, 2, 5);
+    
+    strncpy(timestampTemp, "0x", 3);
+    
+    for (i = 2; (i * 2) < strlen(timestamp); i++)  //Data starts at the 3rd byte
+    {
+      substr_cpy_off(timestampTemp, 2, timestamp, i * 2, 2, 5);
+      data[i - 2] = atol(timestampTemp);
+    }
+    write("strlen timestamp = %d ", strlen(timestamp));
+    
+    result = EthAddToken(p, "ipv4", "option68");
+    if(result != 0) write("Error @ EthAddToken ipv4 option68 %d", result);
+    result = EthSetTokenInt64(p, "ipv4", "option68.length", strlen(timestamp) / 2);
+    if(result != 0) write("Error @ EthAddToken ipv4 option68Length %d", result);
+    result = EthSetTokenData(p, "ipv4", "option68.data", (strlen(timestamp) - 4) / 2, data);
+    if(result != 0) write("Error @ EthAddToken ipv4 option68Data %d", result);
+  }
+  
+  if(!isWildcard(TTL))
+  {
+    if(isIpv6 == kFalse)
+    {
+      result = EthSetTokenInt64(p, "ipv4", "ttl", atol(TTL));
+      if(result != 0) write("Error @ EthSetTokenInt64 ipv4 ttl %lld", result);
+    }
+    else
+    {
+      result = EthSetTokenInt64(p, "ipv6", "hopLimit", atol(TTL));
+      if(result != 0) write("Error @ EthSetTokenInt64 ipv6 hopLimit %lld", result);
+    }
+  }
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %lld", result);
+  write("complete");
+  
+  // After complete packet 
+  if(truncate == kTrue)
+  {
+    // Set the Ethernet total Length in such a way that the udp packet is truncated.
+    // Only the last payload byte is truncated.
+    if(isIpv6 == kFalse)
+    {
+      ipLength = EthGetTokenInt64(p, "ipv4", "length");
+      result = EthSetTokenInt64(p, "ipv4", "length", ipLength - 1);
+      if(result != 0) write("Error @ EthSetTokenInt64 ipv4 length %lld", result);
+      
+      // Recalculate IP checksum
+      result = EthSetTokenInt64(p, "ipv4", "checksum", CalculateChecksum(p, "ipv4"));
+      if(result != 0) write("Error @ EthSetTokenInt64 ipv4 checksum %lld", result);
+    }
+    if(isIpv6 == kTrue)
+    {
+      ipLength = EthGetTokenInt64(p, "ipv6", "length");
+      result = EthSetTokenInt64(p, "ipv6", "length", ipLength - 1);
+      if(result != 0) write("Error @ EthSetTokenInt64 ipv6 length %lld", result);
+      
+      // Recalculate IP checksum
+      result = EthSetTokenInt64(p, "ipv6", "checksum", CalculateChecksum(p, "ipv6"));
+      if(result != 0) write("Error @ EthSetTokenInt64 ipv6 checksum %lld", result);
+    }
+  }
+  
+  if(!isWildcard(length))
+  {
+    write("length");
+    result = EthSetTokenInt64(p, "udp", "length", atol(length));
+    if(result != 0) write("Error @ EthSetTokenInt64 udp length %lld", result);
+    
+    // Recalculate UDP checksum
+    result = EthSetTokenInt64(p, "udp", "checksum", CalculateChecksum(p, "udp"));
+    if(result != 0) write("Error @ EthSetTokenInt64 udp checksum %lld", result);
+  }
+  
+  if(!isWildcard(checksum))
+  {
+    write("checksum");
+    result = EthSetTokenInt64(p, "udp", "checksum", atol(checksum));
+    if(result != 0) write("Error @ EthSetTokenInt64 udp checksum %lld", result);
+  }
+  
+  result = EthOutputPacket(p);
+  if(result != 0) write("Error @ EthOutputPacket %d", result);
+  
+  EthReleasePacket(p);
+  if(result != 0) write("Error @ EthReleasePacket %d", result);
+}
+
+
+/**
+ * Waits for a UDP message.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param checkChecksum If kTrue, only accept packets with a valid checksum.
+ * @param checkDefaultTos If kTrue, only accept default value Type of Service.
+ * @param timeStamp The timestamp option to match the packet.
+ * @param TTL The ipv4 time to live to match the packet.
+ * @param srcIpAddress The destination IP address to match the packet.
+ * @param destIpAddress The source IP address to match the packet.
+ * @param srcPort The UDP source port to match the packet.
+ * @param destPort The UDP destination port to match the packet.
+ * @param length The UDP length to match the packet.
+ * @param data The UDP data to match the packet.
+ * @param checkEmptyPadding If kTrue, only accept packets with empty padding.
+ */
+export  WaitForUdpMessage(
+  long timeout,
+  enum Bool checkChecksum,
+  enum Bool checkDefaultTos,
+  char timestamp[],
+  char TTL[],
+  char srcIpAddress[],
+  char destIpAddress[],
+  char srcPort[],
+  char destPort[],
+  word length,
+  char data[]
+  )
+{
+  char lengthStr[6];
+  snprintf(lengthStr, elcount(lengthStr), "%d", length);
+  WaitForUdpMessage(timeout, checkChecksum, checkDefaultTos, timestamp, TTL, srcIpAddress, destIpAddress, srcPort, destPort, lengthStr, data);
+}
+
+/**
+ * Waits for a UDP message.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param checkChecksum If kTrue, only accept packets with a valid checksum.
+ * @param checkDefaultTos If kTrue, only accept default value Type of Service.
+ * @param timeStamp The timestamp option to match the packet.
+ * @param TTL The ipv4 time to live to match the packet.
+ * @param srcIpAddress The destination IP address to match the packet.
+ * @param destIpAddress The source IP address to match the packet.
+ * @param srcPort The UDP source port to match the packet.
+ * @param destPort The UDP destination port to match the packet.
+ * @param length The UDP length to match the packet.
+ * @param data The UDP data to match the packet.
+ * @param checkEmptyPadding If kTrue, only accept packets with empty padding.
+ */
+export WaitForUdpMessage(
+  long timeout,
+  enum Bool checkChecksum,
+  enum Bool checkDefaultTos,
+  char timestamp[],
+  char TTL[],
+  char srcIpAddress[],
+  char destIpAddress[],
+  char srcPort[],
+  char destPort[],
+  char length[],
+  char data[]
+  )
+{
+  WaitForUdpMessage(timeout, 1, checkChecksum, checkDefaultTos, timestamp, TTL, srcIpAddress, destIpAddress, srcPort, destPort, length, data);
+}
+
+
+/**
+ * Waits for a UDP message.
+ * @param timeout The amount of time in milliseconds to wait.
+ * @param channel The channel on which  the message is expected
+ * @param checkChecksum If kTrue, only accept packets with a valid checksum.
+ * @param checkDefaultTos If kTrue, only accept default value Type of Service.
+ * @param timeStamp The timestamp option to match the packet.
+ * @param TTL The ipv4 time to live to match the packet.
+ * @param srcIpAddress The destination IP address to match the packet.
+ * @param destIpAddress The source IP address to match the packet.
+ * @param srcPort The UDP source port to match the packet.
+ * @param destPort The UDP destination port to match the packet.
+ * @param length The UDP length to match the packet.
+ * @param data The UDP data to match the packet.
+ * @param checkEmptyPadding If kTrue, only accept packets with empty padding.
+ */
+export testfunction WaitForUdpMessage(
+  long timeout,
+  long channel,
+  enum Bool checkChecksum,
+  enum Bool checkDefaultTos,
+  char timestamp[],
+  char TTL[],
+  char srcIpAddress[],
+  char destIpAddress[],
+  char srcPort[],
+  char destPort[],
+  char length[],
+  char data[]
+  )
+{
+  word validChecksum;
+  enum Bool isIpv6;
+  
+  PrepareWaitForIp(destIpAddress, srcIpAddress, 0x11);           /* UDP Protocol Type */
+  PrepareWaitForUdp(destPort, srcPort);
+  
+  isIpv6 = kFalse;
+  //Check for IPv6
+  if(IpVersionOfString(destIpAddress) == 6 || IpVersionOfString(srcIpAddress) == 6)
+  {
+    isIpv6 = kTrue;
+  }
+  
+  if(checkChecksum == kTrue)
+  {
+    InternalAddExpectedParameter("udp", "checksum", 0, kValidChecksum);
+  }
+  
+  if(checkDefaultTos == kTrue)
+  {
+    if(isIpv6 == kTrue)
+    {
+      testStepFail("WaitForUdpMessage", "Test case can only be done using IPv4.");
+      return;
+    }
+    // Default TOS = 0x00 
+    InternalAddExpectedParameter("ipv4", "dscp", 0); // dscp: Differentiated Services Code Point value. DSCP obsoleted TOS
+  }
+  
+  if(!IsWildcard(timestamp))
+  {
+    byte timestampDataBytes[50];
+    char charTmp[5];
+    int64 i;
+    
+    if(isIpv6 == kTrue)
+    {
+      testStepFail("WaitForUdpMessage", "Test case can only be done using IPv4.");
+      return;
+    }
+    
+    // Convert to byte array
+    strncpy(charTmp, "0x", 3);
+    
+    for (i = 0; (i * 2) < strlen(timestamp); i++)
+    {
+      substr_cpy_off(charTmp, 2, timestamp, i * 2, 2, 5);
+      timestampDataBytes[i] = atol(charTmp);
+    }
+    InternalAddExpectedDataParameter("ipv4", "option68.data", timestampDataBytes, strlen(timestamp)/2);
+  }
+  
+  if(!IsWildcard(TTL))
+  {
+    if(isIpv6 == kFalse)
+    {
+      InternalAddExpectedParameter("ipv4", "ttl", atol(TTL));
+    }
+    else
+    {
+      InternalAddExpectedParameter("ipv6", "hopLimit", atol(TTL));
+    }
+  }
+  
+  if(!IsWildcard(length))
+  {
+    InternalAddExpectedParameter("udp", "length", atol(length));
+  }
+  
+  if(!IsWildcard(data))
+  {
+    byte dataBytes[110];
+    memcpy(dataBytes, data, strlen(data));
+    InternalAddExpectedDataParameter("udp", "data", dataBytes, strlen(data));
+  }
+
+  StartObservationOfIncomingPackets(channel, kAnswerExpected);
+
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForUdpMessage", "DUT sent a UDP message.");
+  else
+    testStepFail("WaitForUdpMessage", "DUT didn't send a UDP message");
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Waits for an incoming ICMP destination unreachable problem.
+ * @param timeout The amount of time in milliseconds to wait.
+ */
+export testfunction WaitForIcmpDestinationUnreachable(
+  long timeout,
+  char srcIpAddress[],
+  char destIpAddress[]
+  )
+{
+  PrepareWaitForEthernet(syspar::Host1Mac, syspar::DIface0MacAddr);
+  PrepareWaitForIp(destIpAddress, srcIpAddress, IpVersionOfString(syspar::Host1Ip) == 4 ? 1 : 58);  /* ICMPv4/6 Protocol Type */
+  
+  PrepareWaitForIcmpDestinationUnreachable(syspar::Wildcard);
+  StartObservationOfIncomingPackets(kAnswerExpected);
+  
+  if (WaitForIncomingPacket(kAnswerExpected, timeout) == 0)
+    testStepPass("WaitForIcmpDestinationUnreachable", "DUT sent an ICMPv4 destination unreachable.");
+  else
+    testStepFail("WaitForIcmpDestinationUnreachable", "DUT didn't send an ICMPv4 destination unreachable.");
+  
+  InternalClearAllParameters();
+}
+
+/**
+ * Send an ICMP destination unreachable message to the DUT.
+ */
+export testfunction SendIcmpDestinationUnreachable(
+  char destIpAddress[]
+  )
+{
+  long p,result;
+  
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+  if(IpVersionOfString(syspar::Host1Ip) == 4)
+  {
+    p = EthInitPacket("icmpv4","destinationUnreachable");
+
+    result = EthSetTokenInt64(p, "eth",   "destination", ConvertMacAddressStringToInt64(syspar::DIface0MacAddr));
+    if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d", result);
+    result = EthSetTokenInt64(p, "eth",   "source", ConvertMacAddressStringToInt64(syspar::Host1Mac));
+    if(result != 0) write("Error @ EthSetTokenInt64 eth src %d", result);
+    result = EthSetIpAddressToken(p, "destination", destIpAddress);
+    if(result != 0) write("Error @ EthSetIpAddressToken ipv4 dest %d", result);
+    result = EthSetIpAddressToken(p, "source", syspar::Host1Ip);
+    if(result != 0) write("Error @ EthSetIpAddressToken ipv4 src %d", result);
+    result = EthSetTokenInt64(p, "icmpv4",  "code", 3); // Port unreachable
+    if(result != 0) write("Error @ EthSetTokenInt64 icmpv4 code %d", result);
+    
+    memcpy(gIpv4Payload, gLastReceivedPackageHeader, gLastReceivedPackageHeaderLength);
+    memcpy_off(gIpv4Payload, gLastReceivedPackageHeaderLength, gLastReceivedPackagePayload, 0, 8);
+    result = EthResizeToken(p,"icmpv4","data",(gLastReceivedPackageHeaderLength+8)*8);
+    if(result !=0) write("Error @EthResizeToken icmp payload %d", result);
+    result = EthSetTokenData(p, "icmpv4", "data", gLastReceivedPackageHeaderLength+8, gIpv4Payload);
+    if(result !=0) write("Error @EthSetTokenData icmp payload %d", result);
+    
+    gIpv4PayloadLength = gLastReceivedPackageHeaderLength + 8;
+  }
+  else
+  {
+    p = EthInitPacket("icmpv6", "destinationUnreachable");
+    
+    result = EthSetTokenInt64(p, "eth",   "destination", ConvertMacAddressStringToInt64(syspar::DIface0MacAddr));
+    if(result != 0) write("Error @ EthSetTokenInt64 eth dest %d", result);
+    result = EthSetTokenInt64(p, "eth",   "source", ConvertMacAddressStringToInt64(syspar::Host1Mac));
+    if(result != 0) write("Error @ EthSetTokenInt64 eth src %d", result);
+    
+    result = EthSetIpAddressToken(p, "destination", destIpAddress);
+    if(result != 0) write("Error @ EthSetIpAddressToken dest %d", result);
+    result = EthSetIpAddressToken(p, "source", syspar::Host1Ip);
+    if(result != 0) write("Error @ EthSetIpAddressToken src %d", result);
+    
+  }
+  
+  if (syspar::DIface0VLAN >= 0)
+  {
+    EthAddToken(p, "eth", "vlanId");
+    EthSetTokenInt(p, "eth", "vlanId", syspar::DIface0VLAN);
+  }
+  
+  result = EthCompletePacket(p);
+  if(result != 0) write("Error @ EthCompletePacket %d",result);
+  
+  result = EthOutputPacket(p);
+  if(result != 0) write("Error @ EthOutputPacket %d",result);
+  
+  result = EthReleasePacket(p);
+  if(result != 0) write("Error @ EthReleasePacket %d",result);
+}
+
+export void DisplayWarning(char warningMessage[])
+{
+  testStepWarning(warningMessage);
+}

@@ -1,0 +1,206 @@
+/*@!Encoding:1252*/
+includes
+{
+  
+}
+
+variables
+{
+  const dword kAvbOK = 0;
+  const dword kAvbIoPending = 460609;
+  const dword kAvbInsufficientBuffer = 460607;
+  const dword kAvbNoReceiveBuffer = 460610;
+  const dword kAvbDataOmmitted = 460611;
+  const dword kAvbPresentationTimeLessThanPacketTime = 460618;
+  
+  const dword kVerbositySilent  = 0;
+  const dword kVerbosityError   = 1;
+  const dword kVerbosityWarning = 2;
+  const dword kVerbosityInfo    = 3;
+  
+  const dword kInvalidHandle = 0;
+  
+  const dword kAvtpProtocolAaf = 2;
+  const dword kAvtpProtocolCrf = 4;
+  
+  //
+  // IEEE 1722a d8 5.4.3 "Calculation of presentation time"
+  //
+  const byte kDefaultPresentationTimeOffsetMsClassA = 2;
+  const byte kDefaultPresentationTimeOffsetMsClassB = 50;
+  
+  // AAF
+  
+  const dword kAafFormatNotSpecified = 0;
+  const dword kAafFormat32BitFloatingPoint = 1;
+  const dword kAafFormat32BitInteger = 2;
+  const dword kAafFormat24BitInteger = 3;
+  const dword kAafFormat16BitInteger = 4;
+  const dword kAafFormatAes3 = 5;
+  const dword kAafFormatReserved = 6;
+  
+  const dword kAafSampleRateNotSpecified = 0;
+  const dword kAafSampleRate8KHz = 1;
+  const dword kAafSampleRate16KHz = 2;
+  const dword kAafSampleRate32KHz = 3;
+  const dword kAafSampleRate44_1KHz = 4;
+  const dword kAafSampleRate48KHz = 5;
+  const dword kAafSampleRate88_2KHz = 6;
+  const dword kAafSampleRate96KHz = 7;
+  const dword kAafSampleRate176_4KHz = 8;
+  const dword kAafSampleRate192KHz = 9;
+  const dword kAafSampleRate33_1_3RPM = 10;
+  const dword kAafSampleRate45RPM = 11;
+  const dword kAafSampleRate78RPM = 12;
+  const dword kAafSampleRateReserved = 13;
+  
+  // CRF
+  
+  const dword kCtfTypeUser = 0;
+  const dword kCrfTypeAudioSample = 1;
+  const dword kCrfTypeVideoFrame = 2;
+  const dword kCrfTypeVideoLine = 3;
+  const dword kCrfTypeReserved = 4;
+
+  const dword kCrfAudioClockFrequencyUserSpecified = 0;
+  const dword kCrfAudioClockFrequency8KHz = 1;
+  const dword kCrfAudioClockFrequency16KHz = 2;
+  const dword kCrfAudioClockFrequency32KHz = 3;
+  const dword kCrfAudioClockFrequency44_1KHz = 4;
+  const dword kCrfAudioClockFrequency88_2KHz = 5;
+  const dword kCrfAudioClockFrequency176_4KHz = 6;
+  const dword kCrfAudioClockFrequency48KHz = 7;
+  const dword kCrfAudioClockFrequency96KHz = 8;
+  const dword kCrfAudioClockFrequency192KHz = 9;
+  const dword kCrfAudioClockFrequencyReserved = 10;
+
+  const dword kCrfAudioClockMultiplierNominal = 0;
+  const dword kCrfAudioClockMultiplierNTSCDropDown = 1;
+  const dword kCrfAudioClockMultiplierNTSCPullUp = 2;
+  const dword kCrfAudioClockMultiplierPALDropDownFilm = 3;
+  const dword kCrfAudioClockMultiplierFilmPullUpPAL = 4;
+  const dword kCrfAudioClockMultiplierReserved = 5;
+}
+
+dword GetSamplesPerSecond(dword aafSampleRate)
+{
+  switch (aafSampleRate)
+  {
+    case kAafSampleRate8KHz:
+      return 8000;
+    case kAafSampleRate16KHz:
+      return 16000;
+    case kAafSampleRate32KHz:
+      return 32000;
+    case kAafSampleRate44_1KHz:
+      return 44100;
+    case kAafSampleRate48KHz:
+      return 48000;
+    case kAafSampleRate88_2KHz:
+      return 88200;
+    case kAafSampleRate96KHz:
+      return 96000;
+    case kAafSampleRate176_4KHz:
+      return 176400;
+    case kAafSampleRate192KHz:
+      return 192000;
+    default:
+      return 0;
+  }
+}
+
+long CheckHandleAndStopIfError(dword handle, char function[])
+{
+  char text[256];
+  
+  if (handle == 0)
+  {
+    strncpy(text, function, elCount(text));
+    strncat(text, " returned 0, AvbGetLastError", elCount(text));
+    
+    return StopIfError(AvbGetLastError(), text);
+  }
+  
+  return kAvbOK;
+}
+
+long StopIfError(long returnCode, char function[])
+{
+  if (returnCode != kAvbOK && returnCode != kAvbIoPending)
+  {
+    WriteErrorAndStop(returnCode, function);
+    return returnCode;
+  }
+  
+  return kAvbOK;
+}
+
+void WriteErrorAndStop(long errorCode, char function[])
+{
+  char text[256];
+  
+  snprintf(text, elCount(text), "%s returned ", function);
+ 
+  WriteErrorAndStop(text, errorCode);
+}
+
+void WriteErrorAndStop(char text[], long errorCode)
+{
+  char textOut[256], lastErrorText[256];
+  long ret;
+    
+  ret = AvbGetLastErrorText(elCount(lastErrorText), lastErrorText);
+  
+  if (ret == 0)
+  {
+    strncpy(lastErrorText, "AvbGetLastErrorText returned 0", elCount(lastErrorText));
+  }
+    
+  PrependCaplFileName(text, textOut);
+  
+  snprintf(text, elCount(text), "%d (%s)", errorCode, lastErrorText);
+  strncat(textOut, text, elCount(textOut));
+  
+  write(textOut);
+  Stop();
+}
+
+void WriteAndStop(char text[])
+{
+  char textOut[256];
+  
+  PrependCaplFileName(text, textOut);
+  
+  write(textOut);
+  Stop();
+}
+
+void WriteAndStop(char text[], long value)
+{
+  char textOut[256];
+  
+  PrependCaplFileName(text, textOut);
+  
+  snprintf(text, elCount(text), textOut, value);
+  
+  write(text);
+  Stop();
+}
+
+void WriteAndStop(char text[], long value1, long value2)
+{
+  char textOut[256];
+  
+  PrependCaplFileName(text, textOut);
+  
+  snprintf(text, elCount(text), textOut, value1, value2);
+  
+  write(text);
+  Stop();
+}
+
+void PrependCaplFileName(char inText[], char outText[])
+{
+  strncpy(outText, "%BASE_FILE_NAME%: ", elCount(outText));
+  strncat(outText, inText, elCount(outText));
+}

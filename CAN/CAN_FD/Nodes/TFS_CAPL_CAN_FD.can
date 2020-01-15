@@ -1,0 +1,269 @@
+/*@!Encoding:1252*/
+includes
+{
+  
+}
+
+variables
+{
+  long    incDlcCount;  
+  mstimer tm1;
+  message EngineData msg1;
+  long    testFlags = 0;
+  int     expectedDLCValue;
+  dword   checkHandle[10];
+  
+  enum TestFlags
+  {
+    WAIT_FOR_MESSAGE = 0,
+    CHECK_INCONSISTENT_DLC = 1,
+    CHECK_SET_MSG_DLC = 2,
+    CHECK_SET_MSG_DLC_NODatbase = 3
+  };
+}
+
+on timer tm1
+{
+  output(msg1);
+}
+
+void MainTest ()
+{
+  TC1_1_WaitForEngineData();
+  TC1_2_WaitForEngineStatus();
+  TC1_3_WaitForIgnitionInfo();
+  TC2_1_1_CheckInvalidDLC();
+  TC2_1_2_CheckInvalidDLCByNodeTx();
+  TC2_1_3_CheckInvalidDLCByNodeTx();
+  TC3_ChangeSignalValues();
+  TC4_SetMsgDLC();
+  TC5_CheckCycleTime();  
+}
+
+void cb1(TestCheck c)
+{
+  testSetMsgDlc(msg1.id, incDlcCount);
+  ++incDlcCount;
+}
+
+testcase TC1_1_WaitForEngineData()
+{
+  message EngineData msg;
+  WaitForMessageGeneric(msg, 1000);
+}  
+
+testcase TC1_2_WaitForEngineStatus()
+{
+  message EngineStatus msg;
+  WaitForMessageGeneric(msg, 1000);
+}
+
+testcase TC1_3_WaitForIgnitionInfo()
+{
+   message Ignition_Info msg;
+   WaitForMessageGeneric(msg, 1000);
+}
+
+void WaitForMessageGeneric(message * msg, long waitTime)
+{
+   message * msgData;
+  
+  if(testWaitForMessage(msg.id,1000) != 1)
+  {
+    testStepFail("testWaitForMessage", "Message not received");
+    return;
+  }
+  if(TestGetWaitEventMsgData (msgData) < 0)
+  {
+    testStepFail("TestGetWaitEventMsgData", "Message could not be read");
+    return;
+  }
+  
+  testJoinMessageEvent(msg.id);
+  
+  if(testWaitForAllJoinedEvents(1000)<=0)
+  {
+    testStepFail("testWaitForAllJoinedEvents", "Message(s) not received");
+    return;
+  }
+  if(TestGetWaitEventMsgData (1, msgData) < 0)
+  {
+    testStepFail("TestGetWaitEventMsgData", "Message EngineData could not be read");
+    return;
+  }
+  if(msgData.id != msg.id || msgData.dlc != msg.dlc)
+  {
+    testStepFail("TestGetWaitEventMsgData", "Message EngineData has wrong data (id =%d dlc = %d)", msg.id, msg.dlc);
+    return;
+  }
+}
+
+testcase TC2_1_1_CheckInvalidDLC()
+{
+  long numCheckEvents;
+  incDlcCount = 0;
+  
+  checkHandle[0] = ChkStart_InconsistentDLC(EngineData, "cb1");
+  TestAddCondition(checkHandle[0]);
+  setTimerCyclic(tm1,200);
+  testWaitForTimeout(1000);
+  cancelTimer(tm1);
+  ChkControl_Stop(checkHandle[0]);
+  TestRemoveCondition(checkHandle[0]);
+}
+
+testcase TC2_1_2_CheckInvalidDLCByNodeTx()
+{
+  long numCheckEvents;
+  incDlcCount = 0;
+  
+  checkHandle[0] = ChkStart_InconsistentTxDLC(Engine, "cb1");
+  TestAddCondition(checkHandle[0]);
+  testWaitForTimeout(2000);  
+  numCheckEvents = ChkQuery_NumEvents(checkHandle[0]);
+  
+  if (numCheckEvents > 0)
+  {
+    testStepFail("ChkStart_InconsistentDLC", "%d DLC errors found", numCheckEvents);
+    return;
+  }
+  ChkControl_Stop(checkHandle[0]);
+  TestRemoveCondition(checkHandle[0]);
+}
+
+testcase TC2_1_3_CheckInvalidDLCByNodeTx()
+{
+  long numCheckEvents;
+  incDlcCount = 0;
+  
+  checkHandle[0] = ChkStart_InconsistentRxDLC(Engine, "cb1");
+  TestAddCondition(checkHandle[0]);
+  testWaitForTimeout(2000);  
+  ChkControl_Stop(checkHandle[0]);
+  TestRemoveCondition(checkHandle[0]);
+}
+
+testcase TC3_ChangeSignalValues()
+{
+  message * msg;
+  
+  $Test_Signal_Byte_01_02 = 0x65;
+  $Test_Signal_Byte_03_05 = 0x65;
+  $Test_Signal_Byte_06_09 = 0x65;
+  $Test_Signal_Byte_10_14 = 0x65;
+  $Test_Signal_Byte_15_20 = 0x65;
+  $Test_Signal_Byte_21_27 = 0x65;
+  $Test_Signal_Byte_28_34 = 0x65;
+  $Test_Signal_Byte_35_41 = 0x65;
+  $Test_signal_Byte_42_48 = 0x65;
+  $Test_signal_Byte_49_55 = 0x65;
+  $Test_signal_Byte_56_62 = 0x65;
+  $Test_Signal_Byte_63    = 0x65;
+  
+  testWaitForMessage(Test_Message_CAN_FD,1000);
+  
+  testGetWaitEventMsgData(msg);
+  
+  if($Test_Signal_Byte_01_02 == 0x65 &&
+     $Test_Signal_Byte_03_05 == 0x65 &&
+     $Test_Signal_Byte_06_09 == 0x65 &&
+     $Test_Signal_Byte_10_14 == 0x65 &&
+     $Test_Signal_Byte_15_20 == 0x65 &&
+     $Test_Signal_Byte_21_27 == 0x65 &&
+     $Test_Signal_Byte_28_34 == 0x65 &&
+     $Test_Signal_Byte_35_41 == 0x65 &&
+     $Test_signal_Byte_42_48 == 0x65 &&
+     $Test_signal_Byte_49_55 == 0x65 &&
+     $Test_signal_Byte_56_62 == 0x65 &&
+     $Test_Signal_Byte_63    == 0x65)
+  {
+    testStepPass("ChangeSignalValues", "Values changed for all data bytes!");
+  }
+  
+  
+  
+  
+  
+}
+
+
+testcase TC4_SetMsgDLC()
+{
+  long waitTime;
+  waitTime = 100;
+  
+  testSetMsgDlc(EngineData, 9);
+  expectedDLCValue = 9;
+  testWaitForTimeout(waitTime);
+  testFlags = CHECK_SET_MSG_DLC;
+  testWaitForTimeout(waitTime);
+
+  testFlags = 0;
+  testSetMsgDlc(EngineData, 255);
+  expectedDLCValue = 15;
+  testWaitForTimeout(waitTime);
+  testFlags = CHECK_SET_MSG_DLC;
+  testWaitForTimeout(waitTime);
+  
+  testFlags = 0;
+  testSetMsgDlc(EngineData, 2);
+  expectedDLCValue = 2;
+  testWaitForTimeout(waitTime);
+  testFlags = CHECK_SET_MSG_DLC;
+  testWaitForTimeout(waitTime);
+  
+  testFlags = 0;
+  testResetMsgDlc(EngineData);
+  expectedDLCValue = 15;
+  testWaitForTimeout(waitTime);
+  testFlags = CHECK_SET_MSG_DLC;
+  testWaitForTimeout(waitTime);
+  
+  testFlags = 0;
+  
+}
+
+testcase TC5_CheckCycleTime()
+{
+  // checks the cycle time of the message
+  checkHandle[0] = ChkStart_MsgRelCycleTimeViolation (EngineData, 0.9, 1.1);
+  TestAddCondition(checkHandle[0]);
+  checkHandle[1] = ChkStart_MsgAbsCycleTimeViolation (EngineData, 90, 110);
+  TestAddCondition(checkHandle[1]);
+  checkHandle[2] = ChkStart_SignalCycleTimeViolation(EngineData::EngSpeed, 90, 110);
+  TestAddCondition(checkHandle[2]);
+  // sequence of different actions and waiting conditions
+  TestWaitForTimeout(5000);
+  TestRemoveCondition(  checkHandle[0] );
+  TestRemoveCondition(  checkHandle[1] );
+  TestRemoveCondition(  checkHandle[2] );
+}
+
+on message can1.EngineData
+{
+  switch(testFlags)
+  {
+    case CHECK_SET_MSG_DLC:
+      if(this.dlc != expectedDLCValue)
+      {
+        testStepFail("testSetMsgDlc", "DLC is %d expected DLC %d", this.dlc, expectedDLCValue);
+      }
+      else
+      {
+        testStepPass("testSetMsgDlc", "DLC is %d expected DLC %d", this.dlc, expectedDLCValue);
+      }
+      break;
+  }
+}
+
+on message can1.0x3ff
+{
+    if(this.dlc != expectedDLCValue)
+    {
+      testStepFail("testSetMsgDlc", "DLC is %d expected DLC %d", this.dlc, expectedDLCValue);
+    }
+    else
+    {
+      testStepPass("testSetMsgDlc", "DLC is %d expected DLC %d", this.dlc, expectedDLCValue);
+    }
+}

@@ -1,0 +1,379 @@
+/*@@includes:*/
+includes
+{
+  #include "FRFRMeasureDelay.cin"
+  #include "FRFRSynchronize.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  int cMaxStaticSlot[2] = { 60, 60 };
+
+  // The routing info is specified numerically!
+  // Thus, this CAPL program is NOT database independent!
+
+  // Some type defs and helping variables:
+
+  struct tFrameDef {
+    word    mSlotID;
+    byte    mCycleOffset;
+    byte    mCycleRepetition;
+    byte    mChannelMask;
+    int     mLength;    // [Byte]
+    dword   mFlags;
+    int     mECUNum;
+  };
+
+  const int cMaxECUs = 10;
+  int bECUIsRunning[cMaxECUs];
+
+  enum ECUs { BLU, BSC, Engine, GearBox, Dashboard, None };
+
+  // Following is the reception and forwarding table.
+  // Frames are forwarded in the same slot as they are received in!
+
+  const int cMaxRcvFrames = 4;
+  struct tFrameDef rcvTable[2][cMaxRcvFrames] =
+  {
+    // from channel 1 to channel 2:
+    {
+      { mSlotID = 13, mCycleOffset = 0, mCycleRepetition = 2, mChannelMask = 1, mLength = 16, mFlags = 0x10, mECUNum = Engine }, // ABSInfo
+      { mSlotID = 25, mCycleOffset = 0, mCycleRepetition = 2, mChannelMask = 1, mLength = 16, mFlags = 0x10, mECUNum = Engine }, // EngineData
+      { mSlotID = 26, mCycleOffset = 0, mCycleRepetition = 2, mChannelMask = 1, mLength = 16, mFlags = 0x10, mECUNum = Engine }, // EngineStatus
+      { mSlotID = 0,  mCycleOffset = 0, mCycleRepetition = 2, mChannelMask = 1, mLength = 16, mFlags = 0x10, mECUNum = None }
+    },
+    // from channel 2 to channel 1:
+    {
+      { mSlotID = 16, mCycleOffset = 0, mCycleRepetition = 2, mChannelMask = 1, mLength = 16, mFlags = 0x10, mECUNum = BSC }, // BreakControl
+      { mSlotID = 51, mCycleOffset = 0, mCycleRepetition = 2, mChannelMask = 1, mLength = 16, mFlags = 0x10, mECUNum = BSC }, // BackLightInfo
+      { mSlotID = 52, mCycleOffset = 0, mCycleRepetition = 2, mChannelMask = 1, mLength = 16, mFlags = 0x10, mECUNum = GearBox }, // GearBoxInfo
+      { mSlotID = 0,  mCycleOffset = 0, mCycleRepetition = 2, mChannelMask = 1, mLength = 16, mFlags = 0x10, mECUNum = None }
+    }
+  };
+
+  // Gateway memory buffer for reception and forwarding:
+  byte data[254];
+  FRFrame (1,0,1) dummy;
+
+  // Constants:
+  const dword cStopFlag = 0x80;
+
+}
+/*@@end*/
+
+/*@@frFrame:*:*/
+on FrFrame *
+{
+  int j;
+  
+  if (@sysvar::Gateway::DoRouting == 0)
+    return;
+
+  if (@sysvar::Gateway::DoStopAll != 0)
+    return;
+
+  // buffer the frames payload area:
+  for (j=0; j<this.FR_PayloadLength * 2; j++)
+  {
+    data[j] = this.byte(j);
+  }
+
+  // for the measurement of the forwarding delays:
+  logFrame(this.MsgChannel, this.FR_SlotID, this.FR_Cycle, this.FR_ChannelMask, this.Time_NS, data[15]);
+  data[15] = this.FR_Cycle;
+
+  // optionally manipulate the payload:
+  if (@sysvar::Gateway::DoManipulating != 0)
+    manipulate(this.MsgChannel, this.FR_SlotID, this.FR_Cycle, this.FR_ChannelMask);
+
+  // forward the frame:
+  route(this.MsgChannel, this.FR_SlotID, this.FR_Cycle, this.FR_ChannelMask);
+}
+/*@@end*/
+
+/*@@caplFunc:route(byte,word,byte,byte):*///function
+int route (byte srcChan, word slot, byte cycle, byte chanMask)
+{
+  int i;
+
+  srcChan -= 1;
+  if ((srcChan < 0) || (srcChan > 1))
+    return 0;
+
+  for (i=0; i<cMaxRcvFrames; i++)
+  {
+    if(    (slot == rcvTable[srcChan][i].mSlotID)
+        && (chanMask == rcvTable[srcChan][i].mChannelMask)
+        && ((cycle % rcvTable[srcChan][i].mCycleRepetition) == rcvTable[srcChan][i].mCycleOffset) )
+    {
+      sendFrame(srcChan, i);
+      return 1;
+    }
+  }
+  return 0;
+}
+/*@@end*/
+
+/*@@caplFunc:manipulate_ABSInfo(byte,word,byte,byte):*///function
+void manipulate_ABSInfo (byte srcChan, word slot, byte cycle, byte chanMask)
+{
+  int j;
+  FrFrame ABSInfo frame;
+
+  if(    (slot == frame.FR_SlotID)
+      && (chanMask == frame.FR_ChannelMask)
+      && ((cycle % frame.FR_CycleRepetition) == frame.FR_CycleOffset)
+      //&& (srcChan == frame.MsgChannel)
+    )
+  {
+    for (j=0; j<frame.FR_PayloadLength * 2; j++)
+    {
+      frame.byte(j) = data[j];
+    }
+
+    // do data manipulation:
+    if (@sysvar::Gateway::ExChange_CarSpeed != 0)
+      frame.CarSpeed = @sysvar::Gateway::Manual_CarSpeed;
+    // end of data manipulation
+
+    for (j=0; j<frame.FR_PayloadLength * 2; j++)
+    {
+      data[j] = frame.byte(j);
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:manipulate(byte,word,byte,byte):*///function
+void manipulate (byte srcChan, word slot, byte cycle, byte chanMask)
+{
+  manipulate_ABSInfo(srcChan, slot, cycle, chanMask);
+  manipulate_EngineData(srcChan, slot, cycle, chanMask);
+  manipulate_GearBoxInfo(srcChan, slot, cycle, chanMask);
+}
+/*@@end*/
+
+/*@@caplFunc:manipulate_EngineData(byte,word,byte,byte):*///function
+void manipulate_EngineData (byte srcChan, word slot, byte cycle, byte chanMask)
+{
+  int j;
+  FrFrame EngineData frame;
+
+  if(    (slot == frame.FR_SlotID)
+      && (chanMask == frame.FR_ChannelMask)
+      && ((cycle % frame.FR_CycleRepetition) == frame.FR_CycleOffset)
+      //&& (srcChan == frame.MsgChannel)
+    )
+  {
+    for (j=0; j<frame.FR_PayloadLength * 2; j++)
+    {
+      frame.byte(j) = data[j];
+    }
+
+    // do data manipulation:
+    if (@sysvar::Gateway::ExChange_EngSpeed != 0)
+      frame.EngSpeed = @sysvar::Gateway::Manual_EngSpeed;
+    // end of data manipulation
+
+    for (j=0; j<frame.FR_PayloadLength * 2; j++)
+    {
+      data[j] = frame.byte(j);
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:manipulate_GearBoxInfo(byte,word,byte,byte):*///function
+void manipulate_GearBoxInfo (byte srcChan, word slot, byte cycle, byte chanMask)
+{
+  int j;
+  FrFrame GearBoxInfo frame;
+
+  if(    (slot == frame.FR_SlotID)
+      && (chanMask == frame.FR_ChannelMask)
+      && ((cycle % frame.FR_CycleRepetition) == frame.FR_CycleOffset)
+      //&& (srcChan == frame.MsgChannel)
+    )
+  {
+    for (j=0; j<frame.FR_PayloadLength * 2; j++)
+    {
+      frame.byte(j) = data[j];
+    }
+
+    // do data manipulation:
+    if (@sysvar::Gateway::ExChange_Gear != 0)
+      frame.Gear = @sysvar::Gateway::Manual_Gear;
+    // end of data manipulation
+
+    for (j=0; j<frame.FR_PayloadLength * 2; j++)
+    {
+      data[j] = frame.byte(j);
+    }
+  }
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  int i;
+
+  InitFrameDelayMeasurement();
+  InitFRFRSynchronize();
+
+  @sysvar::Gateway::DoManipulating = 1;
+
+  for (i=0; i<cMaxECUs; i++) bECUIsRunning[i] = 1;
+}
+/*@@end*/
+
+/*@@preStart:PreStart:*/
+on preStart
+{
+  PreInitFRFRSynchronize();
+}
+/*@@end*/
+
+/*@@frStartCycle:*:*/
+on FRStartCycle *
+{
+  LogFRFRSyncStartOfCycle(this.MsgChannel, this.FR_Cycle, this.time_ns, this.FR_correctionFailedCounter);
+}
+/*@@end*/
+
+/*@@sysvarChange:Gateway::DoStopAll:*/
+on sysvar sysvar::Gateway::DoStopAll
+{
+  if (@this == 1) stopSending();
+}
+/*@@end*/
+
+/*@@caplFunc:stopSending():*///function
+void stopSending ()
+{
+  int i, j;
+
+  for (j=0; j<2; j++)
+  {
+    for (i=0; i<cMaxRcvFrames; i++)
+    {
+      stopFrame(j, i);
+    }  
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:stopFrame(int,int):*///function
+void stopFrame (int chanIdx, int frameIdx)
+{
+  int dstChanIdx;
+
+  if (rcvTable[chanIdx][frameIdx].mSlotID <= 0) return;
+
+  dstChanIdx = 1 - chanIdx;
+  dummy.FR_SlotID = rcvTable[chanIdx][frameIdx].mSlotID;
+  dummy.FR_CycleOffset = rcvTable[chanIdx][frameIdx].mCycleOffset;
+  dummy.FR_CycleRepetition = rcvTable[chanIdx][frameIdx].mCycleRepetition;
+  dummy.FR_ChannelMask = rcvTable[chanIdx][frameIdx].mChannelMask;
+  dummy.MsgChannel = dstChanIdx + 1;
+  dummy.FR_Flags = rcvTable[chanIdx][frameIdx].mFlags | cStopFlag;
+  dummy.FR_PayloadLength = rcvTable[chanIdx][frameIdx].mLength / 2;
+  if (rcvTable[chanIdx][frameIdx].mSlotID <= cMaxStaticSlot[dstChanIdx])
+  {
+    FrUpdateStatFrame(dummy);
+  }
+  else
+  {
+    FrOutputDynFrame(dummy);
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:Gateway::DoStopECUBSC:*/
+on sysvar sysvar::Gateway::DoStopECUBSC
+{
+  if (@this == 1) stopECU(BSC); else startECU(BSC); 
+}
+/*@@end*/
+
+/*@@sysvarChange:Gateway::DoStopECUEngine:*/
+on sysvar sysvar::Gateway::DoStopECUEngine
+{
+  if (@this == 1) stopECU(Engine); else startECU(Engine); 
+}
+/*@@end*/
+
+/*@@sysvarChange:Gateway::DoStopECUGearBox:*/
+on sysvar sysvar::Gateway::DoStopECUGearBox
+{
+  if (@this == 1) stopECU(GearBox); else startECU(GearBox); 
+}
+/*@@end*/
+
+/*@@caplFunc:stopECU(int):*///function
+void stopECU (int ecuNum)
+{
+  int i, j;
+
+  if ((ecuNum >= 0) && (ecuNum < cMaxECUs)) bECUIsRunning[ecuNum] = 0;
+
+  for (j=0; j<2; j++)
+  {
+    for (i=0; i<cMaxRcvFrames; i++)
+    {
+      if (rcvTable[j][i].mECUNum == ecuNum)
+        stopFrame(j, i);
+    }  
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:sendFrame(int,int):*///function
+void sendFrame (int chanIdx, int frameIdx)
+{
+  int j, ecuNum;
+  byte dstChan;
+
+  dstChan = (1 - chanIdx) + 1;
+
+  ecuNum = rcvTable[chanIdx][frameIdx].mECUNum;
+  if ((ecuNum >= 0) && (ecuNum < cMaxECUs))
+  {
+    if ( bECUIsRunning[ecuNum] == 0)
+      return;
+  }
+
+  if (rcvTable[chanIdx][frameIdx].mSlotID > 0)
+  {
+    dummy.FR_SlotID = rcvTable[chanIdx][frameIdx].mSlotID;
+    dummy.FR_CycleOffset = rcvTable[chanIdx][frameIdx].mCycleOffset;
+    dummy.FR_CycleRepetition = rcvTable[chanIdx][frameIdx].mCycleRepetition;
+    dummy.FR_ChannelMask = rcvTable[chanIdx][frameIdx].mChannelMask;
+    dummy.MsgChannel = dstChan;
+    dummy.FR_Flags = rcvTable[chanIdx][frameIdx].mFlags;
+    dummy.FR_PayloadLength = rcvTable[chanIdx][frameIdx].mLength / 2;
+    for (j=0; j<rcvTable[chanIdx][frameIdx].mLength; j++)
+    {
+      dummy.byte(j) = data[j];
+    }
+    if (rcvTable[chanIdx][frameIdx].mSlotID <= cMaxStaticSlot[dstChan-1])
+    {
+      FrUpdateStatFrame(dummy);
+    }
+    else
+    {
+      FrOutputDynFrame(dummy);
+    }
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:startECU(int):*///function
+void startECU (int ecuNum)
+{
+  if ((ecuNum >= 0) && (ecuNum < cMaxECUs)) bECUIsRunning[ecuNum] = 1;
+}
+/*@@end*/
+

@@ -1,0 +1,1777 @@
+/*@!Encoding:1252*/
+/*@!Encoding:1252*/
+includes
+{
+  #include "RT_checks.cin"
+}
+
+variables
+{
+}
+
+// ==============================================================================================================
+// functionality of the test A5 01 BAM Init
+// ==============================================================================================================
+// FuncPath's:
+// 1: No disturbance detected. (PASS)
+// 2: Requesting error. (timeout) (FAIL)
+// 3: Message buffer searching error. (FAIL)
+// 4: TP.CM_BAM not send to global address (FAIL)
+// 5: TP.CM_BAM total message size does not fit number of TP.DT packets (FAIL)
+// 6: TP.DT messages after wide event detected (FAIL)
+// 7: PGI inconsistency (FAIL)
+// 8: TP.CM_BAM total number of packages does not fit number of TP.DT packets (FAIL)
+void CTF_A05_01_BAM_Init(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  word bufIndicesTPCM[long];
+  word bufIndicesTPDT[long];
+  long bufIdxBAM;
+  long bufIdxTPDT;
+  char reportText[1024];
+  char errText[1024];
+  char errTextRequest[1024];
+  dword timeout;
+  int64 stepTime;
+  int64 tpStartTime;
+  int64 tpEndTime;
+  word totalBytes;
+  byte totalPackages;
+  word neededPackages;
+  word detectedPackages;
+  double tpcmMs;
+  byte prio;
+  dword pgn;
+  byte requestAnswered;
+  byte ok;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(7, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(7, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/2 request
+    // ====================
+    
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) globally...", src, src, pgn, pgn, dst, dst);
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+
+    // ok used as flag for the request state (1=ok, 0=timeout)
+    requestAnswered = 1;
+    
+    // request from tool (src) to DUT (dst) globally.
+    if ( CT_Request_And_Await_Response_Glob(pgR, pgis[k], errTextRequest, src, dst, timeout, prio, 1) != 0)
+    {
+      // requesting error (timeout).
+      // there are other errors to check for within buffer. e.g. if it was sent to specific address...
+      // so do not leave until some further tests were done.
+      requestAnswered = 0; // tp not detected... continue checking...
+    }
+    
+    // check against dlc within the response really has a dlc>8
+    if (pgR.dlc <= 8)
+    {
+      CT_STEP_END_ERROR_DLC_NOT_GREATER_8_NO_TP_POSSIBLE(7, pgR.dlc);
+      return; // leave on fail.
+    }
+    
+    // request done...
+    CT_STEP_END_PASS(0);
+    
+    CT_WAIT(gc_TIMEOUT_T3); // wait T3... seconds to check if the transport really is done.
+    
+    // ====================
+    // step 2/2 Check data...
+    // ====================
+    CT_STEP_BEGIN("Checking data...");
+    
+    // stop message buffering
+    MsgBuf_StopRecording();
+    
+    // Get all TP.CM_BAM for current pgn from DUT (dst)
+    if ( !CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndicesTPCM, stepTime, dst, gc_TPCM_CTRL_WORD_BAM, pgn))
+    {
+      // msg buf error only if the request was detected, but nothing found within message buffer.
+      if (requestAnswered)
+      {
+        // TP.CM_BAM not found.
+        CT_STEP_END_FAIL(3, "TP.CM_BAM not found within message buffer.");
+        return; // leave on fail.
+      }
+    };
+    
+    bufIdxBAM   = bufIndicesTPCM[0]; // the first TP.CM_BAM entry index...
+    tpcmMs      = CT_Ns2Sec(gMsgBuf[bufIdxBAM].time_ns);
+    tpStartTime = gMsgBuf[bufIdxBAM].time_ns;
+    tpEndTime   = pgR.time_ns;
+    
+    // check TP.CM_BAM sent to global address...
+    if (CT_GetDst(gMsgBuf[bufIdxBAM]) != gc_BC_ADDR)
+    {
+      CT_STEP_END_FAIL(4, "TP.CM_BAM not sent to global address.");
+      return; // leave on fail.
+    }
+    
+    if (requestAnswered)
+    {
+      // BAM total messages: byte 2 and 3 in payload.
+      // BAM number of packages: byte 4
+      totalBytes = CT_GetDataWord(1, gMsgBuf[bufIdxBAM]);
+      totalPackages = CT_GetTPCMRTSPkgCount(gMsgBuf[bufIdxBAM]);
+      neededPackages = (word)_ceil(totalBytes/7.0);
+      
+      // debug...
+      //write("tpcmMs=%.6f, totalBytes=%d, packages=%d, neededPackages=%d, tpStartTime=%.6f, tpEndTime=%.6f", tpcmMs, totalBytes, totalPackages, neededPackages, CT_Ns2Sec(tpStartTime), CT_Ns2Sec(tpEndTime));
+      
+      // now get the TP.DT messages after tpcm from DUT (dst)
+      if (!CT_Get_TPDTs_In_MsgBuf_Between(bufIndicesTPDT, tpStartTime, tpEndTime, dst))
+      {
+        // TP.DTs not found.
+        CT_STEP_END_FAIL(3, "TP.DTs for transport not found within message buffer.");
+        return; // leave on fail.
+      }
+      
+      detectedPackages = bufIndicesTPDT.size();
+      
+      if (detectedPackages > 0)
+      {
+        if ( neededPackages != detectedPackages )
+        {
+          snprintf(errText, elcount(errText), "TP.CM_BAM at t=%.6f: Total message size %d does not fit detected TP.DT count of %d. (%d packages needed)", tpcmMs, totalBytes, detectedPackages, neededPackages);
+          CT_STEP_END_FAIL(5, errText);
+          return; // leave on fail.
+        }
+        
+        // check that there are no tp.dt's between the wide event and the buffer end, or the next TPCM.
+        bufIdxTPDT = MsgBuf_FindByTimestamp(0, pgR.time_ns+1);
+        if ( bufIdxTPDT != IDX_NOT_FOUND )
+        {
+          word i;
+          for (i=bufIdxTPDT; i<MSGBUF_SIZE; i++)
+          {
+            if (CT_GetPGN( gMsgBuf[i] ) == gc_PGN_TPCM ) break; // there is a TPCM. leave...
+            if (MsgBuf_IsEmptyMsg(gMsgBuf[i])) break; // leave after end of message buffer.
+            
+            // if there is TP.DT, this indicates TP.DT's after the wide event...
+            if (
+                    ( CT_GetPGN(gMsgBuf[i]) == gc_PGN_TPDT ) 
+                &&  ( CT_GetSrc(gMsgBuf[i]) == dst)
+                &&  ( (CT_GetDst(gMsgBuf[i]) == src) || (CT_GetDst(gMsgBuf[i]) == gc_BC_ADDR) )
+              )
+            {
+              CT_STEP_END_FAIL(6, "TP.DT messages after wide event detected.");
+              return; // leave on fail.
+            }
+          }
+        };
+      }
+      
+    }
+    else
+    {
+      // if request was not ok (timeout), and no other error with higher prio left, leave now with timeout message.
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errTextRequest, timeout);
+      return;
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+    
+  }
+  
+}
+
+
+// ==============================================================================================================
+// functionality of the test A05_02_BAM_Data_Timing_First_DT
+// FuncPath's:
+// 1: No disturbance detected. (PASS)
+// 2: Requesting error. (timeout) (FAIL)
+// 3: Message buffer searching error. (FAIL)
+// 4: TP.CM_BAM not prior to TP.DT (FAIL)
+// 5: TP.DT_Timing error (FAIL)
+// 6: PGI inconsistency (FAIL)
+//
+void CTF_A05_02_BAM_Data_Timing_First_DT(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  char errTextRequest[1024];
+  dword timeout;
+  int64 stepTime, requestTime;
+  double dt;    // delta t
+  double tprev; // previous time as double
+  double tcur;  // current time as double.
+  byte prio;
+  dword pgn;
+  byte ok;
+  byte tdSeq;   // a td's sequence number
+  byte requestAnswered;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(6, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(6, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/2 request
+    // ====================
+    
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) globally...", src, src, pgn, pgn, dst, dst);
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+
+    // ok used as flag for the request state (1=ok, 0=timeout)
+    requestAnswered = 1;
+    if ( CT_Request_And_Await_Response_Glob(pgR, pgis[k], errTextRequest, src, dst, timeout, prio, 1) != 0)
+    {
+      // requesting error (timeout).
+      // there are other errors to check for within buffer. e.g. if it was sent to specific address...
+      // so do not leave until some further tests were done.
+      requestAnswered = 0; // tp not detected... continue checking...
+    }
+    requestTime = gPgLastRequest.time_ns;
+
+    // check against dlc within the response really has a dlc>8
+    if (pgR.dlc <= 8)
+    {
+      CT_STEP_END_ERROR_DLC_NOT_GREATER_8_NO_TP_POSSIBLE(6, pgR.dlc);
+      return; // leave on fail.
+    }
+
+    // request done...
+    CT_STEP_END_PASS(0);
+
+    CT_WAIT(gc_TIMEOUT_T3); // wait T3... seconds to check if the transport really is done.
+    
+    // ====================
+    // step 2/2 Check data...
+    // ====================
+    CT_STEP_BEGIN("Checking data...");
+    
+    // stop message buffering...
+    MsgBuf_StopRecording();
+   
+    // Get all TP.CM_BAM for current pgn from DUT (dst)
+    if ( !CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, requestTime, dst, gc_TPCM_CTRL_WORD_BAM, pgn))
+    {
+      if (requestAnswered)
+      {
+        CT_STEP_END_FAIL(3, "Searching in message buffer failure.");
+        return; // leave on fail.
+      }
+    }
+    
+    tprev = CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns);
+    //write("BAM_INIT-TIME: %f", tprev);
+    
+    // get all TP.DT indices of the message buffer between request time and response time if answered if not answered requestTime and time of now is used...
+    if (!CT_Get_TPDTs_In_MsgBuf_Between(bufIndices, requestTime, requestAnswered ? pgR.time_ns : timeNowInt64(), dst))
+    {
+      if (requestAnswered)
+      {
+        CT_STEP_END_FAIL(3, "TP.DT not found in message buffer.");
+        return; // leave on fail.
+      }
+    }
+    
+    // check that td's with seq number 1 (first ones) time is not < bam-init-time if the td's sequence number is 1...
+    ok = 1;
+    for (long bi: bufIndices)
+    {
+      // only the td with seq 1 is investigated in this testcase...
+      tdSeq = CT_GetDataByte(0, gMsgBuf[bufIndices[bi]]);
+
+      // only for the first td's with sequence number 1...
+      if (tdSeq == 1)
+      {
+        tcur  = CT_Ns2Sec(gMsgBuf[bufIndices[bi]].time_ns);
+        dt    = tcur - tprev;
+        // write("DT #%d, seq=%d: ta=%.6f, tb=%.6f, dt=%.6f", bi, tdSeq, ta, tb, dt);
+        
+        // is DT before the TP.CM_BAM...?
+        if (tcur < tprev) 
+        {
+          snprintf(errText, elcount(errText), "TP.CM_BAM at t=%.6f not prior to first TP.DT at t=%.6f.", tcur, tprev);
+          CT_STEP_END_FAIL(4, errText);
+          return; // in this case leave the test now.
+        }
+      
+        // is the first DT after BAM its time diff within allowed range?
+        if (tcur > tprev)
+        {
+          if (!CT_InRange(dt*1000, (double)gc_TP_BAM_MIN_DT, (double)gc_TIMEOUT_TR))
+          {
+            snprintf(errText, elcount(errText), "First TP.DT at t=%.6f: Difference to TP.CM_BAM at t=%.6f is %dms and that is out of range of [%dms, %dms].", tcur, tprev, (word)(dt*1000), gc_TP_BAM_MIN_DT, gc_TIMEOUT_TR);
+            CT_STEP_END_FAIL(5, errText);
+            return; // leave on fail.
+          }
+        }
+        
+        // skip further buffer entries.
+        break;
+      }
+    }
+    
+    // if request was not ok (timeout)...
+    if (!requestAnswered) 
+    {
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errTextRequest, timeout);
+      return;
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+    
+  }
+}
+
+
+// ==============================================================================================================
+// functionality of the test A5 03 BAM Data Timing Subsequent TPs
+// FuncPath's:
+// 1: No disturbance detected. (PASS)
+// 2: Requesting error. (timeout) (FAIL)
+// 3: Message buffer searching error. (FAIL)
+// 4: TP.DT_Timing error (FAIL)
+// 5: PGI inconsistency (FAIL)
+//
+void CTF_A05_03_BAM_Data_Timing_Subsequent_DTs(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  char errTextRequest[1024];
+  dword timeout;
+  int64 stepTime;
+  int64 tpStartTime;
+  double dt;    // delta t
+  double tprev; // previous time as double
+  double tcur;  // current time as double.
+  byte prio;
+  dword pgn;
+  byte ok;
+  byte tdSeq; // DT sequence number.
+  byte requestAnswered;
+  double a,b;
+
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/2 request
+    // ====================
+    
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) globally...", src, src, pgn, pgn, dst, dst);
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+
+    // ok used as flag for the request state (1=ok, 0=timeout)
+    requestAnswered = 1;
+    if ( CT_Request_And_Await_Response_Glob(pgR, pgis[k], errTextRequest, src, dst, timeout, prio, 1) != 0)
+    {
+      // requesting error (timeout).
+      // there are other errors to check for within buffer. e.g. if it was sent to specific address...
+      // so do not leave until some further tests were done.
+      requestAnswered = 0; // tp not detected... continue checking...
+    }
+    
+    // check against dlc within the response really has a dlc>8
+    if (pgR.dlc <= 8)
+    {
+      CT_STEP_END_ERROR_DLC_NOT_GREATER_8_NO_TP_POSSIBLE(5, pgR.dlc);
+      return; // leave on fail.
+    }
+    
+    // request done...
+    CT_STEP_END_PASS(0);
+
+    CT_WAIT(gc_TIMEOUT_T3); // wait T3... seconds to check if the transport really is done.
+    
+    // ====================
+    // step 2/2 Check data...
+    // ====================
+    CT_STEP_BEGIN("Checking data...");
+    
+    // stop message buffering...
+    MsgBuf_StopRecording();
+   
+    // Get all TP.CM_BAM for current pgn from DUT (dst)
+    if ( !CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dst, gc_TPCM_CTRL_WORD_BAM, pgn))
+    {
+      if (requestAnswered)
+      {
+        CT_STEP_END_FAIL(3, "Searching in message buffer failure.");
+        return; // leave on fail.
+      }
+    }
+    
+    // get all TP.DT indices of the message buffer between bam-init and response time
+    tpStartTime = gMsgBuf[bufIndices[0]].time_ns;
+    if (!CT_Get_TPDTs_In_MsgBuf_Between(bufIndices, tpStartTime, requestAnswered ? pgR.time_ns : timeNowInt64(), dst))
+    {
+      if (requestAnswered)
+      {
+        CT_STEP_END_FAIL(3, "Searching in message buffer failure.");
+        return; // leave on fail.
+      }
+    }
+    
+    // check td's times to preceiding td's
+    ok = 1;
+    for (long bi: bufIndices)
+    {
+      tdSeq = CT_GetDataByte(0, gMsgBuf[bufIndices[bi]]);
+      tcur  = CT_Ns2Sec(gMsgBuf[bufIndices[bi]].time_ns);
+
+      // for all subsequential tds with seq-nr >1...
+      if (tdSeq >1 )
+      {
+        // is the DT to previous package in allowed range?
+        dt = tcur - tprev;
+        a = (double)gc_TP_BAM_MIN_DT - 0.5;
+        b = (double)gc_TIMEOUT_TR + 0.5;
+        // write("a=%.1f, b=%.1f", a, b);
+        if (!CT_InRange((double)dt*1000, a, b))
+        {
+          snprintf(errText, elcount(errText), "TP.DT at t=%.6f: Difference to previous TP.DT at t=%.6f is %dms and that is out of range of [%fms, %fms].", tcur, tprev, (word)(dt*1000), a, b);
+          CT_STEP_END_FAIL(4, errText);
+          return; // leave on fail.
+        }
+      }
+      
+      // update time of prevous package.
+      tprev = tcur;
+    }
+
+    // if request was not ok (timeout)...
+    if (!requestAnswered) 
+    {
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errTextRequest, timeout);
+      return;
+    }
+    
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+    
+  }
+}
+
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A5 05 04 BAM No Abort
+// FuncPath's:
+// 1: No disturbance detected. (PASS)
+// 2: Requesting error. (timeout) (FAIL)
+// 3: DUT transmits ABORT for its own BAM transport and interrupts it. (FAIL)
+// 4: DUT reacts on received ABORT during BAM transport from outside and stops sending.(FAIL)
+// 5: PGI inconsistency (FAIL)
+//
+void CTF_A05_04_BAM_No_Abort(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  char errTextRequest[1024];
+  dword timeout;
+  int64 stepTime;
+  byte prio;
+  dword pgn;
+  byte ok;
+  byte requestAnswered;
+  byte receivedAbrt;
+  byte ia,ib; // 2 indices.
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/2 request
+    // ====================
+    
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) globally...", src, src, pgn, pgn, dst, dst);
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+
+    // react with abort on each tp dt...
+    gReactor_ReactWithAbortOnDT_Active = 1; // auto resets after testcase.
+    
+    // ok used as flag for the request state (1=ok, 0=timeout)
+    requestAnswered = 1;
+    if ( CT_Request_And_Await_Response_Glob(pgR, pgis[k], errTextRequest, src, dst, timeout, prio, 1) != 0)
+    {
+      // requesting error (timeout).
+      requestAnswered = 0;
+      // do not leave here, because when there is no wide event (due to an abort), the abort cant be detected bellow.
+    }
+    
+    // check against dlc within the response really has a dlc>8
+    if (pgR.dlc <= 8)
+    {
+      CT_STEP_END_ERROR_DLC_NOT_GREATER_8_NO_TP_POSSIBLE(5, pgR.dlc);
+      return; // leave on fail.
+    }
+    
+    // request done...
+    CT_STEP_END_PASS(0);
+
+    CT_WAIT(gc_TIMEOUT_T3); // wait T3... seconds to check if the transport really is done.
+    
+    // ====================
+    // step 2/2 Check data...
+    // ====================
+    CT_STEP_BEGIN("Checking data...");
+    
+    // stop message buffering...
+    MsgBuf_StopRecording();
+   
+    // -----------------------------
+    // CHECK DUT TRANSMITS ABORTS
+    // -----------------------------
+    // check that DUT (dst) did not sent any TP.CM_ABORT's to the sender (src) or global address...
+    // for the transport for current pgn
+    
+    ok =  (!CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dst, src, gc_TPCM_CTRL_WORD_ABORT, pgn)) // specific abort for transported pgn
+    &&    (!CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(bufIndices, stepTime, dst, gc_BC_ADDR, gc_TPCM_CTRL_WORD_ABORT))  // any global abort during BAM
+    ;
+    if (!ok)
+    {
+      // there are abort tpcm's from dut... ( take the first buffer index )
+      snprintf(errText, elcount(errText), "DUT transmits ABORT for its own BAM transport at t=%.6f and interrupts it.", CT_Ns2Sec(gMsgBuf[bufIndices[0]].time_ns));
+      CT_STEP_END_FAIL(3, errText);
+      return; // leave on fail.
+    }
+    
+    // -----------------------------
+    // CHECK DUT RECEIVES ABORTS
+    // -----------------------------
+    // check that DUT (dst) ignores any TP.CM_ABORTS from others (e.g. TOOL (src), or global address)
+    // for the transport for current pgn
+    ok =  (!CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(bufIndices, stepTime, src, dst, gc_TPCM_CTRL_WORD_ABORT))             // any specific abort
+    &&    (!CT_Get_TPCMs_In_MsgBuf_By_CtrlByte(bufIndices, stepTime, src, gc_BC_ADDR, gc_TPCM_CTRL_WORD_ABORT)) // any global abrt for any pgn
+    ;
+    receivedAbrt = 0;
+    if (!ok)
+    {
+      float abrtTimeMs;
+      word lastIdx;
+      int i;
+
+      lastIdx = bufIndices.size()-1;
+      for (i=lastIdx; i>=0; i--)
+      {
+        qword bufTime;
+        bufTime = gMsgBuf[bufIndices[i]].time_ns;
+        abrtTimeMs = CT_Ns2Sec(bufTime);
+        if (bufTime <= pgR.time_ns) break; // abort within the wide-event
+      }
+      
+      // there are abort tpcm's from dut...
+      receivedAbrt = 1;
+      // if request was not ok, and no fail up to here, leave test with requesting timeout error.
+      if (!requestAnswered)
+      {
+        snprintf(errText, elcount(errText), "DUT reacts on received ABORT at t=%.6f during BAM transport from outside and stops sending.", abrtTimeMs);
+        CT_STEP_END_FAIL(4, errText);
+        return; // leave on fail.
+      }
+      
+      // CHECK DUT RETRANSMITS DUE TO ABORT. Get all the BAM-headers... there has to be only ONE else it's a retransmission.
+      if (CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dst, gc_BC_ADDR, gc_TPCM_CTRL_WORD_BAM, pgn))
+      {
+        if (bufIndices.size()>1)
+        {
+          snprintf(errText, elcount(errText), "DUT reacts on received ABORT at t=%.6f during BAM transport from outside by restarting BAM at t=%.6f.", abrtTimeMs, CT_Ns2Sec(gMsgBuf[bufIndices[1]].time_ns));
+          CT_STEP_END_FAIL(4, errText);
+          return; // leave on fail.
+        }
+      }
+    }
+
+    if (!requestAnswered)
+    {
+      // not due a received abrt, really a timeout...
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errTextRequest, timeout);
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+    
+  }
+}
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A5 05 05 BAM Data Content
+// FuncPath's:
+// 1: No disturbance detected. (PASS)
+// 2: Requesting error. (timeout) (FAIL)
+// 3: Message buffer searching error. (FAIL)
+// 4: Invalid sequence number (0) in TP.DT (FAIL)
+// 5: TP.DT not sent to global address (FAIL)
+// 6: TP.DT incorrect content (FAIL)
+// 7: PGI inconsistency (FAIL)
+// 8: Fixed PGN inconsistency. The fixed PGN has to be >0 with DLC>8.(INCONCLUSIVE)
+void CTF_A05_05_BAM_Data_Content(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  message* m;
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  char errTextRequest[1024];
+  dword timeout;
+  int64 tpStartTime;
+  int64 stepTime;
+  byte prio;
+  byte target;
+  byte nrOfSteps;
+  dword pgn;
+  double ts;
+  dword fixedPgn;
+  byte fixedPgnData[long];
+  byte requestAnswered;
+  struct gPGAttrs pgi;
+  struct gPGAttrs pgiFixed;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  //if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(7, pgis)) return;
+  
+  // requestable non cyclic dlc>8
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(7, pgis[k], "requestable non cyclic PG with DLC>8");
+      return; // leave on pgi inconsistency (if there are pgi's given)
+    }
+  }
+
+  CT_GetPGI_PGN_FIXED(pgiFixed, fixedPgnData);
+  if ( (pgiFixed.PGN == 0) || (fixedPgnData.size()<=8))
+  {
+    CT_STEP_END_INCONCLUSIVE(8, "Fixed PGN inconsistency. The fixed PGN has to be >0x0 with DLC>8. Data content can't be checked without fixed PGN configured.");
+    return; // leave on fail. At least a proper fixed-pgn is needed.
+  }
+  
+  nrOfSteps = (pgis.size() ? 3 : 1);
+  
+  if (pgis.size()) CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/3 request
+    // ====================
+    
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) globally...", src, src, pgn, pgn, dst, dst);
+    stepTime = CT_STEP_BEGIN(-nrOfSteps, reportText);
+
+    // ok used as flag for the request state (1=ok, 0=timeout)
+    requestAnswered = 1;
+    if ( CT_Request_And_Await_Response_Glob(pgR, pgis[k], errTextRequest, src, dst, timeout, prio, 1) != 0)
+    {
+      // requesting error (timeout).
+      // do not leave to detect invalid tp sequence number.
+      requestAnswered = 0;
+    }
+    
+    // check against dlc within the response really has a dlc>8
+    if (pgR.dlc <= 8)
+    {
+      CT_STEP_END_ERROR_DLC_NOT_GREATER_8_NO_TP_POSSIBLE(7, pgR.dlc);
+      return; // leave on fail.
+    }
+    
+    // request done...
+    CT_STEP_END_PASS(0);
+
+    CT_WAIT(gc_TIMEOUT_T3); // wait T3... seconds to check if the transport really is done.
+    
+    
+    // ====================
+    // step 2/3 Check data...
+    // ====================
+    CT_STEP_BEGIN("Checking data...");
+    
+    // stop message buffering...
+    MsgBuf_StopRecording();
+   
+    // Get all TP.CM_BAM for current pgn from DUT (dst)
+    if ( !CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dst, gc_TPCM_CTRL_WORD_BAM, pgn))
+    {
+      if (requestAnswered)
+      {
+        CT_STEP_END_FAIL(3, "Searching for TP.CM_BAM in message buffer failure.");
+        return; // leave on fail.
+      }
+    }
+    
+    // get all TP.DT indices of the message buffer between bam-init and response time
+    tpStartTime = gMsgBuf[bufIndices[0]].time_ns;
+    if (!CT_Get_TPDTs_In_MsgBuf_Between(bufIndices, tpStartTime, requestAnswered ? pgR.time_ns : timeNowInt64(), dst))
+    {
+      if (requestAnswered)
+      {
+        CT_STEP_END_FAIL(3, "Searching for TP.DT in message buffer failure.");
+        return; // leave on fail.
+      }
+    }
+    
+    // check the DT's ...
+    for (long bi: bufIndices)
+    {
+      ts = CT_Ns2Sec(gMsgBuf[bufIndices[bi]].time_ns);
+      
+      // valid sequence number ? (1-255) -> so 0 is not allowed.
+      if (CT_GetDataByte(0, gMsgBuf[bufIndices[bi]]) == 0)
+      {
+        snprintf(errText, elcount(errText), "Invalid sequence number 0 in TP.DT at t=%.6f. (Allowed 1-255)", ts);
+        CT_STEP_END_FAIL(4, errText);
+        return; // leave on fail.
+      }
+      
+      // check for global addressing of the TP.DT...
+      target = CT_GetDst(gMsgBuf[bufIndices[bi]]);
+      if (target != gc_BC_ADDR)
+      {
+        snprintf(errText, elcount(errText), "TP.DT at t=%.6f not sent to 0x%.02X instead of global address 0x%.02X", ts, target, gc_BC_ADDR);
+        CT_STEP_END_FAIL(5, errText);
+        return; // leave on fail.
+      }
+      
+      // check for proper content of the DT...
+      // this is currently not possible, so the path 6 can not be reached up to now.
+      // it's done using the FIXED PGN bellow...
+    }
+
+    // handle timeout on request error...
+    if (!requestAnswered)
+    {
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errTextRequest, timeout);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+    
+  } // CT_LOOP (normal pgis) END.
+  
+  // ====================
+  // step 3/3 Check data...
+  // step 1/1 (if there are no pgis given - only fixed pgn is used as a single step)
+  // ====================
+  // check the td content by a bam from the DUT.
+  // up to now this is not possible, due there is no answer we know it's content a priori.
+  // for a specific dut this can be implemented here...
+  snprintf(reportText, elcount(reportText), "Checking TP.DT content, using FIXED PGN %d (0x%.05X) ....", pgiFixed.PGN, pgiFixed.PGN);
+  CT_STEP_BEGIN(nrOfSteps, reportText);
+  {
+    word i;
+    
+    // reuse of previously filled pgR. Set DLC back to max, else data will be cutted within next pg-get-data (internally)
+    pgR.dlc=gc_J1939_PG_DLC_MAX;
+    if (CT_Request_And_Await_Response_Glob(pgR, pgiFixed, errText, src, dst, timeout, prio, 1) == 0)
+    {
+      MsgBuf_StopRecording();
+      // ok responds to FIXED PGN...
+      for (i=0; i<_max(pgR.dlc,fixedPgnData.size()); i++)
+      {
+        // write("pgR byte (i=%d) = %x, fixedPgnData=%x", i, pgR.byte(i), fixedPgnData[i]);
+        if (pgR.byte(i) != fixedPgnData[i])
+        {
+          snprintf(errText, elcount(errText), "TP.DT incorrect content detected at t=%.6f. (Got: 0x%.02X, Expected: 0x%.02X)", ts, pgR.byte(i), fixedPgnData[i]);
+          CT_STEP_END_FAIL(6, errText);
+          return; // leave on fail.
+        }
+      }
+    }
+    else
+    {
+      snprintf(reportText, elcount(reportText), "TP.DT data content check not possible.");
+      CT_STEP_END_FAIL(2, reportText);
+      CT_STEP_END_FAIL(2, errText);
+      return; // leave on fail.
+    }
+  }
+  CT_STEP_END_PASS(1);
+}
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A5 05 06 BAM Data Sequence
+// FuncPath's:
+// 1: No disturbance detected. (PASS)
+// 2: Requesting error. (timeout) (FAIL)
+// 3: Message buffer searching error. (FAIL)
+// 4: TP.DT sequence inconsistency. (FAIL)
+// 5: PGI inconsistency (FAIL)
+//
+void CTF_A05_06_BAM_Data_Sequence(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  char errTextRequest[1024];
+  dword timeout;
+  int64 tpStartTime;
+  int64 stepTime;
+  double ts;
+  byte requestAnswered;
+  byte prio;
+  byte nr;
+  byte i;
+  dword pgn;
+  byte ok;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/2 request
+    // ====================
+    
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) globally...", src, src, pgn, pgn, dst, dst);
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+
+    // ok used as flag for the request state (1=ok, 0=timeout)
+    requestAnswered = 1;
+    if ( CT_Request_And_Await_Response_Glob(pgR, pgis[k], errTextRequest, src, dst, timeout, prio, 1) != 0)
+    {
+      // requesting error (timeout).
+      requestAnswered=0;
+      // do not leave, due sequence inconsistency leads to timeout here.
+    }
+    
+    // check against dlc within the response really has a dlc>8
+    if (pgR.dlc <= 8)
+    {
+      CT_STEP_END_ERROR_DLC_NOT_GREATER_8_NO_TP_POSSIBLE(5, pgR.dlc);
+      return; // leave on fail.
+    }
+    
+    // request done...
+    CT_STEP_END_PASS(0);
+
+    CT_WAIT(gc_TIMEOUT_T3); // wait T3... seconds to check if the transport really is done.
+    
+    // ====================
+    // step 2/2 Check data...
+    // ====================
+    CT_STEP_BEGIN("Checking data...");
+    
+    // stop message buffering...
+    MsgBuf_StopRecording();
+    
+    // Get all TP.CM_BAM for current pgn from DUT (dst)
+    if ( !CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dst, gc_TPCM_CTRL_WORD_BAM, pgn))
+    {
+      if (requestAnswered)
+      {
+        CT_STEP_END_FAIL(3, "Searching TPCM in message buffer failure.");
+        return; // leave on fail.
+      }
+    }
+    
+    //for(long f:bufIndices) write("f=%d, bufIndices[f]=%d, time=%.6f", f, bufIndices[f], CT_Ns2Sec( gMsgBuf[bufIndices[0]].time_ns ));
+    
+    // get all TP.DT indices of the message buffer between bam-init response time.
+    tpStartTime = gMsgBuf[bufIndices[0]].time_ns;
+    //write("get td's between %d and %d...", tpStartTime, pgR.time_ns);
+    
+    if (!CT_Get_TPDTs_In_MsgBuf_Between(bufIndices, tpStartTime, requestAnswered ? pgR.time_ns : timeNowInt64(), dst))
+    {
+      if (requestAnswered)
+      {
+        CT_STEP_END_FAIL(3, "Searching TPDT in message buffer failure.");
+        return; // leave on fail.
+      }
+    }
+    
+    // check the DT's ...
+    i = 1;
+    for (long bi: bufIndices)
+    {
+      ts = CT_Ns2Sec(gMsgBuf[bufIndices[bi]].time_ns);
+      
+      // check for upcounting sequence numbers starting from 1...
+      nr = CT_GetDataByte(0, gMsgBuf[bufIndices[bi]]);
+      //write("=> DT @%.6f chk nr=%d <-> i=%d", ts, nr, i);
+      if (nr != i)
+      {
+        snprintf(errText, elcount(errText), "TP.DT sequence inconsistency detected at t=%.6f. (got: 0x%.02X, expected 0x%.02X)", ts, nr, i);
+        CT_STEP_END_FAIL(4, errText);
+        return; // leave on fail.
+      }
+      i++;
+    }
+    
+    // on request error: request timeout if no error was detected up to here.
+    if (!requestAnswered)
+    {
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errTextRequest, timeout);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+  }
+  
+}
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A5 05 07 BAM Data DLC
+// FuncPath's:
+// 1: No disturbance detected. (PASS)
+// 2: Requesting error. (timeout) (FAIL)
+// 3: Message buffer searching error. (FAIL)
+// 4: TP.DT wrong DLC (FAIL)
+// 5: PGI inconsistency (FAIL)
+//
+void CTF_A05_07_BAM_Data_DLC(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  message* m;
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  char errTextRequest[1024];
+  dword timeout;
+  double ts;
+  int64 stepTime;
+  int64 tpStartTime;
+  byte prio;
+  byte dlc;
+  dword pgn;
+  byte ok;
+  byte requestAnswered;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/2 request
+    // ====================
+    
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) globally...", src, src, pgn, pgn, dst, dst);
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+
+    // ok used as flag for the request state (1=ok, 0=timeout)
+    requestAnswered = 1;
+    if ( CT_Request_And_Await_Response_Glob(pgR, pgis[k], errTextRequest, src, dst, timeout, prio, 1) != 0)
+    {
+      // requesting error (timeout).
+      requestAnswered = 0;
+      // do not leave to be able to inspect errors further (most lead to timeout)
+    }
+    
+    // check against dlc within the response really has a dlc>8
+    if (pgR.dlc <= 8)
+    {
+      CT_STEP_END_ERROR_DLC_NOT_GREATER_8_NO_TP_POSSIBLE(5, pgR.dlc);
+      return; // leave on fail.
+    }
+    
+    // request done...
+    CT_STEP_END_PASS(0);
+
+    CT_WAIT(gc_TIMEOUT_T3); // wait T3... seconds to check if the transport really is done.
+    
+    // ====================
+    // step 2/2 Check data...
+    // ====================
+    CT_STEP_BEGIN("Checking data...");
+    
+    // stop message buffering...
+    MsgBuf_StopRecording();
+    
+    // Get all TP.CM_BAM for current pgn from DUT (dst)
+    if ( !CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dst, gc_TPCM_CTRL_WORD_BAM, pgn))
+    {
+      if (requestAnswered)
+      {
+        snprintf(errText, elcount(errText), "Searching TPCM's in message buffer failure. (started at t=%.6f)", stepTime);
+        CT_STEP_END_FAIL(3, errText);
+        return; // leave on fail.
+      }
+    }
+    
+    // get all TP.DT indices of the message buffer between bam-init and response time
+    tpStartTime = gMsgBuf[bufIndices[0]].time_ns;
+    if (!CT_Get_TPDTs_In_MsgBuf_Between(bufIndices, tpStartTime, requestAnswered ? pgR.time_ns : timeNowInt64(), dst))
+    {
+      if (requestAnswered)
+      {
+        snprintf(errText, elcount(errText), "Searching TP.DT's in message buffer failure. (started at t=%.6f)", tpStartTime);
+        CT_STEP_END_FAIL(3, errText);
+        return; // leave on fail.
+      }
+    }
+    
+    // check the DT's for their dlc......
+    for (long bi: bufIndices)
+    {
+      ts = CT_Ns2Sec(gMsgBuf[bufIndices[bi]].time_ns);
+      dlc = gMsgBuf[bufIndices[bi]].dlc;
+      // check for DLC...
+      if (dlc != 8)
+      {
+        snprintf(errText, elcount(errText), "TP.DT DLC error. at t=%.6f. (got: 0x%.02X, expected 0x%.02X)", ts, dlc, 8);
+        CT_STEP_END_FAIL(4, errText);
+        return; // leave on fail.
+      }
+    }
+    
+    // check request timeout error.
+    if (!requestAnswered)
+    {
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errTextRequest, timeout);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+    
+  }
+}
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A5 05 08 BAM Data Padding
+// FuncPath's:
+// 1: No disturbance detected. (PASS)
+// 2: Requesting error. (timeout) (FAIL)
+// 3: Message buffer searching error. (FAIL)
+// 4: TP.DT padding byte or DLC error. (FAIL)
+// 5: PGI inconsistency (FAIL)
+//
+void CTF_A05_08_BAM_Data_Padding(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  char errTextRequest[1024];
+  dword timeout;
+  double ts;
+  int64 stepTime;
+  int64 tpStartTime;
+  byte prio;
+  byte dlc;
+  dword pgn;
+  byte ok;
+  byte requestAnswered;
+  byte i;
+  long bufIdx;
+  word totalBytes;
+  byte padbytecount;
+  long li; // last buf index
+  byte doffs; // data offset ( data byte index )
+  byte di; // data byte i
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/2 request
+    // ====================
+    
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) globally...", src, src, pgn, pgn, dst, dst);
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+
+    // ok used as flag for the request state (1=ok, 0=timeout)
+    requestAnswered = 1;
+    if ( CT_Request_And_Await_Response_Glob(pgR, pgis[k], errTextRequest, src, dst, timeout, prio, 1) != 0)
+    {
+      // requesting error (timeout).
+      requestAnswered = 0;
+      // do not leave to be able to inspect errors further (most lead to timeout)
+    }
+    
+    // check against dlc within the response really has a dlc>8
+    if (pgR.dlc <= 8)
+    {
+      CT_STEP_END_ERROR_DLC_NOT_GREATER_8_NO_TP_POSSIBLE(5, pgR.dlc);
+      return; // leave on fail.
+    }
+    
+    // request done...
+    CT_STEP_END_PASS(0);
+
+    CT_WAIT(gc_TIMEOUT_T3); // wait T3... seconds to check if the transport really is done.
+    
+    // ====================
+    // step 2/2 Check data...
+    // ====================
+    CT_STEP_BEGIN("Checking data...");
+    
+    // stop message buffering...
+    MsgBuf_StopRecording();
+    
+    // Get all TP.CM_BAM for current pgn from DUT (dst)
+    if ( !CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dst, gc_TPCM_CTRL_WORD_BAM, pgn))
+    {
+      if (requestAnswered)
+      {
+        snprintf(errText, elcount(errText), "Searching TPCM's in message buffer failure. (started at t=%.6f)", stepTime);
+        CT_STEP_END_FAIL(3, errText);
+        return; // leave on fail.
+      }
+    }
+    
+    bufIdx = bufIndices[0];
+    totalBytes = gMsgBuf[bufIdx].data[2] << 8 | gMsgBuf[bufIdx].data[1];
+    
+    // get all TP.DT indices of the message buffer between bam-init and response time
+    tpStartTime = gMsgBuf[bufIndices[0]].time_ns;
+    if (!CT_Get_TPDTs_In_MsgBuf_Between(bufIndices, tpStartTime, requestAnswered ? pgR.time_ns : timeNowInt64(), dst))
+    {
+      if (requestAnswered)
+      {
+        snprintf(errText, elcount(errText), "Searching TP.DT's in message buffer failure. (started at t=%.6f)", tpStartTime);
+        CT_STEP_END_FAIL(3, errText);
+        return; // leave on fail.
+      }
+    }
+    
+    // check the DT's for their dlc......
+    li = bufIndices.size()-1LL;
+    padbytecount = (7-(totalBytes % 7))%7;
+    if (padbytecount>0)
+    {
+      doffs = padbytecount-2;
+      //write("totalBytes=%d, padbytecount=%d, doffs=%d", totalBytes, padbytecount, doffs);
+      for (long bi: bufIndices)
+      {
+        ts = CT_Ns2Sec(gMsgBuf[bufIndices[bi]].time_ns);
+        dlc = gMsgBuf[bufIndices[bi]].dlc;
+        // check for DLC...
+        if (dlc != 8)
+        {
+          snprintf(errText, elcount(errText), "TP.DT DLC error. at t=%.6f. (got: 0x%.02X, expected 0x%.02X)", ts, dlc, 8);
+          CT_STEP_END_FAIL(4, errText);
+          return; // leave on fail.
+        }
+        // ... and for the last found DT (nevertheless if it's the real last DT, but the last that was found in the buffer's block)...
+        if (bi==li)
+        {
+          // check the padding bytes to be 0xFF...
+          for (i=doffs; i<8; i++)
+          {
+            di = gMsgBuf[bufIndices[li]].data[i]; 
+            //write("i=%d, di=%d", i, di);
+            if (di != 0xFF)
+            {
+              snprintf(errText, elcount(errText), "TP.DT padding byte %d error. at t=%.6f. (got: 0x%.02X, expected 0x%.02X)", i, ts, di, 0xFF);
+              CT_STEP_END_FAIL(4, errText);
+              return; // leave on fail.
+            }
+          }
+        }      
+      }
+    }
+    
+    // check request timeout error.
+    if (!requestAnswered)
+    {
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errTextRequest, timeout);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+  }
+}
+
+
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A5 05 09 BAM Data Prio
+// FuncPath's:
+// 1: No disturbance detected. (PASS)
+// 2: Requesting error. (timeout) (FAIL)
+// 3: Message buffer searching error. (FAIL)
+// 4: TP.DT prio is not 7. (FAIL)
+// 5: PGI inconsistency (FAIL)
+//
+void CTF_A05_09_BAM_Data_Prio(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR = {dlc=gc_J1939_PG_DLC_MAX};
+  word bufIndices[long];
+  char reportText[1024];
+  char errText[1024];
+  char errTextRequest[1024];
+  dword timeout;
+  int64 tpStartTime;
+  int64 stepTime;
+  double ts;
+  byte requestAnswered;
+  byte prio;
+  dword pgn;
+  byte ok;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(5, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(5, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    // ====================
+    // step 1/2 request
+    // ====================
+    
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) from DUT %d (0x%.02X) globally...", src, src, pgn, pgn, dst, dst);
+    stepTime = CT_STEP_BEGIN(-2, reportText);
+
+    // ok used as flag for the request state (1=ok, 0=timeout)
+    requestAnswered = 1;
+    if ( CT_Request_And_Await_Response_Glob(pgR, pgis[k], errTextRequest, src, dst, timeout, prio, 1) != 0)
+    {
+      // requesting error (timeout).
+      requestAnswered=0;
+      // do not leave, due sequence inconsistency leads to timeout here.
+    }
+    
+    // check against dlc within the response really has a dlc>8
+    if (pgR.dlc <= 8)
+    {
+      CT_STEP_END_ERROR_DLC_NOT_GREATER_8_NO_TP_POSSIBLE(5, pgR.dlc);
+      return; // leave on fail.
+    }
+    
+    // request done...
+    CT_STEP_END_PASS(0);
+
+    CT_WAIT(gc_TIMEOUT_T3); // wait T3... seconds to check if the transport really is done.
+    
+    // ====================
+    // step 2/2 Check data...
+    // ====================
+    CT_STEP_BEGIN("Checking data...");
+    
+    // stop message buffering...
+    MsgBuf_StopRecording();
+    
+    // Get all TP.CM_BAM for current pgn from DUT (dst)
+    if ( !CT_Get_TPCMs_In_MsgBuf_By_CtrlByte_And_Pgn(bufIndices, stepTime, dst, gc_TPCM_CTRL_WORD_BAM, pgn))
+    {
+      if (requestAnswered)
+      {
+        CT_STEP_END_FAIL(3, "Searching TPCM in message buffer failure.");
+        return; // leave on fail.
+      }
+    }
+    
+    //for(long f:bufIndices) write("f=%d, bufIndices[f]=%d, time=%.6f", f, bufIndices[f], CT_Ns2Sec( gMsgBuf[bufIndices[0]].time_ns ));
+    
+    // get all TP.DT indices of the message buffer between bam-init response time.
+    tpStartTime = gMsgBuf[bufIndices[0]].time_ns;
+    //write("get td's between %d and %d...", tpStartTime, pgR.time_ns);
+    
+    if (!CT_Get_TPDTs_In_MsgBuf_Between(bufIndices, tpStartTime, requestAnswered ? pgR.time_ns : timeNowInt64(), dst))
+    {
+      if (requestAnswered)
+      {
+        CT_STEP_END_FAIL(3, "Searching TPDT in message buffer failure.");
+        return; // leave on fail.
+      }
+    }
+    
+    // check the DT's ...
+    for (long bi: bufIndices)
+    {
+      ts = CT_Ns2Sec(gMsgBuf[bufIndices[bi]].time_ns);
+      prio = CT_GetPrio(gMsgBuf[bufIndices[bi]]);
+      if ( prio != gc_PRIO_TP_DATA)
+      {
+        snprintf(errText, elcount(errText), "TP.DT prio inconsistency detected at t=%.6f. (got: %d, expected: %d)", ts, prio, gc_PRIO_TP_DATA);
+        CT_STEP_END_FAIL(4, errText);
+        return; // leave on fail.
+      }
+    }
+    
+    // on request error: request timeout if no error was detected up to here.
+    if (!requestAnswered)
+    {
+      CT_STEP_END_Failed_To_Detect_Requested_PGN(2, errTextRequest, timeout);
+      return; // leave on fail.
+    }
+    
+    CT_STEP_END_PASS(1);
+    CT_WAIT(350); // wait 350 ms after doing request to not send requests too quick...
+  }
+  
+}
+
+
+
+
+
+// ==============================================================================================================
+// functionality of the test A5 05 10 BAM Singularity
+// FuncPath's:
+// 1: Expected result. (PASS)
+// 2: Message buffer searching error. (FAIL)
+// 3: DUT started BAM before prevous BAM finished (FAIL)
+// 4: PGI inconsistency (FAIL)
+// 5: TPCM.BAM timeout for request A (FAIL)
+// 6: BAM timeout for request A (FAIL)
+// 7: BAM timeout for request B (FAIL)
+void CTF_A05_10_BAM_Singularity(byte dst, struct gPGAttrs pgis[long])
+{
+  word bufIndices[long];
+  int64 BAMInitTime[long];
+  byte BAMPgkCount[long];
+  char reportText[1024];
+  char errText[1024];
+  int64 reqTime1, reqTime2;
+  dword bamTime;
+  dword pgn, missingPgn;
+  byte ok;
+  byte i;
+  byte src1, src2;
+  pg J1939::J1939_CT_RT::TPCMxx pgBAM;
+  byte responseBMissing;
+  byte overlapResult;
+  
+  src1=gTOOL_Addr;
+  src2=CT_Get_Third_Node_Adr(gTOOL_Addr, dst);
+  
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(4, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(4, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    CT_WAIT_UNTIL_NO_BAM(dst); // else there may be a DT with sequence #1 before the BAM init and the step-time.
+    pgn = pgis[k].PGN;
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+    
+    // ====================
+    // step 1/5 Send request A...
+    // ====================
+    // send BAM requests from tool node...
+    reqTime1 = CT_SendRequest(pgn, src1, gc_BC_ADDR);
+    snprintf(reportText, elcount(reportText), "REQUEST A: Source %d (0x%02X) requests PGN %d (0x%.05X) globally at t=%.6f", src1, src1, pgn, pgn, CT_Ns2Sec(reqTime1));
+    CT_STEP_BEGIN(-5, reportText);
+    // for the first time, wait until a BAM started...
+    if (CT_WaitForTPCM(pgBAM, pgn, dst, gc_BC_ADDR, gc_TPCM_CTRL_WORD_BAM, 2*gc_RESP_TIMEOUT))
+    {
+      snprintf(errText, elcount(errText), "TPCM.BAM timeout for request A. Requested PGN %d (0x%.05X) from source %d (0x%.02X) at t=%.6f was not answered.", pgn, pgn, src1, src1, CT_Ns2Sec(reqTime1));
+      CT_STEP_END_FAIL(5, errText);
+      return; // leave on fail.
+    }
+    CT_WAIT(50);
+    bamTime = (pgBAM.TotalNumberOfPacketsBAM+1) * gc_RESP_TIMEOUT;
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/5 Send request B during BAM
+    // ====================
+    // send BAM requests from tool node...
+    reqTime2 = CT_SendRequest(pgn, src2, gc_BC_ADDR);
+    snprintf(reportText, elcount(reportText), "REQUEST B: Source %d (0x%02X) requests PGN %d (0x%.05X) globally at t=%.6f during BAM", src2, src2, pgn, pgn, CT_Ns2Sec(reqTime2));
+    CT_STEP_BEGIN(reportText);
+    CT_WAIT(1); // Sync output.
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 3/5 Await response A
+    // ====================
+    snprintf(reportText, elcount(reportText), "AWAIT RESPONSE A: Await BAM for PGN %d (0x%.05X) from source %d (0x%.02X) at t=%.6f", pgn, pgn, src1, src1, CT_Ns2Sec(reqTime1));
+    CT_STEP_BEGIN(reportText);
+    if (testWaitForJ1939PG(pgn, dst, gc_BC_ADDR, bamTime) == 0)
+    {
+      snprintf(errText, elcount(errText), "BAM timeout for request A. Requested PGN %d (0x%.05X) from source %d (0x%.02X) at t=%.06f was not answered.", pgn, pgn, src1, src1, CT_Ns2Sec(reqTime1));
+      CT_STEP_END_FAIL(6, errText);
+      return; // leave on fail.
+    }
+    // ====================
+    // step 4/5 Await response B
+    // ====================
+    responseBMissing = 0;
+    missingPgn = pgn;
+    snprintf(reportText, elcount(reportText), "AWAIT RESPONSE B: Await BAM for PGN %d (0x%.05X) from requesting source %d (0x%.02X) at t=%.6f", pgn, pgn, src2, src2, CT_Ns2Sec(reqTime2));
+    CT_STEP_BEGIN(reportText);
+    CT_WAIT(1); // Sync output.
+    if (testWaitForJ1939PG(pgn, dst, gc_BC_ADDR, bamTime) == 0)
+    {
+      CT_STEP_END_FAIL(0, "Response B missing. But checking for overlapping TPCM.BAM's in next step..."); // mark step as fail...
+      responseBMissing = 1;
+    }
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 5/5 Check for overlapping BAM transports...
+    // ====================
+    CT_STEP_BEGIN("Check for overlapping BAM transports...");
+      
+    if ((overlapResult = CT_Check_For_Overlapping_BAM(reqTime1, pgn, dst, errText)) != 0)
+    {
+      if (overlapResult == 2)
+      {
+        CT_STEP_END_FAIL(2, errText);
+        return; // leave on fail.
+      }
+      CT_STEP_END_FAIL(3, errText);
+      return; // leave on fail.
+    }
+    
+    
+    if (responseBMissing)
+    {
+      pgn = missingPgn;
+      snprintf(errText, elcount(errText), "No TPCM.BAM overlappings, but BAM timeout for request B. Requested PGN %d (0x%.05X) from source %d (0x%.02X) at t=%.06f was not answered.", pgn, pgn, src2, src2, CT_Ns2Sec(reqTime2));
+      CT_STEP_END_FAIL(7, errText);
+      return; // leave on fail.
+    }
+  
+    CT_STEP_END_PASS(1);
+  } 
+  
+}
+
+
+
+// ==============================================================================================================
+// functionality of the test A5 05 11 BAM Simultaneous
+// FuncPath's:
+// 1: No disturbance detected. (PASS)
+// 2: Request timeout. DUT seems not to send BAM simultaneously. (FAIL)
+// 3: PGI inconsistency (FAIL)
+// 4: DUT starts BAM not simultaneous, but in sequence (FAIL)
+void CTF_A05_11_BAM_Simultaneous(byte src, byte dst, struct gPGAttrs pgis[long])
+{
+  pg* pgR     = {dlc=gc_J1939_PG_DLC_MAX};
+  pg* pgTool  = {dlc=50};
+  word bufIndices[long];
+  int64 BAMInitTime[long];
+  byte BAMPgkCount[long];
+  char reportText[1024];
+  char errText[1024];
+  char errTextRequest[1024];
+  dword timeout;
+  int64 stepTime;
+  byte prio;
+  dword pgn;
+  byte ok;
+  byte i;
+  byte overlapResult;
+  
+  pgR.dlc = gc_J1939_PG_DLC_MAX;
+  pgTool.dlc = 50;
+  
+  timeout =  gc_RESP_TIMEOUT;
+  prio = gc_PRIO_DEFAULT;
+
+  // PRECONDITIONS...
+  // requestable non cyclic dlc>8
+  if (CT_STEP_CHECK_PGIS_ARE_EMPTY_INCONCLUSIVE(3, pgis)) return;
+  ok = 1;
+  for(long k: pgis)
+  {
+    if (CT_IsNonReq(pgis[k]) || !CT_ExpRespContains(pgis[k].ExpResp, gExpResp_PG) || CT_IsDLC8(pgis[k]) || CT_IsCyclic(pgis[k])) 
+    {
+      CT_STEP_PGI_CFG_ERROR(3, pgis[k], "requestable non cyclic PG with DLC>8");
+      ok = 0;
+    }
+  }
+  if (!ok) return; // leave on fail.
+
+  // prepare
+  initJ1939PGData(pgTool);
+  for (i=0; i<pgTool.dlc; i++) pgTool.byte(i)=i;
+  pgTool.sa = gTOOL_Addr;
+  pgTool.da = gBC_Addr;
+  
+  // loop through given pgis...
+  CT_LOOP(-pgis.size());
+  for(long k: pgis)
+  {
+    pgn = pgis[k].PGN;
+    pgTool.pgn = pgn;
+    
+    snprintf(reportText, elcount(reportText), "Using PGN %d (0x%.05X)...", pgn, pgn);
+    CT_LOOP(reportText);
+  
+    CT_WAIT_UNTIL_NO_BAM(dst); // else there may be a DT with sequence #1 before the BAM init and the step-time.
+    
+    // ====================
+    // step 1/4 Tool sends BAM for given PGN...
+    // ====================
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) starts a BAM for PGN %d (0x%.05X)...", src, src, pgn, pgn);
+    stepTime = CT_STEP_BEGIN(-4, reportText);
+    output(pgTool);
+    CT_WAIT(2*gc_TP_BAM_MIN_DT);
+    CT_STEP_END_PASS(0);
+    
+    // ====================
+    // step 2/4 Tool requests PGN from DUT
+    // ====================
+    // During BAM send request to the DUT so it shall start a BAM within tool's running BAM for the given Pgn..
+    snprintf(reportText, elcount(reportText), "Tool %d (0x%.02X) requests PGN %d (0x%.05X) globally...", src, src, pgn, pgn);
+    ok = 1;
+    CT_STEP_BEGIN(reportText);
+    CT_SendRequest(pgn, src, gBC_Addr);
+    if (testWaitForJ1939PG(pgn, dst, gBC_Addr, gc_TP_MAX_DURATION)==0)
+    {
+      // requesting error (timeout).
+      snprintf(reportText, elcount(reportText), "Timeout waiting for BAM from DUT for PGN %d (0x%.05X). DUT seems not to send BAM simultaneously.", pgn, pgn);
+      CT_STEP_END_FAIL(2, reportText);
+      // await BAM finishes...
+      CT_WAIT((pgTool.dlc/7)*gc_TP_BAM_MIN_DT);
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(1);
+    
+    // ====================
+    // step 3/4 wait until all BAM finished.
+    // ====================
+    CT_STEP_BEGIN("Awaiting some time for the Tool's BAM to be finished...");
+    CT_WAIT((pgTool.dlc/7)*gc_TP_BAM_MIN_DT);
+    CT_STEP_END_PASS(0);
+
+    // ====================
+    // step 4/4 Check the DUT really sent the BAM simultaneous.
+    // ====================
+    CT_STEP_BEGIN("Check the DUT really sent the BAM simultanous.");
+    if ((overlapResult = CT_Check_For_Overlapping_BAM(stepTime, pgn, gc_ANY_ADDR, errText)) != 1)
+    {
+      CT_STEP_END_FAIL(4, "DUT does start BAM not simultaneous, but in sequence.");
+      return; // leave on fail.
+    }
+    CT_STEP_END_PASS(1);
+  }
+  
+}

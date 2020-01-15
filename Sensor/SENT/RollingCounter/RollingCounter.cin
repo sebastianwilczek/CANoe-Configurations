@@ -1,0 +1,84 @@
+/*@!Encoding:1252*/
+
+variables
+{
+  //timer to queue the data
+  msTimer gRollingCounterQueueTimer;
+  //variable for the sensor to use
+  sysvarFloat* gSensor;
+   //min value of the rolling counter
+  const float gRollingCounterMin = 0.0;
+  //max value of the rolling counter
+  const float gRollingCounterMax = 255.0;
+  //step increment for the next value
+  const float gRollingCounterStep = 1.0;
+}
+
+//Called befor the measurements starts
+on preStart
+{
+  //define the sensor sysvar
+  SetSensor();
+  //initialize the array
+  CalcValues();
+  //fill the queue at startup
+  QueueValues();
+}
+
+//Called on measurement start
+on start
+{
+  SetQueueTimer();
+}
+
+//Queues values to the system variable
+void QueueValues()
+{
+  enum sensorErrorCode res;  
+  res = eSensorNoError;
+  while(eSensorNoError == res)
+  {
+    res = gSensor.QueueValues(gValueArray, elCount(gValueArray));
+    if (eSensorNoError == res)
+    {
+      CalcValues();
+    }
+  }
+}
+
+//Calculates the values of the data array
+void CalcValues()
+{
+  int i = 0;
+  int array_size;
+  array_size = elCount(gValueArray);
+  for(i = 0; i < array_size; ++i)
+  {
+    gValueArray[i] = NextValue();
+  }
+}
+
+//Calculates the next value
+float NextValue()
+{
+  float result = gRollingCounterMax;
+  result += gRollingCounterStep;
+  if(result > gRollingCounterMax)
+  {
+    result = gRollingCounterMin;
+  }  
+  return result;
+}
+
+//Sets the queue timer
+void SetQueueTimer()
+{
+  setTimer(gRollingCounterQueueTimer, gQueueTimerInterval);
+}
+
+//Called timer function 
+on timer gRollingCounterQueueTimer
+{
+  QueueValues();
+  SetQueueTimer();
+}

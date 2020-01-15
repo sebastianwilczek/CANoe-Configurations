@@ -1,0 +1,1281 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "C2x_Basics.cin"
+  #include "..\DataSources\ASNV_Template_CAM.cin"
+  #include "..\DataSources\ASNV_Template_DENM.cin"
+}
+
+variables
+{
+  // SimCar configuration
+  int gDriveCourseClockwise = 1;
+  int gUseDisplay           = 1;   // this option can only be enabled for one CAPL programm to use the car panel
+  int gkCommRange           = 100; // range in meter, in which messages are passed through to application
+  int gSimCar_UpdPosTimer   = 0;   // configures how "fast" the vehicle moves (rate in ms to read GPS pos from file)
+  int gkCarId               = 1;   // last BYTE of MAC Id (also used in Network Address)
+  int gVehicleIsActive      = 1;   // activate/deactivate sending CAM
+
+  /********************************************/
+  struct  EthData  gEthData = { source={0,0,0,0,0,0}, dest={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, ethType=0x0707 };
+  struct  CnhData  gCnhData;
+  struct  WLANData gWlanData = { durationId=0, address1={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, address2={0,0,0,0,0,0}, address3={0,0,0,0,0,0},
+                                 address4={0,0,0,0,0,0}, sequenceControl=0,qos=0 };
+
+  // timer variables
+  msTimer tim_StartSimCar;
+  msTimer tim_SendCAM;
+  msTimer timWatchdogTL;
+  msTimer tim_SimCar_UpdatePos;
+  msTimer tim_UpdateCarList;
+  msTimer timWatchdogRWW; // watchdog for RWW application
+  
+  // drawing API
+  enum gEnumFigures { Square = 1, Rectangle = 2, Ellipse = 3, Cross = 4, Triangle = 5, Line = 6, Bitmap = 7, Text = 8 };
+  long gCommCircleFigureHdl;
+  long gCommTextFigureHdl;
+
+  char gErrorString[1024];
+
+  /********************************************/
+  // facility variables
+  int     gTimCAMCycleTime   = 1000;   // cycle time of CAM messages
+  BYTE    gHL_AccidentFlag   = 0;
+
+  /*********************************************/
+  // Sim car
+  LONG      gSimCar_CAMPktHdl     = 0;
+  DWORD     gSimCar_FileHandle[4] = { 0,0,0,0 }; // keeps handles of route files
+  int       gSimCar_MoveFileId    = 0;
+  float     gSimCar_ActPosLat     = 0;
+  float     gSimCar_ActPosLong    = 0;
+  float     gSimCar_ActHeading    = 0;
+  float     gSimCar_ActSpeed      = 0;
+  float     gSimCar_ActAltitude   = 0;
+  float     gLastLat              = 48.825458;
+  float     gLastLon              =  9.095959;
+  
+  int64     gItsTimeStamp         = 0; // UNIX time since 1970
+  dword     gUTCsince1970Mod32    = 0;
+  int64     gUTCsince2004         = 0;
+  
+  enum  enumRefTime{en2004 = 0, en2010 = 1}; 
+
+
+  /******************************************************/
+  // traffic light info
+  int       gTL_OldDistanceToTL       = 600;
+  int       gAllowMove                = 1;
+  const int gkRsuTypeTrafficLight     = 0;
+  const int gkRsuTypeRoadwork         = 1;
+  int       gRsuTypeInRange           = -1;
+  int       gTL_ShowSign              = 0;
+  int       gTL_RSUState              = 0;
+  int       gTL_RsuTimeToSwitch       = 0;
+  int       gTL_RsuNoMoreRelevantFlag = 0;
+  int       gTL_DistToTrafficLight    = 0;
+  int       gTL_SlowDownFlag          = 0;
+  int       gTL_DistTolerance         = 20; // dist to stop before RSU
+  float     gTL_Lat;
+  float     gTL_Long;
+  
+  /******************************************************/
+  // Roadworks Warning info
+  int       gRWWShowSign              = 0;
+  int       gRWWNoMoreRelevantFlag    = 0;
+  int       gRWW_DistToRww            = 0;
+  float     gRWW_Lat;
+  float     gRWW_Long;
+
+  // data of CAM message received from other cars
+  struct CarData
+  {
+    int   validFlag;
+    BYTE  macId[6];
+    int   distance;
+    DWORD timeStamp;
+    int   stationType;
+  };
+  struct CarData gCarDataList[11];
+  
+  int       gRwwDisplayActive     = 0;
+  int       gTlDisplayActive      = 0;
+  int       gIsDENMAvailable      = 0;    // 0 = false, 1 = true
+}
+
+/********************************************************/
+//
+// init env vars and packet
+//
+/********************************************************/
+void Appl_Init ()
+{
+  LONG errCode;
+
+  gEthData.source[5] = gkCarId;
+
+  gSimCar_MoveFileId = 0;
+
+  /********************************/
+  // init the CAM packet
+  gSimCar_CAMPktHdl = C2xInitPacket("btp", "btpOverCnh");
+  C2xInitProtocol(gSimCar_CAMPktHdl, "CAM");
+  
+  if (gSimCar_CAMPktHdl == 0)
+  {
+    write ("CAM packet cannot be initialized: stopping measurement");
+    stop();
+  }
+}
+
+on start
+{
+  // register the receive callback
+  C2xRegisterCallback(0, "OnC2xPacket");
+
+  // init application
+  //Appl_Init();
+}
+
+/********************************************************/
+//
+// start the application
+//
+/********************************************************/
+void Appl_Start ()
+{
+  // start cars later
+  setTimer(tim_StartSimCar, 5);
+
+  setTimer(tim_UpdateCarList,500);
+}
+
+on preStop
+{
+  // release packet
+  if (gSimCar_CAMPktHdl)
+  {
+    C2xReleasePacket( gSimCar_CAMPktHdl );
+  }
+  
+  if (gCommCircleFigureHdl != 0)
+  {
+    C2xDeleteMapObject(gCommCircleFigureHdl);
+  }
+  if (gCommTextFigureHdl != 0)
+  {
+    C2xDeleteMapObject(gCommTextFigureHdl);
+  }
+}
+
+/*********************************************/
+//
+// main function to start the sim car
+//
+/*********************************************/
+void SimCar_Start ()
+{
+  // open gps route files
+  if (gDriveCourseClockwise == 1)
+  {
+    gSimCar_FileHandle[0] = GPS_FileOpen(".\\Course_logs\\Course_Clockwise1.log");
+    gSimCar_FileHandle[1] = GPS_FileOpen(".\\Course_logs\\Course_Clockwise2.log");
+    gSimCar_FileHandle[2] = GPS_FileOpen(".\\Course_logs\\Course_Clockwise3.log");
+    gSimCar_FileHandle[3] = GPS_FileOpen(".\\Course_logs\\Course_Clockwise4.log");
+  }
+  else
+  {
+    gSimCar_FileHandle[0] = GPS_FileOpen(".\\Course_logs\\Course_CounterClockwise1.log");
+    gSimCar_FileHandle[1] = GPS_FileOpen(".\\Course_logs\\Course_CounterClockwise2.log");
+    gSimCar_FileHandle[2] = GPS_FileOpen(".\\Course_logs\\Course_CounterClockwise3.log");
+    gSimCar_FileHandle[3] = GPS_FileOpen(".\\Course_logs\\Course_CounterClockwise4.log");
+  }
+
+  // start update position timer
+  setTimer (tim_SimCar_UpdatePos, gSimCar_UpdPosTimer);
+
+  // start sending CAM
+  setTimer(tim_SendCAM, gTimCAMCycleTime);
+}
+
+on timer tim_SimCar_UpdatePos
+{
+  SimCar_Move();
+
+  setTimer (tim_SimCar_UpdatePos, gSimCar_UpdPosTimer);
+}
+
+on timer tim_StartSimCar
+{
+  SimCar_Start();
+}
+
+/**********************************/
+//
+// return 0: do not move
+// return 1: get next pos (org route)
+//
+/**********************************/
+BYTE SimCar_CheckMove()
+{
+  int distanceTL = 10000;
+
+  distanceTL = GPS_CalcDistance( gSimCar_ActPosLong, gSimCar_ActPosLat, gTL_Long, gTL_Lat);
+  // if no gTL_Long/gTL_Lat available, set dist to 5000
+  if (distanceTL < 0)
+  {
+    distanceTL = 5000;
+  }
+
+  if (distanceTL <= gTL_DistTolerance)
+  {
+    if ((gTL_RSUState == 2) || (gTL_RSUState == 1))
+    {
+      return 0;
+    }
+  }  
+
+  // standard: normal movement
+  return 1;
+}
+
+/*********************************************/
+//
+// get the next step from the actual used file
+//
+/*********************************************/
+void SimCar_Move()
+{
+  int i=0;
+  BYTE moveCommand=0;
+
+  // keep last position
+  gLastLat = gLatitude;
+  gLastLon = gLongitude;
+
+  // check if car is allowed to move
+  moveCommand = SimCar_CheckMove();
+
+  if (moveCommand != 0) // 0=do not move
+  {
+    if (GPS_FileReadLine(gSimCar_FileHandle[gSimCar_MoveFileId]) == 0) // file finished
+    {
+      if (gSimCar_MoveFileId == 0) 
+      {
+        if (gHL_AccidentFlag) {
+          // there is an accident, use alternativ route
+          gSimCar_MoveFileId = 2;
+        }
+        else {
+          // no accident, use direct route
+          gSimCar_MoveFileId = 1;
+        }
+      }
+      else if (gSimCar_MoveFileId == 1) {
+        gSimCar_MoveFileId = 3;
+      }
+      else if (gSimCar_MoveFileId == 2) {
+        gSimCar_MoveFileId = 3;
+      }
+      else if (gSimCar_MoveFileId == 3) {
+        // start from beginning
+        gSimCar_MoveFileId = 0;
+        // reset the files
+        for (i=0; i<4; i++)
+        {
+          GPS_FileReset(gSimCar_FileHandle[i]);
+        }
+      }
+    }
+    else
+    {
+      gSimCar_ActPosLat   = gLatitude;
+      gSimCar_ActPosLong  = gLongitude;
+      gSimCar_ActHeading  = gHeading;
+      gSimCar_ActSpeed    = gSpeed;
+      gSimCar_ActAltitude = gAltitude;
+    }
+  }
+  else
+  {
+    // send the WLAN frame
+    //gLatitude  = gSimCar_ActPosLat;
+    //gLongitude = gSimCar_ActPosLong;
+    //gHeading   = gSimCar_ActHeading;
+    gSimCar_ActSpeed = 0;
+  }
+}
+
+/****************************************************/
+//
+// functions sets the internal data of the 
+// WLAN header
+//
+/****************************************************/
+void SimCar_SetWLANData ()
+{
+  gWlanData.durationId   = 0;
+  //gWlanData.address1[5]; // not used
+  gWlanData.address2[5]  = gEthData.source[5];
+  //gWlanData.address3[5]; // not used
+  //gWlanData.address4[5]; // not used
+  gWlanData.sequenceControl =0;
+  gWlanData.qos = 0;
+}
+
+/****************************************************/
+//
+// functions sets the internal data of the 
+// Common Network Header protocol
+//
+/****************************************************/
+void SimCar_SetCnhData ()
+{
+  //DWORD actTime;
+  gCnhData.version          = 0;
+  gCnhData.nextHeader       = 2; // BTP-B
+  gCnhData.ht               = 5; // 1: Beacon | 2: GeoUnicast | 3: GeoAnycast | 4: GeoBroadcast | 5 Topologically Scoped Broadcast
+  gCnhData.hst              = 0; // 0: Single Hop | 1: Rectangular Area | 2: Ellipsoidal Area | 
+  gCnhData.reserved         = 0;
+  gCnhData.flags            = 0;
+  gCnhData.payloadLength    = 0;
+  gCnhData.tc_Reserved      = 0;
+  gCnhData.tc_Relevance     = 1;
+  gCnhData.tc_Reliability   = 1;
+  gCnhData.tc_Latency       = 1;
+  gCnhData.hopLimit         = 1;
+
+  gCnhData.lpv.lpvNetAddr.manuallyFlag   = 0;
+  gCnhData.lpv.lpvNetAddr.stationType    = 2; // 2=car
+  gCnhData.lpv.lpvNetAddr.stationSubType = 0;
+  gCnhData.lpv.lpvNetAddr.countryCode    = 49;
+  gCnhData.lpv.lpvNetAddr.addr[5]        = gEthData.source[5]; // use the MAC Id
+
+  gCnhData.lpv.timeStamp        = gUTCsince1970Mod32;
+  gCnhData.lpv.latitude         = gSimCar_ActPosLat  * 10 * 1000000;
+  gCnhData.lpv.longitude        = gSimCar_ActPosLong * 10 * 1000000;
+  gCnhData.lpv.speed            = gSimCar_ActSpeed   * 100/3.6;
+  gCnhData.lpv.heading          = gSimCar_ActHeading * 10;// / 0.005493247;
+  gCnhData.lpv.altitude         = gSimCar_ActAltitude;
+  gCnhData.lpv.timeAccuracy     = 0;
+  gCnhData.lpv.positionAccuracy = 0;
+  gCnhData.lpv.speedAccuracy    = 0;
+  gCnhData.lpv.headingAccuracy  = 0;
+  gCnhData.lpv.altitudeAccuracy = 0;
+
+}
+
+on timer tim_SendCAM
+{
+  SimCar_SendCAM();
+
+  setTimer(tim_SendCAM, gTimCAMCycleTime);
+}
+
+on timer timWatchdogTL // traffic light
+{
+  Gui_ResetGUIValues(8);
+}
+
+on timer timWatchdogRWW // Road work warning
+{
+  Gui_ResetGUIValues(9);
+}
+
+/*********************************************/
+//
+// set all values for the frame and send CAM message
+//
+/*********************************************/
+void SimCar_SendCAM ()
+{
+  int errFlag;
+  int i=0;
+  float divider;
+  int delFlag;
+  float count;
+//  char valueFormat[20]  = "My %1.0fst GPS-Text";
+  
+  count = 0;
+  
+  divider = 10000000.0;
+
+  errFlag = 0;
+  
+  if (gVehicleIsActive == 1)
+  {
+    // get the time base for the message
+    gItsTimeStamp      = C2xGetITSTimestamp();
+    gUTCsince1970Mod32 = gItsTimeStamp & 0xFFFFFFFF; // UNIX TST Mod32
+    gUTCsince2004      = C2xConvertTimeToMSSinceUTC (gItsTimeStamp, en2004);
+    
+    SimCar_SetWLANData();
+    SimCar_SetCnhData();
+    SimCar_SetCAMValues();
+    
+    if (SetPacketData_WLAN(gSimCar_CAMPktHdl, gWlanData) != 0) {
+      errFlag=1;
+    }
+    if (SetPacketData_ETH(gSimCar_CAMPktHdl, gEthData) != 0) {
+      errFlag=1;
+    }
+    if (SetPacketData_CNH(gSimCar_CAMPktHdl, gCnhData) != 0) {
+      errFlag=1;
+    }
+    if (SetPacketData_BTP(gSimCar_CAMPktHdl, 2001, 0, 0) != 0) {
+      errFlag=1;
+    }
+
+    if (errFlag == 0)
+    {
+      if (C2xCompletePacket(gSimCar_CAMPktHdl) != 0) {
+        write ("C2xCompletePacket error: cannot encode CAM message");
+      }
+      else {
+        C2xOutputPacket(gSimCar_CAMPktHdl);
+      }
+    }
+  }
+  
+  // check if at least one vehicle is in list
+  // if one comm partner is available show a communication circle
+  delFlag = 1;
+  for (i=0; i<elcount(gCarDataList); i++)
+  {
+    if (gCarDataList[i].validFlag == 1)
+    {
+      count++;
+      // draw the circle
+      if (gVehicleIsActive == 1)
+      {
+        if (gCommCircleFigureHdl == 0)
+        {
+          gCommCircleFigureHdl = C2xCreateMapObject(Ellipse);
+        }
+        if (gCommCircleFigureHdl != 0)
+        {
+          C2xSetMapObjectPosition(gCommCircleFigureHdl, gCnhData.lpv.latitude/divider, gCnhData.lpv.longitude/divider);
+          C2xSetMapObjectHeading(gCommCircleFigureHdl, gCnhData.lpv.heading/10);
+          C2xSetMapObjectSize(gCommCircleFigureHdl, 32, 32);
+          C2xDrawMapObject(gCommCircleFigureHdl);
+          delFlag=0;
+        }
+      }
+    }
+  }
+  if (delFlag == 1)
+  {
+    C2xDeleteMapObject(gCommCircleFigureHdl);
+    gCommCircleFigureHdl=0;
+    C2xDeleteMapObject(gCommTextFigureHdl);
+    gCommTextFigureHdl=0;
+  }
+  else
+  {
+    // draw the text
+    if (gCommTextFigureHdl == 0)
+    {
+      gCommTextFigureHdl = C2xCreateMapObject(Text);
+    }
+    if (gCommTextFigureHdl != 0)
+    {
+      C2xSetMapObjectText(gCommTextFigureHdl, "     %1.0f",count);
+      C2xSetMapObjectFillColor(gCommTextFigureHdl, makeRGB(0,0,255));
+      C2xSetMapObjectLineColor(gCommTextFigureHdl, makeRGB(0,0,0));
+      C2xSetMapObjectPosition(gCommTextFigureHdl, gCnhData.lpv.latitude/divider, gCnhData.lpv.longitude/divider);
+      //C2xSetMapObjectHeading(gCommTextFigureHdl, gCnhData.lpv.heading/10);
+      C2xDrawMapObject(gCommTextFigureHdl);
+    }
+  }
+  
+}
+
+/**************************************************/
+//
+// function inserts the CAM data in the ASN.1 structure
+//
+/**************************************************/
+void SimCar_SetCAMValues ()
+{  
+  struct CAM camPdu;
+ 
+  camPdu.header.isValidFlag     = 1;
+  camPdu.header.protocolVersion = 1;
+  camPdu.header.messageID       = 0;
+  camPdu.header.stationID       = gEthData.source[5];
+
+  camPdu.cam.isValidFlag = 1;
+  camPdu.cam.generationDeltaTime  = gUTCsince2004 & 0xFFFF; // generationTime = TimestampIts mod 65536
+
+  camPdu.cam.camParameters.isValidFlag = 1;
+  camPdu.cam.camParameters.basicContainer.isValidFlag = 1;
+  camPdu.cam.camParameters.basicContainer.stationType = 5;
+
+  camPdu.cam.camParameters.basicContainer.referencePosition.isValidFlag = 1;
+  camPdu.cam.camParameters.basicContainer.referencePosition.latitude = (gSimCar_ActPosLat  * 10 * 1000000);
+  camPdu.cam.camParameters.basicContainer.referencePosition.longitude = (gSimCar_ActPosLong * 10 * 1000000);
+  camPdu.cam.camParameters.basicContainer.referencePosition.positionConfidenceEllipse.isValidFlag = 1;
+  camPdu.cam.camParameters.basicContainer.referencePosition.positionConfidenceEllipse.semiMajorConfidence = 1;
+  camPdu.cam.camParameters.basicContainer.referencePosition.positionConfidenceEllipse.semiMinorConfidence = 1;
+  camPdu.cam.camParameters.basicContainer.referencePosition.positionConfidenceEllipse.semiMajorOrientation.isValidFlag = 1;
+  camPdu.cam.camParameters.basicContainer.referencePosition.positionConfidenceEllipse.semiMajorOrientation.directionValue = (gSimCar_ActHeading * 10);
+  camPdu.cam.camParameters.basicContainer.referencePosition.positionConfidenceEllipse.semiMajorOrientation.directionConfidence = 1;
+  camPdu.cam.camParameters.basicContainer.referencePosition.elevation.isValidFlag = 1;
+  camPdu.cam.camParameters.basicContainer.referencePosition.elevation.elevationValue = 0;
+  camPdu.cam.camParameters.basicContainer.referencePosition.elevation.elevationConfidence = 1;
+
+  camPdu.cam.camParameters.highFrequencyContainer.isValidFlag = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.choice = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.isValidFlag = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.direction.isValidFlag = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.direction.directionValue = (gSimCar_ActHeading * 10);
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.direction.directionConfidence = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.movement.isValidFlag = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.movement.vehicleSpeed = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.movement.vehicleSpeedConfidence = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.driveDirection = 0;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.longitudinalAcceleration.isValidFlag = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.longitudinalAcceleration.longitudinalAccelerationValue = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.longitudinalAcceleration.longitudinalAccelerationConfidence = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.curvature.isValidFlag = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.curvature.curvatureValue = 0;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.curvature.curvatureConfidence = 1;
+  camPdu.cam.camParameters.highFrequencyContainer.basicVehicleContainerHighFrequency.curvatureCalculationMode = 1;
+  
+  API_SetCAMParams(gSimCar_CAMPktHdl, camPdu);
+}
+
+/**************************************************/
+//
+// function inserts the CAM data in the ASN.1 structure
+//
+/**************************************************/
+void Rx_HandleRxSpatMsg (long packetHandle)
+{
+  char gErrorString[1024];
+  int64 gResult;
+  int nachkomma;
+
+  /*******************************************************/
+  // traffic light state
+  gResult = C2xGetTokenInt64(packetHandle, "SpatMessage", "trafficLightInfo.trafficLightState");
+  if (C2xGetLastError() != 0)
+  {
+    C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+    write("HandleSpatMsg: C2xGetTokenInt64 returned error: %s", gErrorString);
+  }
+  else
+  {
+    gTL_RSUState = gResult;
+  }
+
+  /*******************************************************/
+  // time to change
+  gResult = C2xGetTokenInt64(packetHandle, "SpatMessage", "trafficLightInfo.timeToChange");
+  if (C2xGetLastError() != 0)
+  {
+    C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+    write("HandleSpatMsg: C2xGetTokenInt64 returned error: %s", gErrorString);
+  }
+  else
+  {
+    gTL_RsuTimeToSwitch = gResult;
+  }
+
+  /*******************************************************/
+  // latitude - hemisphere
+  gResult = C2xGetTokenInt64(packetHandle, "SpatMessage", "position.latitude.hemisphere");
+  if (C2xGetLastError() != 0)
+  {
+    C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+    write("HandleSpatMsg: C2xGetTokenInt64 returned error: %s", gErrorString);
+  }
+  else
+  {
+    // param currently not in use
+  }
+
+  /*******************************************************/
+  // latitude - hemisphere
+  gResult = C2xGetTokenInt64(packetHandle, "SpatMessage", "position.longitude.degree");
+  if (C2xGetLastError() != 0)
+  {
+    C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+    write("HandleSpatMsg: C2xGetTokenInt64 returned error: %s", gErrorString);
+  }
+  else
+  {
+    gTL_Long =  (float)gResult;
+    gTL_Long = gTL_Long / 10 / 1000000;
+  }
+
+  /*******************************************************/
+  // latitude - hemisphere
+  gResult = C2xGetTokenInt64(packetHandle, "SpatMessage", "position.latitude.degree");
+  if (C2xGetLastError() != 0)
+  {
+    C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+    write("HandleSpatMsg: C2xGetTokenInt64 returned error: %s", gErrorString);
+  }
+  else
+  {
+    gTL_Lat =  (float)gResult;
+    gTL_Lat = gTL_Lat / 10 / 1000000;
+  }
+}
+
+void Rx_HandleRSUDenm(long packetHandle)
+{
+  char    gErrorString[1024];
+  int64   gResult;
+  int     relevanceAreaLength = 0;
+  struct  DENM denmPdu;
+  
+  gIsDENMAvailable = 1;
+  
+  /*******************************************************/
+  // relevanceArea length
+  if(API_GetDENMParams(packetHandle, denmPdu) == 0)
+  {
+   relevanceAreaLength = denmPdu.denm.management.relevanceDistance;
+  
+    switch(relevanceAreaLength)
+    {
+      case 0:
+        relevanceAreaLength = 50;
+        break;
+      case 1:
+        relevanceAreaLength = 100;
+        break;
+      case 2:
+        relevanceAreaLength = 200;
+        break;
+      case 3:
+        relevanceAreaLength = 500;
+        break;
+      case 4:
+        relevanceAreaLength = 1000;
+        break;
+      case 5:
+        relevanceAreaLength = 5000;
+        break;
+      case 6:
+        relevanceAreaLength = 10000;
+        break;
+      case 7:
+        relevanceAreaLength = 15000;
+        break;
+    }
+    
+    /*******************************************************/
+    // longitude eventposition
+    gResult = denmPdu.denm.management.eventPosition.longitude;
+
+    gRWW_Long =  (float)gResult;
+    gRWW_Long = gRWW_Long / 10 / 1000000;
+    
+    /*******************************************************/
+    // latitude eventposition
+    gResult = denmPdu.denm.management.eventPosition.latitude;
+   
+    gRWW_Lat =  (float)gResult;
+    gRWW_Lat = gRWW_Lat / 10 / 1000000;
+    
+    // Calculate the distance from the vehicle to the Event Position
+    gRWW_DistToRww = GPS_CalcDistance(gRWW_Long, gRWW_Lat, gLastLon, gLastLat);
+    
+    // If the distance is smaller than the relevance area length, set the flags to show the sign in the map window,
+    // else set the flags to delete the sign in the map window.
+    if ( gRWW_DistToRww < relevanceAreaLength)  
+    {
+      gRWWNoMoreRelevantFlag = 0;
+      gRWWShowSign = 1;
+    }
+    else
+    {
+      gRWWNoMoreRelevantFlag = 1;
+      gRWWShowSign = 0;
+    }
+    
+    Gui_UpdateGUI(gRWW_DistToRww);
+  }
+  else
+  {
+    write("Error in decoding DENM!");  
+  }
+}
+
+/****************************************************/
+//
+// returns the distance to the position of the sender of the
+// received packet
+//
+/****************************************************/
+int CheckCommunicationRange (long packet)
+{
+  float latitude;
+  float longitude;
+  int   dist;
+  long  etherType;
+  
+  etherType = C2xGetTokenInt( packet, "eth", "type" ); 
+  
+  if(etherType == 0x8947)
+    {
+      latitude  = C2xGetTokenInt(packet, "geo_eh", "lpvLatitude");
+      latitude  = latitude/ 10 / 1000000;
+      longitude = C2xGetTokenInt(packet, "geo_eh", "lpvLongitude");
+      longitude = longitude / 10 / 1000000;
+    }
+    else if(etherType == 0x0707)
+    {
+      latitude  = C2xGetTokenInt(packet, "geo_cnh", "lpvLat");
+      latitude  = latitude/ 10 / 1000000;
+      longitude = C2xGetTokenInt(packet, "geo_cnh", "lpvLong");
+      longitude = longitude/ 10 / 1000000;
+    }
+  
+
+
+  return GPS_CalcDistance(longitude, latitude, gLastLon, gLastLat);
+}
+
+
+/****************************************************/
+//
+// set distance of car to traffic light on panel
+//
+/****************************************************/
+void Gui_SetDistToRSUsInfo (int dist, int stationType)
+{
+  if (gUseDisplay == 0)
+  {
+    return;
+  }
+
+  if (stationType == 8) // traffic light
+  {
+    @sysvar::DistToTrafficLight = dist;  
+  }
+  if (stationType == 9) // RWW
+  {
+    @sysvar::DistToTrafficLight = dist;  
+  }
+}
+
+
+/******************************************************/
+//
+//  function is called when a packet is received
+//
+/******************************************************/
+void OnC2xPacket (LONG channel, LONG dir, LONG radioChannel, LONG signalStrength, LONG sigQuality, LONG packet)
+{
+  BYTE rx_data[300];
+  LONG rxLength;
+  int  distToMyself;
+  int  stationType;
+  long  etherType;
+  char  error[100];
+
+  // if it is a received message
+  if (dir == RX)
+  {
+    // calculate dist to myself and station type
+    distToMyself = CheckCommunicationRange(packet);
+    
+    etherType = C2xGetTokenInt( packet, "eth", "type" );
+    if (C2xGetLastError() != 0)
+    {
+      C2xGetLastErrorText( elCount(error), error );
+      write("Error: %s", error );
+    }
+    
+    if(etherType == 0x8947)
+    {
+      stationType = C2xGetTokenInt(packet, "geo_eh", "lpvGNAddrStationType");
+    }
+    else if(etherType == 0x0707)
+    {
+      stationType = C2xGetTokenInt(packet, "geo_cnh", "lpvNetAddrStType");
+    }
+
+    // virtual communication range simulation
+    // only messages from ITS stations are handeled by the upper layers
+    if (distToMyself <= gkCommRange)
+    {      
+      Rx_HandleMessage(packet, distToMyself, stationType);
+    }
+  }
+}
+
+
+/****************************************************/
+//
+// RX message handler: decide whether message is from
+// vehicle or RSU
+//
+/****************************************************/
+void Rx_HandleMessage (long packet, int dist, int stationType)
+{
+  // in case no further msg is received, reset GUI
+  if ((stationType == 8) || (stationType == 9))
+  {
+    Rx_HandleRSUMsg(packet, dist);
+    Rx_HandleITSStation(packet, dist);
+  }
+  else
+  {
+    // RX message from vehicle
+    Rx_HandleITSStation(packet, dist);
+  }
+}
+
+/****************************************************/
+//
+// function resets the GUI control values
+//
+/****************************************************/
+void Gui_ResetGUIValues (int stationType)
+{
+  if (gUseDisplay == 0)
+  {
+    return;
+  }
+
+  @sysVar::Car1Speed = gSimCar_ActSpeed;
+
+  write ("Gui_ResetGUIValues");
+  //if (distToMyself > gkCommRange)
+  {
+    if (stationType == 8) // Traffic light
+    {
+      gTL_OldDistanceToTL = gkCommRange;
+      gTL_RsuNoMoreRelevantFlag=0;
+      gAllowMove = 1;
+      gTL_SlowDownFlag=0; 
+    }    
+    else if(stationType == 9) // RWW
+    {
+      write ("reset");
+      gRWWNoMoreRelevantFlag=0;       
+      
+      @sysvar::Car1TlState    = 3; // white
+      @sysvar::Car1Distance   = 0; // no dist value
+      @sysvar::Car1DistancePB = 0; // no bar
+      @sysvar::Car1DisplayState = 0;
+      @sysvar::Car1TlTimeToChangeState = 0;     
+    }
+  }  
+}
+
+
+
+
+/****************************************************/
+//
+// handle the RSU traffic light message
+//
+/****************************************************/
+void Rx_HandleRSUTrafficLightMsg (int distToTrafficLight, long packet)
+{
+  int64 gResult;
+  int situationFinishedFlag=0;
+
+  gResult = C2xGetTokenInt64(packet, "btp", "destination");
+
+  if (C2xGetLastError() == 0) // token found
+  {
+    if (gResult == 6002) // check if app data is SPaT message
+    {
+      Rx_HandleRxSpatMsg(packet);
+    }
+    else
+    {
+      write ("Cannot decode Spat message");
+    }
+  }
+  else
+  {
+    write ("Cannot decode Spat message");
+  }
+
+
+  if (gTL_RSUState != 0) // state is not green
+  {
+    if (distToTrafficLight < 60)
+    {
+      if (gTL_RsuNoMoreRelevantFlag == 0) {
+        gTL_ShowSign=1;
+        gAllowMove=0;
+      }
+    }
+    else if (distToTrafficLight < gkCommRange)
+    {
+      if (gTL_RsuNoMoreRelevantFlag == 0) {
+        gTL_ShowSign=1;
+        gTL_SlowDownFlag=1;
+      }
+    }
+    else
+    {
+      if (gTL_RsuNoMoreRelevantFlag == 0)
+      {
+        gAllowMove=1;
+        gTL_ShowSign=0;
+        gTL_SlowDownFlag=0;
+      }
+    }
+  }
+  else
+  {
+    gAllowMove=1;
+    gTL_ShowSign=0;
+  }
+
+  gTL_ShowSign=1;
+
+  // progress bar
+  if ( (distToTrafficLight < gTL_OldDistanceToTL) && (situationFinishedFlag == 0))
+  {
+    gTL_OldDistanceToTL = distToTrafficLight;
+  }
+  else if (distToTrafficLight == gTL_OldDistanceToTL)
+  {
+    situationFinishedFlag=0;  
+  }
+  else
+  {
+    gTL_RsuNoMoreRelevantFlag = 1;
+    situationFinishedFlag=0;
+    gTL_SlowDownFlag=0;
+    
+    if (distToTrafficLight > gkCommRange)
+    {
+      gTL_OldDistanceToTL = gkCommRange;
+      gTL_RsuNoMoreRelevantFlag = 0;
+    }
+  }
+
+  Gui_UpdateGUI(distToTrafficLight);
+}
+
+/****************************************************/
+//
+// function handles the display
+//
+/****************************************************/
+void Gui_UpdateGUI (int distToMyself)
+{
+  int oldDistance = 0;
+
+  if (gUseDisplay == 0)
+  {
+    return;
+  }
+
+  @sysVar::Car1Speed   = gSimCar_ActSpeed;
+
+  // handle the traffic light
+  if (gRsuTypeInRange == gkRsuTypeTrafficLight)
+  {
+    if (gTL_ShowSign == 1)
+    {
+      @sysvar::Car1DisplayState = 2;
+    }
+    else
+    {
+      @sysvar::Car1DisplayState = 0;
+    }
+
+    // progress bar
+    if (gTL_RsuNoMoreRelevantFlag == 1)
+    {
+      @sysvar::Car1TlState    = 3; // white
+      @sysvar::Car1Distance   = 0; // no dist value
+      @sysvar::Car1DistancePB = 0; // no bar
+      @sysvar::Car1DisplayState = 0;
+      @sysvar::Car1TlTimeToChangeState = 0;
+
+    }
+    else
+    {
+      @sysvar::Car1TlState    = gTL_RSUState;
+      @sysvar::Car1DistancePB = gkCommRange-distToMyself;
+      @sysvar::Car1Distance   = distToMyself;
+      @sysvar::Car1TlTimeToChangeState = gTL_RsuTimeToSwitch/1000;
+    }
+  }
+  else if (gRsuTypeInRange == gkRsuTypeRoadwork)
+  {
+    if (gRWWShowSign == 1)
+    {
+      @sysvar::Car1DisplayState = 3;
+    }
+    else
+    {
+      @sysvar::Car1DisplayState = 0;
+    }
+
+    // progress bar
+    if (gRWWNoMoreRelevantFlag == 1)
+    {
+      @sysvar::Car1TlState    = 3; // white
+      @sysvar::Car1Distance   = 0; // no dist value
+      @sysvar::Car1DistancePB = 0; // no bar
+      @sysvar::Car1DisplayState = 0;
+      @sysvar::Car1TlTimeToChangeState = 0;
+    }
+    else
+    {
+      @sysvar::Car1TlState  = 3; // white
+      @sysvar::Car1DistancePB = gkCommRange-distToMyself;
+      @sysvar::Car1Distance = distToMyself;
+      @sysvar::Car1TlTimeToChangeState = 0;
+    }
+  }
+  
+}
+
+/****************************************************/
+//
+// handle the RSU messages, check if it is a message
+// from traffic light or roadwork
+//
+/****************************************************/
+void Rx_HandleRSUMsg (long packet, int dist)
+{
+  float  latitude;
+  float  longitude;
+  int    stationType;
+  long  etherType;
+  
+  etherType = C2xGetTokenInt( packet, "eth", "type" ); 
+  
+  if(etherType == 0x8947)
+    {
+      latitude  = C2xGetTokenInt(packet, "geo_eh", "lpvLatitude");
+      latitude  = latitude/ 10 / 1000000;
+      longitude = C2xGetTokenInt(packet, "geo_eh", "lpvLongitude");
+      longitude = longitude / 10 / 1000000;
+      stationType  = C2xGetTokenInt(packet, "geo_eh", "lpvGNAddrStationType");
+    }
+    else if(etherType == 0x0707)
+    {
+      latitude  = C2xGetTokenInt(packet, "geo_cnh", "lpvLat");
+      latitude  = latitude/ 10 / 1000000;
+      longitude = C2xGetTokenInt(packet, "geo_cnh", "lpvLong");
+      longitude = longitude/ 10 / 1000000;
+      stationType  = C2xGetTokenInt(packet, "geo_cnh", "lpvNetAddrStType");
+    }
+  
+  
+  
+  Gui_SetDistToRSUsInfo(dist, stationType);
+
+  // check how to handle the received message
+  if (stationType == 8) // traffic light
+  {
+    setTimer(timWatchdogTL,2000);
+    if (dist > gkCommRange)
+    {
+      Gui_ResetGUIValues(stationType);
+    }
+
+    gRsuTypeInRange = gkRsuTypeTrafficLight;
+
+    gTL_DistToTrafficLight = GPS_CalcDistance(gTL_Long, gTL_Lat, gLastLon, gLastLat);
+    if (gTL_DistToTrafficLight < 0)
+    {
+      gTL_DistToTrafficLight = 5000;
+    }
+
+    Rx_HandleRSUTrafficLightMsg(gTL_DistToTrafficLight, packet);
+  }
+  else if (stationType == 9) // RSU
+  {
+    setTimer(timWatchdogRWW,1500);
+    if (dist > gkCommRange)
+    {
+      Gui_ResetGUIValues(stationType);
+    }
+
+    gRsuTypeInRange = gkRsuTypeRoadwork;
+    Rx_HandleRSUDenm(packet);    
+  }
+}
+
+/****************************************************/
+//
+// handle messages from different vehicles
+//
+/****************************************************/
+void Rx_HandleITSStation(long packet, int dist)
+{
+  int    i;
+  BYTE   data[6];
+  struct CarData actCarData;
+  long   stationType;
+  long  etherType;
+  char  error[100];
+  
+  etherType = C2xGetTokenInt( packet, "eth", "type" );
+  if (C2xGetLastError() != 0)
+  {
+    C2xGetLastErrorText( elCount(error), error );
+    write("Error: %s", error );
+  }
+    
+  if(etherType == 0x8947)
+  {
+    if (C2xGetTokenData(packet, "geo_eh", "lpvGNAddrMID", 0, 6, data) != 6)
+    {
+      C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+      write("C2xGetTokenData() failed %s", gErrorString);    
+    }
+
+    stationType = C2xGetTokenInt(packet, "geo_eh", "lpvGNAddrStationType");
+    if (stationType == 0)
+    {
+      C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+      write("C2xGetTokenInt() failed %s", gErrorString);    
+    }
+  }
+  else if(etherType == 0x0707)
+  {
+    if (C2xGetTokenData(packet, "geo_cnh", "lpvNetAddrLL", 0, 6, data) != 6)
+    {
+      C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+      write("C2xGetTokenData() failed %s", gErrorString);    
+    }
+
+    stationType = C2xGetTokenInt(packet, "geo_cnh", "lpvNetAddrStType");
+    if (stationType == 0)
+    {
+      C2xGetLastErrorText(elcount(gErrorString), gErrorString);
+      write("C2xGetTokenInt() failed %s", gErrorString);    
+    }
+  }
+  
+  
+  
+    
+  // collect data for actCarData struct 
+  for (i=0; i<6; i++)
+  {
+    actCarData.macId[i] = data[i];
+  }
+  actCarData.validFlag   = 1;
+  actCarData.distance    = dist;
+  actCarData.timeStamp   = timeNow();
+  actCarData.stationType = stationType;
+
+  // insert car data in 
+  CarDataListInsertItem(actCarData);
+}
+
+/****************************************************/
+//
+// insert data of car in car data list
+//
+/****************************************************/
+void CarDataListInsertItem (struct CarData actCarData)
+{
+  int listPos;
+
+  listPos = actCarData.macId[5];
+  
+  // insert rx data in list
+  if (listPos < elcount(gCarDataList)) {
+    memcpy(gCarDataList[listPos], actCarData);
+  }
+  else {
+    write ("UpdateCarDataList(): inserting received data failed: pos is %i", listPos);
+  }
+}
+ 
+
+/****************************************************/
+//
+// Update the list of cars in communication range.
+//
+/****************************************************/
+void CarDataListUpdateList ()
+{
+  DWORD actTime;
+  int   i=0;
+  char  outputText[500];
+  char  tempText[100];
+
+  // check for old entries and remove them
+  actTime = timeNow();
+  for (i=0; i<elcount(gCarDataList); i++)
+  {
+    if (gCarDataList[i].validFlag == 1)
+    {
+      if (gCarDataList[i].timeStamp < (actTime - 200000))
+      {
+        // out of time -> remove entry
+        gCarDataList[i].validFlag = 0;
+      }
+    }
+  }
+
+  // update info on panel
+  Gui_UpdateCarDataList();
+}
+
+on timer tim_UpdateCarList
+{
+  CarDataListUpdateList();
+
+  setTimer (tim_UpdateCarList,50);
+}
+
+/******************************************************/
+//
+// update data in car data list on the panel
+//
+/******************************************************/
+void Gui_UpdateCarDataList ()
+{
+  int   i=0;
+  int   textFlag;
+  char  outputText[1100];
+  char  tempText[100];
+
+  textFlag = 0;
+  
+  // if gui is not supported, return
+  if (gUseDisplay == 0) {
+    return;
+  }
+
+  for (i=0; i<elcount(gCarDataList); i++)
+  {
+    if (gCarDataList[i].validFlag == 1)
+    {
+      if(gCarDataList[i].stationType == 2)
+      {
+        snprintf(tempText, elCount(tempText), "Car: %i, Distance: %im, StationType: %i",gCarDataList[i].macId[5], gCarDataList[i].distance, gCarDataList[i].stationType);
+        if (textFlag == 0) {
+          snprintf(outputText, elCount(tempText), "%s",tempText);
+        }
+        else {
+          snprintf(outputText, elCount(outputText)+elCount(tempText), "%s\n%s",outputText, tempText);
+        }
+      }      
+      textFlag = 1;
+    }
+  }
+  
+  // set data to CAPL Output view
+  if (textFlag == 1) {
+    putValueToControl("Dashboard SimCar1","OutputView",outputText);  
+  }
+  else {
+    putValueToControl("Dashboard SimCar1","OutputView"," ");
+  }
+}
+
+

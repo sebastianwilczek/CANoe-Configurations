@@ -1,0 +1,917 @@
+/*@!Encoding:1252*/
+variables
+{
+  dword dwBusContextLIN1;
+
+  byte gBitStream[35];  // array of data to be sent as bit stream
+  int  gCurrentBitPos;  // "pointer" inside of data array fir bit stream
+  linFrame 0x0 gBitStreamFrame; // frame used as a place holder
+  
+  char gCallerName[20] = "LINStress.can"; // name of this CAPL program
+  const byte  gChannel = 1;   // LIN channel to apply stress functionality
+  const	word	ID_VALUE_RANGE 		= 0x3F;
+
+  const dword gByte_NotToSend = 0xFFF;   // in bit stream don't send byte
+  const dword gByte_MaskInvertStopBit = 0x100; // in bit stream invert stop bit
+  const dword gByte_MaskInvertStartBit = 0x1000; // in bit stream invert start bit
+  const dword gCS_Autom = 0xFFC;  // in bit stream calculate CS byte automatically 
+
+  const	dword	MAX_DISTURBANCE_TIME = 360000; // time in ms
+  const	byte	MAX_RESP_COUNT		= 254;
+  const	word	MAX_INTERBYTE_VAL 	= 0xFF;
+  const	byte	MAX_DLC		= 8;
+
+  const dword wrCAPLSink = 1;
+  const dword wrSYSSink = 0;
+  const dword wrInfo = 1;
+  const dword wrError = 3;
+
+}
+
+on sysvar LIN::ErrBitStreamAny
+{
+  byte aBitStream[5];
+  dword byteVal;
+  long numBits;
+  byte ret;
+
+  // react on push only
+  if( !@this )
+    return;
+  
+  numBits = 0;
+
+  byteVal=@LIN::ErrBSArbitraryByte0;
+  if (gByte_NotToSend != byteVal)
+  {
+    aBitStream[0]=byteVal;
+    numBits += 8;
+    byteVal=@LIN::ErrBSArbitraryByte1;
+    if (gByte_NotToSend != byteVal)
+    {
+      aBitStream[1]=byteVal;
+      numBits += 8;
+      byteVal=@LIN::ErrBSArbitraryByte2;
+      if (gByte_NotToSend != byteVal)
+      {
+        aBitStream[2]=byteVal;
+        numBits += 8;
+        byteVal=@LIN::ErrBSArbitraryByte3;
+        if (gByte_NotToSend != byteVal)
+        {
+          aBitStream[3]=byteVal;
+          numBits += 8;
+          byteVal=@LIN::ErrBSArbitraryByte4;
+          if (gByte_NotToSend != byteVal)
+          {
+            aBitStream[4]=byteVal;
+            numBits += 8;
+          }
+        }
+      }
+    }
+  }
+
+  // LINstress 
+  ret = LINSendBitStream(aBitStream, numBits);
+  writeLineEx(wrCAPLSink, wrInfo,  "LINSendBitStream( d[0]=0x%x; d[1]=0x%x; d[2]=0x%x; d[3]=0x%x; d[4]=0x%x, length=%d )=%d", 
+         aBitStream[0], aBitStream[1], aBitStream[2], aBitStream[3], aBitStream[4], numBits, ret );
+
+}
+
+on sysvar LIN::ErrInvertRespSw
+{
+  long	_id,ret,_dlc,byteIndex;
+  byte	bitIndex,level;
+
+  // react on push only
+  if( !@this )
+    return;
+  
+  // get FrameId
+  _id = @LIN::ErrInvertRespID;
+
+  // validate frameId
+  if( _id > ID_VALUE_RANGE )
+  {
+    @LIN::ErrInvertRespID = ID_VALUE_RANGE;
+    _id = ID_VALUE_RANGE;
+  }
+  
+  // get ByteIndex
+  byteIndex = @LIN::ErrInvertRespByteIndex;
+  // get DLC
+  _dlc = LINGetDlc( _id );
+
+  // Validate byte index
+  if( byteIndex > _dlc )
+  {
+    @LIN::ErrInvertRespByteIndex = _dlc;
+    byteIndex = _dlc;
+  }
+  else if( byteIndex < 0 )
+  {
+    @LIN::ErrInvertRespByteIndex = 0;
+    byteIndex = 0;
+  }
+
+  // get bitIndex
+  bitIndex = @LIN::ErrInvertRespBitIndex;
+
+  // get level
+  level = @LIN::ErrInvertRespLevel;
+
+  // LINstress
+  ret = LINInvertRespBit( _id, byteIndex, bitIndex, level );
+  writeLineEx(wrCAPLSink, wrInfo,  "LINInvertRespBit( 0x%x, %d, %d, %d )=%d", _id, byteIndex, bitIndex, level, ret );
+
+}
+
+on sysvar LIN::ErrInvertHeaderSw
+{
+  byte	byteIndex,bitIndex, level,ret;
+
+  // react on push only
+  if( !@this )
+    return;
+
+  // ByteIndex value
+  byteIndex = @LIN::ErrInvertHeaderByteIndex;
+
+  // bitIndex value
+  bitIndex = @LIN::ErrInvertHeaderBitIndex;
+
+  // Level value
+  level = @LIN::ErrInvertHeaderLevel;
+
+  // LINstress 
+  ret = LINInvertHeaderBit( byteIndex, bitIndex, level );
+  writeLineEx(wrCAPLSink, wrInfo,  "LINInvertHeaderBit( %d, %d, %d )=%d", byteIndex, bitIndex, level, ret );
+
+}
+
+on sysvar LIN::ErrRespLenApply
+{
+  dword	_id, lDLC, ret;
+  int		count;
+
+  // react on push only
+  if( !@this )
+    return;
+
+  // Get FrameId
+  _id = @LIN::ErrRespLenFrameId;
+  // Validate FrameId 
+  if( _id > ID_VALUE_RANGE )
+  {
+    @LIN::ErrRespLenFrameId = ID_VALUE_RANGE;
+    _id = ID_VALUE_RANGE;
+  }
+
+  // Get requested DLC
+  lDLC = @LIN::ErrRespLength;
+
+  // Validate
+  if( lDLC > MAX_DLC+1 )
+  {
+    lDLC = MAX_DLC+1;
+    @LIN::ErrRespLength = lDLC;
+  }
+
+  // LINstress
+  ret = LinSetRespLength( _id,  lDLC );
+  writeLineEx(wrCAPLSink, wrInfo,  "LinSetRespLength( 0x%x, %d )=%d", _id, lDLC, ret );
+}
+
+on sysvar LIN::ErrHeaderApply
+{
+  dword	_id;
+  byte	syncByte,StopAfterError;
+  int		ret;
+
+  // react on push only
+  if( !@this )
+    return;
+
+  // Get SyncByte
+  syncByte = @LIN::ErrHeaderSyncByte;
+
+  // Get FrameId
+  _id = @LIN::ErrHeaderID;
+
+  // Validate FrameId 
+  if( _id > ID_VALUE_RANGE )
+  {
+    @LIN::ErrHeaderID = ID_VALUE_RANGE;
+    _id = ID_VALUE_RANGE;
+  }
+
+  // Calculate protected ID
+  _id = LINGetProtectedID( _id );
+
+  // Query if parity error has to be applied
+  if( @LIN::ErrHeaderParitySw )
+  {
+    // Calculate PID with parity error
+    _id ^= 0xC0;
+  }
+
+  // Query if StopAfterError has to be set
+  StopAfterError = @LIN::ErrHeaderStopAfterError;
+
+  // LINstress
+  ret = LINSendHeaderError( syncByte, _id, StopAfterError );
+  writeLineEx(wrCAPLSink, wrInfo,  "LINSendHeaderError( 0x%x, 0x%x, %d )=%d", syncByte, _id, StopAfterError, ret );
+}
+
+// This function sends LIN header as a bit stream
+int SendSpecialHeader(int breakLength, int delimiterLength, byte syncByte, byte pidByte)
+{
+  byte data[25], ret;
+  int headerLength;
+  int currentPosition;
+  int i;
+
+  headerLength = breakLength + delimiterLength + 20; // Header consists of Break, Sync and PID bytes
+
+  if (headerLength > 200)
+  {
+    return 0; // maximum is exceeded
+  }
+
+  currentPosition = 0;
+
+  for (i = 0; i < 25; ++i)
+  {
+    data[i] = 0xff; // initialize 
+  }
+
+  for (i = breakLength; i > 0;) // set sync break
+  {
+    if (i >= 8)
+    {
+      data[currentPosition >> 3] = 0;
+      i -= 8;
+      currentPosition += 8;
+    }
+    else
+    {
+      data[currentPosition >> 3] &= ~(1 << (currentPosition & 0x7));
+      --i;
+      ++currentPosition;
+    }
+  }
+
+  currentPosition += delimiterLength; // set synch delimiter
+
+  // set sync byte
+  data[currentPosition >> 3] &= ~(1 << (currentPosition & 0x7)); // set dominant start bit
+  ++currentPosition;
+  for (i = 0; i < 8; ++i)
+  {
+    if ((syncByte & (1 << i)) == 0) // dominant bit in syncByte
+    {
+      data[currentPosition >> 3] &= ~(1 << (currentPosition & 0x7));
+    }
+    ++currentPosition;
+  }
+  ++currentPosition; // set recessive stop bit
+
+  // set protected id
+  data[currentPosition >> 3] &= ~(1 << (currentPosition & 0x7)); // set dominant start bit
+  ++currentPosition;
+  for (i = 0; i < 8; ++i)
+  {
+    if ((pidByte & (1 << i)) == 0) // dominant bit in pidByte
+    {
+      data[currentPosition >> 3] &= ~(1 << (currentPosition & 0x7));
+    }
+    ++currentPosition;
+  }
+  ++currentPosition; // set recessive stop bit
+
+  ret = LINSendBitStream(data, headerLength); // send created header
+  writeLineEx(wrCAPLSink, wrInfo,  "LINSendBitStream( data, length=%d )=%d", headerLength, ret );
+  writeLineEx(wrCAPLSink, wrInfo,  "data[0]=0x%x, data[1]=0x%x, data[2]=0x%x, data[3]=0x%x, data[4]=0x%x", 
+           data[0], data[1], data[2], data[3], data[4] );
+
+  return headerLength;
+}
+
+on sysvar LIN::ErrBitStreamSpecial
+{
+  int ret;
+  dword d0, d1, d2, d3, d4, d5, d6, d7, cs;
+  dword d0_d1, d1_d2, d2_d3, d3_d4, d4_d5, d5_d6, d6_d7, d7_CS;
+
+  // react on push only
+  if( !@this )
+    return;
+
+  SetBitStream_Init();
+  SetBitStream_Header (@LIN::ErrBSHdrBreakLength, @LIN::ErrBSHdrDelLength, @LIN::ErrBSHdrSyncByte, 0, @LIN::ErrBSHdrPID);
+
+  SetBitStream_ResponseSpace(@LIN::ErrBSRespSpace);
+
+  d0 = @LIN::ErrBSRespD0;
+  d1 = @LIN::ErrBSRespD1;
+  d2 = @LIN::ErrBSRespD2;
+  d3 = @LIN::ErrBSRespD3;
+  
+  d4 = @LIN::ErrBSRespD4;
+  d5 = @LIN::ErrBSRespD5;
+  d6 = @LIN::ErrBSRespD6;
+  d7 = @LIN::ErrBSRespD7;
+  cs = @LIN::ErrBSRespCS;
+
+  d0_d1 = @LIN::ErrBSRespD0_D1;
+  d1_d2 = @LIN::ErrBSRespD1_D2;
+  d2_d3 = @LIN::ErrBSRespD2_D3;
+  d3_d4 = @LIN::ErrBSRespD3_D4;
+  d4_d5 = @LIN::ErrBSRespD4_D5;
+  d5_d6 = @LIN::ErrBSRespD5_D6;
+  d6_d7 = @LIN::ErrBSRespD6_D7;
+  d7_CS = @LIN::ErrBSRespD7_CS;
+
+  if ( SetBitStream_ResponseLow (d0, d0_d1, d1, d1_d2, d2, d2_d3, d3, d3_d4) > 0)
+  {
+    // 4 data bytes are defined -> next 4 (or less) can be set
+    SetBitStream_ResponseHigh (d4, d4_d5, d5, d5_d6, d6, d6_d7, d7, d7_CS);
+    SetBitStream_ResponseChecksum(cs); // set checksum only if response is required
+  }
+
+  ret = LINSendBitStream(gBitStream, gCurrentBitPos); // send created bit stream
+  writeLineEx(wrCAPLSink, wrInfo,  "LINSendBitStream( data, length=%d )=%d", gCurrentBitPos, ret );
+  writeLineEx(wrCAPLSink, wrInfo,  "data[0]=0x%x, data[1]=0x%x, data[2]=0x%x, data[3]=0x%x, data[4]=0x%x, data[5]=0x%x, data[6]=0x%x, data[7]=0x%x", 
+           gBitStream[0], gBitStream[1], gBitStream[2], gBitStream[3], gBitStream[4], gBitStream[5], gBitStream[6], gBitStream[7] );
+
+}
+
+on sysvar LIN::ErrDisturbanceStart
+{
+  dword level,length;
+  int64 msTime;
+  dword ret;
+
+  // react on push only
+  if( !@this )
+    return;
+
+  // get disturbance length in ms
+  msTime = @LIN::ErrDisturbanceLength;
+
+  // valdiate  disturbance length
+  if( msTime > MAX_DISTURBANCE_TIME )
+  {
+    msTime = MAX_DISTURBANCE_TIME;
+    @LIN::ErrDisturbanceLength = MAX_DISTURBANCE_TIME;
+  }
+
+  // convert seconds to bit times (if it's not permanent)
+  if( msTime > 0 )
+    length = linTime2Bits_ns( msTime * 1000000 ); 
+  else if( msTime < 0 ) // permanent disturbance if -1 is set
+  {
+    length = -1;
+    @LIN::ErrDisturbanceLength = -1;
+  }
+
+  // get Level value
+  level = @LIN::ErrDisturbanceMode;
+
+  // Apply disturbance
+  ret = LINStartDisturbance(length,level);
+  writeLineEx(wrCAPLSink, wrInfo, "LINStartDisturbance(%d, %d)=%d",length,level,ret);
+}
+
+on sysvar LIN::ErrDisturbanceStop
+{
+  byte ret;
+
+  // react on push only
+  if( !@this )
+    return;
+
+  ret = LINStopDisturbance();
+  writeLineEx(wrCAPLSink, wrInfo, "LINStopDisturbance()=%d", ret);
+}
+
+on sysvar LIN::ErrIBHeaderApply
+{
+  byte ret, _id, length;
+
+  // react on push only
+  if( !@this )
+    return;
+
+  // Get FrameId
+  _id = @LIN::ErrIBHeaderFrameId;
+  // Validate FrameId 
+  if( _id > ID_VALUE_RANGE )
+  {
+    @LIN::ErrIBHeaderFrameId = ID_VALUE_RANGE;
+    _id = ID_VALUE_RANGE;
+  }
+
+  // Get interbyte length
+  length = @LIN::ErrIBHeaderLength;
+  // Validate Length 
+  if( length > MAX_INTERBYTE_VAL )
+  {
+    @LIN::ErrIBHeaderLength = MAX_INTERBYTE_VAL;
+    length = MAX_INTERBYTE_VAL;
+  }
+ 
+  // LINstress
+  ret = linSetInterByteSpace( _id, 0, length );
+  writeLineEx(wrCAPLSink, wrInfo,  "linSetInterByteSpace( 0x%x, 0, %d)=%d", _id, length, ret );
+}
+
+on sysvar LIN::ErrIBRespSpaceApply
+{
+  byte ret, _id, length;
+
+  // react on push only
+  if( !@this )
+    return;
+
+  // Get FrameId
+  _id = @LIN::ErrIBRespSpaceFrameId;
+  // Validate FrameId 
+  if( _id > ID_VALUE_RANGE )
+  {
+    @LIN::ErrIBRespSpaceFrameId = ID_VALUE_RANGE;
+    _id = ID_VALUE_RANGE;
+  }
+
+  // Get interbyte length
+  length = @LIN::ErrIBRespSpaceLength;
+  // Validate Length 
+  if( length > MAX_INTERBYTE_VAL )
+  {
+    @LIN::ErrIBRespSpaceLength = MAX_INTERBYTE_VAL;
+    length = MAX_INTERBYTE_VAL;
+  }
+ 
+  // LINstress
+  ret = linSetInterByteSpace( _id, 1, length );
+  writeLineEx(wrCAPLSink, wrInfo,  "linSetInterByteSpace( 0x%x, 1, %d)=%d", _id, length, ret );
+}
+
+on sysvar LIN::ErrIBInterFrameApply
+{
+  byte ret, length;
+
+  // react on push only
+  if( !@this )
+    return;
+
+  // Get interbyte length
+  length = @LIN::ErrIBInterFrameLength;
+  // Validate Length 
+  if( length > MAX_INTERBYTE_VAL )
+  {
+    @LIN::ErrIBInterFrameLength = MAX_INTERBYTE_VAL;
+    length = MAX_INTERBYTE_VAL;
+  }
+ 
+  // LINstress
+  ret = linSetInterframeSpace( length );
+  writeLineEx(wrCAPLSink, wrInfo,  "linSetInterframeSpace( %d )=%d",length, ret );
+}
+
+on sysvar LIN::ErrIBRespApply
+{
+  byte ret, _id, sixteenthBits, byteIndex, i;
+  dword arrayOfSixteenthBits[9];
+
+
+  // react on push only
+  if( !@this )
+    return;
+
+  // Initialize
+  for (i=0; i < 9; ++i)
+  {
+    arrayOfSixteenthBits[i] = 0;
+  }
+
+  // Get interbyte length
+  sixteenthBits = @LIN::ErrIBRespLength;
+  // Validate Length 
+  if( sixteenthBits > MAX_INTERBYTE_VAL )
+  {
+    @LIN::ErrIBRespLength = MAX_INTERBYTE_VAL;
+    sixteenthBits = MAX_INTERBYTE_VAL;
+  }
+  // Get FrameId Type
+  if (@LIN::ErrIBRespFrameChoice == 0)
+  {
+    _id = 0xFF;
+  }
+  else
+  {
+    // Get FrameId
+    _id = @LIN::ErrIBRespFrameId;
+    // Validate FrameId 
+    if( _id > ID_VALUE_RANGE )
+    {
+      @LIN::ErrIBRespFrameId = ID_VALUE_RANGE;
+      _id = ID_VALUE_RANGE;
+    }
+  }
+
+  // Get Byte index
+  if (@LIN::ErrIBRespByteChoice == 0)
+  {
+    // all bytes get the requested interbyte space
+    byteIndex = 0xFF;
+  }
+  else
+  {
+    // Get Byte Index
+    byteIndex = @LIN::ErrIBRespByteIndex;
+    // Validate FrameId 
+    if( byteIndex > 7 )
+    {
+      @LIN::ErrIBRespByteIndex = 7;
+      byteIndex = 7;
+    }
+  }
+
+  // Perform LIN Stress
+  if (0xFF == _id && 0xFF==byteIndex)
+  {
+    // all frame ids and all bytes
+    ret = LINSetGlobalInterByteSpace( sixteenthBits );
+    writeLineEx(wrCAPLSink, wrInfo, "LINSetGlobalInterByteSpace( %d )=%d", sixteenthBits, ret );
+  }
+  else if (0xFF == _id && 0xFF !=byteIndex)
+  {
+    // all frame ids and certain bytes -> THIS CAN WORK FOR ALL FRAMES PUBLISHED BY A SLAVE ONLY
+    msgBeep (3); 
+    writeLineEx(wrCAPLSink, wrError, "This combination is possible only when this CAPL program runs in the Slave context!");
+  }
+  else if (0xFF != _id && 0xFF==byteIndex)
+  {
+    // certain frame + all bytes
+    for (i=0; i < 9; ++i)
+    {
+      arrayOfSixteenthBits[i] = sixteenthBits;
+    }
+    ret = linSetInterByteSpaces(_id, arrayOfSixteenthBits );
+    writeLineEx(wrCAPLSink, wrInfo,  "linSetInterByteSpaces( %d, arrayOfSixteenthBits )=%d", _id, ret );
+    for (i=0; i < 9; ++i)
+    {
+      writeLineEx(wrCAPLSink, wrInfo,  "arrayOfSixteenthBits[%d]==%d", i, arrayOfSixteenthBits[i] );
+    }
+  } 
+  else
+  {
+    // Certain frame + certain byte index
+    ret = linSetInterByteSpace( _id, byteIndex+2, sixteenthBits );
+    writeLineEx(wrCAPLSink, wrInfo,  "linSetInterByteSpace( 0x%x, %d, %d)=%d", _id, byteIndex+2, sixteenthBits, ret );
+  }
+}
+
+on sysvar LIN::ErrRespCountApply
+{
+  dword	_id, lDLC, ret;
+  int		count;
+
+  // react on push only
+  if( !@this )
+    return;
+
+  // Get FrameId
+  _id = @LIN::ErrRespCountFrameId;
+  // Validate FrameId 
+  if( _id > ID_VALUE_RANGE )
+  {
+    @LIN::ErrRespCountFrameId = ID_VALUE_RANGE;
+    _id = ID_VALUE_RANGE;
+  }
+
+  // Get number of responses to set
+  count = @LIN::ErrRespCount;
+
+  // Validate
+  if( count > MAX_RESP_COUNT )
+  {
+    count = MAX_RESP_COUNT;
+    @LIN::ErrRespCount = MAX_RESP_COUNT;
+  }
+  else if( count < 0 )
+  {
+    count = -1;
+    @LIN::ErrRespCount = -1;
+  }
+
+  // LINstress
+  ret = LINSetRespCounter( _id,  count );
+  writeLineEx(wrCAPLSink, wrInfo,  "LINSetRespCounter( 0x%x, %d )=%d", _id, count, ret );
+}
+
+on sysvar LIN::ErrCSApply
+{
+  dword	_id, ret;
+  byte csErrorChoice, csManualByte;
+  linFrame 0x0 linErrFrame;
+
+  // react on push only
+  if( !@this )
+    return;
+
+  // Get FrameId
+  _id = @LIN::ErrCSFrameId;
+  // Validate FrameId 
+  if( _id > ID_VALUE_RANGE )
+  {
+   @LIN::ErrCSFrameId = ID_VALUE_RANGE;
+    _id = ID_VALUE_RANGE;
+  }
+
+
+  // Get requested error type
+  csErrorChoice = @LIN::ErrCSChoice;
+
+  if (0 == csErrorChoice)
+  {
+    // Automatic Error
+    ret = linSetChecksumError(_id, 1);
+    writeLineEx(wrCAPLSink, wrInfo,  "linSetChecksumError( 0x%x, 1 )=%d", _id, ret );
+  }
+  else
+  {
+    // Manual Error
+    linErrFrame.id = _id;
+    linErrFrame.dlc = linGetDlc(_id);
+    linErrFrame.MsgChannel = gChannel;
+    // data bytes
+    linErrFrame.byte(0) = @LIN::ErrCSData1;
+    linErrFrame.byte(1) = @LIN::ErrCSData2;
+    linErrFrame.byte(2) = @LIN::ErrCSData3;
+    linErrFrame.byte(3) = @LIN::ErrCSData4;
+    linErrFrame.byte(4) = @LIN::ErrCSData5;
+    linErrFrame.byte(5) = @LIN::ErrCSData6;
+    linErrFrame.byte(6) = @LIN::ErrCSData7;
+    linErrFrame.byte(7) = @LIN::ErrCSData8;
+
+    csManualByte = @LIN::ErrCSByteRQ;
+
+    linSetManualChecksum(linErrFrame, csManualByte);
+    output(linErrFrame); // it is important to call output() to make the changes active
+    writeLineEx(wrCAPLSink, wrInfo,  "linSetManualChecksum( linErrFrame, 0x%x ); linErrFrame => ID=0x%x, Length=%d", csManualByte, linErrFrame.id, linErrFrame.dlc);
+//  	writeLineEx(wrCAPLSink, wrInfo,  "      linErrFrame = ID=x%x, DLC=%d, MsgChannel=%d )", linErrFrame.id, linErrFrame.dlc, linErrFrame.MsgChannel);
+  }
+}
+
+on sysvar LIN::ErrCSReset
+{
+  dword	_id, ret;
+  byte csErrorChoice, csManualByte;
+  linFrame 0x0 linErrFrame;
+
+  // react on push only
+  if( !@this )
+    return;
+
+  // Get FrameId
+  _id = @LIN::ErrCSFrameId;
+  // Validate FrameId 
+  if( _id > ID_VALUE_RANGE )
+  {
+    @LIN::ErrCSFrameId = ID_VALUE_RANGE;
+    _id = ID_VALUE_RANGE;
+  }
+
+
+  // Get requested error type
+  csErrorChoice = @LIN::ErrCSChoice;
+
+  if (0 == csErrorChoice)
+  {
+    // Automatic Error
+    ret = linSetChecksumError(_id, 0);
+    writeLineEx(wrCAPLSink, wrInfo,  "linSetChecksumError( 0x%x, 0 )=%d", _id, ret );
+  }
+  else
+  {
+    // Manual Error
+    linErrFrame.id = _id;
+    linErrFrame.dlc = linGetDlc(_id);
+    // data bytes
+    linErrFrame.byte(0) = @LIN::ErrCSData1;
+    linErrFrame.byte(1) = @LIN::ErrCSData2;
+    linErrFrame.byte(2) = @LIN::ErrCSData3;
+    linErrFrame.byte(3) = @LIN::ErrCSData4;
+    linErrFrame.byte(4) = @LIN::ErrCSData5;
+    linErrFrame.byte(5) = @LIN::ErrCSData6;
+    linErrFrame.byte(6) = @LIN::ErrCSData7;
+    linErrFrame.byte(7) = @LIN::ErrCSData8;
+
+    linResetManualChecksum(linErrFrame);
+    output(linErrFrame); // it is important to call output() to make the changes active
+    writeLineEx(wrCAPLSink, wrInfo,  "linResetManualChecksum( linErrFrame )" );
+    writeLineEx(wrCAPLSink, wrInfo,  "linErrFrame = ID=x%x, DLC=%d )", linErrFrame.id, linErrFrame.dlc );
+  }
+}
+
+on start
+{
+  dword ret;
+
+  dwBusContextLIN1 = GetBusNameContext("LIN");
+  ret = SetBusContext(dwBusContextLIN1);
+  //writeLineEx(wrCAPLSink, wrInfo,  "SetBusContext( LIN )=%d", ret); //EVAL0006243
+}
+
+int SetBitStream_Header (int breakLength, int delimiterLength, dword syncByte, dword interByteLength, dword pidByte)
+{
+  int headerLength, i;
+
+  headerLength = breakLength + delimiterLength + 20 + interByteLength; // Header consists of Break, Sync and PID bytes + interbyte btw. Sync and PID
+
+  if (headerLength > 8*elCount(gBitStream))
+  {
+    return 0; // maximum is exceeded
+  }
+
+  for (i = breakLength; i > 0;) // set sync break
+  {
+    if (i >= 8)
+    {
+      gBitStream[gCurrentBitPos >> 3] = 0; // set the whole byte to be dominant
+      i -= 8;
+      gCurrentBitPos += 8;
+    }
+    else
+    {
+      gBitStream[gCurrentBitPos >> 3] &= ~(1 << (gCurrentBitPos & 0x7)); // set signle dominant bit
+      --i;
+      ++gCurrentBitPos;
+    }
+  }
+
+  gCurrentBitPos += delimiterLength; // set synch delimiter
+
+  SetBitStream_SetByteAtCurrentPosition(syncByte, interByteLength); // set sync byte and interbyte after it
+
+  SetBitStream_SetByteAtCurrentPosition(pidByte, 0); // set protected ID byte 
+ 
+  return headerLength;
+}
+
+void SetBitStream_Init ()
+{
+  int i;
+  
+  gCurrentBitPos = 0;
+
+  for (i = 0; i < elCount(gBitStream); ++i)
+  {
+    gBitStream[i] = 0xff; // initialize with recessive bits
+  }
+
+}
+
+int SetBitStream_ResponseSpace (int responseSpaceLength)
+{
+  if (responseSpaceLength + gCurrentBitPos + 1 > 8*elCount(gBitStream))
+  {
+    return 0; // maximum is exceeded
+  }
+  
+  if (responseSpaceLength > 0)
+  {
+    gCurrentBitPos += responseSpaceLength; // set response space
+  }
+
+  return responseSpaceLength;
+}
+
+int SetBitStream_ResponseLow (dword d1, dword d1_d2, dword d2, dword d2_d3, dword d3, dword d3_d4, dword d4, dword d4_d5)
+{
+  byte frameLength;
+
+  frameLength=0;
+
+  if (0 != SetBitStream_SetByteAtCurrentPosition(d1, d1_d2))
+  {
+    gBitStreamFrame.byte(0) = d1;
+    ++frameLength;
+    if (0 != SetBitStream_SetByteAtCurrentPosition(d2, d2_d3))
+    {
+      gBitStreamFrame.byte(1) = d2;
+      ++frameLength;
+      if (0 != SetBitStream_SetByteAtCurrentPosition(d3, d3_d4))
+      {
+        gBitStreamFrame.byte(2) = d3;
+        ++frameLength;
+        if (0 != SetBitStream_SetByteAtCurrentPosition(d4, d4_d5))
+        {
+          gBitStreamFrame.byte(3) = d4;
+          ++frameLength;
+        }
+      }
+    }
+  }
+  gBitStreamFrame.DLC = frameLength;
+
+  return frameLength; // current frame length in bytes
+}
+
+int SetBitStream_SetByteAtCurrentPosition (dword byteAsGiven, int followedByInterbyte)
+{
+  int i;
+  byte byteValue;
+
+  if (10 + followedByInterbyte + gCurrentBitPos + 1 > 8*elCount(gBitStream))
+  {
+    return 0; // maximum is exceeded
+  }
+  if (gByte_NotToSend == byteAsGiven)
+    return 0; 
+
+  byteValue = byteAsGiven & 0xFF; // take byte value only
+
+  {
+    { // set dominant start bit
+      if ( !(byteAsGiven & gByte_MaskInvertStartBit))
+        gBitStream[gCurrentBitPos >> 3] &= ~(1 << (gCurrentBitPos & 0x7)); 
+      ++gCurrentBitPos;
+    }
+
+    for (i = 0; i < 8; ++i)
+    {
+      if ((byteValue & (1 << i)) == 0) // is dominant bit in byteValue ? 
+      {
+        gBitStream[gCurrentBitPos >> 3] &= ~(1 << (gCurrentBitPos & 0x7)); // set dominant bit
+      }
+      ++gCurrentBitPos;
+    }
+
+    {  // set recessive stop bit
+      if ( byteAsGiven & gByte_MaskInvertStopBit)
+        gBitStream[gCurrentBitPos >> 3] &= ~(1 << (gCurrentBitPos & 0x7)); 
+      ++gCurrentBitPos;
+    }
+
+    if (followedByInterbyte > 0)
+    {
+      gCurrentBitPos += followedByInterbyte; // add interbyte space
+    }
+
+    return 10 + followedByInterbyte; // 10 bit length + interbyte length
+  }
+
+  return 0; // byte value is ignored
+}
+
+int SetBitStream_ResponseHigh (dword d5, dword d5_d6, dword d6, dword d6_d7, dword d7, dword d7_d8, dword d8, dword d8_CS)
+{
+  byte frameLength;
+
+
+  if (0 != SetBitStream_SetByteAtCurrentPosition(d5, d5_d6))
+  {
+    frameLength=4;
+    gBitStreamFrame.byte(0) = d5;
+    ++frameLength;
+    if (0 != SetBitStream_SetByteAtCurrentPosition(d6, d6_d7))
+    {
+      gBitStreamFrame.byte(1) = d6;
+      ++frameLength;
+      if (0 != SetBitStream_SetByteAtCurrentPosition(d7, d7_d8))
+      {
+        gBitStreamFrame.byte(2) = d7;
+        ++frameLength;
+        if (0 != SetBitStream_SetByteAtCurrentPosition(d8, d8_CS))
+        {
+          gBitStreamFrame.byte(3) = d8;
+          ++frameLength;
+        }
+      }
+    }
+    gBitStreamFrame.DLC = frameLength;
+
+    return frameLength; // current frame length in bytes
+  }
+  return gBitStreamFrame.DLC;
+}
+
+int SetBitStream_ResponseChecksum (dword csByte)
+{
+  byte csValue;
+  if (gCS_Autom == csByte)
+  {
+    gBitStreamFrame.id = @LIN::ErrBSHdrPID & 0x3F;
+    gBitStreamFrame.msgChannel = gChannel;
+    csValue = linGetChecksum(gBitStreamFrame);
+//writeLineEx(wrCAPLSink, wrInfo, "linGetChecksum() = 0x%x, id=0x%x, length=%d, data_low = 0x%x, data_high = 0x%x", 
+//     csValue, gBitStreamFrame.id, gBitStreamFrame.dlc, gBitStreamFrame.dword(0), gBitStreamFrame.dword(4));
+    return SetBitStream_SetByteAtCurrentPosition(csValue, 0); // set automatically calculated checksum
+  }
+  return SetBitStream_SetByteAtCurrentPosition(csByte, 0); // set checksum as specified
+}
+

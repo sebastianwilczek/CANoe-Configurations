@@ -1,0 +1,363 @@
+/*@!Encoding:1252*/
+variables
+{
+  //
+  // Constants
+  //
+
+  CHAR      kPanelName[32]  = "Chat Client 2"; // Name of the panel
+  const INT kVerbosity = 0;                    // 1=information to write window, 0=no output to write window
+
+  //
+  // Global Variables
+  //
+
+  DWORD     gClientSocket;                // The client socket
+  CHAR      gReceiveBuffer[200];          // Receive buffer
+  INT       gConnectionSecured;
+}
+
+on start
+{
+  if (@sysvar::ChatClient2::Enable > 0)
+  {
+    ClientStart();
+  }
+}
+
+/*
+  Start Chat Client and connect to server
+*/
+void ClientStart()
+{
+  DWORD remoteAddressIPv4;
+  BYTE  remoteAddressIPv6[16];
+  BYTE  localAddressIPv6[16];
+  CHAR  errorText[200];
+  CHAR  buf[32];
+  LONG  result;
+
+  //
+  // Setup Panel Data
+  //
+
+  enableControl( kPanelName, "RemoteIPv4Address", 0 );
+  enableControl( kPanelName, "RemoteTCPPort"    , 0 );
+  enableControl( kPanelName, "LoginName"        , 0 );
+
+  //
+  // Setup server address
+  //
+
+  sysGetVariableString( sysvar::ChatClient2::ServerAddress, buf, elcount(buf) );
+  
+  if( ipGetAddressAsArray(buf, remoteAddressIPv6) == 0 )
+  {
+    //
+    // Create IPv6 TCP socket and connect
+    //
+
+    if (kVerbosity > 0)
+    {
+      write( "<%BASE_FILE_NAME%> Connecting to %s ...", buf );
+    }
+    
+    ipGetAddressAsArray("::", localAddressIPv6);
+    gClientSocket = TcpOpen( localAddressIPv6, 0 );
+    if (IpGetLastSocketError(gClientSocket) != 0)
+    {
+      IpGetLastSocketErrorAsString( gClientSocket, errorText, elcount(errorText) );
+      write( "<%BASE_FILE_NAME%> TcpSocket::open IPv6 failed, %s (Result %d)", errorText, IpGetLastSocketError(gClientSocket) );
+      return;
+    }
+
+    result = TcpConnect( gClientSocket, remoteAddressIPv6, @sysvar::ChatClient2::ServerPortNumber );
+    if (result != 0 && ipGetLastSocketError(gClientSocket) != 10035 ) // WSAEWOULDBLOCK
+    {
+      IpGetLastSocketErrorAsString(gClientSocket, errorText, elcount(errorText) );
+      write( "<%BASE_FILE_NAME%> TcpSocket::connect IPv6 failed, %s (Result %d)", errorText,IpGetLastSocketError(gClientSocket) );
+      return;
+    }
+  }
+  else
+  {
+    remoteAddressIPv4 = IpGetAddressAsNumber( buf );
+    //
+    // Create IPv4 TCP socket and connect
+    //
+
+    if (kVerbosity > 0)
+    {
+      write( "<%BASE_FILE_NAME%> Connecting to %s ...", buf );
+    }
+
+    gClientSocket = TcpOpen( 0, 0 );
+    if (IpGetLastSocketError(gClientSocket) != 0)
+    {
+      IpGetLastSocketErrorAsString( gClientSocket, errorText, elcount(errorText) );
+      write( "<%BASE_FILE_NAME%> TcpSocket::open failed, %s (Result %d)", errorText, IpGetLastSocketError(gClientSocket) );
+      return;
+    }
+
+    result = TcpConnect( gClientSocket, remoteAddressIPv4, @sysvar::ChatClient2::ServerPortNumber );
+    if (result != 0 && ipGetLastSocketError(gClientSocket) != 10035 ) // WSAEWOULDBLOCK
+    {
+      IpGetLastSocketErrorAsString(gClientSocket, errorText, elcount(errorText) );
+      write( "<%BASE_FILE_NAME%> TcpSocket::connect failed, %s (Result %d)", errorText,IpGetLastSocketError(gClientSocket) );
+      return;
+    }
+  }
+}
+
+void OnTlsHandshakeComplete(dword socket, int result)
+{
+  CHAR  errorText[200];
+  CHAR  userName[32];
+  LONG  retVal;
+
+  if (kVerbosity > 0)
+  {
+    write( "<%BASE_FILE_NAME%> OnTlsHandshakeComplete with result %d, socket 0x%x", result, socket );
+  }
+
+  if (result == 0)
+  {
+    gConnectionSecured = 1;
+    
+    //
+    // Send user name to server
+    //
+
+    sysGetVariableString( sysvar::ChatClient2::LoginName, userName, elcount(userName) );
+    
+    retVal = TcpSend( socket, userName, strlen(userName) );
+
+    if (retVal != 0)
+    {
+      IpGetLastSocketErrorAsString( socket, errorText, elcount(errorText) );
+      write( "<%BASE_FILE_NAME%> TcpSocket::Send failed, %s (Result %d)", errorText, IpGetLastSocketError(socket) );
+      return;
+    }
+
+    //
+    // Receive
+    //
+    
+    TcpReceive( socket, gReceiveBuffer, elcount(gReceiveBuffer) );
+
+    if (IpGetLastSocketError(socket) != 997)
+    {
+      IPGetLastSocketErrorAsString( socket, errorText, elcount(errorText) );
+      write( "<%BASE_FILE_NAME%> TcpSocket::Receive failed, %s (Result %d)", errorText, IpGetLastSocketError(socket) );
+      return;
+    }
+
+  }
+  else
+  {
+    write( "<%BASE_FILE_NAME%> OnTlsHandshakeComplete failed, result %d", result );
+  }
+}
+
+
+/*
+  Stop Chat Client and close connection to server
+*/
+void ClientStop()
+{
+  if (kVerbosity > 0)
+  {
+    write( "<%BASE_FILE_NAME%> ClientStop" );
+  }
+
+  //
+  // Setup Panel Data
+  //
+
+  enableControl( kPanelName, "RemoteIPv4Address", 1 );
+  enableControl( kPanelName, "RemoteTCPPort"    , 1 );
+  enableControl( kPanelName, "LoginName"        , 1 );
+
+  //
+  // Close socket
+  //
+
+  tlsClose(gClientSocket, 1);
+  gClientSocket = 0;
+  gConnectionSecured = 0;
+}
+
+/*
+ * Callback function, if the server has closed the connection.
+ *
+ * socket - Socket handle of the client
+ * result - Result of the operation, 0 on success.
+ */
+void OnTcpClose( dword socket, long result)
+{
+  if (kVerbosity > 0)
+  {
+    write( "<%BASE_FILE_NAME%> TCP connection closed, result %d", result );
+  }
+  tlsClose(gClientSocket, 1);
+  gClientSocket = 0;
+  gConnectionSecured = 0;
+}
+
+/*
+ * Callback for receiving on IPv4 socket
+ *
+ * socket  - Socket handle of the client
+ * result  - Result of the operation, 0 on success
+ * address - Remote IPv4 address of the client (in network byte-order!)
+ * port    - Remote port number of the client
+ * buffer  - Buffer which contains the received data
+ * size    - Size in bytes of the received data
+ */
+void OnTcpReceive( dword socket, long result, dword address, dword port, char buffer[], dword size)
+{
+  TcpReceiveInternal( socket, result, buffer, size);
+}
+
+/*
+ * Callback for receiving on IPv6 socket
+ *
+ * socket  - Socket handle of the client
+ * result  - Result of the operation, 0 on success
+ * address - Remote IPv6 address of the client (in network byte-order!)
+ * port    - Remote port number of the client
+ * buffer  - Buffer which contains the received data
+ * size    - Size in bytes of the received data
+ */
+void OnTcpReceive( dword socket, long result, byte address[], dword port, char buffer[], dword size)
+{
+  TcpReceiveInternal( socket, result, buffer, size);
+}
+
+/*
+ * Data is received from Chat Server. Put it to text buffer.
+ *
+ * socket  - Socket handle of the client
+ * result  - Result of the operation, 0 on success
+ * buffer  - Buffer which contains the received data
+ * size    - Size in bytes of the received data
+ */
+void TcpReceiveInternal( dword socket, long result, char buffer[], dword size)
+{
+  CHAR errorText[200];
+  CHAR receiveText[512];
+  LONG retVal;
+
+  //
+  // Put text to the panel
+  //
+
+  if (kVerbosity > 0)
+  {
+    write( "<%BASE_FILE_NAME%> TCP received %d bytes, socket 0x%x", size, socket );
+  }
+
+  if (result == 0)
+  {
+    strncpy( receiveText, buffer, size+1 );
+
+    putValueToControl( kPanelName, "ChatOutput", receiveText );
+    putValueToControl( kPanelName, "ChatOutput", "\n" );
+
+    //
+    // Receive
+    //
+
+    TcpReceive( socket, gReceiveBuffer, elcount(gReceiveBuffer) );
+
+    if (ipGetLastSocketError(socket) != 997)
+    {
+      IpGetLastSocketErrorAsString( socket, errorText, elcount(errorText) );
+      write( "<%BASE_FILE_NAME%> TcpSocket::Receive failed, %s (Result %d)", errorText, retVal );
+      return;
+    }
+  }
+  else
+  {
+    write( "<%BASE_FILE_NAME%> OnTcpReceive failed, gResult %d", result );
+  }
+}
+
+/*
+ * Start or stop the client with the system variable 'Enable', whicht
+ * is assigned to a switch in a panel.
+ */
+on sysvar sysvar::ChatClient2::Enable
+{
+  if (@this == 1)
+  {
+    ClientStart();
+  }
+  else
+  {
+    ClientStop();
+  }
+}
+
+/*
+ * User has entered text and clicked 'Send' button.
+ * Send entered text to server.
+ */
+on sysvar sysvar::ChatClient2::Output
+{
+  if ((gClientSocket) && (gConnectionSecured) && (@this == 1))
+  {
+    SendMessage();
+  }
+}
+
+/*
+ * Callback, which is called on connect to server
+ *
+ * socket - Socket handle
+ * result - Result of the operation, 0 on success.
+ */
+void OnTcpConnect( dword socket, long result)
+{
+  CHAR errorText[200];
+
+  if (kVerbosity > 0)
+  {
+    write( "<%BASE_FILE_NAME%> OnTcpConnect with result %d, socket 0x%x", result, socket );
+  }
+  
+  if (result == 0)
+  {
+    gClientSocket = tlsOpen(gClientSocket);
+    result = tlsAuthenticateAsClient(gClientSocket, "");
+    if ((tlsGetLastError(gClientSocket) != 0) && (tlsGetLastError(gClientSocket) != 997))
+    {
+      tlsGetLastErrorAsString(gClientSocket, errorText, elcount(errorText) );
+      write( "<%BASE_FILE_NAME%> tlsAuthenticateAsClient failed, %s (Result %d)", errorText, tlsGetLastError(gClientSocket) );
+      return;
+    }
+  }
+  else
+  {
+    write( "<%BASE_FILE_NAME%> OnTcpConnect failed, result %d", result );
+  }
+}
+
+/*
+ * Send text of SysVar ChatClient2::Text to server.
+ */
+void SendMessage()
+{
+  CHAR text[200];
+
+  sysGetVariableString( sysvar::ChatClient2::Text, text, elcount(text) );
+
+  TcpSend( gClientSocket, text, strlen(text) );
+
+  if (IPGetLastSocketError(gClientSocket) != 0)
+  {
+    IPGetLastSocketErrorAsString( gClientSocket, text, elcount(text) );
+    write( "<%BASE_FILE_NAME%> TcpSocket::send failed, %s (Result %d)", text, IpGetLastSocketError(gClientSocket) );
+  }
+}
+

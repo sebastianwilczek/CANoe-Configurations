@@ -1,0 +1,603 @@
+/*@!Encoding:1252*/
+includes
+{
+}
+
+variables
+{
+  struct RSU_TrafficLight_T
+  {
+    double Latitude;
+    double Longitude;
+    double Elevation;
+    long Heading;
+    long Speed;
+  };
+
+  struct RSU_TrafficLight_T RSU_TrafficLight_Ctx =
+  {
+    /* Latitude */ 48.825146,
+    /* Longitude */ 9.096219,
+    /* Elevation */ 301.4,
+    /* Heading */ 0,
+    /* Speed */ 0
+  };
+
+  ////////////////////////////////////////
+  
+  enum States
+  {
+    eRed,
+    eRedYellow,
+    eGreen,
+    eYellow
+  };
+  struct SignalGroup
+  {
+    word id;
+    word stateTime[4];
+    word currentState;
+    word nextStateChange;
+    byte permissiveMovement;
+  };
+  
+  struct SignalGroup signalGroup_1[5] =
+  {
+    {
+      /* id */ 1,
+      /* stateTime */ { 21,  3,  12,  3 },
+      /* currentState */ eRedYellow,
+      /* nextStateChange */ 3,
+      /* permissiveMovement */ 0
+    },
+    {
+      /* id */ 2,
+      /* stateTime */ { 30,  3,  3,  3 },
+      /* currentState */ eRedYellow,
+      /* nextStateChange */ 3,
+      /* permissiveMovement */ 1
+    },
+    {
+      /* id */ 3,
+      /* stateTime */ {  27,  3,  6,  3 },
+      /* currentState */ eRed,
+      /* nextStateChange */ 27,
+      /* permissiveMovement */ 0
+    },
+    {
+      /* id */ 4,
+      /* stateTime */ {  21,  3,  12,  3 },
+      /* currentState */ eRed,
+      /* nextStateChange */ 9,
+      /* permissiveMovement */ 0
+    },
+    {
+      /* id */ 5,
+      /* stateTime */ { 30,  3,  3,  3 },
+      /* currentState */ eRed,
+      /* nextStateChange */ 18,
+      /* permissiveMovement */ 1
+    }
+  };
+  struct SignalGroup signalGroup_2[4] =
+  {
+    {
+      /* id */ 1,
+      /* stateTime */ {  12,  3,  18,  3 },
+      /* currentState */ eRedYellow,
+      /* nextStateChange */ 3,
+      /* permissiveMovement */ 1
+    },
+    {
+      /* id */ 2,
+      /* stateTime */ {  27,  3,  3,  3 },
+      /* currentState */ eRedYellow,
+      /* nextStateChange */ 3,
+      /* permissiveMovement */ 1
+    },
+    {
+      /* id */ 3,
+      /* stateTime */ {  24,  3,  6,  3 },
+      /* currentState */ eRed,
+      /* nextStateChange */ 24,
+      /* permissiveMovement */ 0
+    },
+    {
+      /* id */ 4,
+      /* stateTime */ {  21,  3,  9,  3 },
+      /* currentState */ eRed,
+      /* nextStateChange */ 9,
+      /* permissiveMovement */ 0
+    }
+  };
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// MAP
+////////////////////////////////////////////////////////////////////////////////
+
+void MapInit(long packet, struct MAP mapPdu)
+{
+  byte hashedId8[8] ;
+  byte macAddress[6] ;
+
+  C2xSecPacketGetSignerHashedId8(packet, hashedId8) ;
+  memcpy_off(macAddress, 0, hashedId8, 2, 6);
+  
+  C2xSetTokenData(packet, "wlan", "address2", elcount(macAddress), macAddress);
+
+  C2xSetTokenData(packet, "eth", "source", elcount(macAddress), macAddress);
+
+  C2xSetTokenInt64(packet, "geo_bh", "version", 0);
+  C2xSetTokenInt64(packet, "geo_bh", "multiplier", 5);
+  C2xSetTokenInt64(packet, "geo_bh", "base", 1);
+  C2xSetTokenInt64(packet, "geo_bh", "remainingHopLimit", 1);
+
+  C2xSetTokenInt64(packet, "geo_ch", "maximumHopLimit", 1);
+  C2xSetTokenInt64(packet, "geo_ch", "tcID", 1);
+  C2xSetTokenInt64(packet, "geo_ch", "flags", 0);
+
+  C2xSetTokenInt64(packet, "geo_eh", "lpvGNAddrStationType", 15);
+  C2xSetTokenInt64(packet, "geo_eh", "lpvGNAddrStationCountryCode", 262);
+  C2xSetTokenInt64(packet, "geo_eh", "lpvLatitude", RSU_TrafficLight_Ctx.Latitude * 1e7);
+  C2xSetTokenInt64(packet, "geo_eh", "lpvLongitude", RSU_TrafficLight_Ctx.Longitude * 1e7);
+  C2xSetTokenInt64(packet, "geo_eh", "lpvPositionAccuracyIndicator", 1);
+  C2xSetTokenInt64(packet, "geo_eh", "lpvSpeed", 0.0);
+  C2xSetTokenInt64(packet, "geo_eh", "lpvHeading", 0.0);
+  C2xSetTokenData(packet, "geo_eh", "lpvGNAddrMID", elcount(macAddress), macAddress);
+
+  mapPdu.header.protocolVersion = 1;
+  mapPdu.header.messageID = 5;
+  mapPdu.header.stationID = hashedId8[4] << 24 | hashedId8[5] << 16 | hashedId8[6] << 8 | hashedId8[7] << 0 ;
+  mapPdu.map.intersections.isValidFlag = 1 ;
+  mapPdu.map.intersections.length = 2 ;
+  mapPdu.map.intersections.arrayValue[0].id.id = 1;
+  mapPdu.map.intersections.arrayValue[0].revision = 0;
+  mapPdu.map.intersections.arrayValue[0].refPoint.lat = 488252880.0;
+  mapPdu.map.intersections.arrayValue[0].refPoint.lon = 90958140.0;
+  mapPdu.map.intersections.arrayValue[0].laneWidth.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneWidth.value = 350;
+  mapPdu.map.intersections.arrayValue[0].speedLimits.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].speedLimits.length = 1;
+  mapPdu.map.intersections.arrayValue[0].speedLimits.arrayValue[0].type = 5; // vehicleMaxSpeed
+  mapPdu.map.intersections.arrayValue[0].speedLimits.arrayValue[0].speed = 695;
+  mapPdu.map.intersections.arrayValue[0].laneSet.length = 10;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].laneID = 10;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].laneAttributes.directionalUse.string, "10", 3);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].maneuvers.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].maneuvers.stringLength = 3;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].maneuvers.string, "101", 13);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].nodeList.nodes.arrayValue[0].delta.node_XY4.x = -271.6812054999866;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].nodeList.nodes.arrayValue[0].delta.node_XY4.y = 2001.713731838673;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].nodeList.nodes.arrayValue[1].delta.node_XY4.x = -190.91111737519628;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].nodeList.nodes.arrayValue[1].delta.node_XY4.y = 3692.049772054485;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].connectsTo.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].connectsTo.length = 2;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].connectsTo.arrayValue[0].connectingLane.lane = 32;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].connectsTo.arrayValue[0].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].connectsTo.arrayValue[0].signalGroup.value = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].connectsTo.arrayValue[1].connectingLane.lane = 41;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].connectsTo.arrayValue[1].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[0].connectsTo.arrayValue[1].signalGroup.value = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].laneID = 11;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].laneAttributes.directionalUse.string, "10", 3);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].maneuvers.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].maneuvers.stringLength = 3;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].maneuvers.string, "010", 13);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].nodeList.nodes.arrayValue[0].delta.node_XY4.x = 73.42735283360396;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].nodeList.nodes.arrayValue[0].delta.node_XY4.y = 2012.8343636541263;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].nodeList.nodes.arrayValue[1].delta.node_XY4.x = -212.9393232226688;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].nodeList.nodes.arrayValue[1].delta.node_XY4.y = 3703.1704039489555;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].connectsTo.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].connectsTo.length = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].connectsTo.arrayValue[0].connectingLane.lane = 21;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].connectsTo.arrayValue[0].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[1].connectsTo.arrayValue[0].signalGroup.value = 2;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[2].laneID = 12;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[2].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[2].laneAttributes.directionalUse.string, "01", 3);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[2].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[2].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[2].nodeList.nodes.arrayValue[0].delta.node_XY4.x = 433.2213817234807;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[2].nodeList.nodes.arrayValue[0].delta.node_XY4.y = 2046.1962591795032;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[2].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[2].nodeList.nodes.arrayValue[1].delta.node_XY4.x = -227.62479379199826;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[2].nodeList.nodes.arrayValue[1].delta.node_XY4.y = 3680.929140239032;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].laneID = 20;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].laneAttributes.directionalUse.string, "10", 3);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].maneuvers.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].maneuvers.stringLength = 3;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].maneuvers.string, "111", 13);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].nodeList.nodes.arrayValue[0].delta.node_XY4.x = 2004.5667324330395;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].nodeList.nodes.arrayValue[0].delta.node_XY4.y = 355.86021896369107;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].nodeList.nodes.arrayValue[1].delta.node_XY4.x = 3686.053112379961;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].nodeList.nodes.arrayValue[1].delta.node_XY4.y = 211.2920050467307;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].connectsTo.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].connectsTo.length = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].connectsTo.arrayValue[0].connectingLane.lane = 12;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].connectsTo.arrayValue[0].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].connectsTo.arrayValue[0].signalGroup.value = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].connectsTo.arrayValue[1].connectingLane.lane = 32;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].connectsTo.arrayValue[1].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].connectsTo.arrayValue[1].signalGroup.value = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].connectsTo.arrayValue[2].connectingLane.lane = 41;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].connectsTo.arrayValue[2].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[3].connectsTo.arrayValue[2].signalGroup.value = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[4].laneID = 21;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[4].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[4].laneAttributes.directionalUse.string, "01", 3);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[4].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[4].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[4].nodeList.nodes.arrayValue[0].delta.node_XY4.x = 2011.9094677111825;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[4].nodeList.nodes.arrayValue[0].delta.node_XY4.y = 11.120631815453306;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[4].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[4].nodeList.nodes.arrayValue[1].delta.node_XY4.x = 3752.1377299354212;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[4].nodeList.nodes.arrayValue[1].delta.node_XY4.y = 189.05074133680725;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].laneID = 30;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].laneAttributes.directionalUse.string, "10", 3);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].maneuvers.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].maneuvers.stringLength = 3;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].maneuvers.string, "101", 13);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].nodeList.nodes.arrayValue[0].delta.node_XY4.x = 638.8179696680065;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].nodeList.nodes.arrayValue[0].delta.node_XY4.y = -1957.2312044978432;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].nodeList.nodes.arrayValue[1].delta.node_XY4.x = 205.59658794452577;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].nodeList.nodes.arrayValue[1].delta.node_XY4.y = -3436.275239587908;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].connectsTo.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].connectsTo.length = 2;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].connectsTo.arrayValue[0].connectingLane.lane = 12;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].connectsTo.arrayValue[0].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].connectsTo.arrayValue[0].signalGroup.value = 4;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].connectsTo.arrayValue[1].connectingLane.lane = 21;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].connectsTo.arrayValue[1].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[5].connectsTo.arrayValue[1].signalGroup.value = 4;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].laneID = 31;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].laneAttributes.directionalUse.string, "10", 3);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].maneuvers.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].maneuvers.stringLength = 3;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].maneuvers.string, "010", 13);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].nodeList.nodes.arrayValue[0].delta.node_XY4.x = 301.05214662560223;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].nodeList.nodes.arrayValue[0].delta.node_XY4.y = -1990.5931000232197;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].nodeList.nodes.arrayValue[1].delta.node_XY4.x = 205.59658794452577;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].nodeList.nodes.arrayValue[1].delta.node_XY4.y = -3436.275239587908;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].connectsTo.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].connectsTo.length = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].connectsTo.arrayValue[0].connectingLane.lane = 41;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].connectsTo.arrayValue[0].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[6].connectsTo.arrayValue[0].signalGroup.value = 5;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[7].laneID = 32;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[7].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[7].laneAttributes.directionalUse.string, "01", 3);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[7].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[7].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[7].nodeList.nodes.arrayValue[0].delta.node_XY4.x = -44.05641170798837;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[7].nodeList.nodes.arrayValue[0].delta.node_XY4.y = -1990.5931000232197;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[7].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[7].nodeList.nodes.arrayValue[1].delta.node_XY4.x = 220.2820585138552;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[7].nodeList.nodes.arrayValue[1].delta.node_XY4.y = -3436.275239587908;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].laneID = 40;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].laneAttributes.directionalUse.string, "10", 3);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].maneuvers.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].maneuvers.stringLength = 3;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].maneuvers.string, "111", 13);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].nodeList.nodes.arrayValue[0].delta.node_XY4.x = -1549.317144849043;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].nodeList.nodes.arrayValue[0].delta.node_XY4.y = -200.17137315226057;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].nodeList.nodes.arrayValue[1].delta.node_XY4.x = -3715.4240535186195;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].nodeList.nodes.arrayValue[1].delta.node_XY4.y = -166.80947770590066;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].connectsTo.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].connectsTo.length = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].connectsTo.arrayValue[0].connectingLane.lane = 12;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].connectsTo.arrayValue[0].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].connectsTo.arrayValue[0].signalGroup.value = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].connectsTo.arrayValue[1].connectingLane.lane = 21;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].connectsTo.arrayValue[1].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].connectsTo.arrayValue[1].signalGroup.value = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].connectsTo.arrayValue[2].connectingLane.lane = 32;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].connectsTo.arrayValue[2].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[8].connectsTo.arrayValue[2].signalGroup.value = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[9].laneID = 41;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[9].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[9].laneAttributes.directionalUse.string, "01", 3);
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[9].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[9].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[9].nodeList.nodes.arrayValue[0].delta.node_XY4.x = -1586.030821265845;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[9].nodeList.nodes.arrayValue[0].delta.node_XY4.y = 133.44758210150704;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[9].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[9].nodeList.nodes.arrayValue[1].delta.node_XY4.x = -3693.3958476711473;
+  mapPdu.map.intersections.arrayValue[0].laneSet.arrayValue[9].nodeList.nodes.arrayValue[1].delta.node_XY4.y = -233.53326867763732;
+  mapPdu.map.intersections.arrayValue[1].id.id = 2;
+  mapPdu.map.intersections.arrayValue[1].revision = 0;
+  mapPdu.map.intersections.arrayValue[1].refPoint.lat = 488233351.43758;
+  mapPdu.map.intersections.arrayValue[1].refPoint.lon = 90960091.3524628;
+  mapPdu.map.intersections.arrayValue[1].laneWidth.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneWidth.value = 350;
+  mapPdu.map.intersections.arrayValue[1].speedLimits.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].speedLimits.length = 1;
+  mapPdu.map.intersections.arrayValue[1].speedLimits.arrayValue[0].type = 5; // vehicleMaxSpeed
+  mapPdu.map.intersections.arrayValue[1].speedLimits.arrayValue[0].speed = 695;
+  mapPdu.map.intersections.arrayValue[1].laneSet.length = 7;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].laneID = 10;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].laneAttributes.directionalUse.string, "10", 3);
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].maneuvers.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].maneuvers.stringLength = 3;
+  strncpy(mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].maneuvers.string, "100", 13);
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].nodeList.nodes.arrayValue[0].delta.node_XY4.x = -551.4744478933754;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].nodeList.nodes.arrayValue[0].delta.node_XY4.y = 922.9921705550727;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].nodeList.nodes.arrayValue[1].delta.node_XY4.x = -118.17309597156166;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].nodeList.nodes.arrayValue[1].delta.node_XY4.y = 2494.0350310774948;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].connectsTo.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].connectsTo.length = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].connectsTo.arrayValue[0].connectingLane.lane = 31;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].connectsTo.arrayValue[0].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[0].connectsTo.arrayValue[0].signalGroup.value = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].laneID = 11;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].laneAttributes.directionalUse.string, "10", 3);
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].maneuvers.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].maneuvers.stringLength = 3;
+  strncpy(mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].maneuvers.string, "010", 13);
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].nodeList.nodes.arrayValue[0].delta.node_XY4.x = -78.7820639810411;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].nodeList.nodes.arrayValue[0].delta.node_XY4.y = 981.9065134073705;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].nodeList.nodes.arrayValue[1].delta.node_XY4.x = -137.86861201899725;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].nodeList.nodes.arrayValue[1].delta.node_XY4.y = 2533.3108152814657;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].connectsTo.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].connectsTo.length = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].connectsTo.arrayValue[0].connectingLane.lane = 21;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].connectsTo.arrayValue[0].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[1].connectsTo.arrayValue[0].signalGroup.value = 2;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[2].laneID = 12;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[2].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[2].laneAttributes.directionalUse.string, "01", 3);
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[2].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[2].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[2].nodeList.nodes.arrayValue[0].delta.node_XY4.x = 393.9103198399864;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[2].nodeList.nodes.arrayValue[0].delta.node_XY4.y = 1060.4589590599908;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[2].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[2].nodeList.nodes.arrayValue[1].delta.node_XY4.x = -177.25964391821103;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[2].nodeList.nodes.arrayValue[1].delta.node_XY4.y = 2572.5864992921156;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].laneID = 20;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].laneAttributes.directionalUse.string, "10", 3);
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].maneuvers.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].maneuvers.stringLength = 3;
+  strncpy(mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].maneuvers.string, "011", 13);
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].nodeList.nodes.arrayValue[0].delta.node_XY4.x = 1181.730959689529;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].nodeList.nodes.arrayValue[0].delta.node_XY4.y = 235.6577206635135;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].nodeList.nodes.arrayValue[1].delta.node_XY4.x = 2028.6381474857208;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].nodeList.nodes.arrayValue[1].delta.node_XY4.y = 137.46695760090196;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].connectsTo.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].connectsTo.length = 2;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].connectsTo.arrayValue[0].connectingLane.lane = 12;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].connectsTo.arrayValue[0].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].connectsTo.arrayValue[0].signalGroup.value = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].connectsTo.arrayValue[1].connectingLane.lane = 31;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].connectsTo.arrayValue[1].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[3].connectsTo.arrayValue[1].signalGroup.value = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[4].laneID = 21;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[4].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[4].laneAttributes.directionalUse.string, "01", 3);
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[4].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[4].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[4].nodeList.nodes.arrayValue[0].delta.node_XY4.x = 1181.730959689529;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[4].nodeList.nodes.arrayValue[0].delta.node_XY4.y = -176.74335671372597;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[4].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[4].nodeList.nodes.arrayValue[1].delta.node_XY4.x = 2048.333663507069;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[4].nodeList.nodes.arrayValue[1].delta.node_XY4.y = 176.74335671372597;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].laneID = 30;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].laneAttributes.directionalUse.string, "10", 3);
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].maneuvers.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].maneuvers.stringLength = 3;
+  strncpy(mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].maneuvers.string, "101", 13);
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].nodeList.nodes.arrayValue[0].delta.node_XY4.x = 452.9968678648987;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].nodeList.nodes.arrayValue[0].delta.node_XY4.y = -824.8028086186217;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].nodeList.nodes.arrayValue[1].delta.node_XY4.x = 256.0417079122959;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].nodeList.nodes.arrayValue[1].delta.node_XY4.y = -2022.7358637375828;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].connectsTo.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].connectsTo.length = 2;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].connectsTo.arrayValue[0].connectingLane.lane = 12;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].connectsTo.arrayValue[0].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].connectsTo.arrayValue[0].signalGroup.value = 4;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].connectsTo.arrayValue[1].connectingLane.lane = 21;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].connectsTo.arrayValue[1].signalGroup.isValidFlag = 1;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[5].connectsTo.arrayValue[1].signalGroup.value = 4;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[6].laneID = 31;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[6].laneAttributes.directionalUse.stringLength = 2;
+  strncpy(mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[6].laneAttributes.directionalUse.string, "01", 3);
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[6].nodeList.nodes.length = 2;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[6].nodeList.nodes.arrayValue[0].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[6].nodeList.nodes.arrayValue[0].delta.node_XY4.x = -413.60583595264114;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[6].nodeList.nodes.arrayValue[0].delta.node_XY4.y = -824.8028086186217;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[6].nodeList.nodes.arrayValue[1].delta.choice = 3;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[6].nodeList.nodes.arrayValue[1].delta.node_XY4.x = 196.95515995260277;
+  mapPdu.map.intersections.arrayValue[1].laneSet.arrayValue[6].nodeList.nodes.arrayValue[1].delta.node_XY4.y = -2179.8418693379463;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// SPAT
+////////////////////////////////////////////////////////////////////////////////
+
+void SpatInit(long packet, struct SPAT spatPdu)
+{
+  byte hashedId8[8] ;
+  byte macAddress[6] ;
+
+  C2xSecPacketGetSignerHashedId8(packet, hashedId8) ;
+  memcpy_off(macAddress, 0, hashedId8, 2, 6);
+  
+  C2xSetTokenData(packet, "wlan", "address2", elcount(macAddress), macAddress);
+
+  C2xSetTokenData(packet, "eth", "source", elcount(macAddress), macAddress);
+
+  C2xSetTokenInt64(packet, "geo_bh", "version", 0);
+  C2xSetTokenInt64(packet, "geo_bh", "multiplier", 1);
+  C2xSetTokenInt64(packet, "geo_bh", "base", 1);
+  C2xSetTokenInt64(packet, "geo_bh", "remainingHopLimit", 1);
+
+  C2xSetTokenInt64(packet, "geo_ch", "flags", 0);
+  C2xSetTokenInt64(packet, "geo_ch", "tcID", 1);
+  C2xSetTokenInt64(packet, "geo_ch", "maximumHopLimit", 1);
+
+  C2xSetTokenInt64(packet, "geo_eh", "lpvGNAddrStationType", 15);
+  C2xSetTokenInt64(packet, "geo_eh", "lpvGNAddrStationCountryCode", 262);
+  C2xSetTokenInt64(packet, "geo_eh", "lpvLatitude", RSU_TrafficLight_Ctx.Latitude * 1e7);
+  C2xSetTokenInt64(packet, "geo_eh", "lpvLongitude", RSU_TrafficLight_Ctx.Longitude * 1e7);
+  C2xSetTokenInt64(packet, "geo_eh", "lpvPositionAccuracyIndicator", 1);
+  C2xSetTokenInt64(packet, "geo_eh", "lpvSpeed", 0.0);
+  C2xSetTokenInt64(packet, "geo_eh", "lpvHeading", 0.0);
+  C2xSetTokenData(packet, "geo_eh", "lpvGNAddrMID", elcount(macAddress), macAddress);
+
+  spatPdu.header.protocolVersion = 1;
+  spatPdu.header.messageID = 4;
+  spatPdu.header.stationID = hashedId8[4] << 24 | hashedId8[5] << 16 | hashedId8[6] << 8 | hashedId8[7] << 0 ;
+  spatPdu.spat.intersections.length = 2;
+  spatPdu.spat.intersections.arrayValue[0].id.id = 1;
+  spatPdu.spat.intersections.arrayValue[0].revision = 1;
+  spatPdu.spat.intersections.arrayValue[0].status.stringLength = 16;
+  strncpy(spatPdu.spat.intersections.arrayValue[0].status.string, "0000000000000000", 17);
+  spatPdu.spat.intersections.arrayValue[0].states.length = 5 ;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[0].signalGroup = 1;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[0].state_time_speed.length = 1 ;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[0].state_time_speed.arrayValue[0].eventState = 3; // stop_And_Remain
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[0].state_time_speed.arrayValue[0].timing.isValidFlag = 1;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[1].signalGroup = 2;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[1].state_time_speed.length = 1 ;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[1].state_time_speed.arrayValue[0].eventState = 3;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[1].state_time_speed.arrayValue[0].timing.isValidFlag = 1;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[2].signalGroup = 3;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[2].state_time_speed.length = 1 ;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[2].state_time_speed.arrayValue[0].eventState = 3;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[2].state_time_speed.arrayValue[0].timing.isValidFlag = 1;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[3].signalGroup = 4;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[3].state_time_speed.length = 1 ;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[3].state_time_speed.arrayValue[0].eventState = 3;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[3].state_time_speed.arrayValue[0].timing.isValidFlag = 1;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[4].signalGroup = 5;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[4].state_time_speed.length = 1 ;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[4].state_time_speed.arrayValue[0].eventState = 3;
+  spatPdu.spat.intersections.arrayValue[0].states.arrayValue[4].state_time_speed.arrayValue[0].timing.isValidFlag = 1;
+  spatPdu.spat.intersections.arrayValue[1].id.id = 2;
+  spatPdu.spat.intersections.arrayValue[1].revision = 1;
+  spatPdu.spat.intersections.arrayValue[1].status.stringLength = 16;
+  strncpy(spatPdu.spat.intersections.arrayValue[1].status.string, "0000000000000000", 17);
+  spatPdu.spat.intersections.arrayValue[1].states.length = 4 ;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[0].signalGroup = 1;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[0].state_time_speed.length = 1 ;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[0].state_time_speed.arrayValue[0].eventState = 3;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[0].state_time_speed.arrayValue[0].timing.isValidFlag = 1;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[1].signalGroup = 2;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[1].state_time_speed.length = 1 ;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[1].state_time_speed.arrayValue[0].eventState = 3;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[1].state_time_speed.arrayValue[0].timing.isValidFlag = 1;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[2].signalGroup = 3;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[2].state_time_speed.length = 1 ;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[2].state_time_speed.arrayValue[0].eventState = 3;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[2].state_time_speed.arrayValue[0].timing.isValidFlag = 1;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[3].signalGroup = 4;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[3].state_time_speed.length = 1 ;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[3].state_time_speed.arrayValue[0].eventState = 3;
+  spatPdu.spat.intersections.arrayValue[1].states.arrayValue[3].state_time_speed.arrayValue[0].timing.isValidFlag = 1;
+}
+
+void UpdateSpat(struct SPAT spatPdu, dword signalGroupCnt, dword intersectionId, struct SignalGroup signalGroup[])
+{
+  word eventState;
+  word iSignalGroup;
+
+  int64 nowUtc; // utc 0.1 seconds since 1970
+  dword minGreenTime;
+
+  nowUtc = C2xGetITSTimestamp() / 100;
+  
+  for (iSignalGroup = 0 ; iSignalGroup < signalGroupCnt ; ++iSignalGroup)
+  {
+    signalGroup[iSignalGroup].nextStateChange -= 1;
+    if (signalGroup[iSignalGroup].nextStateChange == 0)
+    {
+      if (signalGroup[iSignalGroup].currentState == eYellow)
+        signalGroup[iSignalGroup].currentState = eRed;
+      else
+        signalGroup[iSignalGroup].currentState += 1;
+
+      signalGroup[iSignalGroup].nextStateChange = signalGroup[iSignalGroup].stateTime[signalGroup[iSignalGroup].currentState];
+    }
+
+    if (signalGroup[iSignalGroup].permissiveMovement)
+    {
+      switch (signalGroup[iSignalGroup].currentState)
+      {
+      case eRed:       eventState = 3; break ; // stop_And_Remain
+      case eRedYellow: eventState = 4; break ; // pre_Movement
+      case eGreen:     eventState = 5; break ; // permissive_Movement_Allowed
+      case eYellow:    eventState = 7; break ; // permissive_clearance
+      }
+    }
+    else
+    {
+      switch (signalGroup[iSignalGroup].currentState)
+      {
+      case eRed:       eventState = 3; break ; // stop_And_Remain
+      case eRedYellow: eventState = 4; break ; // pre_Movement
+      case eGreen:     eventState = 6; break ; // protected_Movement_Allowed
+      case eYellow:    eventState = 8; break ; // protected_clearance
+      }
+    }
+    spatPdu.spat.intersections.arrayValue[intersectionId].states.arrayValue[iSignalGroup].state_time_speed.arrayValue[0].eventState = eventState ;
+    
+    if (signalGroup[iSignalGroup].currentState == eGreen)
+    {
+      minGreenTime = signalGroup[iSignalGroup].nextStateChange;
+      if (minGreenTime > 3)
+        minGreenTime = 3;
+
+      spatPdu.spat.intersections.arrayValue[intersectionId].states.arrayValue[iSignalGroup].state_time_speed.arrayValue[0].timing.minEndTime = (nowUtc + minGreenTime * 10) % 36000;
+      spatPdu.spat.intersections.arrayValue[intersectionId].states.arrayValue[iSignalGroup].state_time_speed.arrayValue[0].timing.maxEndTime.isValidFlag = 1;
+      spatPdu.spat.intersections.arrayValue[intersectionId].states.arrayValue[iSignalGroup].state_time_speed.arrayValue[0].timing.maxEndTime.value = (nowUtc + signalGroup[iSignalGroup].nextStateChange * 10) % 36000;
+    }
+    else
+    {
+      spatPdu.spat.intersections.arrayValue[intersectionId].states.arrayValue[iSignalGroup].state_time_speed.arrayValue[0].timing.minEndTime = (nowUtc + signalGroup[iSignalGroup].nextStateChange * 10) % 36000;
+      spatPdu.spat.intersections.arrayValue[intersectionId].states.arrayValue[iSignalGroup].state_time_speed.arrayValue[0].timing.maxEndTime.isValidFlag = 0;
+    }
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// EOF
+////////////////////////////////////////////////////////////////////////////////

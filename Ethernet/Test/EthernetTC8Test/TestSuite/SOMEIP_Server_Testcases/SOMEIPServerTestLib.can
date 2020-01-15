@@ -1,0 +1,3280 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+includes
+{
+  #include "..\ShareableFolders\CaplLibrary\Tc8TestLib\BasicFunctionsTestLib.cin"
+  #include "..\ShareableFolders\CaplLibrary\StubFunctionLib\SOMEIPStubFunctions.cin"
+}
+
+variables
+{
+  enum SomeIpMessageType
+  {
+    SomeIpMessageTypeRequest = 0x00,
+    SomeIpMessageTypeRequestNoReturn = 0x01,
+    SomeIpMessageTypeNotification = 0x02,
+    SomeIpMessageTypeResponse = 0x80,
+    SomeIpMessageTypeError = 0x81,
+    SomeIpMessageTypeTpRequest = 0x20,
+    SomeIpMessageTypeTpRequestNoReturn =0x21,
+    SomeIpMessageTypeTpNotification = 0x22,
+    SomeIpMessageTypeTpResponse = 0x23,
+    SomeIpMessageTypeTpError = 0x24
+  };
+  
+  word gCurrentRequestId;
+  
+  const int kMaxTcpConnections = 2;
+  
+  enum Bool gTcpTxConnectionEstablished[kMaxTcpConnections];
+  enum Bool gTcpRxConnectionEstablished[kMaxTcpConnections];
+  
+  dword gTcpRxApplicationEndpointHandle[kMaxTcpConnections];
+  dword gTcpTxApplicationEndpointHandle[kMaxTcpConnections];
+  
+}
+
+/**
+ * This function should be called in the preparation of the test fixture
+ */
+export InitTestFixture()
+{
+  
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+  
+  Internal_InitTestFixture(kSomeIpServer, "OnPacketSOMEIPServer");
+  
+  SomeIpSetVerbosity(3);
+  SomeIpIlControlStart();
+  testWaitForTimeout(5000); //Wait until IGMP messages have been sent
+}
+
+
+/**
+ * This function should be called in the preparation of each test case
+ */
+export InitTestCase(char testCaseName[], int testCaseNumber, enum Bool stubFunctionRequired)
+{
+  int i;
+  
+  Internal_InitTestCase(testCaseName, kSomeIpServer, "SOMEIP Server", testCaseNumber, stubFunctionRequired);
+  gCurrentRequestId = 1;
+  for(i = 0; i < elcount(gTcpTxConnectionEstablished); i++)
+  {
+    gTcpTxConnectionEstablished[i] = kFalse;
+    gTcpRxConnectionEstablished[i] = kFalse;
+  }
+}
+
+/**
+ * This function should be called in the completion of each test case
+ */
+export EndTestCase()
+{
+  Internal_EndTestCase();
+}
+
+/**
+ * This function should be called in the completion of the test fixture
+ */
+export EndTestFixture()
+{
+  SomeIpIlControlStop();
+  Internal_EndTestFixture();
+}
+
+
+/**
+ * This function is called by CANoe when a SOME/IP message is received.
+ * @param messageHandle The handle of the SOME/IP message.
+ * @param rxChannel The channel on which the message was received.
+ */
+long OnSomeIpProcessRxMessage(dword messageHandle, long rxChannel)
+{
+  enum Bool match;
+  
+  write("SOME/IP Message received at %d", timeNow());
+  
+  if (gExpectedMessagesPerChannel[rxChannel] == -1)
+    return 0;
+  
+  
+  match = CompareParameters(0, messageHandle, rxChannel, gReportOnFailure);
+  if (match == kTrue)
+  {
+  
+    EthernetPacketReceived(rxChannel);
+  }
+  return 0;
+}
+
+/**
+ * This function is called when an ethernet message is arriving.
+ */
+void OnPacketSOMEIPServer(long channel, long dir, long packetHandle)
+{
+  AnswerArpRequestForHost1(packetHandle);
+  AnswerNdpSolicitation(packetHandle);
+}
+
+/**
+ * Send a SOME/IP Request Message.
+ * @param destIp The IP Address to which the SOME/IP message should be sent
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP
+ * @param  messageType The message type of the message
+ * @param serviceId The Service ID of the message
+ * @param methodId The Method ID of the message
+ * @param requestId The Request ID of the message
+ * @param protocolVersion The Protocol Version of the message
+ * @param interfaceVersion The Interface Version of the message
+ * @param returnCode The Return Code of the message
+ * @param payloadSize The size of the payload in bytes
+ */
+export testfunction SendSomeIp(
+  char destIp[],
+  int protocol,
+  enum SomeIpMessageType messageType,
+  word serviceId,
+  char methodId[],
+  char requestId[],
+  char protocolVersion[],
+  char interfaceVersion[],
+  char returnCode[],
+  dword payloadSize
+  )
+{
+  InternalSendSomeIpRequest(
+    destIp,
+    protocol,
+    syspar::Wildcard,
+    messageType,
+    serviceId,
+    methodId,
+    requestId,
+    protocolVersion,
+    interfaceVersion,
+    returnCode,
+    payloadSize,
+    0
+  );
+}
+
+/**
+ * Send a SOME/IP Request Message.
+ * @param destIp The IP Address to which the SOME/IP message should be sent
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP
+ * @param destinationPort The destination port to which the message should be sent to
+ * @param serviceId The Service Id of the message
+ * @param methodId The Method Id of the message
+ * @param requestId The Request Id of the message
+ * @param protocolVersion The Protocol Version of the message
+ * @param interfaceVersion The Interface Version of the message
+ * @param returnCode The Return Code of the message
+ * @param payloadSize The size of the payload of the message in bytes
+ */
+export testfunction SendSomeIpRequest(
+  char destIp[],
+  int protocol,
+  char destinationPort[],
+  word serviceId,
+  char methodId[],
+  char requestId[],
+  char protocolVersion[],
+  char interfaceVersion[],
+  char returnCode[],
+  dword payloadSize
+  )
+{
+  InternalSendSomeIpRequest(
+    destIp,
+    protocol,
+    destinationPort,
+    SomeIpMessageTypeRequest,
+    serviceId,
+    methodId,
+    requestId,
+    protocolVersion,
+    interfaceVersion,
+    returnCode,
+    payloadSize,
+    0
+  );
+}
+
+/**
+ * Send a SOME/IP Request Message.
+ * @param destIp The IP Address to which the SOME/IP message should be sent
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP
+ * @param methodId The Method Id of the message
+ * @param requestId The Request Id of the message
+ * @param protocolVersion The Protocol Version of the message
+ * @param interfaceVersion The Interface Version of the message
+ * @param returnCode The Return Code of the message
+ * @param payloadSize The size of the payload of the message in bytes
+ * @param connectionId Which TCP connection should be used? (If protocol is UDP, this parameter is ignored)
+ */
+export testfunction SendSomeIpRequest(
+  char destIp[],
+  int protocol,
+  char destinationPort[],
+  word serviceId,
+  char methodId[],
+  char requestId[],
+  char protocolVersion[],
+  char interfaceVersion[],
+  char returnCode[],
+  dword payloadSize,
+  int connectionId
+  )
+{
+  InternalSendSomeIpRequest(
+    destIp,
+    protocol,
+    destinationPort,
+    SomeIpMessageTypeRequest,
+    serviceId,
+    methodId,
+    requestId,
+    protocolVersion,
+    interfaceVersion,
+    returnCode,
+    payloadSize,
+    connectionId
+  );
+}
+
+/**
+ * Send a SOME/IP Request Message.
+ * @param destIp The IP Address to which the SOME/IP message should be sent
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP
+ * @param destinationPort The destination port. If wildcard, syspar::SomeIpServiceDiscoveryPort will be used
+ * @param messageType the type of the message
+ * @param serviceId The Service ID of the message
+ * @param rawMethodId The Method Id of the message
+ * @param rawRequestId The Request Id of the message
+ * @param rawProtocolVersion The Protocol Version of the message
+ * @param rawInterfaceVersion The Interface Version of the message
+ * @param rawReturnCode The Return Code of the message
+ * @param payloadSize The size of the payload of the message
+ * @param connectionId The ID of the connection that should be used (only when protocol = TcpProtocol)
+ */
+void InternalSendSomeIpRequest(
+  char destIp[],
+  int protocol,
+  char destinationPort[],
+  enum SomeIpMessageType messageType,
+  word serviceId,
+  char rawMethodId[],
+  char rawRequestId[],
+  char rawProtocolVersion[],
+  char rawInterfaceVersion[],
+  char rawReturnCode[],
+  dword payloadSize,
+  int connectionId
+  )
+{
+  byte dummyPayload[1024];
+  
+  dword handle;
+  dword aep; // application endpoint handle
+  long result;
+  dword messageId, requestId, protocolVersion, interfaceVersion, returnCode, destPort;
+  word methodId, clientId, sessionId;
+  byte ipv6Dest[16];
+  enum Bool isIpv6;
+  
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+  
+  methodId = IsWildcard(rawMethodId) ? 0 : atol(rawMethodId);
+  messageId = (serviceId << 16) + methodId;
+  requestId = IsWildcard(rawRequestId) ? (syspar::ClientId << 16) + ++gCurrentRequestId : atol(rawRequestId);
+  protocolVersion = IsWildcard(rawProtocolVersion) ? 1 : atol(rawProtocolVersion);
+  interfaceVersion = IsWildcard(rawInterfaceVersion) ? syspar::SdClientServiceMajorVersion : atol(rawInterfaceVersion);
+  returnCode = IsWildcard(rawReturnCode) ? 0 : atol(rawReturnCode);
+  
+  isIpv6 = ConvertIpAddressStringToByteArray(destIp, ipv6Dest) == 6 ? kTrue : kFalse;
+  
+  // Open connection
+  if(protocol == syspar::UdpProtocol)
+  {
+   aep = SomeIpOpenLocalApplicationEndpoint(protocol, atol(syspar::SomeIpServiceDiscoveryPort));
+   result = SomeIpGetLastError();
+   if(result != 0) write("Error @ SendSomeIpRequest SomeIpOpenLocalApplicationEndpoint %d", result);
+  }
+  if(protocol == syspar::TcpProtocol)
+  {
+    if(!gTcpTxConnectionEstablished[connectionId])
+    {
+      gTcpTxApplicationEndpointHandle[connectionId] = SomeIpOpenLocalApplicationEndpoint(protocol, atol(syspar::SomeIpServiceDiscoveryPort));
+      result = SomeIpGetLastError();
+      if(result != 0) write("Error @ SendSomeIpRequest SomeIpOpenLocalApplicationEndpoint %d", result);
+      
+      if(isIpv6 == kFalse)
+      {
+        result = SomeIpEstablishTCPConnection(gTcpTxApplicationEndpointHandle[connectionId], ipGetAddressAsNumber(destIp), ConvertStringValueToInt64(destinationPort));
+      }
+      else
+      {
+        result = SomeIpEstablishTCPConnection(gTcpTxApplicationEndpointHandle[connectionId], ipv6Dest, ConvertStringValueToInt64(destinationPort));
+      }
+      if(result != 0) write("Error @ SendSomeIpRequest SomeIpEstablishTCPConnection %d", result);
+      
+      testWaitForTimeout(200); // let connection be established
+      gTcpTxConnectionEstablished[connectionId] = kTrue;
+    }
+    aep = gTcpTxApplicationEndpointHandle[connectionId];
+  }
+  
+  //Create Message
+  handle = SomeIpCreateMessage(messageId, requestId, protocolVersion, interfaceVersion, messageType, returnCode);
+  result = SomeIpGetLastError();
+  if(result != 0) write("Error @ SendSomeIpRequest SomeIpCreateMessage %d", result);
+  
+  result = SomeIpSetData(handle, payloadSize, dummyPayload);
+  if (result != 0) write("Error @ SendSomeIpRequest SomeIpSetData %d", result);
+  
+  //Send message
+  destPort = IsWildcard(destinationPort) ? atol(syspar::SomeIpServiceDiscoveryPort) : ConvertStringValueToInt64(destinationPort);
+  
+  
+  if(isIpv6 == kFalse)
+  {
+    result = SomeIpOutputMessage(aep, ipGetAddressAsNumber(destIp), destPort, handle);
+  }
+  else
+  {
+    result = SomeIpOutputMessage(aep, ipv6Dest, destPort, handle);
+  }
+  
+  if (result != 0) write("Error @ SendSomeIpRequest SomeIpOutputMessage %d", result);
+  
+  //Release message
+  result = SomeIpReleaseMessage(handle);
+  if(result != 0) write("Error @ SendSomeIpRequest SomeIpOutputMessage %d", result);
+  
+  //Close connection
+  if(protocol == syspar::UdpProtocol)
+  {
+   result = SomeIpCloseLocalApplicationEndpoint(aep);
+   if(result != 0) write("Error @ SendSomeIpRequest SomeIpCloseLocalApplicationEndpoint %d", result); 
+  }
+}
+
+/**
+ * Closes all TCP connections that have been opened during a testcase. Should be called in the
+ * completion of a testcase which uses TCP
+ */
+export testfunction CloseTcpConnection()
+{
+  long result;
+  int i;
+  
+  for(i = 0; i < elcount(gTcpTxConnectionEstablished); i++)
+  {
+    if(gTcpTxConnectionEstablished[i])
+    {
+     SomeIpCloseEstablishedTCPConnection(gTcpTxApplicationEndpointHandle[i]);
+     result = SomeIpCloseLocalApplicationEndpoint(gTcpTxApplicationEndpointHandle[i]);
+     if(result != 0) write("Error @ CloseTcpConnection SomeIpCloseLocalApplicationEndpoint %d", result); 
+    }
+    if(gTcpRxConnectionEstablished[i])
+    {
+     SomeIpCloseEstablishedTCPConnection(gTcpRxApplicationEndpointHandle[i]);
+     result = SomeIpCloseLocalApplicationEndpoint(gTcpRxApplicationEndpointHandle[i]);
+     if(result != 0) write("Error @ CloseTcpConnection SomeIpCloseLocalApplicationEndpoint %d", result); 
+    }
+  }
+}
+
+/**
+ * Sends a SOME/IP notification message with a entry type one.
+ * @param destIp The destination ip address of the message
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP
+ * @param serviceId The Service ID that is used in the entry
+ * @param flags The flags field.
+ * @param entryType The Entry Type. Should be either "FindService" or "OfferService"
+ * @param instanceId The Instance ID used in the entry
+ * @param majorVersion The Major Version used in the entry
+ * @param ttl The TTL used in the entry
+ * @param minorVersion The Minor Version used in the entry
+ */
+export testfunction SendSomeIpNotificationEntryTypeOne(
+  char destIp[],
+  int protocol,
+  int serviceId,
+  char flags[],
+  char entryType[],
+  char instanceId[],
+  char majorVersion[],
+  char ttl[],
+  char minorVersion[]
+  )
+{
+  dword aep, aep2, handle;
+  long result;
+  char tempstr[64];
+  dword messageId, requestId, protocolVersion, interfaceVersion, messageType, returnCode;
+  word methodId, clientId, sessionId;
+  byte buffer[500];
+  int i;
+  enum Bool isIpv6;
+  byte ipv6Dest[16];
+  
+  tempstr[0] = '\0';
+  
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+  
+  isIpv6 = ConvertIpAddressStringToByteArray(destIp, ipv6Dest) == 6 ? kTrue : kFalse;
+  
+  aep = SomeIpOpenLocalApplicationEndpoint(protocol, atol(syspar::SomeIpServiceDiscoveryPort));
+  result = SomeIpGetLastError();
+  if(result != 0) write("Error @ SomeIpOpenLocalApplicationEndpoint %d", result);
+    
+  messageId = 0xFFFF8100;
+  requestId = (0 << 16) + gCurrentRequestId++;
+  protocolVersion = 0x01;
+  interfaceVersion = 0x01;
+  messageType = SomeIpMessageTypeNotification;
+  returnCode = 0x00;
+  
+  handle = SomeIpCreateMessage(messageId, requestId, protocolVersion, interfaceVersion, messageType, returnCode);
+  result = SomeIpGetLastError();
+  if(result != 0) write("Error @ SomeIpCreateMessage %d", result);
+  
+  //Set Flags
+  if(IsWildcard(flags))
+    result = SomeIpSetValueDWord(handle, "Flags", 0xC0);
+  else
+    result = SomeIpSetValueDWord(handle, "Flags", atol(flags));
+  if(result != 0) write("Error @ SomeIpSetValueDWord Flags %d", result);
+  
+  //Set Number of Entries
+  result = SomeIpSetValueDWord(handle, "Entry", 1);
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry %d", result);
+  
+  //Set ServiceId of Entry
+  snprintf(tempstr, elCount(tempstr), "Entry[0].%s.ServiceID", entryType);
+  result = SomeIpSetValueDWord(handle, tempstr, serviceId);
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry ServiceId %d", result);
+  
+  //Set InstanceId of Entry
+  snprintf(tempstr, elCount(tempstr), "Entry[0].%s.InstanceID", entryType);
+  result = SomeIpSetValueDWord(handle, tempstr, IsWildcard(instanceId) ? syspar::SdClientServiceInstanceId : ConvertStringValueToInt64(instanceId));
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry InstanceId %d", result);
+  
+  
+  //Set Major Version of entry
+  snprintf(tempstr, elCount(tempstr), "Entry[0].%s.MajorVersion", entryType);
+  result = SomeIpSetValueDWord(handle, tempstr, IsWildcard(majorVersion) ? syspar::SdClientServiceMajorVersion : atol(majorVersion));
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry MajorVersion %d", result);
+  
+  //Set TTL of entry
+  snprintf(tempstr, elCount(tempstr), "Entry[0].%s.TTL", entryType);
+  if(!IsWildcard(ttl))
+  {
+    result = SomeIpSetValueDWord(handle, tempstr, atol(ttl));
+  }
+  else
+  {
+    result = SomeIpSetValueDWord(handle, tempstr, atol(syspar::ServiceId1TTL));
+  }
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry TTL %d", result);
+  
+  //Set Minor Version of entry
+  if(!IsWildcard(minorVersion))
+  {
+   snprintf(tempstr, elCount(tempstr), "Entry[0].%s.MinorVersion", entryType);
+   result = SomeIpSetValueDWord(handle, tempstr, ConvertStringValueToInt64(minorVersion));
+   if(result != 0) write("Error @ SomeIpSetValueDWord Entry MinorVersion %d", result);
+  }
+   
+  //Output and release
+  if(isIpv6 == kFalse)
+  {
+    result = SomeIpOutputMessage(aep, ipGetAddressAsNumber(destIp), atol(syspar::SomeIpServiceDiscoveryPort), handle);
+  }
+  else
+  {
+    result = SomeIpOutputMessage(aep, ipv6Dest, atol(syspar::SomeIpServiceDiscoveryPort), handle);
+  }
+  if (result != 0) write("Error @ SomeIpOutputMessage %d", result);
+  
+  SomeIpReleaseMessage(handle);
+  if(result != 0) write("Error @ SomeIpReleaseMessage %d", result);
+  
+  result = SomeIpCloseLocalApplicationEndpoint(aep);
+  if(result != 0) write("Error @ SomeIpCloseLocalApplicationEndpoint %d", result);
+}
+
+/**
+ * Sends a SOME/IP Notification with two entries type one
+ * @param destIp The destination IP address
+ * @param protocol The protocol with which the message should be sent. 6 for TCP, 17 for UDP
+ * @param entryType1 The entry type of the first entry. Should be either "FindService" or "OfferService"
+ * @param serviceId1 The service Id of the first entry
+ * @param ttl1 The TTL of the first entry
+ * @param instanceId1 The instance ID of the first entry
+ * @param majorVersion1 The Major Version of the first entry
+ * @param entryType2 The entry type of the second entry. Should be either "FindService" or "OfferService"
+ * @param serviceId2 The service Id of the second entry
+ * @param ttl2 The TTL of the second entry
+ * @param instanceId2 The instance ID of the second entry
+ * @param majorVersion2 The Major Version of the second entry
+ */
+export testfunction SendSomeIpNotificationTwoEntriesTypeOne(
+  char destIp[],
+  int protocol,
+  char entryType1[],
+  int serviceId1,
+  char ttl1[],
+  char instanceId1[],
+  char majorVersion1[],
+  char entryType2[],
+  int serviceId2,
+  char ttl2[],
+  char instanceId2[],
+  char majorVersion2[]
+  )
+{
+  dword aep, handle;
+  long result;
+  char tempstr[64];
+  dword messageId, requestId, protocolVersion, interfaceVersion, messageType, returnCode;
+  word methodId, clientId, sessionId;
+  enum Bool isIpv6;
+  byte ipv6Dest[16];
+  
+  tempstr[0] = '\0';
+  
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+  
+  isIpv6 = ConvertIpAddressStringToByteArray(destIp, ipv6Dest) == 6 ? kTrue : kFalse;
+  
+  aep = SomeIpOpenLocalApplicationEndpoint(protocol, atol(syspar::SomeIpServiceDiscoveryPort)); // TCP: 6, UDP: 17
+  result = SomeIpGetLastError();
+  if(result != 0) write("Error @ SomeIpOpenLocalApplicationEndpoint %d", result);
+  
+  messageId = 0xFFFF8100;
+  requestId = (0 << 16) + gCurrentRequestId++;
+  protocolVersion = 0x01;
+  interfaceVersion = 0x01;
+  messageType = SomeIpMessageTypeNotification;
+  returnCode = 0x00;
+  
+  handle = SomeIpCreateMessage(messageId, requestId, protocolVersion, interfaceVersion, messageType, returnCode);
+  result = SomeIpGetLastError();
+  if(result != 0) write("Error @ SomeIpCreateMessage %d", result);
+  
+  //Set Number of Entries
+  result = SomeIpSetValueDWord(handle, "Entry", 2);
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry %d", result);
+  
+  //Set ServiceId of 1st Entry
+  snprintf(tempstr, elCount(tempstr), "Entry[0].%s.ServiceID", entryType1);
+  result = SomeIpSetValueDWord(handle, tempstr, serviceId1);
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry ServiceId1 %d", result);
+  
+  //Set TTL of 1st Entry
+  snprintf(tempstr, elCount(tempstr), "Entry[0].%s.TTL", entryType1);
+  result = SomeIpSetValueDWord(handle, tempstr, ConvertStringValueToInt64(ttl1));
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry TTL 1 %d", result);
+  
+  //Set Major Version of 1st Entry
+  snprintf(tempstr, elCount(tempstr), "Entry[0].%s.MajorVersion", entryType1);
+  result = SomeIpSetValueDWord(handle, tempstr, IsWildcard(majorVersion1) ? syspar::SdClientServiceMajorVersion : ConvertStringValueToInt64(majorVersion1));
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry Major Version 1 %d", result);
+  
+  //Set Instance ID of 1st Entry
+  snprintf(tempstr, elCount(tempstr), "Entry[0].%s.InstanceID", entryType1);
+  result = SomeIpSetValueDWord(handle, tempstr, IsWildcard(instanceId1) ? syspar::SdClientServiceMajorVersion : ConvertStringValueToInt64(instanceId1));
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry Instance ID 1 %d", result);
+  
+  //Set ServiceId of 2nd Entry
+  snprintf(tempstr, elCount(tempstr), "Entry[1].%s.ServiceID", entryType2);
+  result = SomeIpSetValueDWord(handle, tempstr, serviceId2);
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry ServiceId2 %d", result);
+  
+  //Set TTL of 2nd Entry
+  snprintf(tempstr, elCount(tempstr), "Entry[1].%s.TTL", entryType2);
+  result = SomeIpSetValueDWord(handle, tempstr, ConvertStringValueToInt64(ttl2));
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry TTL 2 %d", result);
+  
+  //Set Major Version of 2nd Entry
+  snprintf(tempstr, elCount(tempstr), "Entry[1].%s.MajorVersion", entryType2);
+  result = SomeIpSetValueDWord(handle, tempstr, IsWildcard(majorVersion2) ? syspar::SdClientServiceMajorVersion : ConvertStringValueToInt64(majorVersion2));
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry Major Version 2 %d", result);
+  
+  //Set Instance ID of 2nd Entry
+  snprintf(tempstr, elCount(tempstr), "Entry[1].%s.InstanceID", entryType2);
+  result = SomeIpSetValueDWord(handle, tempstr, IsWildcard(instanceId2) ? syspar::SdClientServiceMajorVersion : ConvertStringValueToInt64(instanceId2));
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry Instance ID 2 %d", result);
+  
+  //Output and release
+  if(isIpv6 == kFalse)
+  {
+    result = SomeIpOutputMessage(aep, ipGetAddressAsNumber(destIp), atol(syspar::SomeIpServiceDiscoveryPort), handle);
+  }
+  else
+  {
+    result = SomeIpOutputMessage(aep, ipv6Dest, atol(syspar::SomeIpServiceDiscoveryPort), handle);
+  }
+  if (result != 0) write("Error @ SomeIpOutputMessage %d", result);
+  
+  SomeIpReleaseMessage(handle);
+  if(result != 0) write("Error @ SomeIpOutputMessage %d", result);
+  
+  result = SomeIpCloseLocalApplicationEndpoint(aep);
+  if(result != 0) write("Error @ SomeIpCloseLocalApplicationEndpoint %d", result);
+}
+
+/**
+ * Sends a SOME/IP message with an entry of type two.
+ * @param destIp the destination IP address.
+ * @param protocol The protocol with which the message should be sent. 6 for TCP, 17 for UDP.
+ * @param serviceId The Service ID of the entry
+ * @param flags The flags of the message.
+ * @param entryType The type of the entry. Should be either "Subscribe" or "SubscribeAck".
+ * @param instanceId The Instance ID of the entry.
+ * @param majorVersion The Major Version of the entry.
+ * @param ttl The TTL of the entry.
+ * @param eventGroupId The Eventgroup ID of the entry.
+ */
+export SendSomeIpNotificationEntryTypeTwo(
+  char destIp[],
+  int protocol,
+  int serviceId,
+  char flags[],
+  char entryType[],
+  char instanceId[],
+  int majorVersion,
+  char ttl[],
+  int eventGroupId
+  )
+{
+  char majorVersionStr[255], eventGroupIdStr[255];
+  
+  snprintf(majorVersionStr, elcount(majorVersionStr), "%d", majorVersion);
+  snprintf(eventGroupIdStr, elcount(eventGroupIdStr), "%d", eventGroupId);
+  
+  SendSomeIpNotificationEntryTypeTwo(
+  destIp,
+  protocol,
+  serviceId,
+  flags,
+  entryType,
+  instanceId,
+  majorVersionStr,
+  ttl,
+  eventGroupIdStr
+  );
+}
+
+/**
+ * Sends a SOME/IP message with an entry of type two.
+ * @param destIp the destination IP address.
+ * @param protocol The protocol with which the message should be sent. 6 for TCP, 17 for UDP.
+ * @param serviceId The Service ID of the entry
+ * @param flags The flags of the message.
+ * @param entryType The type of the entry. Should be either "Subscribe" or "SubscribeAck".
+ * @param instanceId The Instance ID of the entry.
+ * @param majorVersion The Major Version of the entry.
+ * @param ttl The TTL of the entry.
+ * @param eventGroupId The Eventgroup ID of the entry.
+ */
+export SendSomeIpNotificationEntryTypeTwo(
+  char destIp[],
+  int protocol,
+  int serviceId,
+  char flags[],
+  char entryType[],
+  char instanceId[],
+  char majorVersion[],
+  char ttl[],
+  char eventGroupId[]
+  )
+{
+  SendSomeIpNotificationEntryTypeTwo(
+  destIp,
+  syspar::Wildcard,
+  protocol,
+  serviceId,
+  flags,
+  entryType,
+  instanceId,
+  majorVersion,
+  ttl,
+  eventGroupId,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::UdpProtocol
+  );
+}
+
+/**
+ * Sends a SOME/IP message with an entry of type two.
+ * @param destIp the destination IP address.
+ * @param protocol The protocol with which the message should be sent. 6 for TCP, 17 for UDP.
+ * @param flags The flags of the message.
+ * @param entryType The type of the entry. Should be either "Subscribe" or "SubscribeAck".
+ * @param instanceId The Instance ID of the entry.
+ * @param majorVersion The Major Version of the entry.
+ * @param ttl The TTL of the entry.
+ * @param eventGroupId The Eventgroup ID of the entry.
+ */
+export testfunction SendSomeIpNotificationEntryTypeTwo(
+  char destIp[],
+  char destPort[],
+  int protocol,
+  int serviceId,
+  char flags[],
+  char entryType[],
+  char instanceId[],
+  char majorVersion[],
+  char ttl[],
+  char eventGroupId[],
+  char ipAddressEndpointOption[],
+  char portEndpointOption[],
+  int protocolEndpointOption
+  )
+{
+  dword aep, handle;
+  long result;
+  char tempstr[64];
+  dword messageId, requestId, protocolVersion, interfaceVersion, messageType, returnCode;
+  word methodId, clientId, sessionId;
+  enum Bool isIpv6;
+  byte ipv6Dest[16];
+  
+  tempstr[0] = '\0';
+  
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+  
+  isIpv6 = ConvertIpAddressStringToByteArray(destIp, ipv6Dest) == 6 ? kTrue : kFalse;
+  
+  aep = SomeIpOpenLocalApplicationEndpoint(protocol, atol(syspar::SomeIpServiceDiscoveryPort));
+  result = SomeIpGetLastError();
+  if(result != 0) write("Error @ SomeIpOpenLocalApplicationEndpoint %d", result);
+  
+  messageId = 0xFFFF8100;
+  requestId = (0 << 16) + gCurrentRequestId++;
+  protocolVersion = 0x01;
+  interfaceVersion = 0x01;
+  messageType = SomeIpMessageTypeNotification;
+  returnCode = 0x00;
+  
+  handle = SomeIpCreateMessage(messageId, requestId, protocolVersion, interfaceVersion, messageType, returnCode);
+  result = SomeIpGetLastError();
+  if(result != 0) write("Error @ SomeIpCreateMessage %d", result);
+  
+  //Set Flags
+  if(IsWildcard(flags))
+    result = SomeIpSetValueDWord(handle, "Flags", 0xC0);
+  else
+    result = SomeIpSetValueDWord(handle, "Flags", atol(flags));
+  if(result != 0) write("Error @ SomeIpSetValueDWord Flags %d", result);
+  
+  //Set Number of Entries
+  result = SomeIpSetValueDWord(handle, "Entry", 1);
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry %d", result);
+  
+  //Set ServiceId of Entry
+  snprintf(tempstr, elCount(tempstr), "Entry[0].%s.ServiceID", entryType);
+  result = SomeIpSetValueDWord(handle, tempstr, serviceId);
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry ServiceId %d", result);
+  
+  //Set InstanceId of Entry
+  snprintf(tempstr, elCount(tempstr), "Entry[0].%s.InstanceID", entryType);
+  result = SomeIpSetValueDWord(handle, tempstr, IsWildcard(instanceId) ? syspar::SdClientServiceInstanceId : ConvertStringValueToInt64(instanceId));
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry InstanceId %d", result);
+  
+  //Set Major Version of entry
+  snprintf(tempstr, elCount(tempstr), "Entry[0].%s.MajorVersion", entryType);
+  result = SomeIpSetValueDWord(handle, tempstr, IsWildcard(majorVersion) ? syspar::SdClientServiceMajorVersion : ConvertStringValueToInt64(majorVersion));
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry MajorVersion %d", result);
+  
+  //Set TTL of entry
+  snprintf(tempstr, elCount(tempstr), "Entry[0].%s.TTL", entryType);
+  if(!IsWildcard(ttl))
+  {
+    result = SomeIpSetValueDWord(handle, tempstr, atol(ttl));
+  }
+  else
+  {
+    result = SomeIpSetValueDWord(handle, tempstr, atol(syspar::ServiceId1TTL));
+  }
+  if(result != 0) write("Error @ SomeIpSetValueDWord Entry TTL %d", result);
+  
+  
+  //Set Eventgroup ID of entry
+  if(!IsWildcard(eventGroupId))
+  {
+   snprintf(tempstr, elCount(tempstr), "Entry[0].%s.EventgroupID", entryType);
+   result = SomeIpSetValueDWord(handle, tempstr, atol(eventGroupId));
+   if(result != 0) write("Error @ SomeIpSetValueDWord Entry EventgroupID %d", result);
+  }
+  
+  //Set number of options in entry (one IPv4Endpoint Option)
+  snprintf(tempstr, elCount(tempstr), "Entry[0].%s.NumberOfOptions1", entryType);
+   result = SomeIpSetValueDWord(handle, tempstr, 1);
+   if(result != 0) write("Error @ SomeIpSetValueDWord Entry EventgroupID %d", result);
+  
+  //Set Number of options
+  result = SomeIpSetValueDWord(handle, "Option", 1);
+  if(result != 0) write("Error @ SomeIpSetValueDWord Option %d", result);
+  
+  //Set IP adress of endpoint option
+  result = SomeIpSetValueDWord(handle, "Option[0].IPv4Endpoint.IPv4Address", IsWildcard(ipAddressEndpointOption) ? ConvertIpAddressStringToInt64(syspar::IpAddressTester) : ConvertIpAddressStringToInt64(ipAddressEndpointOption));
+  if(result != 0) write("Error @ SomeIpSetValueDWord IP Address Option %d", result);
+  
+  //Set Port of endpoint option
+  result = SomeIpSetValueDWord(handle, "Option[0].IPv4Endpoint.PortNumber", IsWildcard(portEndpointOption) ? atol(syspar::SomeIpServiceDiscoveryPort) : atol(portEndpointOption));
+  if(result != 0) write("Error @ SomeIpSetValueDWord Port number Option %d", result);
+  
+  //Set protocol of endpoint option
+  result = SomeIpSetValueDWord(handle, "Option[0].IPv4Endpoint.L4Proto", protocolEndpointOption);
+  if(result != 0) write("Error @ SomeIpSetValueDWord Protocol Option %d", result);
+  
+  //Output and release
+  if(isIpv6 == kFalse)
+  {
+    result = SomeIpOutputMessage(aep, ipGetAddressAsNumber(destIp), IsWildcard(destPort) ? atol(syspar::SomeIpServiceDiscoveryPort) : atol(destPort), handle);
+  }
+  else
+  {
+    result = SomeIpOutputMessage(aep, ipv6Dest, IsWildcard(destPort) ? atol(syspar::SomeIpServiceDiscoveryPort) : atol(destPort), handle);
+  }
+  if (result != 0) write("Error @ SomeIpOutputMessage %d", result);
+  
+  SomeIpReleaseMessage(handle);
+  if(result != 0) write("Error @ SomeIpOutputMessage %d", result);
+  
+  result = SomeIpCloseLocalApplicationEndpoint(aep);
+  if(result != 0) write("Error @ SomeIpCloseLocalApplicationEndpoint %d", result);
+}
+
+/**
+ * Waits for a SOME/IP error message
+ * @param timeout The timeout in milliseconds
+ * @param protocol The protocol which should be used. 6 for TCP, 17 for UDP.
+ * @param serviceId The service ID of the expected message
+ * @param methodId The method ID of the expected message
+ * @param requestId The request ID of the expected message
+ * @param token An additional token which should be checked
+ * @param tokenValue The value of the additional token
+ * @param tokenCheckType The checkType of the additional token
+ */
+export testfunction WaitForSomeIpErrorMessage(
+  long timeout,
+  int protocol,
+  int serviceId,
+  char methodId[],
+  char requestId[],
+  char token[],
+  char tokenValue[],
+  enum CheckType tokenCheckType)
+{
+  byte payload[1];
+  char service[7];
+  snprintf(service, elcount(service), "%d", serviceId);
+  
+  InternalWaitForSOMEIP(
+  timeout,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  SomeIpMessageTypeError,
+  SomeIpEntryNull,
+  0,
+  syspar::Wildcard,
+  service,
+  syspar::Wildcard,
+  methodId,
+  "RequestId",
+  requestId,
+  kEquals,
+  token,
+  tokenValue,
+  tokenCheckType,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  protocol,
+  kAnswerExpected,
+  payload,
+  0,
+  0
+  );
+}
+
+/**
+ * Waits for a SOME/IP error message
+ * @param timeout The timeout in milliseconds
+ * @param protocol The protocol which should be used. 6 for TCP, 17 for UDP.
+ * @param serviceId The service ID of the expected message
+ * @param methodId The method ID of the expected message
+ * @param requestId The request ID of the expected message
+ * @param token An additional token which should be checked
+ * @param tokenValue The value of the additional token
+ * @param tokenCheckType The checkType of the additional token
+ * @param additionalToken A further additional token which should be checked
+ * @param additionalTokenValue The value of the further additional token
+ * @param additionalTokenCheckType The checkType of the further additional token
+ */
+
+export testfunction WaitForSomeIpErrorMessage(
+  long timeout,
+  int protocol,
+  int serviceId,
+  char methodId[],
+  char requestId[],
+  char token[],
+  char tokenValue[],
+  enum CheckType tokenCheckType,
+  char additionalToken[],
+  char additionalTokenValue[],
+  enum CheckType additionalTokenCheckType)
+{
+  byte payload[1];
+  char service[7];
+  snprintf(service, elcount(service), "%d", serviceId);
+  
+  InternalWaitForSOMEIP(
+  timeout,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  SomeIpMessageTypeError,
+  SomeIpEntryNull,
+  0,
+  syspar::Wildcard,
+  service,
+  syspar::Wildcard,
+  methodId,
+  "RequestId",
+  requestId,
+  kEquals,
+  token,
+  tokenValue,
+  tokenCheckType,
+  additionalToken,
+  additionalTokenValue,
+  additionalTokenCheckType,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  protocol,
+  kAnswerExpected,
+  payload,
+  0,
+  0
+  );
+}
+
+/**
+ * Wait for a SOME/IP Response.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param token The custom token to be checked.
+ * @param tokenValue The expected value of the custom token.
+ * @param tokenCheckType The comparer for the custom token.
+ */
+export testfunction WaitForSOMEIPResponse(
+  long timeout,
+  int protocol,
+  char token[],
+  char tokenValue[],
+  enum CheckType tokenCheckType
+  )
+{
+  byte payload[1];
+  
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::Host1Mac,
+    syspar::IpAddressTester,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    SomeIpMessageTypeResponse,
+    SomeIpEntryNull,
+    -1,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    token,
+    tokenValue,
+    tokenCheckType,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kAnswerExpected,
+    payload,
+    0,
+    0
+  );
+}
+
+/**
+ * Waits for SOME/IP response message
+ * @param timeout The timeout in milliseconds
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param methodId The method ID of the expected message
+ * @param requestId The request ID of the expected message
+ * @param protocolVersion The protocolVersion of the expected message
+ * @param returnCode The return Code of the expected message
+ */
+export testfunction WaitForSOMEIPResponse(
+  long timeout,
+  int protocol,
+  int serviceId,
+  char methodId[],
+  char requestId[],
+  char protocolVersion[],
+  char interfaceVersion[],
+  char returnCode[]
+  )
+{
+  byte payload[1];
+  char tempstr[7];
+  snprintf(tempstr, elcount(tempstr), "%d", serviceId);
+  
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::Host1Mac,
+    syspar::IpAddressTester,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    SomeIpMessageTypeResponse,
+    SomeIpEntryNull,
+    -1,
+    syspar::Wildcard,
+    tempstr,
+    returnCode,
+    methodId,
+    "RequestId",
+    requestId,
+    kEquals,
+    "ProtocolVersion",
+    protocolVersion,
+    kEquals,
+    "InterfaceVersion",
+    interfaceVersion,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kAnswerExpected,
+    payload,
+    0,
+    0
+  );
+}
+
+/**
+ * Waits for a SOME/IP response message
+ * @param timeout The timeout in milliseconds
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param methodId The method ID of the expected message
+ * @param requestId The request ID of the expected message
+ * @param protocolVersion The protocolVersion of the expected message
+ * @param returnCode The return Code of the expected message
+ * @param connectionId The ID of the connection that should be used. Only appliable for TCP messages
+ */
+export testfunction WaitForSOMEIPResponse(
+  long timeout,
+  int protocol,
+  int serviceId,
+  char methodId[],
+  char requestId[],
+  char protocolVersion[],
+  char interfaceVersion[],
+  char returnCode[],
+  int connectionId
+  )
+{
+  byte payload[1];
+  char tempstr[7];
+  snprintf(tempstr, elcount(tempstr), "%d", serviceId);
+  
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::Host1Mac,
+    syspar::IpAddressTester,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    SomeIpMessageTypeResponse,
+    SomeIpEntryNull,
+    -1,
+    syspar::Wildcard,
+    tempstr,
+    returnCode,
+    methodId,
+    "RequestId",
+    requestId,
+    kEquals,
+    "ProtocolVersion",
+    protocolVersion,
+    kEquals,
+    "InterfaceVersion",
+    interfaceVersion,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kAnswerExpected,
+    payload,
+    0,
+    connectionId
+  );
+}
+
+
+/**
+ * Wait for a SOME/IP message.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param destIp The destination IP address.
+ * @param srcPort The UDP or TCP source port.
+ * @param destPort The UDP or TCP destination port.
+ * @param serviceId The service ID of the SOME/IP header.
+ * @param returnCode The return code of the SOME/IP header.
+ * @param methodId The method/event ID of the SOME/IP header.
+ * @param firstToken The first custom token to be checked.
+ * @param firstTokenValue The expected value of the first custom token.
+ * @param firstTokenCheckType The comparer for the first custom token.
+ * @param secondToken The second custom token to be checked.
+ * @param secondTokenValue The expected value of the second custom token.
+ * @param secondTokenCheckType The comparer for the second custom token.
+ * @param thirdToken The third custom token to be checked.
+ * @param thirdTokenValue The expected value of the third custom token.
+ * @param thirdTokenCheckType The comparer for the third custom token.
+ * @param fourthToken The fourth custom token to be checked.
+ * @param fourthTokenValue The expected value of the fourth custom token.
+ * @param fourthTokenCheckType The comparer for the fourth custom token.
+ */
+export testfunction WaitForSOMEIP(
+  long timeout,
+  int protocol,
+  char destIp[],
+  char srcPort[],
+  char destPort[],
+  enum SomeIpMessageType messageType,
+  char serviceId[],
+  char returnCode[],
+  char methodId[],
+  char firstToken[],
+  char firstTokenValue[],
+  enum CheckType firstTokenCheckType,
+  char secondToken[],
+  char secondTokenValue[],
+  enum CheckType secondTokenCheckType,
+  char thirdToken[],
+  char thirdTokenValue[],
+  enum CheckType thirdTokenCheckType,
+  char fourthToken[],
+  char fourthTokenValue[],
+  enum CheckType fourthTokenCheckType
+  )
+{
+  byte payload[1];
+  
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::Host1Mac,
+    destIp,
+    srcPort,
+    destPort,
+    messageType,
+    SomeIpEntryNull,
+    -1,
+    syspar::Wildcard,
+    serviceId,
+    returnCode,
+    methodId,
+    firstToken,
+    firstTokenValue,
+    firstTokenCheckType,
+    secondToken,
+    secondTokenValue,
+    secondTokenCheckType,
+    thirdToken,
+    thirdTokenValue,
+    thirdTokenCheckType,
+    fourthToken,
+    fourthTokenValue,
+    fourthTokenCheckType,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kAnswerExpected,
+    payload,
+    0,
+    0
+  );
+}
+
+/**
+ * Wait for a SOME/IP response.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param destIp The destination IP address.
+ * @param srcPort The UDP or TCP source port.
+ * @param destPort The UDP or TCP destination port.
+ * @param serviceId The service ID of the SOME/IP header.
+ * @param returnCode The return code of the SOME/IP header.
+ * @param methodId The method/event ID of the SOME/IP header.
+ * @param firstToken The first custom token to be checked.
+ * @param firstTokenValue The expected value of the first custom token.
+ * @param firstTokenCheckType The comparer for the first custom token.
+ * @param secondToken The second custom token to be checked.
+ * @param secondTokenValue The expected value of the second custom token.
+ * @param secondTokenCheckType The comparer for the second custom token.
+ * @param thirdToken The third custom token to be checked.
+ * @param thirdTokenValue The expected value of the third custom token.
+ * @param thirdTokenCheckType The comparer for the third custom token.
+ */
+export testfunction WaitForSOMEIPResponse(
+  long timeout,
+  int protocol,
+  char destIp[],
+  char srcPort[],
+  char destPort[],
+  char serviceId[],
+  char returnCode[],
+  char methodId[],
+  char firstToken[],
+  char firstTokenValue[],
+  enum CheckType firstTokenCheckType,
+  char secondToken[],
+  char secondTokenValue[],
+  enum CheckType secondTokenCheckType,
+  char thirdToken[],
+  char thirdTokenValue[],
+  enum CheckType thirdTokenCheckType
+  )
+{
+  byte payload[1];
+  
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::Host1Mac,
+    destIp,
+    srcPort,
+    destPort,
+    SomeIpMessageTypeResponse,
+    SomeIpEntryNull,
+    -1,
+    syspar::Wildcard,
+    serviceId,
+    returnCode,
+    methodId,
+    firstToken,
+    firstTokenValue,
+    firstTokenCheckType,
+    secondToken,
+    secondTokenValue,
+    secondTokenCheckType,
+    thirdToken,
+    thirdTokenValue,
+    thirdTokenCheckType,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kAnswerExpected,
+    payload,
+    0,
+    0
+  );
+}
+
+/**
+ * Wait for a SOME/IP message.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param sourcePort The UDP or TCP source port.
+ * @param destinationPort The UDP or TCP destination port.
+ * @param serviceId The service ID of the SOME/IP header.
+ * @param eventBit The event bit of the SOME/IP Message ID.
+ * @param methodId The method/event ID of the SOME/IP header.
+ * @param returnCode The return code of the SOME/IP header.
+ */
+export testfunction WaitForSOMEIPNotification(
+  long timeout,
+  int protocol,
+  char sourcePort[],
+  char destinationPort[],
+  char serviceId[],
+  char eventBit[],
+  char methodId[],
+  char returnCode[]
+  )
+{
+  byte payload[1];
+  
+  InternalWaitForSOMEIP(
+  timeout,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  sourcePort,
+  destinationPort,
+  SomeIpMessageTypeNotification,
+  SomeIpEntryNull,
+  -1,
+  syspar::Wildcard,
+  serviceId,
+  returnCode,
+  methodId,
+  "EventBit",
+  eventBit,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  protocol,
+  kAnswerExpected,
+  payload,
+  0,
+  0
+  );
+}
+
+/**
+ * Wait for a SOME/IP message.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param destinationIp The destination IP address
+ * @param sourcePort The UDP or TCP source port.
+ * @param destinationPort The UDP or TCP destination port.
+ * @param serviceId The service ID of the SOME/IP header.
+ * @param eventBit The event bit of the SOME/IP Message ID.
+ * @param methodId The method/event ID of the SOME/IP header.
+ * @param returnCode The return code of the SOME/IP header.
+ */
+export testfunction WaitForSOMEIPNotification(
+  long timeout,
+  int protocol,
+  char destinationIp[],
+  char sourcePort[],
+  char destinationPort[],
+  char serviceId[],
+  char eventBit[],
+  char methodId[],
+  char returnCode[]
+  )
+{
+  byte payload[1];
+  
+  InternalWaitForSOMEIP(
+  timeout,
+  syspar::Wildcard,
+  destinationIp,
+  sourcePort,
+  destinationPort,
+  SomeIpMessageTypeNotification,
+  SomeIpEntryNull,
+  -1,
+  syspar::Wildcard,
+  serviceId,
+  returnCode,
+  methodId,
+  "EventBit",
+  eventBit,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  protocol,
+  kAnswerExpected,
+  payload,
+  0,
+  0
+  );
+}
+
+
+/**
+ * Wait for an unexpected SOME/IP notification.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param sourcePort The UDP or TCP source port.
+ * @param destinationPort The UDP or TCP destination port.
+ * @param serviceId The service ID of the SOME/IP header.
+ * @param eventBit The event bit of the SOME/IP Message ID.
+ * @param methodId The method/event ID of the SOME/IP header.
+ * @param returnCode The return code of the SOME/IP header.
+ */
+export testfunction WaitForUnexpectedSOMEIPNotification(
+  long timeout,
+  int protocol,
+  char sourcePort[],
+  char destinationPort[],
+  char serviceId[],
+  char eventBit[],
+  char methodId[],
+  char returnCode[]
+  )
+{
+  byte payload[1];
+  InternalWaitForSOMEIP(
+  timeout,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  sourcePort,
+  destinationPort,
+  SomeIpMessageTypeNotification,
+  SomeIpEntryNull,
+  -1,
+  syspar::Wildcard,
+  serviceId,
+  returnCode,
+  methodId,
+  "EventBit",
+  eventBit,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  protocol,
+  kNoAnswerExpected,
+  payload,
+  0,
+  0
+  );
+}
+
+/**
+ * Wait for an unexpected SOME/IP response.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param serviceId The service ID of the SOME/IP header.
+ * @param token The first custom token to be checked.
+ * @param tokenValue The expected value of the first custom token.
+ * @param tokenCheckType The comparer for the first custom token.
+ * @param secondToken The second custom token to be checked.
+ * @param secondTokenValue The expected value of the second custom token.
+ * @param secondTokenCheckType The comparer for the second custom token.
+ * @param thirdToken The third custom token to be checked.
+ * @param thirdTokenValue The expected value of the third custom token.
+ * @param thirdTokenCheckType The comparer for the third custom token.
+ */
+export testfunction WaitForUnexpectedSomeIpResponse(
+  long timeout,
+  int protocol,
+  int serviceId,
+  char token[],
+  char tokenValue[],
+  enum CheckType tokenCheckType,
+  char secondToken[],
+  char secondTokenValue[],
+  enum CheckType secondTokenCheckType,
+  char thirdToken[],
+  char thirdTokenValue[],
+  enum CheckType thirdTokenCheckType)
+{
+  byte payload[1];
+  
+  InternalWaitForSOMEIP(
+  timeout,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  SomeIpMessageTypeResponse,
+  SomeIpEntryNull,
+  -1,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  token,
+  tokenValue,
+  tokenCheckType,
+  secondToken,
+  secondTokenValue,
+  secondTokenCheckType,
+  thirdToken,
+  thirdTokenValue,
+  thirdTokenCheckType,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  protocol,
+  kNoAnswerExpected,
+  payload,
+  0,
+  0
+  );
+}
+
+/**
+ * Waits for a SOME/IP response message
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param serviceId The service ID of the SOME/IP header.
+ * @param requestId The request ID of the SOME/IP header
+ * @param methodId The method ID of the SOME/IP header
+ * @param token A custom token that should be checked
+ * @param tokenValue The value of the custom token
+ * @param tokenCheckType The check type of the custom token
+ */
+export testfunction WaitForSomeIpResponse(
+  long timeout,
+  int protocol,
+  int serviceId,
+  char requestId[],
+  char methodId[],
+  char returnCode[],
+  byte payload[],
+  char token[],
+  char tokenValue[],
+  enum CheckType tokenCheckType)
+{
+  char serviceStr[7];
+  snprintf(serviceStr, elcount(serviceStr), "%d", serviceId);
+  
+  InternalWaitForSOMEIP(
+  timeout,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  SomeIpMessageTypeResponse,
+  SomeIpEntryNull,
+  -1,
+  syspar::Wildcard,
+  serviceStr,
+  returnCode,
+  methodId,
+  token,
+  tokenValue,
+  tokenCheckType,
+  "RequestId",
+  requestId,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  protocol,
+  kAnswerExpected,
+  payload,
+  elcount(payload),
+  0
+  );
+}
+
+/**
+ * Waits for an unexpected SOME/IP error message
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param serviceId The service ID of the SOME/IP header.
+ * @param token A custom token that should be checked
+ * @param tokenValue The value of the custom token
+ * @param tokenCheckType The check type of the custom token
+ * @param secondToken A custom second token that should be checked
+ * @param secondTokenValue The value of the second custom token
+ * @param secondTokenCheckType The check type of the second custom token
+ */
+export testfunction WaitForUnexpectedSomeIpError(
+  long timeout,
+  int protocol,
+  int serviceId,
+  char token[],
+  char tokenValue[],
+  enum CheckType tokenCheckType,
+  char secondToken[],
+  char secondTokenValue[],
+  enum CheckType secondTokenCheckType,
+  char thirdToken[],
+  char thirdTokenValue[],
+  enum CheckType thirdTokenCheckType)
+{
+  byte payload[1];
+  
+  InternalWaitForSOMEIP(
+  timeout,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  SomeIpMessageTypeError,
+  SomeIpEntryNull,
+  -1,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  token,
+  tokenValue,
+  tokenCheckType,
+  secondToken,
+  secondTokenValue,
+  secondTokenCheckType,
+  thirdToken,
+  thirdTokenValue,
+  thirdTokenCheckType,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  protocol,
+  kNoAnswerExpected,
+  payload,
+  0,
+  0
+  );
+}
+
+/**
+ * Wait for a SOME/IP notification message where two parameters can be compared.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param entryType The entry type of the first entry.
+ * @param entryServiceId The service ID of the first entry.
+ * @param serviceId The service ID of the SOME/IP header.
+ * @param returnCode The return code of the SOME/IP header.
+ * @param methodId The method/event ID of the SOME/IP header.
+ * @param token The first custom token to be checked.
+ * @param tokenValue The expected value of the first custom token.
+ * @param tokenCheckType The comparer for the first custom token.
+ * @param additionalToken The second custom token to be checked.
+ * @param additionalTokenValue The expected value of the second custom token.
+ * @param additionTokenCheckType The comparer for the second custom token.
+ * @param compareTwoToken1 A token to be compared against compareTwoToken2. 
+ * @param compareTwoToken2 A token to be compared against compareTwoToken1. 
+ * @param compareTwoCheckType The comparer for compareTwoToken1 and compareTwoToken2.
+ * @param extractInstanceIds If kTrue, extract the instance IDs of the first two entries.
+ */
+export testfunction WaitForSomeIpNotificationCompareTwoParameters(
+  long timeout,
+  int protocol,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char token[],
+  char tokenValue[],
+  enum CheckType tokenCheckType,
+  char additionalToken[],
+  char additionalTokenValue[],
+  enum CheckType additionTokenCheckType,
+  char compareTwoToken1[],
+  char compareTwoToken2[],
+  enum CheckType compareTwoCheckType,
+  enum Bool extractInstanceIds)
+{ 
+  byte payload[1];
+  if(extractInstanceIds)
+  {
+    InternalSetExtractedParameter("SOME/IP", "Entry[0].OfferService.InstanceID", kExtractInt64);
+    InternalSetExtractedParameter("SOME/IP", "Entry[1].OfferService.InstanceID", kExtractInt64);
+  }
+  
+  InternalWaitForSOMEIP(
+  timeout,
+  syspar::MacAddressBroadcast,
+  syspar::IpAddressBroadcast,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  SomeIpMessageTypeNotification,
+  entryType,
+  entryServiceId,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  token,
+  tokenValue,
+  tokenCheckType,
+  additionalToken,
+  additionalTokenValue,
+  additionTokenCheckType,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  compareTwoToken1,
+  compareTwoToken2,
+  compareTwoCheckType,
+  protocol,
+  kAnswerExpected,
+  payload,
+  0,
+  0
+  );
+}
+
+/**
+ * Waits for a SOME/IP message, where two token can be compared to each other and two tokens can be extracted
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param entryType The entry type of the first entry.
+ * @param entryServiceId The service ID of the first entry.
+ * @param token1 The first custom token to be checked.
+ * @param token1Value The expected value of the first custom token.
+ * @param token1CheckType The comparer for the first custom token.
+ * @param token2 The second custom token to be checked.
+ * @param token2Value The expected value of the second custom token.
+ * @param token2CheckType The comparer for the second custom token.
+ * @param token3 The third custom token to be checked.
+ * @param token3Value The expected value of the third custom token.
+ * @param token3CheckType The comparer for the third custom token.
+ * @param compareTwoToken1 The first token which should be compare to another token
+ * @param compareTwoToken2 The second token which should be compare to another token
+ * @param compareTwoCheckType The comparer of the two token which should be compared to each other
+ * @param extractToken1 The first token that should be extracted
+ * @param extractToken2 The second token that should be extracted
+ */
+export testfunction WaitForSomeIpNotificationCompareTwoAndExtract(
+  long timeout,
+  int protocol,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char token1[],
+  char token1Value[],
+  enum CheckType token1CheckType,
+  char token2[],
+  char token2Value[],
+  enum CheckType token2CheckType,
+  char token3[],
+  char token3Value[],
+  enum CheckType token3CheckType,
+  char compareTwoToken1[],
+  char compareTwoToken2[],
+  enum CheckType compareTwoCheckType,
+  char extractToken1[],
+  char extractToken2[])
+{
+  byte payload[1];
+  
+  if(!IsWildcard(extractToken1))
+  {
+    InternalSetExtractedParameter("SOME/IP", extractToken1, kExtractInt64);
+  }
+  if(!IsWildcard(extractToken2))
+  {
+    InternalSetExtractedParameter("SOME/IP", extractToken2, kExtractInt64);
+  }
+  
+  InternalWaitForSOMEIP(
+  timeout,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  SomeIpMessageTypeNotification,
+  entryType,
+  entryServiceId,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  token1,
+  token1Value,
+  token1CheckType,
+  token2,
+  token2Value,
+  token2CheckType,
+  token3,
+  token3Value,
+  token3CheckType,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  compareTwoToken1,
+  compareTwoToken2,
+  compareTwoCheckType,
+  protocol,
+  kAnswerExpected,
+  payload,
+  0,
+  0
+  );
+
+}
+
+
+/**
+ * Wait for a SOME/IP notification.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param token The custom token to be checked.
+ * @param tokenValue The expected value of the custom token.
+ * @param tokenCheckType The comparer for the custom token.
+ */
+export testfunction WaitForSOMEIPNotification(
+  long timeout,
+  int protocol,
+  char token[],
+  char tokenValue[],
+  enum CheckType tokenCheckType
+  )
+{
+  byte payload[1];
+  
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::MacAddressBroadcast,
+    syspar::IpAddressBroadcast,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    SomeIpMessageTypeNotification,
+    SomeIpEntryNull,
+    -1,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    token,
+    tokenValue,
+    tokenCheckType,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kAnswerExpected,
+    payload,
+    0,
+    0
+  );
+}
+
+
+/**
+ * Wait for a SOME/IP message.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param entryType The entry type of the first entry.
+ * @param entryServiceId The service ID of the first entry.
+ * @param token The custom token to be checked.
+ * @param tokenValue The expected value of the custom token.
+ * @param tokenCheckType The comparer for the custom token.
+ */
+export testfunction WaitForSOMEIPNotification(
+  long timeout,
+  int protocol,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char token[],
+  char tokenValue[],
+  enum CheckType tokenCheckType
+  )
+{
+  byte payload[1];
+  
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::Host1Mac,
+    syspar::IpAddressTester,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    SomeIpMessageTypeNotification,
+    entryType,
+    entryServiceId,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    token,
+    tokenValue,
+    tokenCheckType,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kAnswerExpected,
+    payload,
+    0,
+    0
+  );
+}
+
+
+/**
+ * Wait for a SOME/IP notification and extract up to two custom tokens.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param entryType The entry type of the first entry.
+ * @param entryServiceId The service ID of the first entry.
+ * @param serviceId The service ID of the SOME/IP header.
+ * @param token The custom token to be checked.
+ * @param tokenValue The expected value of the custom token.
+ * @param tokenCheckType The comparer for the custom token.
+ * @param extractToken1 The first custom token to be extracted.
+ * @param extractToken2 The second custom token to be extracted.
+ */
+export testfunction WaitForSOMEIPNotificationAndExtract(
+  long timeout,
+  int protocol,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char token[],
+  char tokenValue[],
+  enum CheckType tokenCheckType,
+  char extractToken1[],
+  char extractToken2[]
+  )
+{
+  byte payload[1];
+  
+  if(!IsWildcard(extractToken1))
+  {
+    InternalSetExtractedParameter("SOME/IP", extractToken1, kExtractInt64);
+  }
+  if(!IsWildcard(extractToken2))
+  {
+    InternalSetExtractedParameter("SOME/IP", extractToken2, kExtractInt64);
+  }
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::Host1Mac,
+    syspar::IpAddressTester,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    SomeIpMessageTypeNotification,
+    entryType,
+    entryServiceId,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    token,
+    tokenValue,
+    tokenCheckType,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kAnswerExpected,
+    payload,
+    0,
+    0
+  );
+}
+
+
+/**
+ * Wait for a SOME/IP notification.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param entryType The entry type of the first entry.
+ * @param entryServiceId The service ID of the entryType entry.
+ * @param token a SOME/IP token which is checked.
+ * @param tokenValue value of the token.
+ * @param tokenCheckType checktype of the token.
+ * @param extractToken The token that should be extracted
+ * @param incrementExtractedValue If kTrue, the extracted value will be incremented by one
+ */
+export testfunction WaitForSOMEIPNotificationAndExtract(
+  long timeout,
+  int protocol,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char token[],
+  char tokenValue[],
+  enum CheckType tokenCheckType,
+  char extractToken1[],
+  enum Bool incrementExtractedValue
+  )
+{
+  byte payload[1];
+  
+  if(!IsWildcard(extractToken1))
+  {
+    InternalSetExtractedParameter("SOME/IP", extractToken1, kExtractInt64);
+  }
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::Host1Mac,
+    syspar::IpAddressTester,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    SomeIpMessageTypeNotification,
+    entryType,
+    entryServiceId,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    token,
+    tokenValue,
+    tokenCheckType,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kAnswerExpected,
+    payload,
+    0,
+    0
+  );
+  if(incrementExtractedValue)
+  {
+    gExtractingParameters[gExtractingParametersCount - 1].Value++;
+    write("Incrementing extracted value %s; new value = %lld", extractToken1, gExtractingParameters[gExtractingParametersCount - 1].Value);
+  }
+}
+
+/**
+ * Wait for a SOME/IP notification message.
+ * @param timeout The timeout in milliseconds
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param entryType The entry type of the first entry.
+ * @param entryServiceId The service ID of the first entry.
+ * @param serviceId The service ID of the SOME/IP header.
+ * @param token The custom token to be checked.
+ * @param tokenValue The expected value of the custom token.
+ * @param tokenCheckType The comparer for the custom token.
+ * @param additionalToken The additional custom token to be checked.
+ * @param additionalTokenValue The expected value of the additional custom token.
+ * @param additionalTokenCheckType The comparer for the additional custom token.
+ */
+export WaitForSOMEIPNotification(
+  long timeout,
+  int protocol,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char token[],
+  char tokenValue[],
+  enum CheckType tokenCheckType,
+  char additionalToken[],
+  int additionalTokenValue,
+  enum CheckType additionalTokenCheckType
+  )
+{
+  char additionalTokenValueStr[255];
+  
+  snprintf(additionalTokenValueStr, elcount(additionalTokenValueStr), "%d", additionalTokenValue);
+  
+  WaitForSOMEIPNotification(
+  timeout,
+  protocol,
+  entryType,
+  entryServiceId,
+  token,
+  tokenValue,
+  tokenCheckType,
+  additionalToken,
+  additionalTokenValueStr,
+  additionalTokenCheckType
+  );
+}
+
+/**
+ * Wait for a SOME/IP Notification.
+ * @param timeout The time to wait in miliseconds.
+ * @param entryType The entry type of the first entry.
+ * @param entryServiceId The service ID of the entryType entry.
+ * @param token a SOME/IP token which is checked.
+ * @param tokenValue value of the token.
+ * @param tokenCheckType checktype of the token.
+ * @param additionalToken The second custom token to be checked.
+ * @param additionalTokenValue The expected value of the second custom token.
+ * @param additionalTokenCheckType The comparer for the second custom token.
+ */
+export testfunction WaitForSOMEIPNotification(
+  long timeout,
+  int protocol,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char token[],
+  char tokenValue[],
+  enum CheckType tokenCheckType,
+  char additionalToken[],
+  char additionalTokenValue[],
+  enum CheckType additionalTokenCheckType
+  )
+{
+  byte payload[1];
+  
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::Host1Mac,
+    syspar::IpAddressTester,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    SomeIpMessageTypeNotification,
+    entryType,
+    entryServiceId,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    token,
+    tokenValue,
+    tokenCheckType,
+    additionalToken,
+    additionalTokenValue,
+    additionalTokenCheckType,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kAnswerExpected,
+    payload,
+    0,
+    0
+  );
+}
+
+
+/**
+ * Wait for a SOME/IP notification.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param entryType The entry type of the first entry.
+ * @param entryServiceId The service ID of the first entry.
+ * @param firstToken The first custom token to be checked.
+ * @param firstTokenValue The expected value of the first custom token.
+ * @param firstTokenCheckType The comparer for the first custom token.
+ * @param secondToken The second custom token to be checked.
+ * @param secondTokenValue The expected value of the second custom token.
+ * @param secondTokenCheckType The comparer for the second custom token.
+ * @param thirdToken The third custom token to be checked.
+ * @param thirdTokenValue The expected value of the third custom token.
+ * @param thirdTokenCheckType The comparer for the third custom token.
+ * @param fourthToken The first custom token to be checked.
+ * @param fourthTokenValue The expected value of the fourth custom token.
+ * @param fourthTokenCheckType The comparer for the fourth custom token.
+ * @param fifthToken The fifth custom token to be checked.
+ * @param fifthTokenValue The expected value of the fifth custom token.
+ * @param fifthTokenCheckType The comparer for the fifth custom token.
+ */
+export testfunction WaitForSOMEIPNotification(
+  long timeout,
+  int protocol,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char firstToken[],
+  char firstTokenValue[],
+  enum CheckType firstTokenCheckType,
+  char secondToken[],
+  char secondTokenValue[],
+  enum CheckType secondTokenCheckType,
+  char thirdToken[],
+  char thirdTokenValue[],
+  enum CheckType thirdTokenCheckType,
+  char fourthToken[],
+  char fourthTokenValue[],
+  enum CheckType fourthTokenCheckType,
+  char fifthToken[],
+  char fifthTokenValue[],
+  enum CheckType fifthTokenCheckType
+  )
+{
+  byte payload[1];
+  
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::Host1Mac,
+    syspar::IpAddressTester,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    SomeIpMessageTypeNotification,
+    entryType,
+    entryServiceId,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    firstToken,
+    firstTokenValue,
+    firstTokenCheckType,
+    secondToken,
+    secondTokenValue,
+    secondTokenCheckType,
+    thirdToken,
+    thirdTokenValue,
+    thirdTokenCheckType,
+    fourthToken,
+    fourthTokenValue,
+    fourthTokenCheckType,
+    fifthToken,
+    fifthTokenValue,
+    fifthTokenCheckType,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kAnswerExpected,
+    payload,
+    0,
+    0
+  );
+}
+
+/**
+ * Wait for a SOME/IP notification and extracts a parameter
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param entryType The entry type of the first entry.
+ * @param entryServiceId The service ID of the first entry.
+ * @param firstToken The first custom token to be checked.
+ * @param firstTokenValue The expected value of the first custom token.
+ * @param firstTokenCheckType The comparer for the first custom token.
+ * @param secondToken The second custom token to be checked.
+ * @param secondTokenValue The expected value of the second custom token.
+ * @param secondTokenCheckType The comparer for the second custom token.
+ * @param thirdToken The third custom token to be checked.
+ * @param thirdTokenValue The expected value of the third custom token.
+ * @param thirdTokenCheckType The comparer for the third custom token.
+ * @param fourthToken The first custom token to be checked.
+ * @param fourthTokenValue The expected value of the fourth custom token.
+ * @param fourthTokenCheckType The comparer for the fourth custom token.
+ * @param fifthToken The fifth custom token to be checked.
+ * @param fifthTokenValue The expected value of the fifth custom token.
+ * @param fifthTokenCheckType The comparer for the fifth custom token.
+ * @param extractToken The token that should be extracted
+ */
+export testfunction WaitForSOMEIPNotificationAndExtract(
+  long timeout,
+  int protocol,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char firstToken[],
+  char firstTokenValue[],
+  enum CheckType firstTokenCheckType,
+  char secondToken[],
+  char secondTokenValue[],
+  enum CheckType secondTokenCheckType,
+  char thirdToken[],
+  char thirdTokenValue[],
+  enum CheckType thirdTokenCheckType,
+  char fourthToken[],
+  char fourthTokenValue[],
+  enum CheckType fourthTokenCheckType,
+  char fifthToken[],
+  char fifthTokenValue[],
+  enum CheckType fifthTokenCheckType,
+  char extractToken[]
+  )
+{
+  byte payload[1];
+  
+  if(!IsWildcard(extractToken))
+  {
+    InternalSetExtractedParameter("SOME/IP", extractToken, kExtractInt64);
+  }
+  
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::Host1Mac,
+    syspar::IpAddressTester,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    SomeIpMessageTypeNotification,
+    entryType,
+    entryServiceId,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    firstToken,
+    firstTokenValue,
+    firstTokenCheckType,
+    secondToken,
+    secondTokenValue,
+    secondTokenCheckType,
+    thirdToken,
+    thirdTokenValue,
+    thirdTokenCheckType,
+    fourthToken,
+    fourthTokenValue,
+    fourthTokenCheckType,
+    fifthToken,
+    fifthTokenValue,
+    fifthTokenCheckType,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kAnswerExpected,
+    payload,
+    0,
+    0
+  );
+}
+
+
+/**
+ * Wait for an unexpected SOME/IP notification.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param entryType The entry type of the first entry.
+ * @param entryServiceId The service ID of the first entry.
+ * @param serviceId The service ID of the SOME/IP header.
+ * @param firstToken The first custom token to be checked.
+ * @param firstTokenValue The expected value of the first custom token.
+ * @param firstTokenCheckType The comparer for the first custom token.
+ * @param secondToken The second custom token to be checked.
+ * @param secondTokenValue The expected value of the second custom token.
+ * @param secondTokenCheckType The comparer for the second custom token.
+ */
+export testfunction WaitForUnexptectedSOMEIPNotification(
+  long timeout,
+  int protocol,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char firstToken[],
+  char firstTokenValue[],
+  enum CheckType firstTokenCheckType,
+  char secondToken[],
+  char secondTokenValue[],
+  enum CheckType secondTokenCheckType
+  )
+{
+  byte payload[1];
+  
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::Host1Mac,
+    syspar::IpAddressTester,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    SomeIpMessageTypeNotification,
+    entryType,
+    entryServiceId,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    firstToken,
+    firstTokenValue,
+    firstTokenCheckType,
+    secondToken,
+    secondTokenValue,
+    secondTokenCheckType,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kNoAnswerExpected,
+    payload,
+    0,
+    0
+  );
+}
+
+/**
+ * Wait for a SOME/IP notification with an IPv4 Endpoint Option.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param entryType The entry type of the first entry.
+ * @param entryServiceId The service ID of the first entry.
+ * @param numberOfOptions The number of options field of the first entry.
+ * @param token The custom token to be checked.
+ * @param tokenValue The expected value of the custom token.
+ * @param tokenCheckType The comparer for the custom token.
+ */
+export testfunction WaitForSOMEIPNotificationWithIPv4EndpointOption(
+  long timeout,
+  int protocol,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char numberOfOptions[],
+  char token[],
+  char tokenValue[],
+  enum CheckType tokenCheckType
+  )
+{
+  char temp[2];
+  byte payload[1];
+  
+  temp[0] = '\0';
+  if(IsWildcard(numberOfOptions))
+    strncpy(temp, "1", elcount(temp));
+  else
+    strncpy(temp, numberOfOptions, elcount(temp));
+  
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::Host1Mac,
+    syspar::IpAddressTester,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    SomeIpMessageTypeNotification,
+    entryType,
+    entryServiceId,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    "Option[x].IPv4Endpoint.Count",
+    temp,
+    IsWildcard(numberOfOptions) ? kGreaterThanOrEqual : kEquals,
+    token,
+    tokenValue,
+    tokenCheckType,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kAnswerExpected,
+    payload,
+    0,
+    0
+  );
+}
+
+/**
+ * Wait for a SOME/IP notification with an IPv4 Multicast Option.
+ * @param timeout The time to wait in miliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param entryType The entry type of the first entry.
+ * @param entryServiceId The service ID of the first entry.
+ * @param numberOfOptions The number of options field of the first entry.
+ * @param firstToken The first custom token to be checked.
+ * @param firstTokenValue The expected value of the first custom token.
+ * @param firstTokenCheckType The comparer for the first custom token.
+ * @param secondToken The second custom token to be checked.
+ * @param secondTokenValue The expected value of the second custom token.
+ * @param secondTokenCheckType The comparer for the second custom token.
+ */
+export testfunction WaitForSOMEIPNotificationWithIPv4MulticastOption(
+  long timeout,
+  int protocol,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char numberOfOptions[],
+  char firstToken[],
+  char firstTokenValue[],
+  enum CheckType firstTokenCheckType,
+  char secondToken[],
+  char secondTokenValue[],
+  enum CheckType secondTokenCheckType
+  )
+{
+  byte payload[1];
+  char optionTokenValue[50];
+  
+  char temp[2];
+  temp[0] = '\0';
+  if(IsWildcard(numberOfOptions))
+    strncpy(temp, "1", elcount(temp));
+  else
+    strncpy(temp, numberOfOptions, elcount(temp));
+  
+  
+  snprintf(optionTokenValue, elcount(optionTokenValue), "%d", IPv4Multicast);
+  InternalWaitForSOMEIP(
+    timeout,
+    syspar::Host1Mac,
+    syspar::IpAddressTester,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    SomeIpMessageTypeNotification,
+    entryType,
+    entryServiceId,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    "Option[x].IPv4Multicast.Count",
+    temp,
+    IsWildcard(numberOfOptions) ? kGreaterThanOrEqual : kEquals,
+    firstToken,
+    firstTokenValue,
+    firstTokenCheckType,
+    secondToken,
+    secondTokenValue,
+    secondTokenCheckType,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    syspar::Wildcard,
+    syspar::Wildcard,
+    kEquals,
+    protocol,
+    kAnswerExpected,
+    payload,
+    0,
+    0
+  );
+}
+
+/**
+ * Waits for a SOME/IP Service Discovery message with an entry type one
+ * @param timeout The timeout in milliseconds
+ * @param entryType The entry type (either Find or Offer Service)
+ * @param entryServiceID The service ID of the entry
+ * @param entryTTL The TTL of the entry
+ * @param instanceId The instance ID of the entry
+ * @param majorVersion The major version of the entry
+ * @param minorVersion The minor version of the entry
+ */
+export testfunction WaitForSomeIpServiceDiscoveryEntryTypeOne(
+  long timeout,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char entryTTL[],
+  char instanceId[],
+  char majorVersion[],
+  char minorVersion[])
+{
+  char tokenInstanceId[128], tokenMajorVersion[128], tokenMinorVersion[128];
+  byte payload[1];
+  
+  snprintf(tokenInstanceId, elcount(tokenInstanceId), "Entry[0].%s.InstanceID", entryType.name());
+  snprintf(tokenMajorVersion, elcount(tokenMajorVersion), "Entry[0].%s.MajorVersion", entryType.name());
+  snprintf(tokenMinorVersion, elcount(tokenMinorVersion), "Entry[0].%s.MinorVersion", entryType.name());
+  
+  InternalWaitForSOMEIP(
+  timeout,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::SomeIpServiceDiscoveryPort,
+  SomeIpMessageTypeNotification,
+  entryType,
+  entryServiceId,
+  entryTTL,
+  "0xFFFF",
+  "0x00",
+  "0x100",
+  tokenInstanceId,
+  instanceId,
+  kEquals,
+  tokenMajorVersion,
+  majorVersion,
+  kEquals,
+  tokenMinorVersion,
+  minorVersion,
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  "EventBit",
+  "1",
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::UdpProtocol,
+  kAnswerExpected,
+  payload,
+  0,
+  0
+  );
+}
+
+/**
+ * Waits for a SOME/IP service discovery message with an entry type two
+ * @param timeout The timeout in milliseconds
+ * @param entryType The entry type (either Find or Offer Service)
+ * @param entryServiceID The service ID of the entry
+ * @param entryTTL The TTL of the entry
+ * @param instanceId The instance ID of the entry
+ * @param majorVersion The major version of the entry
+ * @param eventGroupId The event group ID of the entry
+ * @param reserved The reserved field of the entry
+ */
+export WaitForSomeIpServiceDiscoveryEntryTypeTwo(
+  long timeout,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char entryTTL[],
+  char instanceId[],
+  int majorVersion,
+  char eventGroupId[],
+  char reserved[])
+{
+  char majorVersionString[10];
+  snprintf(majorVersionString, elcount(majorVersionString), "%d", majorVersion);
+  WaitForSomeIpServiceDiscoveryEntryTypeTwo(
+  timeout,
+  entryType,
+  entryServiceId,
+  entryTTL,
+  instanceId,
+  majorVersionString,
+  eventGroupId,
+  reserved);
+}
+
+/**
+ * Waits for a SOME/IP service discovery message with an entry type two
+ * @param timeout The timeout in milliseconds
+ * @param entryType The entry type (either Find or Offer Service)
+ * @param entryServiceID The service ID of the entry
+ * @param entryTTL The TTL of the entry
+ * @param instanceId The instance ID of the entry
+ * @param majorVersion The major version of the entry
+ * @param eventGroupId The event group ID of the entry
+ * @param reserved The reserved field of the entry
+ */
+export testfunction WaitForSomeIpServiceDiscoveryEntryTypeTwo(
+  long timeout,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char entryTTL[],
+  char instanceId[],
+  char majorVersion[],
+  char eventGroupId[],
+  char reserved[])
+{
+  char tokenInstanceId[128], tokenMajorVersion[128], tokenEventgroup[128], tokenReserved[128];
+  byte payload[1];
+  
+  snprintf(tokenInstanceId, elcount(tokenInstanceId), "Entry[0].%s.InstanceID", entryType.name());
+  snprintf(tokenMajorVersion, elcount(tokenMajorVersion), "Entry[0].%s.MajorVersion", entryType.name());
+  snprintf(tokenEventgroup, elcount(tokenEventgroup), "Entry[0].%s.EventgroupID", entryType.name());
+  snprintf(tokenReserved, elcount(tokenReserved), "Entry[0].%s.Reserved", entryType.name());
+  
+  InternalWaitForSOMEIP(
+  timeout,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  syspar::SomeIpServiceDiscoveryPort,
+  SomeIpMessageTypeNotification,
+  entryType,
+  entryServiceId,
+  entryTTL,
+  "0xFFFF",
+  "0x00",
+  "0x100",
+  tokenInstanceId,
+  instanceId,
+  kEquals,
+  tokenMajorVersion,
+  majorVersion,
+  kEquals,
+  tokenEventgroup,
+  eventGroupId,
+  kEquals,
+  tokenReserved,
+  reserved,
+  kEquals,
+  "EventBit",
+  "1",
+  kEquals,
+  syspar::Wildcard,
+  syspar::Wildcard,
+  kEquals,
+  syspar::UdpProtocol,
+  kAnswerExpected,
+  payload,
+  0,
+  0
+  );
+}
+
+/**
+ * Wait for a SOME/IP message.
+ * @param timeout The time to wait in miliseconds.
+ * @param destMac The destination MAC address.
+ * @param destIp The destination IP address.
+ * @param srcPort The UDP or TCP source port.
+ * @param destPort The UDP or TCP destination port.
+ * @param messageType The SOME/IP message type.
+ * @param entryType The entry type of the first entry.
+ * @param entryServiceId The service ID of the first entry.
+ * @param serviceId The service ID of the SOME/IP header.
+ * @param returnCode The return code of the SOME/IP header.
+ * @param methodId The method/event ID of the SOME/IP header.
+ * @param firstToken The first custom token to be checked.
+ * @param firstTokenValue The expected value of the first custom token.
+ * @param firstTokenCheckType The comparer for the first custom token.
+ * @param secondToken The second custom token to be checked.
+ * @param secondTokenValue The expected value of the second custom token.
+ * @param secondTokenCheckType The comparer for the second custom token.
+ * @param thirdToken The third custom token to be checked.
+ * @param thirdTokenValue The expected value of the third custom token.
+ * @param thirdTokenCheckType The comparer for the third custom token.
+ * @param fourthToken The first custom token to be checked.
+ * @param fourthTokenValue The expected value of the fourth custom token.
+ * @param fourthTokenCheckType The comparer for the fourth custom token.
+ * @param fifthToken The fifth custom token to be checked.
+ * @param fifthTokenValue The expected value of the fifth custom token.
+ * @param fifthTokenCheckType The comparer for the fifth custom token.
+ * @param compareTwoFirstToken A token to be compared against compareTwoSecondToken. 
+ * @param compareTwoSecondToken A token to be compared against compareTwoFirstToken. 
+ * @param compareTwoCheckType The comparer for compareTwoFirstToken and compareTwoSecondToken.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param expectedResult Indicates the amount of expected packets.
+ * @param payload The payload of the expected message
+ * @param payloadLength The length of the payload of the expected message
+ * @param connectionId The connection ID which should be used (only when protocol == TCP)
+ */
+void InternalWaitForSOMEIP(
+  long timeout,
+  char destMac[],
+  char destIp[],
+  char srcPort[],
+  char destPort[],
+  enum SomeIpMessageType messageType,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  char entryTTL[],
+  char serviceId[],
+  char returnCode[],
+  char methodId[],
+  char firstToken[],
+  char firstTokenValue[],
+  enum CheckType firstTokenCheckType,
+  char secondToken[],
+  char secondTokenValue[],
+  enum CheckType secondTokenCheckType,
+  char thirdToken[],
+  char thirdTokenValue[],
+  enum CheckType thirdTokenCheckType,
+  char fourthToken[],
+  char fourthTokenValue[],
+  enum CheckType fourthTokenCheckType,
+  char fifthToken[],
+  char fifthTokenValue[],
+  enum CheckType fifthTokenCheckType,
+  char compareTwoFirstToken[],
+  char compareTwoSecondToken[],
+  enum CheckType compareTwoCheckType,
+  int protocol,
+  enum ExpectedResult expectedResult,
+  byte payload[],
+  long payloadLength,
+  int connectionId
+  )
+{
+  dword aep;
+  long result;
+  char passVerb[32];
+  char failVerb[32];
+  dword port;
+  char temp[100];
+  char realDestIp[16];
+  byte realDestIpv6[16];
+  enum Bool isIpv6;
+  isIpv6 = kFalse;
+
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+  if(IsWildcard(destPort))
+  {
+    port = atol(syspar::SomeIpServiceDiscoveryPort);
+  }
+  else
+  {
+    port = ConvertStringValueToInt64(destPort);
+    write("destination port = %d", port);
+  }
+  if(IsWildcard(destIp))
+  {
+    strncpy(realDestIp, syspar::IpAddressTester, elcount(realDestIp));
+  }
+  else
+  {
+    strncpy(realDestIp, destIp, elcount(realDestIp));
+  }
+  
+  if(ConvertIpAddressStringToByteArray(realDestIp, realDestIpv6) == 6)
+  {
+    isIpv6 = kTrue;
+  }
+  if(protocol == syspar::UdpProtocol)
+  {
+    if(isIpv6 == kFalse)
+    {
+      aep = SomeIpOpenLocalApplicationEndpoint(protocol, port, ipGetAddressAsNumber(realDestIp));
+    }
+    else
+    {
+      aep = SomeIpOpenLocalApplicationEndpoint(protocol, port, realDestIpv6);
+    }
+    result = SomeIpGetLastError();
+    if(result != 0) write("Error @ SomeIpOpenLocalApplicationEndpoint %d", result);
+  }
+  if(protocol == syspar::TcpProtocol)
+  {
+    write("waiting for TCP message, time=%d", timeNow());
+    write("=======================================");
+    if(!gTcpRxConnectionEstablished[connectionId])
+    {
+      if(isIpv6 == kFalse)
+      {
+        gTcpRxApplicationEndpointHandle[connectionId] = SomeIpOpenLocalApplicationEndpoint(protocol, port, ipGetAddressAsNumber(realDestIp));
+      }
+      else
+      {
+        gTcpRxApplicationEndpointHandle[connectionId] = SomeIpOpenLocalApplicationEndpoint(protocol, port, realDestIpv6);
+      }
+      result = SomeIpGetLastError();
+      if(result != 0) write("Error @ InternalWaitForSOMEIP SomeIpOpenLocalApplicationEndpoint %d", result);
+      SomeIpTcpListen(gTcpRxApplicationEndpointHandle[connectionId]);
+      gTcpRxConnectionEstablished[connectionId] = kTrue;
+    }   
+    aep = gTcpRxApplicationEndpointHandle[connectionId];
+  }
+  
+  if(isIpv6 == kFalse)
+  {
+    SomeIpSetProperty("SDMulticastIp", ipGetAddressAsNumber(syspar::SomeIpServiceDiscoveryIpAddress));
+  }
+  else
+  {
+    SomeIpSetProperty("SDMulticastIpv6", realDestIpv6); 
+  }
+  SomeIpSetProperty("SDMulticastPort", port);
+  
+  InternalAddExpectedParameter("SOME/IP", "MessageType", messageType);
+  
+  if(entryType  != SomeIpEntryNull)
+  {
+    InternalAddExpectedParameter("SOME/IP", "Entry[0]", entryType);
+    snprintf(temp, elcount(temp), "Entry[0].%s.TTL", entryType.name());
+    if(IsWildcard(entryTTL))
+    {
+     InternalAddExpectedParameter("SOME/IP", temp, 0, kGreaterThan);
+    }
+    else
+    {
+      InternalAddExpectedParameter("SOME/IP", temp, ConvertStringValueToInt64(entryTTL));
+    }
+    if(entryServiceId != -1)
+    {
+      snprintf(temp, elcount(temp), "Entry[0].%s.ServiceID", entryType.name());
+      InternalAddExpectedParameter("SOME/IP", temp, entryServiceId);
+    }
+  }
+  if(!IsWildcard(srcPort))
+  {
+    InternalAddExpectedParameter("SOME/IP", "SourcePort", ConvertStringValueToInt64(srcPort));
+  }
+  if(!IsWildcard(serviceId))
+  {
+    InternalAddExpectedParameter("SOME/IP", "ServiceId", ConvertStringValueToInt64(serviceId));
+  }
+  if(!IsWildcard(methodId))
+  {
+    InternalAddExpectedParameter("SOME/IP", "MethodId", (0x7FFF & ConvertStringValueToInt64(methodId)));
+  }
+  if(!IsWildcard(returnCode))
+  {
+    InternalAddExpectedParameter("SOME/IP", "ReturnCode", ConvertStringValueToInt64(returnCode));
+  }
+  
+  AddTokenAsExpectedParameter(firstToken, firstTokenValue, firstTokenCheckType);
+  AddTokenAsExpectedParameter(secondToken, secondTokenValue, secondTokenCheckType);
+  AddTokenAsExpectedParameter(thirdToken, thirdTokenValue, thirdTokenCheckType);
+  AddTokenAsExpectedParameter(fourthToken, fourthTokenValue, fourthTokenCheckType);
+  AddTokenAsExpectedParameter(fifthToken, fifthTokenValue, fifthTokenCheckType);
+  
+  if(!IsWildcard(compareTwoFirstToken) && !IsWildcard(compareTwoSecondToken))
+  {
+    Internal_AddExpectedParameterCompareTwoParameters("SOME/IP", compareTwoFirstToken, "SOME/IP", compareTwoSecondToken, compareTwoCheckType);
+  }
+  
+  if(payloadLength > 0)
+  {
+    InternalAddExpectedDataParameter("SOME/IP", "data", payload, payloadLength);
+  }
+  
+  
+  StartObservationOfIncomingPackets(expectedResult);
+  
+  substr_cpy(temp, messageType.name(), strlen("SomeIpMessageType"), -1, elcount(temp));
+  if(expectedResult == kAnswerExpected)
+  {
+    strncpy(passVerb, "sent", elcount(passVerb));
+    strncpy(failVerb, "didn't send", elcount(failVerb));
+  }
+  else if(expectedResult == kNoAnswerExpected)
+  {
+    strncpy(passVerb, "didn't send", elcount(passVerb));
+    strncpy(failVerb, "sent", elcount(failVerb));
+  }
+  
+  if (WaitForIncomingPacket(expectedResult, timeout) == 0)
+    testStepPass("WaitForSOMEIPNotification", "DUT %s the expected SOME/IP %s message.", passVerb, temp);
+  else
+    testStepFail("WaitForSOMEIPNotification", "DUT %s the expected SOME/IP %s message.", failVerb, temp);
+  
+  if(protocol == syspar::UdpProtocol)
+  {
+    result = SomeIpCloseLocalApplicationEndpoint(aep);
+    if(result != 0) write("Error @ SomeIpCloseLocalApplicationEndpoint %d", result);
+  }
+  
+  InternalClearAllParameters();
+    
+}
+
+/**
+ * Wait for several SOME/IP notifications with given max and min interval times.
+ * @param timeout The time to wait in milliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param messageType The SOME/IP message type.
+ * @param entryType The entry type of the first entry.
+ * @param entryServiceId The service ID of the first entry.
+ * @param lastTimeIntervalMinimum The minimum time interval between the last two messages.
+ * @param lastTimeIntervalMaximum The maximum time interval between the last two messages.
+ * @param secondLastTimeIntervalMinimum The minimum time interval between the second last and last message. Set to zero to ignore.
+ * @param secondLastTimeIntervalMaximum The maximum time interval between the second last and last message. Set to zero to ignore.
+ */
+export testfunction WaitForSeveralSOMEIPNotifications(
+  long timeout,
+  int protocol,
+  enum SomeIpMessageType messageType,
+  enum SomeIpEntryType entryType,
+  int entryServiceId,
+  long lastTimeIntervalMinimum,
+  long lastTimeIntervalMaximum,
+  long secondLastTimeIntervalMinimum,
+  long secondLastTimeIntervalMaximum
+  )
+{  
+  dword aep;
+  long result;
+  
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+  
+  aep = SomeIpOpenLocalApplicationEndpoint(protocol, atol(syspar::SomeIpServiceDiscoveryPort));
+  result = SomeIpGetLastError();
+  if(result != 0) write("Error @ SomeIpOpenLocalApplicationEndpoint %d", result);
+  
+  
+  InternalAddExpectedParameter("SOME/IP", "MessageType", messageType);
+  
+  if(entryType  != SomeIpEntryNull)
+  {
+    InternalAddExpectedParameter("SOME/IP", "Entry[0]", entryType);
+    if(entryServiceId != -1)
+    {
+      char temp[100];
+      snprintf(temp, elcount(temp), "Entry[0].%s.ServiceID", entryType.name());
+      InternalAddExpectedParameter("SOME/IP", temp, entryServiceId);
+    }
+  }
+  
+  WaitForSeveralMessages(
+    timeout,
+    lastTimeIntervalMinimum,
+    lastTimeIntervalMaximum,
+    secondLastTimeIntervalMinimum,
+    secondLastTimeIntervalMaximum,
+    "SOME/IP Notification");
+}
+
+/**
+ * Wait for several SOME/IP notifications with given max and min interval times.
+ * @param timeout The time to wait in milliseconds.
+ * @param protocol The protocol that should be used. 6 for TCP, 17 for UDP.
+ * @param serviceId The service ID of the expected message
+ * @param eventBit The event bit of the expected message
+ * @param methodOrEventId The method or event id of the expected message (depending on the event bit)
+ * @param returnCode The return code of the expected message
+ * @param minTimeDiff The minimum time difference in milliseconds between the last two messages
+ */
+export testfunction WaitForSeveralSOMEIPNotifications(
+  long timeout,
+  int protocol,
+  int serviceId,
+  char eventBit[],
+  char methodOrEventId[],
+  char returnCode[],
+  int minTimeDiff
+  )
+{  
+  dword aep;
+  long result;
+  
+  SetBusContext(GetBusNameContext("Ethernet_1"));
+  
+  aep = SomeIpOpenLocalApplicationEndpoint(protocol, atol(syspar::SomeIpServiceDiscoveryPort));
+  result = SomeIpGetLastError();
+  if(result != 0) write("Error @ SomeIpOpenLocalApplicationEndpoint %d", result);
+  
+  
+  InternalAddExpectedParameter("SOME/IP", "MessageType", SomeIpMessageTypeNotification);
+  InternalAddExpectedParameter("SOME/IP", "ServiceId", serviceId);
+  if(!IsWildcard(eventBit))
+    InternalAddExpectedParameter("SOME/IP", "EventBit", ConvertStringValueToInt64(eventBit));
+  if(!IsWildcard(methodOrEventId))
+    InternalAddExpectedParameter("SOME/IP", "MethodId", (0x7FFF & ConvertStringValueToInt64(methodOrEventId)));
+  if(!IsWildcard(returnCode))
+    InternalAddExpectedParameter("SOME/IP", "ReturnCode", ConvertStringValueToInt64(returnCode));
+  
+  
+  
+  WaitForSeveralMessages(
+    timeout,
+    minTimeDiff,
+    timeout,
+    0,
+    0,
+    "SOME/IP Notification");
+}
+
+/**
+ * Converts the string to a meaningful value which can be processed to InternalAddExpectedParameter
+ * This function will recognize if it is an IP address or some special value like syspar::Client1CurrentRequestId
+ * @param string The string value
+ * @returns the converted int64
+ */
+int64 ConvertStringValueToInt64(char string[])
+{
+  int64 retVal;
+  
+  if(IsIpAddress(string))
+  {
+    write("Error: String value should not represent an ip address");
+    return 0;
+  }
+  
+  if(strncmp(string, syspar::Client1CurrentRequestId, elcount(string)) == 0)
+    return (syspar::ClientId << 16) + gCurrentRequestId;
+  
+  if(strncmp(string, syspar::ExtractedParameter1, elcount(string)) == 0)
+     return gExtractingParameters[0].Value;
+  
+   if(strncmp(string, syspar::ExtractedParameter2, elcount(string)) == 0)
+     return gExtractingParameters[1].Value;
+  
+  if(strtoll(string, retVal) < 0)
+    write("Warning: Could not convert %s to int64. Testcase result may be unreliable", string);
+  return retVal;
+}
+
+/**
+ * Adds any token as an expected SOME/IP parameter. Ipv6 capable
+ * @param token The token designator
+ * @param value The expected value
+ * @param checkType The comparer
+ */
+void AddTokenAsExpectedParameter(char token[], char value[], enum CheckType checkType)
+{
+  int ipVersion;
+  
+  if(IsWildcard(token) || IsWildcard(value))
+    return;
+
+  ipVersion = IpVersionOfString(value);
+  if(ipVersion < 0)
+  {
+    InternalAddExpectedParameter("SOME/IP", token, ConvertStringValueToInt64(value), checkType);
+  }
+  else if(strncmp(token, "Option", strlen("Option")) == 0) // IPv4 Endpoint options can currently only be compared with Int64
+  {
+    InternalAddExpectedParameter("SOME/IP", token, ConvertIpAddressStringToInt64(value), checkType);
+  }
+  else
+  {
+    byte valueData[16];
+    
+    ConvertIpAddressStringToByteArray(value, valueData);
+    InternalAddExpectedDataParameter("SOME/IP", token, valueData, BytesPerIpVersion(ipVersion), kTrue, 0, checkType);
+  }
+}

@@ -1,0 +1,395 @@
+/*@@var:*/
+variables{
+
+
+  PG WheelSpeedInfo absMsg = { DLC = 8, SA =2 };
+  PG EEC1 eMsg  = { DLC = 8, SA =2 }; 
+  PG EEC4 eMsg4  = { DLC = 8, SA =2 }; 
+  PG EngineTemp msgTemp  = { DLC = 8, SA =2 };
+  PG PowerTakoffInfo pto = {sa=2};
+
+  // engtemp is not modelled as f(engSpeed)
+  int gDbgMsg = 0;
+
+
+  int gGear;         // 0 == neutral; 1- 5
+  int gPowerIdle;
+  double gPedal;     // ppwer of the system ( 0 - 100)
+  double gSpeed;     // meter/sec
+  double gEngSpeed;  // revolution/sec
+  double gEngTemp;     // meter/sec
+
+  double gForce; // Newton
+  double kMass = 800.0;   // kg
+
+  double kAirFriction = 0.6; // F = kFriction*v*v
+  double kRollingFriction = 100.0; // Newton
+  int gBreakActive = 0;
+  int gParkBrake = 0;
+
+  // differential equations (systemClock)
+  const int kDeltaT = 10; // sampling rate of engine
+  const double kDeltaTInSec = kDeltaT / 1000.0;
+
+  const float kTransFormula = 3.6; // m/s * kTransFormula = km/h
+  double kMaxSpeed = 250/kTransFormula; //  in m/s
+
+  double kSpeedForceFactor = 0.001;
+  double kNormalEngSpeed = 1.0;
+
+  msTimer EngTempTimer;
+  msTimer SystemClockTimer; // timer for calculations of the dynamic system model
+  msTimer EngMsgTimer;
+
+  msTimer ABSMsgTimer;
+  msTimer PTOtimer;
+
+  // PTO management
+  int gPtoActive = 0;
+  double rqEngSpeed=0.0;
+  
+
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+//  write("Motor: %f ",kDeltaTInSec );
+  write("Motor");
+  CallAllOnEnvVar();
+  gEngTemp = 18;
+ // gEngTemp = 180;
+  gSpeed = 0;
+  gForce = 0;
+}
+/*@@end*/
+
+/*@@timer:SystemClockTimer:*/
+on timer SystemClockTimer
+{
+   // timer for calculations of the dynamic system model
+
+   // gSpeed(t1) = fun ( gSpeed(t0) );
+
+   double pedal, oldpedal, power,  breakForce,
+          frictionForce,accelarationForce;
+
+   double correspondingEngineSpeed, ratio;
+
+   setTimer(SystemClockTimer,kDeltaT);   
+
+
+   oldpedal = pedal;
+   //pedal = GetValue(evPedalPosition);
+   pedal = gPedal;
+
+   if (pedal<5) {
+     power = 5 * 1.5; // idle running
+   }
+   else {
+     power = pedal*1.5;
+   }
+
+   gEngSpeed = CalcEngSpeed(gSpeed,gGear);
+
+   gForce = Force(gEngSpeed,power,gGear);
+
+   // calculate new speed
+
+   //  F = m * a -> a = F/m
+   //  ( v[t1] - v[t0] ) / deltaT
+   //           =  ( - F(friction) + F(engine)) / m
+
+   frictionForce = (kAirFriction*gSpeed*gSpeed)
+                   + ( 1.0 * gSpeed )
+                   + kRollingFriction ;
+
+   if (gBreakActive||gParkBrake) {
+     breakForce = 10000.0;
+   }
+   else {
+     breakForce = 0.0;
+   }
+
+   accelarationForce = gForce - frictionForce - breakForce;
+   // compiler error
+   // gSpeed = 0.0 / (kMass * kDeltaTInSec);
+
+   ////////////////////////
+   // differential equation
+   ////////////////////////
+
+   //dbgMsg.Data1 = accelarationForce;
+
+   if ( accelarationForce != 0.0 ) { // workaround for error
+     // oldSpeed = gSpeed;
+     gSpeed =   gSpeed + (( accelarationForce   / kMass) * kDeltaTInSec);
+   }
+
+   // reset idle indicator
+   if ( accelarationForce >= -1.0 ) gPowerIdle = 0;
+
+   if ( gPowerIdle == 0 ) {
+      //eMsg.IdleRunning = EngineData.IdleRunning::Running;
+   }
+   else {
+      //eMsg.IdleRunning = EngineData.IdleRunning::Idle;
+   }
+
+   ////////////////////////
+   // check stationary condition
+   ////////////////////////
+   if (gSpeed<=0) gSpeed = 0.0;
+   if ( gGear!=0 )   {
+     correspondingEngineSpeed = CalcEngSpeed(gSpeed,gGear);
+     ratio = EngSpeedToSpeedRatio(gGear);
+     gSpeed = correspondingEngineSpeed / ratio;
+      /* so gibt es Rundungsfehler!!
+         EngSpeedToSpeedRatio(gGear);
+      */
+   }
+   else {
+     // idle running 
+	 if(gPtoActive) {
+	    // engspeed is controlled via external ECU
+		if(rqEngSpeed<600) rqEngSpeed=600;
+		if(rqEngSpeed>6000) rqEngSpeed = 6000;
+		gEngSpeed = gEngSpeed + (rqEngSpeed/60.0-gEngSpeed)/3.0;
+		if(gEngSpeed < 10) gEngSpeed = 10;
+	 }
+	 else {
+	     if (pedal<5) {
+    	   gEngSpeed = 10;
+	     }
+    	 else {
+	       gEngSpeed = 100;
+	 	 }	
+     } 
+   }
+   // assign to messages
+   eMsg.EngineSpeed.phys = gEngSpeed * 60; // now in rpm
+ //  eMsg4.EngForce.phys = gForce;
+   eMsg4.RatedEnginePower.phys = power;
+
+   absMsg.FrontAxleSpeed.phys =  gSpeed * kTransFormula;
+//   absMsg.AccelarationForce.phys = accelarationForce;
+
+
+
+   
+
+}
+/*@@end*/
+
+/*@@caplFunc:Force(float,float,int):*/
+double Force(double engSpeed, double power, int gear)
+{
+
+   // gear==0: idle gear (Leerlauf)
+   // force in Newton
+   // power in kW
+
+   double reducedEngSpeed, force;
+
+
+   double kGearForceFactor[6] =    { 0.0, 
+                                    50.0,  // max at 150 kW  
+                                    26.0,  // max at 100 kW
+                                    20.0,  // max at 120 kW
+                                    12.0,  // max at 100 kW   
+                                    10.0   // max at 100 kW 
+                                  };
+   double kMaxGearForce[6] = { 0.0, 7500, 2600, 2000, 1200, 1000 };
+
+//   reducedEngSpeed = engSpeed - kNormalEngSpeed;
+   if ((gear < 0) || (gear > 5)) runError(1001,55);
+
+   force = power
+         *( kGearForceFactor[gear] );
+
+   // limit force   
+   if  ( force > kMaxGearForce[gear]) {
+    force = kMaxGearForce[gear];
+   }
+   
+   return force;
+}
+/*@@end*/
+
+/*@@caplFunc:CalcEngSpeed(float,int):*/
+double CalcEngSpeed(double speed, int gear)
+{
+   // in Newton
+   double engSpeed, ratio;
+   if ((gear < 0) || (gear > 5)) runError(1002,55);
+
+   if (gear==0){
+     engSpeed = 0.0;
+   }
+   else { 
+     // stationary condition
+     ratio = EngSpeedToSpeedRatio(gear);
+     engSpeed = speed * ratio;
+   }
+   if (engSpeed > 100.0) { 
+      engSpeed = 100.0;
+   }
+   return engSpeed;
+}
+/*@@end*/
+
+/*@@timer:ABSMsgTimer:*/
+on timer ABSMsgTimer
+{
+  setTimer(ABSMsgTimer, 30 );
+  output(absMsg);
+}
+/*@@end*/
+
+/*@@timer:EngMsgTimer:*/
+on timer EngMsgTimer
+{
+//  setTimer(EngMsgTimer, EngineData.CycleTime );
+  setTimer(EngMsgTimer, 50  );
+
+  SendGear();
+  output(eMsg); // send engine data
+  output(eMsg4); // send engine data
+}
+/*@@end*/
+
+/*@@timer:EngTempTimer:*/
+on timer EngTempTimer {
+  int del = 300;
+  if (gEngTemp < 80.0) { // 125.0 produces overflow (Ri) ??
+       setTimer(EngTempTimer,del);
+       del += 25;
+       gEngTemp+=2.0;
+//       write("%10.3f", eMsg.EngTemp.phys);
+  }
+ // putvalue(evFloatDebug3,  gEngTemp);
+  msgTemp.EngineCoolantTemperature.phys = gEngTemp;
+  output(msgTemp);
+}
+/*@@end*/
+
+/*@@envVar:evGwEngRunningInd:*/
+on envVar evGwEngRunningInd
+{
+// Comments!!
+// Motor gets info directly via an environment variable
+
+
+	if (getValue(this)) {
+//      write("Motor Start!");
+	   setTimer(EngTempTimer,0);
+	   setTimer(SystemClockTimer,0);
+	   setTimer(EngMsgTimer,0);
+	   setTimer(ABSMsgTimer,15);
+	   setTimer(PTOtimer,30);
+	   SendGear();
+	}
+	else {
+//      write("Motor Stop!");
+	   cancelTimer(EngTempTimer);
+	   cancelTimer(SystemClockTimer);
+	   cancelTimer(EngMsgTimer);
+	   cancelTimer(ABSMsgTimer);
+	   cancelTimer(PTOtimer);
+	   gPtoActive = 0;
+	}
+}
+/*@@end*/
+
+/*@@caplFunc:EngSpeedToSpeedRatio(int):*/
+double EngSpeedToSpeedRatio(int gear) 
+{
+  if (gear==0) return 10000000.0;
+  return (6-gear)*1.0;
+}
+/*@@end*/
+
+/*@@caplFunc:SendGear():*/
+void SendGear ()
+{
+//  write("SendGear");
+//  PG ETC2 msg;
+
+//  msg.CurrentGear = gGear;
+//  output(msg);
+}
+/*@@end*/
+
+/*@@pg:j1939::EEC2 (0xF003X):*/
+on pg EEC2
+{
+   double oldPedal;
+
+   oldPedal = gPedal;
+   gPedal =  this.AcceleratorPedalPosition;
+   if (oldPedal > gPedal) {
+      gPowerIdle = 1;
+   }
+   else {
+      gPowerIdle = 0;
+   }
+}
+/*@@end*/
+
+/*@@pg:j1939::ETC2 (0xF005X):*/
+on pg ETC2
+{
+   gGear = this.CurrentGear;
+}
+/*@@end*/
+
+/*@@pg:j1939::EBC1 (0xF001X):*/
+on pg EBC1
+{
+  if (this.BrakePedalPosition>50) {
+    gBreakActive = 1;
+  }
+  else {
+    gBreakActive = 0;
+  }
+}
+/*@@end*/
+
+/*@@pg:j1939::Brakes (0xFEFAX):*/
+on pg Brakes
+{
+  gParkBrake = this.ParkingBrakeActuator.phys==0?0:1;
+}
+/*@@end*/
+
+/*@@timer:PTOtimer:*/
+on timer PTOtimer
+{
+  settimer(PTOtimer,100);
+  pto.PowerTakeoffSpeed = (gPtoActive!=0 && getvalue(evGwEngRunningInd)!=0)?1:0;
+  output(pto);
+}
+/*@@end*/
+
+/*@@pg:j1939::PowerTakoffInfo (0xFEF0X):*/
+on pg PowerTakoffInfo
+{
+  if(this.dir!=RX) return;
+  if(getvalue(evGwEngRunningInd)==0) return;
+  gPtoActive = this.PowerTakeoffSetSpeed;
+}
+/*@@end*/
+
+/*@@pg:j1939::TSC1 (0x0X):*/
+on pg TSC1
+{
+pg TSC1 tsc;
+  if(gPtoActive) {
+    if(this.OverrideCtrlModes == tsc.OverrideCtrlModes::SpeedControl) {
+	  rqEngSpeed = this.RqstedSpeed_SpeedLimit.phys;
+	}
+  }
+}
+/*@@end*/
+

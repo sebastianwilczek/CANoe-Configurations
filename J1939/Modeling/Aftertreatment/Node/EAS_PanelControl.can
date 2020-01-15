@@ -1,0 +1,338 @@
+/*@@var:*/
+variables
+{
+  /*- BEGIN MWF CODE ------------------------------------------------------------------------------------------------------*/
+  /* Constants                                                                                                             */
+  /* Environment State Variables                                                                                           */
+  const int kEnvValFrontCatYellowReset   = 0;    /* Environment variable for Panel Control                                 */  
+  const int kEnvValFrontCatYellowSet     = 1;    /* Environment variable for Panel Control                                 */
+  const int kEnvValFrontCatOrangeReset   = 2;    /* Environment variable for Panel Control                                 */
+  const int kEnvValFrontCatOrangeSet     = 3;    /* Environment variable for Panel Control                                 */
+  const int kEnvValFrontCatRedReset      = 4;    /* Environment variable for Panel Control                                 */
+  const int kEnvValFrontCatRedSet        = 5;    /* Environment variable for Panel Control                                 */
+  const int kEnvValFrontCatRedDosReset   = 6;    /* Environment variable for Panel Control                                 */
+  const int kEnvValFrontCatRedDosSet     = 7;    /* Environment variable for Panel Control                                 */
+
+  const int kEnvValBackCatYellowReset    = 0;    /* Environment variable for Panel Control                                 */  
+  const int kEnvValBackCatYellowSet      = 1;    /* Environment variable for Panel Control                                 */
+  const int kEnvValBackCatOrangeReset    = 2;    /* Environment variable for Panel Control                                 */  
+  const int kEnvValBackCatOrangeSet      = 3;    /* Environment variable for Panel Control                                 */
+  const int kEnvValBackCatOrangeDosReset = 4;    /* Environment variable for Panel Control                                 */  
+  const int kEnvValBackCatOrangeDosSet   = 5;    /* Environment variable for Panel Control                                 */
+  const int kEnvValBackCatRedReset       = 6;    /* Environment variable for Panel Control                                 */  
+  const int kEnvValBackCatRedSet         = 7;    /* Environment variable for Panel Control                                 */
+  const int kEnvValBackCatRedDosReset    = 8;    /* Environment variable for Panel Control                                 */  
+  const int kEnvValBackCatRedDosSet      = 9;    /* Environment variable for Panel Control                                 */
+
+  /* SPN Numbers                                                                                                           */
+  const dword kSPNDownstreamCatalyst     = 520192;
+  const dword kSPNUpstreamCatalyst       = 520193;
+  const dword kSPNDosingValve            = 520194;
+  const dword kSPNUreaPressure           = 520195;
+
+  const float kEnvironmentValueLowerTempYellow = 0.0;                              /* Yellow Temperature for lower limit   */
+  const float kEnvironmentValueUpperTempYellow = 50.0;                             /* Yellow Temperature for upper limit   */
+  const float kEnvironmentValueLowerTempOrange = kEnvironmentValueUpperTempYellow; /* Orange Temperature for lower limit   */
+  const float kEnvironmentValueUpperTempOrange = 150.0;                            /* Orange Temperature for upper limit   */
+  const float kEnvironmentValueLowerTempRed    = kEnvironmentValueUpperTempOrange; /* Orange Temperature for lower limit   */
+  const float kEnvironmentValueUpperTempRed    = 1774.0;                           /* Orange Temperature for upper limit   */
+
+  /* Global                                                                                  */
+  float gCatalystUpstreamTemperature   = 0.0;    /* Actual Catalyst Upstream Temp. in [°C]   */
+  float gCatalystDownstreamTemperature = 0.0;    /* Actual Catalyst Downstream Temp. in [°C] */
+  float gReductionFluidPressure        = 0.0;    /* Actual Fluid Pressure in [kPa]           */
+  float gReductionFluidTankLevel       = 0.0;    /* Actual Tank Level in [%]                 */
+  float gReductionFluidTankTemperature = 0.0;    /* Actual Tank Temperature in [°C]          */
+  float gActualDosingQuantity          = 0.0;    /* Actual Dosing Quantity in [g/h]          */
+  float gLastTransitionState           = 0.0;    /* Actual Transition State in [-]           */
+  float gLastMachineState              = 0.0;    /* Actual Machine State in [-]              */
+
+  /* Timers                                                                                  */
+  const int   kSystemTime_1    = 100;                    /* System time in [ms]              */
+  const int   kSystemTime_2    = 250;                    /* System time in [ms]              */
+  const float kSystemTimeSec_1 = kSystemTime_1 / 1000.0; /* System time in [sec]             */
+  const float kSystemTimeSec_2 = kSystemTime_2 / 1000.0; /* System time in [sec]             */
+  double      gTimerTicks_2    = 0;                      /* Timer Ticks in [-]               */
+  msTimer     SystemTimer_1;                             /* System timer                     */
+  msTimer     SystemTimer_2;                             /* System timer                     */
+  /*- END MWF CODE --------------------------------------------------------------------------*/
+}
+/*@@end*/
+
+/*@@pg:CAN1.Aftertreatment::PROB_1_EAS (0x18FF003DX):*/
+on pg Aftertreatment::PROB_1_EAS
+{
+  /* PROB_SCR1_VirECU_TX - Upstream Catalyst Temperature    */
+  gCatalystUpstreamTemperature = this.CatalystUpstreamTemperature.phys;
+  /* PROB_SCR1_VirECU_TX - Downstream Catalyst Temperature  */
+  gCatalystDownstreamTemperature = this.CatalystDownstreamTemperature.phys;
+  /* PROB_SCR1_VirECU_TX - Urea Pressure                      */
+  gReductionFluidPressure = this.ReductionFluidPressure.phys;
+
+}
+/*@@end*/
+
+/*@@pg:CAN1.Aftertreatment::PROB_2_EAS (0x18FF013DX):*/
+on pg Aftertreatment::PROB_2_EAS
+{
+  /* PROB_SCR2_VirECU_TX - Tank Level                       */
+  gReductionFluidTankLevel = this.ReductionFluidTankLevel.phys;
+  /* PROB_SCR2_VirECU_TX - Tank Temperature                 */
+  gReductionFluidTankTemperature = this.ReductionFluidTankTemperature.phys;
+  /* PROB_SCR2_VirECU_TX - Last Transition State            */
+  gLastTransitionState = this.ActualTransitionState.phys;
+  /* PROB_SCR2_VirECU_TX - Actual Machine State             */
+  gLastMachineState  = this.ActualMachineState.phys;
+  /* PROB_SCR2_VirECU_TX - Dosing Quantity                  */
+  gActualDosingQuantity = this.ActualDosingQuantity.phys;
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  /*- BEGIN MWF CODE ---------------------------------------------------------*/
+  setTimer(SystemTimer_1, kSystemTime_1);
+  setTimer(SystemTimer_2, kSystemTime_2);
+  /*- END MWF CODE -----------------------------------------------------------*/
+}
+/*@@end*/
+
+/*@@timer:SystemTimer_1:*/
+/*- BEGIN MWF CODE ---------------------------------------------------------*/ 
+on timer SystemTimer_1
+{
+  /* PROB_SCR1_VirECU_TX - Urea Pressure                      */
+  /* Environment Settings for Urea Pressure                   */
+  /* TO DO: insert application for environment variable here  */
+
+  /* PROB_SCR2_VirECU_TX - Tank Level                       */
+  /* Environment Settings for Tank Level                    */
+  /* 0 - 25 percent:                                        */
+  if (gReductionFluidTankLevel >=  0    && 
+      gReductionFluidTankLevel <   25   )
+  {
+    putValue(envEASTankLevel, 3);
+  }
+  /* 25 - 50 percent:                                       */
+  if (gReductionFluidTankLevel >=  25   && 
+      gReductionFluidTankLevel <   50   )
+  {
+    putValue(envEASTankLevel, 2);
+  }
+  /* 50 - 75 percent:                                       */
+  if (gReductionFluidTankLevel >=  50   &&
+      gReductionFluidTankLevel <   75   ) 
+  {
+    putValue(envEASTankLevel, 1);
+  }
+  /* 75 - 100 percent:                                      */
+  if (gReductionFluidTankLevel >=  75   )
+
+  {
+    putValue(envEASTankLevel, 0);
+  }
+
+   
+   
+  /* PROB_SCR2_VirECU_TX - Last Transition State              */
+  /* Environment Settings for Last Transition State           */
+  /* TO DO: Insert Application for environment variable here  */
+
+  /* PROB_SCR2_VirECU_TX - Actual Machine State               */
+  /* Environment Settings for Actual Machine State            */
+  /* TO DO: Insert Application for environment variable here  */
+
+  /* PROB_SCR2_VirECU_TX - Dosing Quantity                    */
+  /* Environment Settings for Dosing Quantity                 */
+  /* TO DO: Insert Application for environment variable here  */
+  
+  setTimer(SystemTimer_1, kSystemTime_1); 
+}
+/*- END MWF CODE -----------------------------------------------------------*/
+/*@@end*/
+
+/*@@timer:SystemTimer_2:*/
+/*- BEGIN MWF CODE ---------------------------------------------------------*/
+on timer SystemTimer_2
+{
+  
+  /* Environment Settings for Connectors/hoses  */
+  /* If Engine Speed is above 0 rpm, fill hoses */
+  if (gLastMachineState > 0)
+  {
+    putValue(envEASSuctionLine, 1);
+    putValue(envEASPressureLine, 1);
+    putValue(envEASCoolingLine, 1);
+    putValue(envEASBackflowLine, 1);
+  }
+  else
+  {
+    putValue(envEASSuctionLine, 0);
+    putValue(envEASPressureLine, 0);
+    putValue(envEASCoolingLine, 0);
+    putValue(envEASBackflowLine, 0);
+  }
+  
+  /* PROB_1_EAS - Upstream Catalyst Temperature             */
+  /* Environment Settings for Upstream Catalyst Temperature */
+  /* 0 - 50 degrees:     yellow                             */
+  if (gCatalystUpstreamTemperature >=  kEnvironmentValueLowerTempYellow    && 
+      gCatalystUpstreamTemperature <   kEnvironmentValueUpperTempYellow    )
+  {
+    /* Set/Reset Environement variable for yellow temperature */
+    if (getValue(envEASUpstreamCatalyst) == kEnvValFrontCatYellowReset &&
+      getValue(envEASDosing)           == kEnvValFrontCatYellowReset )
+    {
+      putValue(envEASUpstreamCatalyst, kEnvValFrontCatYellowSet);
+      putValue(envEASDosing, kEnvValFrontCatYellowSet);
+    }
+    else
+    {
+      putValue(envEASUpstreamCatalyst, kEnvValFrontCatYellowReset);
+      putValue(envEASDosing, kEnvValFrontCatYellowReset);
+    }
+  }
+  /* 50 - 150 degrees:     orange                             */
+  if (gCatalystUpstreamTemperature >=  kEnvironmentValueLowerTempOrange    && 
+      gCatalystUpstreamTemperature <   kEnvironmentValueUpperTempOrange    )
+  {
+    /* Set/Reset Environement variable for orange temperature */
+    if (getValue(envEASUpstreamCatalyst) == kEnvValFrontCatOrangeReset &&
+        getValue(envEASDosing)           == kEnvValFrontCatOrangeReset )
+    {
+      putValue(envEASUpstreamCatalyst, kEnvValFrontCatOrangeSet);
+      putValue(envEASDosing, kEnvValFrontCatOrangeSet);
+    }
+    else
+    {
+      putValue(envEASUpstreamCatalyst, kEnvValFrontCatOrangeReset);
+      putValue(envEASDosing, kEnvValFrontCatOrangeReset);
+    }
+  }
+  /* 150 - 1700 degrees:     red                               */
+  if (gCatalystUpstreamTemperature >=  kEnvironmentValueLowerTempRed    && 
+      gCatalystUpstreamTemperature <   kEnvironmentValueUpperTempRed    )
+  {
+    /* Set/Reset Environement variable for red temperature */
+    /* here: Dosing                                        */
+    if (gActualDosingQuantity > 0  && gLastMachineState == 1)
+    {
+      if (getValue(envEASUpstreamCatalyst) == kEnvValFrontCatRedReset &&
+          getValue(envEASDosing)           == kEnvValFrontCatRedDosReset )
+      {
+        putValue(envEASUpstreamCatalyst, kEnvValFrontCatRedSet);
+        putValue(envEASDosing, kEnvValFrontCatRedDosSet);
+      }
+      else
+      {
+        putValue(envEASUpstreamCatalyst, kEnvValFrontCatRedReset);
+        putValue(envEASDosing, kEnvValFrontCatRedDosReset);
+      }
+    }
+    
+    /* Set/Reset Environement variable for red temperature */
+    /* here: No dosing                                        */
+    if (gActualDosingQuantity == 0)
+    {
+      if (getValue(envEASUpstreamCatalyst) == kEnvValFrontCatRedReset &&
+          getValue(envEASDosing)           == kEnvValFrontCatRedReset )
+      {
+        putValue(envEASUpstreamCatalyst, kEnvValFrontCatRedSet);
+        putValue(envEASDosing, kEnvValFrontCatRedSet);
+      }
+      else
+      {
+        putValue(envEASUpstreamCatalyst, kEnvValFrontCatRedReset);
+        putValue(envEASDosing, kEnvValFrontCatRedReset);
+      }
+    }
+  }
+
+
+  /* PROB_1_EAS - Downstream Catalyst Temperature             */
+  /* Environment Settings for Downstream Catalyst Temperature */
+  /* 0 - 50 degrees:     yellow                               */
+  if (gCatalystDownstreamTemperature >=  kEnvironmentValueLowerTempYellow    && 
+      gCatalystDownstreamTemperature <   kEnvironmentValueUpperTempYellow    )
+  {
+    /* Set/Reset Environement variable for yellow temperature */
+    if (getValue(envEASDownstreamCatalyst) == kEnvValBackCatYellowReset)
+    {
+      putValue(envEASDownstreamCatalyst, kEnvValBackCatYellowSet);
+    }
+    else
+    {
+      putValue(envEASDownstreamCatalyst, kEnvValBackCatYellowReset);
+    }
+  }
+  /* 50 - 150 degrees:     orange                             */
+  if (gCatalystDownstreamTemperature >=  kEnvironmentValueLowerTempOrange    && 
+      gCatalystDownstreamTemperature <   kEnvironmentValueUpperTempOrange    )
+  {
+    /* Set/Reset Environement variable for orange temperature */
+    /* here: Dosing                                           */
+    if (gActualDosingQuantity > 0  && gLastMachineState == 1)
+    {
+      if (getValue(envEASDownstreamCatalyst) == kEnvValBackCatOrangeDosReset)
+      {
+        putValue(envEASDownstreamCatalyst, kEnvValBackCatOrangeDosSet);
+      }
+      else
+      {
+        putValue(envEASDownstreamCatalyst, kEnvValBackCatOrangeDosReset);
+      }
+    }
+  
+    /* Set/Reset Environement variable for orange temperature */
+    /* here: No dosing                                        */
+    if (gActualDosingQuantity == 0)
+    {
+      if (getValue(envEASDownstreamCatalyst) == kEnvValBackCatOrangeReset)
+      {
+        putValue(envEASDownstreamCatalyst, kEnvValBackCatOrangeSet);
+        }
+      else
+      {
+        putValue(envEASDownstreamCatalyst, kEnvValBackCatOrangeReset);
+      } 
+    }
+  }
+  /* 150 - 1700 degrees:     red                              */
+  if (gCatalystDownstreamTemperature >=  kEnvironmentValueLowerTempRed    && 
+      gCatalystDownstreamTemperature <   kEnvironmentValueUpperTempRed    )
+  {
+    /* Set/Reset Environement variable for red temperature    */
+    /* here: Dosing                                           */
+    if (gActualDosingQuantity > 0  && gLastMachineState == 1)
+    {
+      if (getValue(envEASDownstreamCatalyst) == kEnvValBackCatRedDosReset)
+      {
+        putValue(envEASDownstreamCatalyst, kEnvValBackCatRedDosSet);
+      }
+      else
+      {
+        putValue(envEASDownstreamCatalyst, kEnvValBackCatRedDosReset);
+      }
+    }
+  
+    /* Set/Reset Environement variable for red temperature    */
+    /* here: No dosing                                        */
+    if (gActualDosingQuantity == 0)
+    {
+      if (getValue(envEASDownstreamCatalyst) == kEnvValBackCatRedReset)
+      {
+        putValue(envEASDownstreamCatalyst, kEnvValBackCatRedSet);
+      }
+      else
+      {
+        putValue(envEASDownstreamCatalyst, kEnvValBackCatRedReset);
+      }
+    }
+  }
+
+  setTimer(SystemTimer_2, kSystemTime_2); 
+}
+/*- END MWF CODE -----------------------------------------------------------*/
+/*@@end*/
+

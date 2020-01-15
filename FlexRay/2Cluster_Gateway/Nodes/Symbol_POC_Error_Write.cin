@@ -1,0 +1,304 @@
+/*@@includes:*/
+includes
+{
+#include "LibPrint_v70.cin"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+  const int cMaxObservedClusters = 2;
+  int  gClusterSleeps[cMaxObservedClusters] = { -1, -1 };
+
+  char writeTxt[512];
+  const int cWriteTextSize = 512;
+  char writeTxt2[40];
+  const int cWriteTextSize2 = 40;
+
+  int gPOCEventDebugLevel = 0; // 0 - 2
+  int gErrorEventDebugLevel = 0; // 0 - 2
+  int gSymbolEventDebugLevel = 0; // 0 - 2
+
+  int gSleepObservationDebugLevel = 0; // 0 - 2
+}
+/*@@end*/
+
+/*@@frSymbol:FlexRay Symbol:*/
+on FRSymbol
+{
+  getFRSymbolName(this.FR_Symbol, cWriteTextSize2, writeTxt2);
+  //snprintf(writeTxt, cWriteTextSize, "%10.6f: on FRSymbol   %2d in cycle %3d on channel %2d with Mask %d, Length %d.", getTime(0), this.FR_Symbol, this.FR_Cycle, (int)this.MsgChannel, this.FR_ChannelMask, this.FR_Length);
+  snprintf(writeTxt, cWriteTextSize, "%10.6f: on FRSymbol   %2d (%-32s) in cycle %3d on channel %2d with Mask %d, Length %d.", getTime(0), this.FR_Symbol, writeTxt2, this.FR_Cycle, (int)this.MsgChannel, this.FR_ChannelMask, this.FR_Length);
+  myprint(gSymbolEventDebugLevel,writeTxt);
+  //output(this);
+}
+/*@@end*/
+
+/*@@frPocState:FlexRay PocState:*/
+on FRPOCState
+{
+  byte idx;
+
+  getPOCStateName(this.FR_POCState, cWriteTextSize2, writeTxt2);
+  //snprintf(writeTxt, cWriteTextSize, "%10.6f: on FRPOCState %2d in cycle %3d on channel %2d with HW Type %2d, Info1 0x%02x, Info2 0x%02x, Info3 0x%02x, Info4 0x%02x.", getTime(0), this.FR_POCState, this.FR_Cycle, (int)this.MsgChannel, this.Type, this.FR_Info1, this.FR_Info2, this.FR_Info3, this.FR_Info4);
+  snprintf(writeTxt, cWriteTextSize, "%10.6f: on FRPOCState %2d (%-32s) in cycle %3d on channel %2d with HW Type %2d, Info1 0x%02x, Info2 0x%02x, Info3 0x%02x, Info4 0x%02x.", getTime(0), this.FR_POCState, writeTxt2, this.FR_Cycle, (int)this.MsgChannel, this.Type, this.FR_Info1, this.FR_Info2, this.FR_Info3, this.FR_Info4);
+  myprint(gPOCEventDebugLevel,writeTxt);
+  //output(this);
+
+  idx = this.MsgChannel - 1;
+  if (idx >= cMaxObservedClusters) return;
+
+  if (((gClusterSleeps[idx] == -1) || (gClusterSleeps[idx] == 0)) && ((this.FR_POCState == 4) || (this.FR_POCState == -2))) {
+    // halt or not synced
+    gClusterSleeps[idx] = 1;
+    snprintf(writeTxt, cWriteTextSize, "%10.6f: gClusterSleeps[%d] = 1", getTime(0), idx+1);
+    myprint(gSleepObservationDebugLevel,writeTxt);
+
+    POCChanged(this.MsgChannel, this.FR_POCState, gClusterSleeps[idx]);
+  }
+  if (((gClusterSleeps[idx] == -1) || (gClusterSleeps[idx] == 1)) && (this.FR_POCState == 2)) {
+    // normal active
+    gClusterSleeps[idx] = 0;
+    snprintf(writeTxt, cWriteTextSize, "%10.6f: gClusterSleeps[%d] = 0", getTime(0), idx+1);
+    myprint(gSleepObservationDebugLevel,writeTxt);
+
+    POCChanged(this.MsgChannel, this.FR_POCState, gClusterSleeps[idx]);
+  }
+
+}
+/*@@end*/
+
+/*@@frError:FlexRay Error:*/
+on FRError
+{
+  getFRErrorName(this.FR_Code, cWriteTextSize2, writeTxt2);
+  //snprintf(writeTxt, cWriteTextSize, "%10.6f: on FRError   %3d on channel %2d with HW Type %2d,  Data0 0x%02x, Data1 0x%02x, Data2 0x%02x, Data3 0x%02x, Data4 0x%02x.", getTime(0), this.FR_Code, (int)this.MsgChannel, this.FR_HWTag, this.FR_Data0, this.FR_Data1, this.FR_Data2, this.FR_Data3, this.FR_Data4);
+  snprintf(writeTxt, cWriteTextSize, "%10.6f: on FRError   %3d (%-32s) on channel %2d with HW Type %2d,  Data0 0x%02x, Data1 0x%02x, Data2 0x%02x, Data3 0x%02x, Data4 0x%02x.", getTime(0), this.FR_Code, writeTxt2, (int)this.MsgChannel, this.FR_HWTag, this.FR_Data0, this.FR_Data1, this.FR_Data2, this.FR_Data3, this.FR_Data4);
+  myprint(gErrorEventDebugLevel,writeTxt);
+  //output(this);
+}
+/*@@end*/
+
+/*@@caplFunc:getTime(float):*///function
+float getTime (float time)
+{
+  //return TimeNowFloat()/100000.0;
+  return TimeNowNS()/1000000000.0;
+  //return time/1000000000.0;
+}
+/*@@end*/
+
+/*@@caplFunc:getPOCStateName(int,word,char[]):*///function
+int getPOCStateName (int state, word nameSize, char name[])
+{
+  int r = -1;
+  if (state == -2) {
+    snprintf(name, nameSize, "Synchronization Lost");
+	r = state;
+  } else if (state == 0x00) {
+    snprintf(name, nameSize, "Default Config");
+	r = state;
+  } else if (state == 0x01) { 
+    snprintf(name, nameSize, "Ready");
+	r = state;
+  } else if (state == 0x02) { 
+    snprintf(name, nameSize, "Normal Active");
+	r = state;
+  } else if (state == 0x03) { 
+    snprintf(name, nameSize, "Normal Passive");
+	r = state;
+  } else if (state == 0x04) { 
+    snprintf(name, nameSize, "Halt");
+	r = state;
+  } else if (state == 0x05) { 
+    snprintf(name, nameSize, "Monitor Mode");
+	r = state;
+  } else if (state == 0x0f) { 
+    snprintf(name, nameSize, "Config");
+	r = state;
+  } else if (state == 0x10) { 
+    snprintf(name, nameSize, "Wakeup Standby");
+	r = state;
+  } else if (state == 0x11) { 
+    snprintf(name, nameSize, "Wakeup Listen");
+	r = state;
+  } else if (state == 0x12) { 
+    snprintf(name, nameSize, "Wakeup Send");
+	r = state;
+  } else if (state == 0x13) { 
+    snprintf(name, nameSize, "Wakeup Detect");
+	r = state;
+  } else if (state == 0x20) { 
+    snprintf(name, nameSize, "Startup Prepare");
+	r = state;
+  } else if (state == 0x21) { 
+    snprintf(name, nameSize, "Coldstart Listen");
+	r = state;
+  } else if (state == 0x22) { 
+    snprintf(name, nameSize, "Coldstart Collision Resolution");
+	r = state;
+  } else if (state == 0x23) { 
+    snprintf(name, nameSize, "Coldstart Consistency Check");
+	r = state;
+  } else if (state == 0x24) { 
+    snprintf(name, nameSize, "Coldstart Gap");
+	r = state;
+  } else if (state == 0x25) { 
+    snprintf(name, nameSize, "Coldstart Join");
+	r = state;
+  } else if (state == 0x26) { 
+    snprintf(name, nameSize, "Integration Coldstart Check");
+	r = state;
+  } else if (state == 0x27) { 
+    snprintf(name, nameSize, "Integration Listen");
+	r = state;
+  } else if (state == 0x28) { 
+    snprintf(name, nameSize, "Integration Consistency Check");
+	r = state;
+  } else if (state == 0x29) { 
+    snprintf(name, nameSize, "Initialize Schedule");
+	r = state;
+  } else if (state == 0x2a) { 
+    snprintf(name, nameSize, "Abort Startup");
+	r = state;
+  } else if (state == 0x2b) { 
+    snprintf(name, nameSize, "Startup Success");
+	r = state;
+  } else { 
+    snprintf(name, nameSize, "Unknown");
+	r = -1;
+  }
+  return r;
+}
+/*@@end*/
+
+/*@@caplFunc:getFRErrorName(word,word,char[]):*///function
+int getFRErrorName (word code, word nameSize, char name[])
+{
+  int r = -1;
+  if (code == 0) {
+    snprintf(name, nameSize, "No Error");
+	r = code;
+  } else if (code == 1) { 
+    snprintf(name, nameSize, "FlexCard Overflow");
+	r = code;
+  } else if (code == 2) { 
+    snprintf(name, nameSize, "POC Error Mode Change");
+	r = code;
+  } else if (code == 3) { 
+    snprintf(name, nameSize, "Sync Frames Below Minimum");
+	r = code;
+  } else if (code == 4) { 
+    snprintf(name, nameSize, "Sync Frame Overflow");
+	r = code;
+  } else if (code == 5) { 
+    snprintf(name, nameSize, "Clock Correction Failure");
+	r = code;
+  } else if (code == 6) { 
+    snprintf(name, nameSize, "Parity Error");
+	r = code;
+  } else if (code == 7) { 
+    snprintf(name, nameSize, "Receive FIFO Overrun");
+	r = code;
+  } else if (code == 8) { 
+    snprintf(name, nameSize, "Empty FIFO Access");
+	r = code;
+  } else if (code == 9) { 
+    snprintf(name, nameSize, "Illegal Input Buffer Access");
+	r = code;
+  } else if (code == 10) { 
+    snprintf(name, nameSize, "Illegal Output Buffer Access");
+	r = code;
+  } else if (code == 11) { 
+    snprintf(name, nameSize, "Syntax Error");
+	r = code;
+  } else if (code == 12) { 
+    snprintf(name, nameSize, "Content Error");
+	r = code;
+  } else if (code == 13) { 
+    snprintf(name, nameSize, "Slot Boundary Violation");
+	r = code;
+  } else if (code == 14) { 
+    snprintf(name, nameSize, "Transmission Across Boundary A");
+	r = code;
+  } else if (code == 15) { 
+    snprintf(name, nameSize, "Transmission Across Boundary B");
+	r = code;
+  } else if (code == 16) { 
+    snprintf(name, nameSize, "Latest Transmit Violation A");
+	r = code;
+  } else if (code == 17) { 
+    snprintf(name, nameSize, "Latest Transmit Violation B");
+	r = code;
+  } else if (code == 18) { 
+    snprintf(name, nameSize, "Error Detection on A");
+	r = code;
+  } else if (code == 19) { 
+    snprintf(name, nameSize, "Error Detection on B");
+	r = code;
+  } else if (code == 20) { 
+    snprintf(name, nameSize, "Message Handler Constraints Flag Error");
+	r = code;
+  } else if (code == 21) { 
+    snprintf(name, nameSize, "NIT SENA");
+	r = code;
+  } else if (code == 22) { 
+    snprintf(name, nameSize, "NIT SBNA");
+	r = code;
+  } else if (code == 23) { 
+    snprintf(name, nameSize, "NIT SENB");
+	r = code;
+  } else if (code == 24) { 
+    snprintf(name, nameSize, "NIT SBNB");
+	r = code;
+  } else if (code == 25) { 
+    snprintf(name, nameSize, "Internal Error Overflow");
+	r = code;
+  } else if (code == 26) { 
+    snprintf(name, nameSize, "Wrong Frame");
+	r = code;
+  } else if (code == 27) { 
+    snprintf(name, nameSize, "Bus Guardian Error");
+	r = code;
+  } else if (code == 28) { 
+    snprintf(name, nameSize, "CHI Error");
+	r = code;
+  } else if (code == 29) { 
+    snprintf(name, nameSize, "Error Handling Level Changed");
+	r = code;
+  } else if (code == 30) { 
+    snprintf(name, nameSize, "Symbol Received");
+	r = code;
+  } else { 
+    snprintf(name, nameSize, "Unknown");
+	r = -1;
+  }
+  return r;
+}
+/*@@end*/
+
+/*@@caplFunc:getFRSymbolName(word,word,char[]):*///function
+int getFRSymbolName (word symbol, word nameSize, char name[])
+{
+  int r = -1;
+  if (symbol == 0) {
+    snprintf(name, nameSize, "Unknown");
+	r = symbol;
+  } else if (symbol == 1) { 
+    snprintf(name, nameSize, "CAS");
+	r = symbol;
+  } else if (symbol == 2) { 
+    snprintf(name, nameSize, "MTS");
+	r = symbol;
+  } else if (symbol == 3) { 
+    snprintf(name, nameSize, "Wakeup Symbol");
+	r = symbol;
+  } else { 
+    snprintf(name, nameSize, "Unspecified");
+	r = -1;
+  }
+  return r;
+}
+/*@@end*/
+

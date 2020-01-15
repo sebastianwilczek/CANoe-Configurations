@@ -1,0 +1,491 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+variables
+{
+  // ICMPv4 payload size
+  const int kICMPv4_MAX_DATA_LENGTH = 1500;
+  
+  enum ICMPv4_Type
+  {
+    ICMPv4_Type_Echo_Reply = 0,
+    ICMPv4_Type_Destination_unreachable = 3,
+    ICMPv4_Type_Sourve_Quench = 4,
+    ICMPv4_Type_Redirect = 5,
+    ICMPv4_Type_Echo_Request = 8,
+    ICMPv4_Type_Router_Advertisement = 9,
+    ICMPv4_Type_Router_Solicitation = 10,
+    ICMPv4_Type_Time_Exceeded = 11,
+    ICMPv4_Type_Parameter_Problem = 12,
+    ICMPv4_Type_Timestamp = 13,
+    ICMPv4_Type_Timestamp_Reply = 14,
+    ICMPv4_Type_Information_Reqest = 15,
+    ICMPv4_Type_Information_Reply = 16,
+    ICMPv4_Type_Adress_Mask_Request = 17,    
+    ICMPv4_Type_Adress_Mask_Reply = 18,
+    
+    ICMPv4_Type_Invalid = 0xFF
+  };
+  
+  struct _Token_ICMPv4
+  {
+    enum ICMPv4_Type type;
+    byte bCode;
+    byte bPayload[kICMPv4_MAX_DATA_LENGTH];
+    int  iPayloadlength;
+    byte bPointer;
+  };  
+  
+  Timer IPv4FragReassemblyTimer;
+  long IPv4FragReassemblyTimeout; // sec
+}
+
+on timer IPv4FragReassemblyTimer
+{
+  // Send ICMPv4 Time Exceeded msg
+  sendIcmpv4TimeExceededMsg();
+}
+
+// Call from "on timer IPv4FragReassemblyTimer"
+int sendIcmpv4TimeExceededMsg()
+{
+  int iRet = 0;
+  dword dstIpAddr;
+  byte IPv4HeaderLength;
+  struct _Token_Eth_Packet sendData;
+    
+  // inititalise
+  initEthTokenData(sendData);
+
+  // Get IPv4 address from recvData
+  dstIpAddr = bEthRecvRawData[15] << 24 | bEthRecvRawData[14] << 16 | bEthRecvRawData[13] << 8 | bEthRecvRawData[12];
+  
+  // Get IPv4 header length
+  IPv4HeaderLength = (bEthRecvRawData[0] & 0x0F)*4;
+  
+  // Set data for ICMPv4 Time Exceeded msg
+  sendData.qwSource = kDIface_0_MAC_ADDR;
+  sendData.type = Eth_Type_IPv4;
+  sendData.ipv4.dwSource = GetDutIpAsNummer();
+  sendData.ipv4.dwDestination = dstIpAddr;
+  sendData.ipv4.protocol = IPv4_Prot_ICMPv4;
+  sendData.ipv4.icmpv4.type = ICMPv4_Type_Time_Exceeded;
+  sendData.ipv4.icmpv4.bCode = 1;
+  sendData.ipv4.icmpv4.iPayloadlength = IPv4HeaderLength + 8;
+  memcpy_off(sendData.ipv4.icmpv4.bPayload, 0, bEthRecvRawData, 0, sendData.ipv4.icmpv4.iPayloadlength);
+  
+  // Send Icmpv4 Time Exceeded msg
+  iRet = sendPacketOrCacheForArp(sendData, dstIpAddr);
+  
+  return iRet;
+}
+
+// Call from "OnIpReceivePrepare"
+int sendIcmpv4ParameterProblemdMsg( ethernetPacket * pkt , byte bPointer)
+{
+  int i;
+  int iRet = 0;
+  dword dstIpAddr;
+  byte IPv4HeaderLength;
+  struct _Token_Eth_Packet sendData;
+  
+  // inititalise
+  initEthTokenData(sendData);
+
+  // Get IPv4 address from recvData
+  dstIpAddr = IPv4GetSrcAddress(pkt);
+  
+  // Get IPv4 header length
+  IPv4HeaderLength = IPv4GetHeaderLength(pkt);
+  
+  // Set data for ICMPv4 Parameter Problem msg
+  sendData.qwSource = kDIface_0_MAC_ADDR;
+  sendData.type = Eth_Type_IPv4;
+  sendData.ipv4.dwSource = GetDutIpAsNummer();
+  sendData.ipv4.dwDestination = dstIpAddr;
+  sendData.ipv4.protocol = IPv4_Prot_ICMPv4;
+  sendData.ipv4.icmpv4.type = ICMPv4_Type_Parameter_Problem;
+  sendData.ipv4.icmpv4.bCode = 0;
+  sendData.ipv4.icmpv4.bPointer = bPointer;
+  sendData.ipv4.icmpv4.iPayloadlength = IPv4HeaderLength + 8;
+  for(i = 0;i < sendData.ipv4.icmpv4.iPayloadlength;i++){
+    sendData.ipv4.icmpv4.bPayload[i] = pkt.byte(i);
+  }
+  
+  // Send Icmpv4 Parameter Problem msg
+  iRet = sendPacketOrCacheForArp(sendData, dstIpAddr);
+  
+  return iRet;
+}
+
+/// <initialize>
+// inititalization of the ICMPv4 Token data
+void initIcmpv4TokenData(struct _Token_ICMPv4 data)
+{
+  int i;
+  data.type = ICMPv4_Type_Invalid;
+  data.bCode = 0; 
+
+  for(i=0; i<elCount(data.bPayload); i++)
+  {
+    data.bPayload[i] = 0;
+  }
+  data.iPayloadlength = 0;
+}
+
+/// <getPacketData>
+// get the ICMPv4 token data from received ethernet packet
+int getIcmpv4Packet(struct _Token_ICMPv4 data, long handle)
+{
+  getIcmpv4PacketHeaderData(data, handle);
+  
+  data.iPayloadlength = EthGetTokenData(handle, "icmpv4", "data", elCount(data.bPayload), data.bPayload);
+  
+  return 1;
+}
+
+/// <getPacketData>
+// get the ICMPv4 packet header data
+void getIcmpv4PacketHeaderData(struct _Token_ICMPv4 data, long handle)
+{
+  // ICMPv4 Data
+  data.type = (enum ICMPv4_Type)EthGetTokenInt(handle, "icmpv4", "type");
+  data.bCode = EthGetTokenInt(handle, "icmpv4", "code");
+}
+
+/// <sendPacket/constructHeader>
+// construct ICMPv4 header
+// ret 1:succeed 0:failed
+void constructIcmpv4Header(enum ICMPv4_Type type, byte bCode, long lPacketHandle)
+{
+  // construct icmpv4 header
+  EthInitProtocol(lPacketHandle, "icmpv4");
+  EthSetTokenInt(lPacketHandle, "icmpv4", "type", kBYTE_OFFSET, 2, kBYTE_ORDER_INTEL, type);
+  EthSetTokenInt(lPacketHandle, "icmpv4", "code", kBYTE_OFFSET, 1, kBYTE_ORDER_INTEL, bCode);
+}
+
+/// <sendPacket>
+// construct ICMPv4 packet
+int constructIcmpv4Packet(struct _Token_IPv4 data, long lPacketHandle)
+{
+  int iRet;
+  
+  iRet = 0;
+  
+  constructIcmpv4Header(data.icmpv4.type, data.icmpv4.bCode, lPacketHandle);
+  
+  // If a payload length is smaller than 1(equal to 0)
+  if(data.icmpv4.iPayloadlength <= 0)
+  {
+    // Do not resize a payload length
+    return 1;
+  }
+  
+  switch(data.icmpv4.type)
+  {
+    // echo reply
+    case ICMPv4_Type_Echo_Reply:
+      break;
+      
+    // destination unreachable
+    case ICMPv4_Type_Destination_unreachable:
+      EthResizeToken( lPacketHandle, "icmpv4", "data", (data.icmpv4.iPayloadlength)*8 /*bits*/ );
+      EthSetTokenData(lPacketHandle, "icmpv4", "data", 0 , data.icmpv4.iPayloadlength, data.icmpv4.bPayload);
+      iRet = 1;
+      break;
+      
+    // echo request
+    case ICMPv4_Type_Echo_Request:
+      EthResizeToken( lPacketHandle, "icmpv4", "data", (data.icmpv4.iPayloadlength)*8 /*bits*/ );
+      EthSetTokenData(lPacketHandle, "icmpv4", "data", 0 , data.icmpv4.iPayloadlength, data.icmpv4.bPayload);
+      iRet = 1;
+      break;
+      
+    // time exceeded
+    case ICMPv4_Type_Time_Exceeded:
+      EthResizeToken( lPacketHandle, "icmpv4", "data", (data.icmpv4.iPayloadlength)*8 /*bits*/ );
+      EthSetTokenData(lPacketHandle, "icmpv4", "data", 0 , data.icmpv4.iPayloadlength, data.icmpv4.bPayload);
+      iRet = 1;
+      break;
+      
+    // parameter problem
+    case ICMPv4_Type_Parameter_Problem:
+      EthSetTokenInt(lPacketHandle, "icmpv4", "pointer", kBYTE_OFFSET, 1, kBYTE_ORDER_INTEL, data.icmpv4.bPointer);
+
+      EthResizeToken( lPacketHandle, "icmpv4", "data", (data.icmpv4.iPayloadlength)*8 /*bits*/ );
+      EthSetTokenData(lPacketHandle, "icmpv4", "data", 0 , data.icmpv4.iPayloadlength, data.icmpv4.bPayload);
+      iRet = 1;
+      break;
+
+    // other
+    default:
+      break;
+  }
+  
+  return iRet;
+}
+
+/// <getPacketData>
+// make ICMPv4 packet
+int makeIcmpv4Packet(struct _Token_Eth_Packet recvData, struct _Token_IPv4 sendData)
+{  
+  int iRet;
+  
+  iRet = 0;
+  
+  switch(recvData.ipv4.protocol)
+  {
+    // ICMPv4
+    case IPv4_Prot_ICMPv4:
+      break;
+    // TCP
+    case IPv4_Prot_TCP:
+      break;
+    // UDP
+    case IPv4_Prot_UDP:
+      break;
+    // IGMP
+    case IPv4_Prot_IGMP:
+      break;
+    // unknown protocol(0x8F)
+    case 0x8F:
+      // Send ICMP Destination Unreachable msg if the received frame is unknown protocol(0x8F)
+      sendData.icmpv4.type = ICMPv4_Type_Destination_unreachable;
+      sendData.icmpv4.bCode = 2;  // Protocol unreachable
+      sendData.icmpv4.iPayloadlength = ((bEthRecvRawData[0] & 0x0F)*4) + 8;
+      memcpy_off(sendData.icmpv4.bPayload, 0, recvData.bPayload, 0, sendData.icmpv4.iPayloadlength);
+      iRet = 1;
+    default:
+      break;
+  }
+  
+  if(iRet == 1){
+    return iRet;
+  }
+  
+  return iRet;
+}
+
+/// <forTestability>
+// configure To Send ICMPv4 method(for Testability)
+// ret 1:succeed 0:failed
+int configToSendIcmpv4(qword dstMacAddr, dword dstIpAddr, enum ICMPv4_Type type)
+{
+  int iRet = 0;
+  struct _Token_Eth_Packet sendData;
+    
+  // inititalise
+  initEthTokenData(sendData);
+  
+  sendData.qwSource = kDIface_0_MAC_ADDR;
+  sendData.qwDestination = dstMacAddr;
+  sendData.type = Eth_Type_IPv4;
+  sendData.ipv4.dwSource =  GetDutIpAsNummer();
+  sendData.ipv4.dwDestination = dstIpAddr;
+  sendData.ipv4.protocol = IPv4_Prot_ICMPv4;
+  sendData.ipv4.icmpv4.type = type;
+  sendData.ipv4.icmpv4.bCode = 0;
+  
+  // send icmpv4
+  iRet = sendPacket(sendData);
+  
+  return iRet;
+}
+
+/// <forTestability>
+// configure To Send ICMPv4 method(for Testability)
+// ret 1:succeed 0:failed
+int configToSendIcmpv4(dword dstIpAddr, enum ICMPv4_Type type, byte data[], word dataLength)
+{
+  int iRet = 0;
+  struct _Token_Eth_Packet sendData;
+
+  // inititalise
+  initEthTokenData(sendData);
+  
+  // Set data for Icmpv4 Echo Request
+  sendData.qwSource = kDIface_0_MAC_ADDR;
+  sendData.type = Eth_Type_IPv4;
+  sendData.ipv4.dwSource =  GetDutIpAsNummer();
+  sendData.ipv4.dwDestination = dstIpAddr;
+  sendData.ipv4.protocol = IPv4_Prot_ICMPv4;
+  sendData.ipv4.icmpv4.type = type;
+  sendData.ipv4.icmpv4.bCode = 0;
+  sendData.ipv4.icmpv4.iPayloadlength = dataLength;
+  memcpy_off(sendData.ipv4.icmpv4.bPayload, 0, data, 0, dataLength);
+
+  // Send Icmpv4 Echo Request
+  iRet = sendPacketOrCacheForArp(sendData, dstIpAddr);
+
+  return iRet;
+}
+
+/// <forTestability>
+//
+// receive and forward ICMP message
+//
+int recieveAndFowardICMP(struct _Token_Testabilty recvData)
+{
+  int iRet = 0;
+  
+  dword dwSocketHandle;
+  word wMaxFwd;
+  word wMaxLen;
+  
+  if(gbICMP_Fwd_Enable == kTrue)
+  {
+    Write("ERROR recieveAndFowardICMP()is already enabled");
+    return iRet;
+  }
+  //
+  // Get receive and forward icmp parameters, enabled forwarding and reset counter
+  //
+  gwICMPMaxFwd = getWordData(recvData.TestabilityMsg.bParameters, 0);
+  gwICMPMaxLen = getWordData(recvData.TestabilityMsg.bParameters, 2);
+  gbICMP_Fwd_Enable = kTrue;
+  gwICMPFwdCnt = 0;
+    
+  return 1;
+}
+
+/// <forTestability>
+//
+// check if receive and forward ICMP message is enabled
+//
+byte IsICMPv4FwdEnabled()
+{
+  if(gbICMP_Fwd_Enable == kTrue)
+  {
+    return kTrue;
+  }
+  return kFalse;
+}
+
+/// <forTestability>
+//
+// forward ICMPv4 message to tester
+//
+void forwardReceivedICMP4vMessage(ethernetPacket * packet)
+{
+  const dword kLEN_ICMPv4_HEADER_LEN = 4;
+  const dword kLEN_FORWARD_ICMP_PARAMS_HEADER = (SIZE_LENGTH + kIPv4_ADDRESS_LENGTH_SIZE)*2 + kLEN_ICMPv4_HEADER_LEN;
+                             //srcAdr(2+4) + dstAdr(2+4) + Tpye(uint8) + Code(uint8) + check sum(uint16)
+  
+  byte bPacketData[kTESTABILITY_HEADER_SIZE + kMAX_TESTABILITY_PARAM_LENGTH];  
+  
+  long lLength;
+  dword dwEventParameterLen;
+  long dwICMPPayloadLen;
+  long lIdx;
+  long lDataOffset;
+        
+  struct _Testabilty_Message_Header msgHeader;
+  struct _EVENT_RECV_FWD_ICMPv4 eventRecvFwd;
+  
+  //
+  // get source/destination IP address from packet
+  //
+  eventRecvFwd.srcip.dwIpv4Addr = IPv4GetSrcAddress(packet);
+  eventRecvFwd.dstip.dwIpv4Addr = IPv4GetDstAddress(packet);
+  eventRecvFwd.srcip.wAddrLength = kIPv4_ADDRESS_LENGTH_SIZE;
+  eventRecvFwd.dstip.wAddrLength = kIPv4_ADDRESS_LENGTH_SIZE;
+  
+  //
+  // address match, Send receive and forward ICMP packet to TEST
+  //
+  if( GetDutIpAsNummer() == eventRecvFwd.dstip.dwIpv4Addr)
+  {
+    //
+    // get ICMP type, code and checksum;
+    //
+    eventRecvFwd.bType = ICMPv4GetType(packet);
+    eventRecvFwd.bCode = ICMPv4GetCode(packet);
+    eventRecvFwd.wCheckSum = ICMPv4GetCheckSum(packet);
+  
+    //
+    // calculate ICMP payload length and get its data
+    //
+    dwICMPPayloadLen = IPv4GetTotalLength(packet) - IPv4GetHeaderLength(packet) - kLEN_ICMPv4_HEADER_LEN;
+    if(dwICMPPayloadLen < 0)
+    {
+      Write("Error in forwardReceivedICMP4vMessage() dwICMPPayloadLen less than 0");
+      dwICMPPayloadLen = 0;
+    }
+    eventRecvFwd.payload.wLength = (word)dwICMPPayloadLen;
+    
+    lDataOffset = ICMPv4GetDataOffset(packet);
+    for(lIdx = 0; lIdx < eventRecvFwd.payload.wLength; lIdx++)
+    {
+      eventRecvFwd.payload.bData[lIdx] =  packet.byte(lDataOffset + lIdx);
+    }
+    
+    //
+    //make testability message header and write it to buffer
+    //
+    InitEventMsgHeader(msgHeader, GID_ICMP, PID_RECEIVE_AND_FORWARD, RID_E_OK);
+    dwEventParameterLen = kLEN_FORWARD_ICMP_PARAMS_HEADER + dwICMPPayloadLen; 
+    SetMsgHeaderLen(msgHeader, dwEventParameterLen);
+    makeTestAbilityHeader(msgHeader, bPacketData);
+  
+    //
+    //write RECEIVE_AND_FORWARD parameters to buffer
+    //
+    makeTestabilityForwardICMPv4Params(eventRecvFwd, bPacketData, (dword)kTESTABILITY_HEADER_SIZE);
+  
+    //
+    //length check and send packet
+    //
+    lLength = kTESTABILITY_HEADER_SIZE + dwEventParameterLen; //testability header size
+    if(lLength > gwICMPMaxFwd)
+    {
+      lLength = gwICMPMaxFwd;
+    }
+    if(gwICMPMaxLen != 0xFFFF && gwICMPMaxLen < (gwICMPFwdCnt + lLength))
+    {
+      lLength = gwICMPMaxLen - gwICMPFwdCnt;
+    }
+    if(lLength <= 0)
+    {
+      return;
+    }
+    if( sendPacketTestabilityUDPSocket(gdwTesterIPv4Addr,  gdwTesterIPv4Port,  bPacketData, (dword)lLength) == 0)
+    {
+      gwICMPFwdCnt += lLength;
+    }
+  }
+}
+
+/// <forTestability>
+//
+// initialize variables for forward ICMPv4 message
+//
+
+void initICMPv4Fwd(void)
+{
+  gbICMP_Fwd_Enable = 0;
+  gwICMPMaxFwd = 0;
+  gwICMPMaxLen = 0xFFFF; //unlimit forward
+  gwICMPFwdCnt = 0;
+}
+

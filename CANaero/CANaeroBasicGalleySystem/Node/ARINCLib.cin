@@ -1,0 +1,328 @@
+/*@!Encoding:1252*/
+/*
+ * ARINCLib - CAPL Function Library for the ARINC812 protocol implements  Version 1.0
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Pr) Created 
+ */
+variables
+{
+  // Constants
+
+  // System ID
+  const byte kSystemIdGAIN_ARINC812Protocol = 5;
+
+  // GAIN States (ARINC812 3.3.3)
+  enum GAINState
+  {
+    kGAINStateInitialization =  1,
+    kGAINStateStandbyOn      =  2,
+    kGAINStateOn             =  3,
+    kGAINStateWaiting        =  4,
+    kGAINStateInterrupted    =  5,
+    kGAINStateFinished       =  6,
+    kGAINStateMaintenance    =  7,
+    kGAINStateError          =  8,
+    kGAINStateStandbyOff     =  9,
+    kGAINStateStoppedAborted = 10
+  };
+
+  // GAIN PC Modes
+  enum GAINPCMode
+  {
+    kGAINPCModeCentralized   = 1,
+    kGAINPCModeDecentralized = 2,
+    kGAINPCModeFallback      = 3,
+    kGAINPCModeWorkshop      = 4
+  };
+
+  // GAIN (Fallback) Types
+  enum GAINType
+  {
+    kGAINTypeSecondary       = 0,
+    kGAINTypePrimary         = 1
+  };
+
+  enum MGCUState
+  {
+    kMGCUStateReserved                = 0,
+    kMGCUStateReservedInitialization  = 1,
+    kMGCUStateOperational             = 2,
+    kMGCUStateMaintenance             = 3,
+    kMGCUStateErrorCheck              = 4
+  };
+
+  // GAIN_STA Max Buffer Size
+  const int  kGAIN_STA_MaxBufferSize  = 5;
+
+  // Implemented Functionalities Flags
+  enum FuncFlags
+  {
+    kFuncFlagPC_DECENTR  = 1,
+    kFuncFlagPC_CENTR    = 2,
+    kFuncFlagRO          = 4,
+    kFuncFlagDIAG        = 8
+  };
+
+  // Max communication units (ARINC812 4.1.2 & 5.2.3.3)
+  const int  kMaxGAINFeeders    = 20;
+  const int  kMaxGAINsPerFeeder = 31;
+  const int  kMaxGAINs          = kMaxGAINFeeders * kMaxGAINsPerFeeder;
+  const int  kMaxMGCUs          = 4; // (4.1.2, possible 31)
+  const int  kMaxNodes          = kMaxGAINs + kMaxMGCUs;
+
+  // DTA functionality
+
+  enum DTAAOTCodeFrameType 
+  {
+    kDTAAOTCodeFrameTypeData      = 0,
+    kDTAAOTCodeFrameTypeHandshake = 1
+  };
+
+  enum DTAAOTCodeDataFrame
+  {
+    
+    kDTAAOTCodeDataFrame1   = 0,
+    kDTAAOTCodeDataFrame2   = 1,
+    kDTAAOTCodeDataFrame3   = 2,
+    kDTAAOTCodeDataFrame4   = 3,
+    kDTAAOTCodeDataFrame5   = 4,
+    kDTAAOTCodeDataFrame6   = 5,
+    kDTAAOTCodeDataFrame7   = 6,
+    kDTAAOTCodeDataFrame8   = 7,
+    kDTAAOTCodeDataFrame9   = 8,
+    kDTAAOTCodeDataFrame10  = 9,
+    kDTAAOTCodeDataFrame11 = 10,
+    kDTAAOTCodeDataFrame12 = 11,
+    kDTAAOTCodeDataFrame13 = 12,
+    kDTAAOTCodeDataFrame14 = 13,
+    kDTAAOTCodeDataFrame15 = 14,
+    kDTAAOTCodeDataFrame16 = 15
+  };
+
+  enum DTAAOTCodeHandshakeFrame
+  {
+    
+    kDTAAOTCodeHandshakeFrameReserved      = 0,
+    kDTAAOTCodeHandshakeFrameAOTUpBlock    = 1,
+    kDTAAOTCodeHandshakeFrameAOTUpMemory   = 2,
+    kDTAAOTCodeHandshakeFrameAOTDownBlock  = 3,
+    kDTAAOTCodeHandshakeFrameAOTDownMemory = 4,
+    kDTAAOTCodeHandshakeFrameRFT           = 5,
+    kDTAAOTCodeHandshakeFrameAcknowledge   = 6,
+    kDTAAOTCodeHandshakeFrameRetryLast     = 7,
+    kDTAAOTCodeHandshakeFrameRetryAll      = 8,
+    kDTAAOTCodeHandshakeFrameAbort         = 9,
+    kDTAAOTCodeHandshakeFrameEOT           = 10
+  };
+
+  const int kDTAMaxDataPacketsPerBlock = 127;
+  
+  const int kDTAMaxBlocks         = 12;
+  const int kDTAMaxParams         = 128;
+  const int kDTAMaxSubParams      = 12;
+
+  int       kDTAParamsPerBlock[kDTAMaxBlocks];                    // "const", too
+  int       kDTASubParamsPerParam[kDTAMaxBlocks][kDTAMaxParams];  // "const", too
+
+  enum PBType
+  {
+    PBTypeInterruptable    = 0,
+    PBTypeNotInterruptable = 1
+  };
+
+  const byte kPBResolution = 50;
+}
+
+BYTE ARINC812_GetPrioFromId (long id)
+{
+  return ((id >> 25) & 0x0F);
+}
+
+BYTE ARINC812_GetMsgCodeFromId (long id)
+{
+  return ((id >> 19) & 0x3F);
+}
+
+BYTE ARINC812_GetLevelIdFromId (long id)
+{
+  return ((id >> 14) & 0x1F);
+}
+
+BYTE ARINC812_GetDeviceIdFromId (long id)
+{
+  return ((id >> 9) & 0x1F);
+}
+
+BYTE ARINC812_GetCodeExtFromId (long id)
+{
+  return ((id >> 6) & 0x07);
+}
+
+BYTE ARINC812_GetSysIdFromId (long id)
+{
+  return (id & 0x3F);
+}
+
+void ARINC812_SendMessage (BYTE prio, BYTE msgCode, BYTE levelId, BYTE deviceId, BYTE codeExt, BYTE dlc, BYTE data[])
+{
+  long i;
+  message * msg;
+  long id;
+
+  id = ARINC812_MakeID(prio, msgCode, levelId, deviceId, codeExt);
+
+  msg.ID = mkExtID(id);
+  msg.dlc = dlc;
+  for (i = 0; i < dlc; i++) {
+    msg.byte(i) = data[i];
+  }
+
+  output(msg);
+}
+
+long ARINC812_MakeId(BYTE prio, BYTE msgCode, BYTE levelId, BYTE deviceId, BYTE codeExt)
+{
+  return (
+       (long)prio     << 25)  /* ARINC 825 - LCC */
+    | ((long)msgCode  << 19)  /* ARINC 825 - SrcID */
+    | ((long)levelId  << 14)  /* ??? */
+    | ((long)deviceId << 9)   /* ARINC 825 - DOC - higher 7 bits */
+    | ((long)codeExt  << 6)   /* ??? */
+    | kSystemIdGAIN_ARINC812Protocol;
+}
+
+void ARINC812_InitConstants ()
+{
+  long i;
+
+  kDTAParamsPerBlock[0]   = 0;
+  kDTAParamsPerBlock[1]   = 2;
+  kDTAParamsPerBlock[2]   = 4;
+  kDTAParamsPerBlock[3]   = 4;
+  kDTAParamsPerBlock[4]   = 16;
+  kDTAParamsPerBlock[5]   = 10;
+  kDTAParamsPerBlock[6]   = 3;
+  kDTAParamsPerBlock[7]   = 128;
+  kDTAParamsPerBlock[8]   = 4;
+  kDTAParamsPerBlock[9]   = 10;
+  kDTAParamsPerBlock[10]  = 9;
+  kDTAParamsPerBlock[11]  = 2;
+
+  kDTASubParamsPerParam[0][0] = 0;
+
+  kDTASubParamsPerParam[1][0] = 1;
+  kDTASubParamsPerParam[1][1] = 6;
+
+  kDTASubParamsPerParam[2][0] = 1;
+  kDTASubParamsPerParam[2][1] = 1;
+  kDTASubParamsPerParam[2][2] = 1;
+  kDTASubParamsPerParam[2][3] = 1;
+
+  kDTASubParamsPerParam[3][0] = 1;
+  kDTASubParamsPerParam[3][1] = 1;
+  kDTASubParamsPerParam[3][2] = 1;
+  kDTASubParamsPerParam[3][3] = 1;
+
+  kDTASubParamsPerParam[4][0] = 1;
+  for (i = 0; i < kDTAParamsPerBlock[4]; i++) {
+    kDTASubParamsPerParam[4][i] = 1;
+  }
+
+  kDTASubParamsPerParam[5][0] = 1;
+  kDTASubParamsPerParam[5][1] = 1;
+  kDTASubParamsPerParam[5][2] = 1;
+  kDTASubParamsPerParam[5][3] = 1;
+  kDTASubParamsPerParam[5][4] = 1;
+  kDTASubParamsPerParam[5][5] = 16;
+  kDTASubParamsPerParam[5][6] = 12;
+  kDTASubParamsPerParam[5][7] = 7;
+  kDTASubParamsPerParam[5][8] = 7;
+  kDTASubParamsPerParam[5][9] = 1;
+
+  kDTASubParamsPerParam[6][0] = 3;
+  kDTASubParamsPerParam[6][1] = 3;
+  kDTASubParamsPerParam[6][2] = 2;
+
+  kDTASubParamsPerParam[7][0] = 1;
+  for (i = 0; i < kDTAParamsPerBlock[7]; i++) {
+    kDTASubParamsPerParam[7][i] = 8;
+  }
+
+  kDTASubParamsPerParam[8][0] = 4;
+  kDTASubParamsPerParam[8][1] = 4;
+  kDTASubParamsPerParam[8][2] = 10;
+  kDTASubParamsPerParam[8][3] = 7;
+
+  kDTASubParamsPerParam[9][0] = 1;
+  kDTASubParamsPerParam[9][1] = 1;
+  kDTASubParamsPerParam[9][2] = 1;
+  kDTASubParamsPerParam[9][3] = 1;
+  kDTASubParamsPerParam[9][4] = 1;
+  kDTASubParamsPerParam[9][5] = 1;
+  kDTASubParamsPerParam[9][6] = 1;
+  kDTASubParamsPerParam[9][7] = 1;
+  kDTASubParamsPerParam[9][8] = 1;
+  kDTASubParamsPerParam[9][9] = 3;
+
+  kDTASubParamsPerParam[10][0] = 1;
+  kDTASubParamsPerParam[10][1] = 1;
+  kDTASubParamsPerParam[10][2] = 1;
+  kDTASubParamsPerParam[10][3] = 1;
+  kDTASubParamsPerParam[10][4] = 1;
+  kDTASubParamsPerParam[10][5] = 1;
+  kDTASubParamsPerParam[10][6] = 1;
+  kDTASubParamsPerParam[10][7] = 1;
+  kDTASubParamsPerParam[10][8] = 1;
+  kDTASubParamsPerParam[10][9] = 3;
+
+  kDTASubParamsPerParam[11][0] = 2;
+  kDTASubParamsPerParam[11][1] = 2;
+}
+
+int ARINC812_GetPriorityInt (char PrioEnum[])
+{
+  if (strncmp(PrioEnum, "PDO1 (Tx)", 9) == 0) {
+    return 3;
+  }
+  if (strncmp(PrioEnum, "PDO1 (Rx)", 9) == 0) {
+    return 4;
+  }
+  if (strncmp(PrioEnum, "PDO2 (Tx)", 9) == 0) {
+    return 5;
+  }
+  if (strncmp(PrioEnum, "PDO2 (Rx)", 9) == 0) {
+    return 6;
+  }
+  if (strncmp(PrioEnum, "PDO3 (Tx)", 9) == 0) {
+    return 7;
+  }
+  if (strncmp(PrioEnum, "PDO3 (Rx)", 9) == 0) {
+    return 8;
+  }
+  if (strncmp(PrioEnum, "PDO4 (Tx)", 9) == 0) {
+    return 9;
+  }
+  if (strncmp(PrioEnum, "PDO4 (Rx)", 9) == 0) {
+    return 10;
+  }
+  return -1;
+}
+
+on preStart
+{
+  ARINC812_InitConstants();
+}
+
+void CAN_GetDataFromMessage (message* msg, byte data[])
+{
+  int i, count;
+  count = _min(msg.dlc, elcount(data));
+
+  for (i = 0; i < count; i++) {
+    data[i] = msg.byte(i);
+  }
+}
+

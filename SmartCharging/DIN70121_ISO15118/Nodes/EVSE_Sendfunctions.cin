@@ -1,0 +1,685 @@
+/*@!Encoding:1252*/
+
+variables
+{
+  byte EVSEMacAddress[6] = { 0x02, 0x00, 0x00, 0x00, 0x01, 0x02 };
+  byte EVSETargetMacAddress[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x00 };
+}
+
+on sysVar Test::SysSendSECCDiscoveryRes
+{
+  if (@this == 1 && IsEVSERoleActive())
+  {
+    SCC_CreateSECCDiscoveryRes("fe80::11", 51111, @sysvar::Common::SysTLSEnabled);  // change Security flag according to setting);      
+    SendMessage();
+  }
+}
+
+on sysVar Test::SysSendSupportedAppProtocolRes
+{  
+  if (@this == 1 && IsEVSERoleActive())
+  {
+    SCC_CreateSupportedAppProtocolRes("OK_SuccessfulNegotiation");  
+    
+    // optional parameter switch is not applied here
+    
+    if (@sysVar::Test::SysTestControlledEntity != 1)
+      SCC_SetOptionalParameter(0, 0);   // if EV is passive, it sends only one schema
+    else if (@sysVar::Test::SysTestSchema == 2)
+      SCC_SetOptionalParameter(0, 1);
+    else
+      SCC_SetOptionalParameter(0, 0);
+    
+    SendMessage();
+  }
+}
+
+on sysVar Test::SysSendSessionSetupRes
+{  
+  if (@this == 1 && IsEVSERoleActive())
+  {
+    // Create an ID for the session
+    SessionId[1] = 1;
+    SessionId[2] = 2;
+    SessionId[3] = 3;
+    SessionId[4] = 4;
+    SessionId[5] = 5;
+    SessionId[6] = 6;
+    SessionId[7] = 7;
+    SessionId[0] = 8;   
+     
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1:
+        SCC_CreateSessionSetupRes_DIN(SessionId, "OK_NewSessionEstablished", "777"); break;
+      case 2:
+        SCC_CreateSessionSetupRes_ISO(SessionId, "OK_NewSessionEstablished", "DE*VEC*EV7771A*7"); break;
+    }
+      
+    if (@sysVar::Test::SysTestUseOptionalPars)
+      SCC_SetOptionalParameter(0, 246772);   // Timestamp    
+    
+    SendMessage();
+  }
+}
+
+on sysVar Test::SysSendServiceDiscoveryRes
+{  
+  if (@this == 1 && IsEVSERoleActive())
+  {
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1:
+        SCC_CreateServiceDiscoveryRes_DIN(SessionId, GetTestConfigNumber(), "OK"); break;
+      case 2:
+        SCC_CreateServiceDiscoveryRes_ISO(SessionId, GetTestConfigNumber(), "OK"); break;
+    }
+    
+    if (@sysVar::Test::SysTestUseOptionalPars)
+      SCC_SetOptionalParameterFromConfig(0, GetTestConfigNumber());
+    
+    SendMessage();
+  }
+}
+
+on sysVar Test::SysSendServiceDetailRes
+{  
+  if (@this == 1 && IsEVSERoleActive())
+  {    
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1:
+        SCC_CreateServiceDetailRes_DIN(SessionId, "OK", 0); break;
+      case 2:
+        SCC_CreateServiceDetailRes_ISO(SessionId, "OK", 0); break;
+    }   
+        
+    if (@sysVar::Test::SysTestUseOptionalPars)
+    {
+      SCC_SetOptionalParameterFromConfig(0, GetTestConfigNumber());
+    }
+    
+    SendMessage();
+  }
+}
+
+on sysVar Test::SysSendPaymentServiceSelRes
+{  
+  if (@this == 1 && IsEVSERoleActive())
+  {
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1:
+        SCC_CreateServicePaymentSelectionRes_DIN(SessionId, "OK"); break;
+      case 2:
+        SCC_CreatePaymentServiceSelectionRes_ISO(SessionId, "OK"); break;
+    }           
+        
+    SendMessage();
+  }
+}
+
+on sysVar Test::SysSendPaymentDetailsRes
+{  
+  if (@this == 1 && IsEVSERoleActive())
+  {
+    byte genChallenge[128];      
+    SCC_GenerateRandomData(genChallenge, 128);
+        
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1:
+        SCC_CreatePaymentDetailsRes_DIN(SessionId, "OK", genChallenge, 7331108); break;
+      case 2:
+        SCC_CreatePaymentDetailsRes_ISO(SessionId, "OK", genChallenge, 7331108); break;
+    }   
+    
+    SendMessage();
+  }
+}
+
+on sysVar Test::SysSendCertificateInstallationRes
+{
+  byte dhParams[65];
+  byte encryptedPrivateKey[48];
+  
+  SCC_GenerateRandomData(dhParams, 65);
+  SCC_GenerateRandomData(encryptedPrivateKey, 48);
+  
+  if (@this == 1 && IsEVSERoleActive())
+  {    
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1:
+        SCC_CreateCertificateInstallationRes_DIN(
+          SessionId,
+          0,
+          "OK",
+          "or+cWiB1xdfx1pbE/wVaBE2JAN7dt0lzEkDK+ihI3cj68/VfB63gvt3Yhu23JIU2",
+          "BP1eae8VbTVcFrxYXkr9E4dvJ9sj6QdanLUwxi4bG87LY4yjyIdPX2Oosip1iv2P/ioHzeGV++GPmry6myrUSl4=",
+          "contract11",
+          "id1");
+        break;
+        
+      case 2:        
+        SCC_CreateCertificateInstallationRes_ISO(
+          SessionId,
+          0,
+          "OK",
+          dhParams,
+          encryptedPrivateKey,
+          "DEVEC987654321"
+          );
+        break;
+    }      
+    
+    SendSignedMessage();
+  }
+}
+
+on sysVar Test::SysSendCertificateUpdateRes
+{
+  byte dhParams[65];
+  byte encryptedPrivateKey[48];
+  
+  SCC_GenerateRandomData(dhParams, 65);
+  SCC_GenerateRandomData(encryptedPrivateKey, 48);
+  
+  if (@this == 1 && IsEVSERoleActive())
+  {
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1:
+        SCC_CreateCertificateUpdateRes_DIN(
+          SessionId,
+          0,
+          "OK",
+          "or+cWiB1xdfx1pbE/wVaBE2JAN7dt0lzEkDK+ihI3cj68/VfB63gvt3Yhu23JIU2",
+          "BP1eae8VbTVcFrxYXkr9E4dvJ9sj6QdanLUwxi4bG87LY4yjyIdPX2Oosip1iv2P/ioHzeGV++GPmry6myrUSl4=",
+          "contract11",
+          22,
+          "id1");
+        break;
+        
+      case 2:
+        SCC_CreateCertificateUpdateRes_ISO(
+          SessionId,
+          0,
+          "OK",
+          dhParams,
+          encryptedPrivateKey,
+          "DEVEC987654321"
+          );
+        break;
+    }
+    
+    if (@sysVar::Test::SysTestUseOptionalPars)
+      SCC_SetOptionalParameter(0, 12);   
+    
+    SendSignedMessage();
+  }
+}
+
+on sysVar Test::SysSendAuthorizationRes
+{  
+  if (@this == 1 && IsEVSERoleActive())
+  {
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1:
+        SCC_CreateContractAuthenticationRes_DIN(SessionId, "OK", 1); break;
+      case 2:
+        SCC_CreateAuthorizationRes_ISO(SessionId, "OK", 2); break;
+    }
+    
+    SendMessage();
+  }
+}
+
+on sysVar Test::SysSendChargeParDiscoveryRes
+{
+  if (@this == 1 && IsEVSERoleActive())
+  {
+    if (@sysvar::Common::SysUserChargingMode == 0 /* AC */)
+      SendChargeParDiscoveryResAC();
+    else if (@sysvar::Common::SysUserChargingMode == 1 /* DC */)
+      SendChargeParDiscoveryResDC();
+  }
+}
+
+void SendChargeParDiscoveryResAC()
+{  
+  byte statusFlags[2];
+  float limits[3];
+  
+  statusFlags[0] = 0;
+  statusFlags[1] = 1;
+  
+  limits[0] = 111.1;
+  limits[1] = 22.2;
+  limits[2] = 33.3;
+  
+  switch (@sysvar::Test::SysTestSchema )
+  {
+    case 1:
+      SCC_CreateChargeParameterDiscoveryResAC_DIN(SessionId, "OK", 0, statusFlags, "None", 0, limits); break;
+    case 2:
+      SCC_CreateChargeParameterDiscoveryResAC_ISO(SessionId, "OK", 0, statusFlags, "None", 0, 222.2, 111.1); break;
+  }        
+      
+  if (@sysVar::Test::SysTestUseOptionalPars)
+    SCC_SetOptionalParameterFromConfig(0, GetTestConfigNumber());   // SASchedule    
+  
+  SendSignedMessage();
+}
+
+void SendChargeParDiscoveryResDC()
+{  
+  float limits[5];
+  limits[0] = 11.1;
+  limits[1] = 999.9;
+  limits[2] = 33.3;
+  limits[3] = 44.4;  
+  
+  if (@sysVar::Test::SysTestSchema)
+    limits[4] = 999.9;
+  
+  switch (@sysvar::Test::SysTestSchema )
+  {
+    case 1:
+      SCC_CreateChargeParameterDiscoveryResDC_DIN(SessionId, "OK", 0, "EVSE_Ready", "None", 0, limits, 321.1); break;
+    case 2:
+      SCC_CreateChargeParameterDiscoveryResDC_ISO(SessionId, "OK", 0, "EVSE_Ready", "None", 0, limits, 321.1); break;
+  }    
+      
+  if (@sysVar::Test::SysTestUseOptionalPars)
+  {        
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1:
+        // DIN parameter
+        SCC_SetOptionalParameter(0, 123.4);
+      case 2:
+        // DIN & ISO parameters      
+        SCC_SetOptionalParameter(1, 4.321);
+        SCC_SetOptionalParameter(2, 432.1);        
+        SCC_SetOptionalParameterFromConfig(3, GetTestConfigNumber());   // SASchedule   
+        SCC_SetOptionalParameter(4, "Valid");         
+        break;
+    }
+  }
+  
+  SendSignedMessage();
+}
+
+on sysVar Test::SysSendCableCheckRes
+{  
+  if (@this == 1 && IsEVSERoleActive())
+  {           
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1:
+        SCC_CreateCableCheckRes_DIN(SessionId, "OK", 0, "EVSE_Ready", "None", 0); break;
+      case 2:
+        SCC_CreateCableCheckRes_ISO(SessionId, "OK", 0, "EVSE_Ready", "None", 0); break;
+    }
+    
+    if (@sysVar::Test::SysTestUseOptionalPars)
+    {
+      SCC_SetOptionalParameter(0, "Valid");
+    }
+    
+    SendMessage();
+  }
+}
+
+on sysVar Test::SysSendPreChargeRes
+{  
+  if (@this == 1 && IsEVSERoleActive())
+  { 
+    float voltage = 100.0;
+           
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1:
+        SCC_CreatePreChargeRes_DIN(SessionId, "OK", 0, "EVSE_Ready", "None", voltage); break;
+      case 2:
+        SCC_CreatePreChargeRes_ISO(SessionId, "OK", 0, "EVSE_Ready", "None", voltage); break;
+    }
+    
+    if (@sysVar::Test::SysTestUseOptionalPars)
+      SCC_SetOptionalParameter(0, "Valid");
+    
+    SendMessage();
+    
+    voltage += 100;
+  }
+}
+
+on sysVar Test::SysSendPowerDeliveryRes
+{
+  if (@this == 1 && IsEVSERoleActive())
+  {    
+    if (@sysvar::Common::SysUserChargingMode == 0 /* AC */)
+      SendPowerDeliveryResAC();
+    else if (@sysvar::Common::SysUserChargingMode == 1 /* DC */)
+      SendPowerDeliveryResDC();
+  }  
+}
+
+void SendPowerDeliveryResAC()
+{  
+  byte statusFlags[2];
+  statusFlags[0] = 0;
+  statusFlags[1] = 1;
+  
+  switch (@sysvar::Test::SysTestSchema )
+  {
+    case 1:
+      SCC_CreatePowerDeliveryResAC_DIN(SessionId, "OK", 0, statusFlags, "None"); break;
+    case 2:
+      SCC_CreatePowerDeliveryResAC_ISO(SessionId, "OK", 0, statusFlags, "None"); break;
+  }
+  
+  SendMessage();
+}
+
+void SendPowerDeliveryResDC()
+{  
+  switch (@sysvar::Test::SysTestSchema )
+  {
+    case 1:  
+      SCC_CreatePowerDeliveryResDC_DIN(SessionId, "OK", 0, "EVSE_Ready", "None"); break;
+    case 2:
+      SCC_CreatePowerDeliveryResDC_ISO(SessionId, "OK", 0, "EVSE_Ready", "None"); break;
+  }        
+      
+  if (@sysVar::Test::SysTestUseOptionalPars)
+    SCC_SetOptionalParameter(0, "Valid");
+  
+  SendMessage();
+}
+
+on sysVar Test::SysSendCurrentDemandRes
+{  
+  if (@this == 1 && IsEVSERoleActive())
+  {
+    byte limitFlags[3];
+    float values[2];
+    byte sigMeterReading[64];
+    
+    limitFlags[0] = 1;
+    limitFlags[1] = 0;
+    limitFlags[2] = 1;
+    
+    values[0] = 11.1;
+    values[1] = 22.2;
+        
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1:  
+        SCC_CreateCurrentDemandRes_DIN(SessionId, "OK", 0, "EVSE_Ready", "None", 11.1, 22.2, limitFlags); break;
+      case 2:
+        SCC_CreateCurrentDemandRes_ISO(SessionId, "OK", 0, "EVSE_Ready", "None", values, limitFlags, "DE*VEC*EV7771A*7", 1); break;
+    } 
+      
+    if (@sysVar::Test::SysTestUseOptionalPars)
+    {          
+      SCC_GenerateRandomData(sigMeterReading, 64);
+      
+      switch (@sysvar::Test::SysTestSchema )
+      {
+        // ISO IS only parameters
+        case 2:
+          
+          // ReceiptRequired
+          SCC_SetOptionalParameter(4, 1);
+          // MeterInfo      
+          SCC_SetOptionalParameter(5, "meter1");
+          SCC_SetOptionalParameter(6, 120);       
+          SCC_SetOptionalParameter(7, sigMeterReading);          
+          SCC_SetOptionalParameter(8, 1);
+          SCC_SetOptionalParameter(9, 1235451);
+          
+        // ISO IS & DIN parameters
+        case 1:  
+          SCC_SetOptionalParameter(0, "Valid");
+          SCC_SetOptionalParameter(1, 111.1);
+          SCC_SetOptionalParameter(2, 122.2);
+          SCC_SetOptionalParameter(3, 133.3);      
+          break;
+        }
+    }      
+    
+    SendMessage();
+  }
+}
+
+on sysVar Test::SysSendChargingStatusRes
+{  
+  if (@this == 1 && IsEVSERoleActive())
+  {
+    byte sigMeterReadingDIN[32];
+    byte sigMeterReadingISO[64];
+    byte statusFlags[2];
+    
+    statusFlags[0] = 1;
+    statusFlags[1] = 1;    
+    SCC_GenerateRandomData(sigMeterReadingDIN, 32);
+    SCC_GenerateRandomData(sigMeterReadingISO, 64);
+    
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1:  
+        SCC_CreateChargingStatusRes_DIN(SessionId, "OK", 0, statusFlags, "None", "777", 1, 0); break;
+      case 2:
+        SCC_CreateChargingStatusRes_ISO(SessionId, "OK", 0, statusFlags, "None", "DE*VEC*EV7771A*7", 1); break;
+    }        
+    
+    if (@sysVar::Test::SysTestUseOptionalPars)
+    {
+      switch (@sysvar::Test::SysTestSchema )
+      {
+      case 1: 
+        SCC_SetOptionalParameter(0, "meter1");
+        SCC_SetOptionalParameter(1, 120.267);
+        SCC_SetOptionalParameter(2, sigMeterReadingDIN);
+        SCC_SetOptionalParameter(3, 1);
+        SCC_SetOptionalParameter(4, 1235451);
+        SCC_SetOptionalParameter(5, 55.5);
+        break;
+        
+      case 2: 
+        SCC_SetOptionalParameter(0, "meter1");
+        SCC_SetOptionalParameter(1, 120);
+        SCC_SetOptionalParameter(2, sigMeterReadingISO);
+        SCC_SetOptionalParameter(3, 1);
+        SCC_SetOptionalParameter(4, 1235451);
+        SCC_SetOptionalParameter(5, 55.5);
+        SCC_SetOptionalParameter(6, 1);
+        break;
+      }
+    }
+    
+    SendMessage();
+  }
+}
+
+on sysVar Test::SysSendMeteringReceiptRes
+{  
+  if (@this == 1 && IsEVSERoleActive())
+  {    
+    if (@sysvar::Common::SysUserChargingMode == 0 /* AC */)
+      SendMeteringReceiptResAC();
+    else if (@sysvar::Common::SysUserChargingMode == 1 /* DC */)
+      SendMeteringReceiptResDC();
+  }
+}
+
+void SendMeteringReceiptResAC()
+{  
+  byte statusFlags[2];
+  statusFlags[0] = 0;
+  statusFlags[1] = 1;
+
+  switch (@sysvar::Test::SysTestSchema )
+  {
+    case 1: 
+      SCC_CreateMeteringReceiptResAC_DIN(SessionId, "OK", 0, statusFlags, "None"); break;
+    case 2: 
+      SCC_CreateMeteringReceiptResAC_ISO(SessionId, "OK", 0, statusFlags, "None"); break;
+  }        
+      
+  SendMessage();
+}
+
+void SendMeteringReceiptResDC()
+{  
+  switch (@sysvar::Test::SysTestSchema )
+  {
+    case 1: 
+      return;   // not supported for this schema
+      // SCC_CreateMeteringReceiptResDC_DIN(SessionId, "OK", 0, "EVSE_Ready", "None"); break;
+    case 2:
+      SCC_CreateMeteringReceiptResDC_ISO(SessionId, "OK", 0, "EVSE_Ready", "None"); break;
+  }
+  
+  if (@sysVar::Test::SysTestUseOptionalPars)
+    SCC_SetOptionalParameter(0, "Valid");
+  
+  SendMessage();
+}
+
+on sysVar Test::SysSendWeldingDetectionRes
+{  
+  if (@this == 1 && IsEVSERoleActive())
+  {    
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1: 
+        SCC_CreateWeldingDetectionRes_DIN(SessionId, "OK", 0, "EVSE_Ready", "None", 432.1); break;
+      case 2:
+        SCC_CreateWeldingDetectionRes_ISO(SessionId, "OK", 0, "EVSE_Ready", "None", 432.1); break;
+    }
+    
+    if (@sysVar::Test::SysTestUseOptionalPars)
+      SCC_SetOptionalParameter(0, "Valid");     
+    
+    SendMessage();
+  }
+}
+
+on sysVar Test::SysSendSessionStopRes
+{  
+  if (@this == 1 && IsEVSERoleActive())
+  {    
+    switch (@sysvar::Test::SysTestSchema )
+    {
+      case 1: 
+        SCC_CreateSessionStopRes_DIN(SessionId, "OK"); break;
+      case 2:
+        SCC_CreateSessionStopRes_ISO(SessionId, "OK"); break;
+    }        
+        
+    SendMessage();
+  }
+}
+
+on sysVar SLAC_Test::SysSendCM_SLAC_Parm_Cnf
+{
+  if (@this > 0 && IsEVSERoleActive())
+  {
+    SCC_CreateCM_SLAC_Parm_Cnf(MyRunId, EVSEMacAddress, EVSETargetMacAddress, 10, 6, EVSEMacAddress);
+    
+    if (@this == 2)
+    {
+      SCC_SLAC_SetAdditionalParameter(0, 0x00); 
+      SCC_SLAC_SetAdditionalParameter(1, EVSETargetMacAddress);
+      SCC_SLAC_SetAdditionalParameter(2, 0x05); 
+      SCC_SLAC_SetAdditionalParameter(3, 0x06);
+    }
+   
+    SendMessage();
+  }  
+}
+
+on sysVar SLAC_Test::SysSendCM_Atten_Profile_Ind
+{
+  byte AAG[58];
+  int i;
+  
+  for (i = 0; i < 58; ++i)
+  {
+    AAG[i] = i+1;
+  }    
+  
+  if (@this > 0 && IsEVSERoleActive())
+  {
+    SCC_CreateCM_Atten_Profile_Ind(EVSEMacAddress, EVSETargetMacAddress, EVSETargetMacAddress, 58, AAG);
+    
+    if (@this == 2)
+      SCC_SLAC_SetAdditionalParameter(0, 0x05);
+   
+    SendMessage();
+  }  
+}
+
+on sysVar SLAC_Test::SysSendCM_Atten_Char_Ind
+{
+  byte AAG[58];
+  int i;
+  
+  for (i = 0; i < 58; ++i)
+  {
+    AAG[i] = i+1;
+  }    
+  
+  if (@this > 0 && IsEVSERoleActive())
+  {
+    SCC_CreateCM_Atten_Char_Ind(MyRunId, EVSEMacAddress, EVSETargetMacAddress, EVSEMacAddress, 10, 58, AAG);
+    
+    if (@this == 2)
+    {
+      SCC_SLAC_SetAdditionalParameter(0, 0x05); 
+      SCC_SLAC_SetAdditionalParameter(1, 0x06);
+      SCC_SLAC_SetAdditionalParameter(2, SLACtestId);
+      SCC_SLAC_SetAdditionalParameter(3, SLACtestId);
+    }
+   
+    SendMessage();
+  }  
+}
+
+on sysVar SLAC_Test::SysSendCM_Validate_Cnf
+{
+  if (@this > 0 && IsEVSERoleActive())
+  {
+    SCC_CreateCM_Validate_Cnf(EVSEMacAddress, EVSETargetMacAddress, 1, 2);
+    
+    if (@this == 2)
+      SCC_SLAC_SetAdditionalParameter(0, 0x01);
+   
+    SendMessage();
+  }  
+}
+
+on sysVar SLAC_Test::SysSendCM_SLAC_Match_Cnf
+{
+  if (@this > 0 && IsEVSERoleActive())
+  {
+    SCC_CreateCM_SLAC_Match_Cnf(MyRunId, EVSEMacAddress, EVSETargetMacAddress, EVSETargetMacAddress, EVSEMacAddress, NID, NMK);
+          
+    if (@this == 2)
+    {
+      SCC_SLAC_SetAdditionalParameter(0, 0x11); 
+      SCC_SLAC_SetAdditionalParameter(1, 0x0F);
+      SCC_SLAC_SetAdditionalParameter(2, 0x32);
+      SCC_SLAC_SetAdditionalParameter(3, SLACtestId);
+      SCC_SLAC_SetAdditionalParameter(4, SLACtestId);
+      SCC_SLAC_SetAdditionalParameter(5, SLACtestId);
+      SCC_SLAC_SetAdditionalParameter(6, 0x12);
+    }
+   
+    SendMessage();
+  }  
+}

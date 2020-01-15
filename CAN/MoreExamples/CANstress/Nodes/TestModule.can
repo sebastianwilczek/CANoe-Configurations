@@ -1,0 +1,195 @@
+/*@@var:*/
+variables
+{
+  long gErrorFrames;  // Stores Number of error frames
+}
+/*@@end*/
+
+/*@@caplFunc:InitializeCANstress():*/
+InitializeCANstress ()
+{
+  // Perform basic initializiation tasks:
+
+  // Start the CANstress COM server ...
+  CANstressCreateServer();
+  // ... and establish the connection between CANstress hardware and the PC
+  CANstressConnect();
+}
+/*@@end*/
+
+/*@@mainTest:MainTest():*/
+void MainTest()
+{
+  Write("Please call 'File | Configuration comment...' to read about the requirements for this demo");
+
+  // First do some initialization tasks for CANstress ...
+  InitializeCANstress();
+  // ... and then log the test-environment
+  LogTestEnvironment();
+
+  // We 'log' here to the Write-window (for demo purpose).
+  // Normally the results can be logged into a file.
+  Write("==========================");
+  Write("Testcase: BusOffTest_EngineData");
+  BusOffTest_EngineData();
+  Write("==========================");
+  Write("Testcase: BusOffTest_NM_Engine");
+  BusOffTest_NM_Engine();
+  Write("==========================");
+  // Room for further tests
+  // ...
+}
+/*@@end*/
+
+/*@@caplFunc:LogTestEnvironment():*/
+LogTestEnvironment ()
+{
+  // Log the test environment:
+  // - CANstress hardware serial number
+  // - Installed transceiver of CANstress hardware
+  // - CANstress firmware
+  // - CANstress software
+
+  char swVersion[128];
+  char fwVersion[128];
+  char serialNum[128];
+  char canInterface1[128];
+  char canInterface2[128];
+
+  CANstressGetInfo( swVersion, elCount(swVersion),
+                    fwVersion, elCount(fwVersion), 
+                    serialNum, elCount(serialNum), 
+                    canInterface1, elCount(canInterface1),
+                    canInterface2, elCount(canInterface2) );
+
+  // "Log" the data to the write window.
+  // (In an advanced test-setup this data will be logged in a xml-test-protocol.)
+  Write("==============================================================");
+  Write("Test environment: ");
+  Write("CANstress software version: %s", swVersion);
+  Write("Serial number of CANstress hardware: %s", serialNum);
+  Write("Firmware version: %s", fwVersion);
+  Write("Transceiver of CAN-Interface1: %s", canInterface1);
+  Write("Transceiver of CAN-Interface2: %s", canInterface2);
+  Write("==============================================================");
+}
+/*@@end*/
+
+/*@@testcase:BusOffTest_EngineData():*/
+testcase BusOffTest_EngineData ()
+{
+  int ret;
+  char text[256];
+  message 0x64 rmsg;
+  rmsg.RTR = 1;
+
+  // Reset all (to avoid effects from previous tests)
+  ResetErrorFrameCounter();
+  resetCan();
+
+  TestWaitForTimeout(500); // wait until reset has been done.
+
+  // Load the prepared CANstress configuration ...
+  CANstressOpen( "EngineData_BusOff.cst" );
+
+  // ... and activate the CANstress hardware
+  CANstressStart();
+
+  // CANstress is now prepared to disturb the message (data frame) EngineData.
+  // Now: stimulate the node (= simulated ECU) with a remote frame to send
+  // the data frame (message) which we will disturb with CANstress:
+  output(rmsg);
+
+  // Wait some time (CANstress will return previously, if it has finished)
+  ret = CANstressWaitForFinished(5000);
+  if (ret != 0)
+  {
+    // Something goes wrong
+    TestStepFail("Error when waiting for finishing of disturbance!");
+    TestStepFail("Perhaps the CANstress device is not properly connected.");
+  }
+  else
+  {
+    snprintf(text, 256, "CANstress: %d disturbances performed.", gErrorFrames);
+ 
+     // Check, if CANstress has actually disturbed as expected
+    if (gErrorFrames >= 31)
+    {
+      Write(text);
+      TestStepPass(text);
+    }
+    else
+    {
+      TestStepFail(text);
+      TestStepFail("Noticed fewer disturbances than expected!");
+    }
+  }
+}
+/*@@end*/
+
+/*@@errorFrameErrorFrame:ErrorFrame:*/
+on errorFrame
+{
+  gErrorFrames++;
+}
+/*@@end*/
+
+/*@@caplFunc:ResetErrorFrameCounter():*/
+ResetErrorFrameCounter ()
+{
+  // Reset the error frame counter
+  gErrorFrames = 0;
+}
+/*@@end*/
+
+/*@@testcase:BusOffTest_NM_Engine():*/
+testcase BusOffTest_NM_Engine ()
+{
+  int ret;
+  char text[256];
+  message 0x51b rmsg;
+  rmsg.RTR = 0;
+
+  // Reset all (to avoid effects from previous tests)
+  ResetErrorFrameCounter();
+  resetCan();
+
+
+  // Load the prepared CANstress configuration ...
+  CANstressOpen( "NM_Engine_BusOff.cst" );
+
+  // ... and activate the CANstress hardware
+  CANstressStart();
+
+  // CANstress is now prepared to disturb the message (data frame) NM_Engine.
+  // Now: stimulate the node (= simulated ECU) with a remote frame to send
+  // the data frame (message) which we will disturb with CANstress:
+  output(rmsg);
+
+  // Wait some time (CANstress will return previously, if it has finished)
+  ret = CANstressWaitForFinished(5000);
+  if (ret != 0)
+  {
+    // Something goes wrong
+  TestStepFail("Error when waiting for finishing of disturbance!");
+  TestStepFail("Perhaps the CANstress device is not properly connected.");
+  }
+  else
+  {
+    snprintf(text, 256, "CANstress: %d disturbances performed.", gErrorFrames);
+
+    // Check, if CANstress has actually disturbed as expected
+    if (gErrorFrames >= 31)
+    {
+      Write(text);
+    TestStepPass(text);
+    }
+    else
+    {
+    TestStepFail(text);
+    TestStepFail("Noticed fewer disturbances than expected!");
+    }
+  }
+}
+/*@@end*/
+

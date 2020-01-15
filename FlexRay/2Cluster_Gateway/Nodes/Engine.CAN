@@ -1,0 +1,211 @@
+/*@!Encoding:1252*/
+includes
+{
+#include "CarModel.cin"
+}
+
+variables
+{
+  // Variables for system check:   
+  Timer   tSystemCheck;
+  int gSystemCheckTime        = 1.5;
+  int SystemCheck             = 0;
+  const int ACTIVE            = 1;
+  const int INACTIVE          = 0;
+
+  // Variables for temperature:   
+  msTimer tEngTempTimer;
+  int gEngTemp;
+
+  // Variables for petrol:  
+  msTimer tEngPetrol;
+
+  int gEngPetrolCount         = 0;
+  int gEmpty                  = 0;
+  int gPetrolTimeFaktor       = 15;
+
+  const int cPetrolFaktor     = 8 ;
+  const int cEngPetrolTime    = 5;
+
+  // Variables for accelerator pedal:  
+  msTimer tPedalPos;
+  int gPedalPosTime           = 10;
+  int gPressAcceleratorPedal  = 0;
+
+  msTimer tResetAcceleratorPedal;
+
+  const int cPEDAL_PRESSURE   = 1;
+  const int cNoPEDAL_PRESSURE = 0; 
+}
+
+on timer tEngPetrol
+{
+  // calculations of the petrol capacity
+  cancelTimer(tEngPetrol);
+
+  // Start with full tank capacity
+  if(gEngPetrolCount <= 44)  
+  {
+    gEngPetrolCount ++;
+    $PetrolLevel = gEngPetrolCount;
+  }
+  // The tank capacity drops
+  else if(gEngPetrolCount == 45)  
+  {   
+    gEmpty ++;
+
+    if(gEmpty == gPetrolTimeFaktor)
+      {
+        $PetrolLevel = gEngPetrolCount - (gEmpty / 15);
+        gPetrolTimeFaktor = gPetrolTimeFaktor + 15; 
+      }
+  }
+
+  if(gEmpty == 675) 
+  {
+    //stop(); the configuration will stop after the fuel is empty, when this function is active
+  }
+  setTimer(tEngPetrol,cEngPetrolTime + (gEngPetrolCount * cPetrolFaktor) );
+}
+
+on timer tEngTempTimer
+{
+  if (gEngTemp < 75.) 
+  {
+    gEngTemp+=2;   
+    $EngTemp = gEngTemp;
+  }
+  setTimer(tEngTempTimer,1000);
+}
+
+on sysVar PowerTrain::EngineRunningPowerTrain
+{
+  // Engine gets info directly via an environment variable
+
+  if(@this) 
+  {
+    cancelTimer(tEngTempTimer);
+    cancelTimer(tEngPetrol);
+
+    setTimer(tEngTempTimer,1000);
+    setTimer(tEngPetrol,cEngPetrolTime);
+
+    StartModel();
+  }
+  else 
+  {
+    cancelTimer(tEngTempTimer);
+    cancelTimer(tEngPetrol);
+
+    StopModel();
+  }
+}
+
+on sysVar PowerTrain::AcceleratorPedal
+{
+  if(@this == 1)
+  {
+    gPressAcceleratorPedal = cPEDAL_PRESSURE;
+  }
+  else 
+  {
+    gPressAcceleratorPedal = cNoPEDAL_PRESSURE;
+    @PowerTrain::AcceleratorPedalPressure = 0;
+  }
+}
+
+on timer tPedalPos
+{
+  if(gPressAcceleratorPedal == cPEDAL_PRESSURE)
+    if(@PowerTrain::PedalPosition < 100)
+      @PowerTrain::PedalPosition += 1;
+
+  if(gPressAcceleratorPedal == cNoPEDAL_PRESSURE)
+    if(@PowerTrain::PedalPosition > 0)
+      @PowerTrain::PedalPosition -= 1;
+
+  setTimer(tPedalPos,gPedalPosTime);
+}
+
+on sysVar PowerTrain::WaterError
+{
+  if(SystemCheck == ACTIVE)
+    return;
+  else
+    $WaterWarningLamp = @this; 
+}
+
+DisableSystemLamps ()
+{
+  SystemCheck = INACTIVE;
+  $BatteryWarningLamp = 0;
+  $OilWarningLamp     = 0;
+  $WaterWarningLamp   = 0;
+}
+
+EnableSystemLamps ()
+{
+  SystemCheck = ACTIVE;
+  $BatteryWarningLamp = 1;
+  $OilWarningLamp     = 1;
+  $WaterWarningLamp   = 1;
+}
+
+on timer tSystemCheck
+{
+  DisableSystemLamps(); 
+}
+
+on sysVar PowerTrain::OilError
+{
+  if(SystemCheck == ACTIVE)
+    return;
+  else
+    $OilWarningLamp = @this; 
+}
+
+on sysVar PowerTrain::BatteryError
+{
+  if(SystemCheck == ACTIVE)
+    return;
+  else
+    $BatteryWarningLamp = @this; 
+}
+
+on key ' '
+{
+  CancelTimer(tResetAcceleratorPedal);
+  @PowerTrain::AcceleratorPedal = 1;
+  gPressAcceleratorPedal = cPEDAL_PRESSURE;
+  @PowerTrain::AcceleratorPedalPressure = 1;
+  SetTimer(tResetAcceleratorPedal,550);
+}
+
+on timer tResetAcceleratorPedal
+{
+  gPressAcceleratorPedal = 0;
+  @PowerTrain::AcceleratorPedal = 0;
+}
+
+on start
+{
+
+  // set to 1 to get more information into write-window 
+  setWriteDbgLevel(1);
+  writeDbgLevel(2,"Engine"); 
+
+  // Init:
+  CallAllOnEnvVar();
+
+  gEngTemp = 0;
+  InitModel();
+
+  setTimer(tPedalPos,gPedalPosTime);
+  setTimer(tSystemCheck,gSystemCheckTime);
+
+  EnableSystemLamps ();
+
+  // Start model:
+  @PowerTrain::EngineRunningPowerTrain = 1;
+}
+

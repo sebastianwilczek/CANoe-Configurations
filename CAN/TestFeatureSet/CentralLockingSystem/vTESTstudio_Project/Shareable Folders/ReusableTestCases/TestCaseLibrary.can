@@ -1,0 +1,164 @@
+includes
+{
+  
+}
+
+variables
+{
+  const int cReasonLen = 128;
+}
+
+testfunction AssignVelocityValue(double& velocity, int baseValue)
+{
+	velocity = 15 * sqrt(5 * baseValue);
+}
+
+testfunction DecreaseVelocity(double& velocity, int decrement)
+{
+	velocity -= decrement;
+}
+
+testcase StaticOpenClose(signal* sigUpDown, int waitingTime, int expWindowMotion)
+{
+  int absCheckId, relCheckId;
+  long signalCheckResult;
+
+	testStep("Initialize all signals", "");
+  
+  $Velocity = 0;
+  $CrashDetected = 0;
+  $LockRequest = vtSig_LockRequest::idle;
+  $EngineRunning = 0;
+  $KeyUp = 0;
+  $KeyDown = 0;
+  @SystemUnderTest::Accelerate = 0;
+  @SystemUnderTest::Decelerate = 0;
+  
+  absCheckId = ChkStart_MsgAbsCycleTimeViolation(WindowControl, syspar::LockingTests::WinCtrlCycleTimeMin, syspar::LockingTests::WinCtrlCycleTimeMax);
+  relCheckId = ChkStart_MsgRelCycleTimeViolation(WindowState, 0, 400);
+  
+  TestAddCondition(absCheckId);
+  TestAddCondition(relCheckId);
+
+  testStep("Start opening/closing the window", "Check if the window is really closing then");
+  
+  $sigUpDown = 1;
+  
+  testWaitForTimeout(waitingTime);
+  
+  signalCheckResult = CheckSignalMatch(WindowMotion, expWindowMotion);
+  if (signalCheckResult != 1)
+  {
+    TestStepFail("Value of signal should be 'currently opening/closing'!");
+  }
+  
+  TestRemoveCondition(absCheckId);
+  TestRemoveCondition(relCheckId);
+}
+
+testcase RequestReponseTiming(long aMin, long aMax)
+{
+	long lRet;
+  dword lTimeOnRequest;
+  dword lDiffTime;
+  char  lReason[cReasonLen];
+  message WindowState lResponse;
+  byte test;
+
+  
+  /*
+   * The reasons to implement this test case in CAPL are:
+   * - Measure the time between request and response once
+   *   (If this time shall be measured multiply and maybe serve as
+   *    condition, then consider to use the ChkStart_MsgDistViolation()-Check.
+   *    This has been not done here to keep the code simple.)
+   * - Print the (raw) content of a message to the report
+   */
+   
+  TestCaseTitle("", "Request Response Timing");
+
+  // Initialize the environment, stop up/down of the windows
+  $WindowControl::KeyUp = 0;
+  $WindowControl::KeyDown = 0;
+
+  TestWaitForTimeout(1000);
+
+  // request the window down
+  $WindowControl::KeyDown = 1;
+
+  TestWaitForMessage(WindowControl, aMax);  // wait for the stimulation message
+  lTimeOnRequest = TimeNow();
+
+  if(TestWaitForMessage(WindowState, aMax) == 0) // wait for the response
+  {
+    TestStepFail("", "Message 'WindowState' did not occur within the given time interval.");
+  }
+  else
+  {
+    testGetWaitEventMsgData(lResponse);
+
+    lDiffTime = TimeNow() - lTimeOnRequest;
+    snprintf(lReason, cReasonLen, "Message 'WindowState' occured within %d0us", lDiffTime);
+    TestStepPass("", lReason);
+    TestCaseComment("", lResponse);  // print the message itself to the report
+  }
+}
+
+testcase CheckMotor(int temperature, double voltage)
+{
+	// Do motor test based on temperature and voltage ...
+}
+
+testcase CheckLockingBehaviorWithDifferentVelocities()
+{
+  int vel;
+	for (vel=0; vel<elcount(syspar::LockingTests::VelocityList); vel++)
+  {
+    $Velocity = vel;
+    // Do locking test...
+  }
+}
+
+testfunction AccelerateDecelerateToTargetSpeed(float targetSpeed)
+{
+	float currentSpeed;
+
+  /*
+   * Simulates increasing/decreasing velocity slowly
+   * as if controlled by driver
+   */
+
+  TestStep("Speed Change", "Requested speed is %f", targetSpeed);
+  currentSpeed = $VehicleMotion::Velocity;
+  if (targetSpeed > currentSpeed) 
+  {
+    // accelerate
+    TestStep("Speed Change", "Accelerating...");
+    @sysvar::SystemUnderTest::Accelerate = 1;
+    @sysvar::SystemUnderTest::Decelerate = 0;
+    do {
+      testWaitForTimeout(20);
+      currentSpeed = $VehicleMotion::Velocity;
+    } while (targetSpeed > currentSpeed);
+    @sysvar::SystemUnderTest::Accelerate = 0;
+  }
+  else if (targetSpeed < currentSpeed) 
+  {
+    TestStep("Speed Change", "Decelerating...");
+    // decelerate
+    @sysvar::SystemUnderTest::Accelerate = 0;
+    @sysvar::SystemUnderTest::Decelerate = 1;
+    do {
+      testWaitForTimeout(20);
+      currentSpeed = $VehicleMotion::Velocity;
+    } while (targetSpeed < currentSpeed);
+    @sysvar::SystemUnderTest::Decelerate = 0;
+  }
+  TestStep("Speed Change", "Reached speed is %f", currentSpeed);
+}
+
+testfunction AccelerateDecelerateByIncrement(float diffSpeed)
+{
+	$VehicleMotion::Velocity = $VehicleMotion::Velocity + diffSpeed;
+}
+

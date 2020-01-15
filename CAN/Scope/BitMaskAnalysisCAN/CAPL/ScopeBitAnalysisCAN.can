@@ -1,0 +1,350 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "ScopeUtils.cin"
+  #include "TransitionTimeMeasurement.cin"
+  #include "scope\ScopeBitAnalyse.cin"
+}
+
+variables
+{
+  char testReportDir[256] = "TestReport";  //subdirectory for the test report
+  const long testStepNameLength = 256;
+  char testStepName[testStepNameLength];
+  
+  message * canTestMessage; //the can message to be analyzed
+ 
+  msTimer tm1;  //general purpose timer
+}
+
+//transmit a message periodically. This message will be analyzed
+testfunction SendCANFDMsg1()
+{
+  message EngineData msg1;
+
+  //enable ACK
+  canSetChannelOutput(%CHANNEL%, 1);
+  
+  canTestMessage = msg1;
+  canTestMessage.can = %CHANNEL%;
+  settimercyclic(tm1,100);
+}
+
+testfunction SendCANClassicMsg()
+{
+  message EngineData msg1;
+  msg1.edl = msg1.brs = 0;
+
+  canSetChannelOutput(%CHANNEL%, 1);
+  
+  canTestMessage = msg1;
+  canTestMessage.can = %CHANNEL%;
+  settimercyclic(tm1,100);
+}
+//stop the transmission of the test message and go to silent mode
+testfunction CancelMsg()
+{
+  canceltimer(tm1);
+  canSetChannelOutput(%CHANNEL%, 0);
+}
+
+on timer tm1
+{
+  output(canTestMessage);
+}
+
+testfunction GetBitData(char logFileName[])
+{
+  const long maxPath = 256;
+  char logFileNameDefault[maxPath] = "bitInfoDefault.asc";
+  char logFilePath[maxPath];
+  dword i;
+  long rc;
+  ScopeAnalysisSetup signalSetup;
+  const long nameLength = 256;
+  char name[nameLength];
+  
+  const dword bitDataCount = 1024;
+  dword arraySize;
+  
+  ScopeBitData canHigh[bitDataCount], canLow[bitDataCount], canDiff[bitDataCount];
+  
+  double arbSamplingPointInPercent, dataSamplingPointInPercent;
+  CANSettings canSettingsArb, canSettingsData;
+
+  if(!canFdGetConfiguration(%CHANNEL%, canSettingsArb, canSettingsData))
+  {
+    testStepFail(testStepName, "Internal error unable to read the bit timing.");
+    return;
+  }
+
+  strncpy(logFilePath, testReportDir, maxPath);
+  strncat(logFilePath, "\\", maxPath);
+  strncat(logFilePath, logFileName, maxPath);
+  setLogFileName("BitInfo",logFilePath);
+  
+  startLogging("BitInfo");
+  
+  //set the voltage sampling point (where the voltage is taken) to the sampling point of the CAN controller
+  arbSamplingPointInPercent = GetSamplingPointInPercent(canSettingsArb.tseg1, canSettingsArb.tseg2);
+  signalSetup.samplePoint = (char)arbSamplingPointInPercent;
+
+  dataSamplingPointInPercent = GetSamplingPointInPercent(canSettingsData.tseg1, canSettingsData.tseg2);
+  signalSetup.samplePointDataPhase = (char)dataSamplingPointInPercent;
+  
+  arraySize = bitDataCount;
+  rc = testWaitScopeGetMessageBits(canTestMessage, signalSetup, arraySize, canHigh, canLow, canDiff);
+  if(!CheckStatusInternal(rc, "testWaitScopeGetMessageBits")) 
+  {
+    return;
+  }
+
+  if(canTestMessage.edl)
+  {
+    writeToLogEx("Voltage levels at sampling point %d%% (arbitration phase), %d%% (data phase):", signalSetup.samplePoint, signalSetup.samplePointDataPhase);
+  }
+  else
+  {
+    writeToLogEx("Voltage levels at sampling point %d%%:", signalSetup.samplePoint);
+  }
+  writeToLogEx("                           Bit\t      Bit start [ns]\tCAN high [V]\tCAN low  [V]\tCAN diff [V]\tLength [ns]\t     Value\t   isStuff");
+  writeToLogEx("--------------------------------------------------------------------------------------------------------------------------------------------------");
+  
+  for(i=0;i<arraySize;++i)
+  {
+    GetBitFieldName(name, nameLength, canDiff[i].type);
+    
+    writeToLogEx("%30s\t%20I64u\t%12.3f\t%12.3f\t%12.3f\t%11d\t%10d\t%10d", 
+      name, canDiff[i].startTime, canHigh[i].signalVoltage, canLow[i].signalVoltage, canDiff[i].signalVoltage, 
+      canDiff[i].bitLength, canDiff[i].bitValue, canDiff[i].typeex);
+  }
+  stopLogging("BitInfo");
+
+  //change logfile name -> current logfile will be closed
+  strncpy(logFilePath, testReportDir, maxPath);
+  strncat(logFilePath, "\\", maxPath);
+  strncat(logFilePath, logFileNameDefault, maxPath);
+  setLogFileName("BitInfo",logFilePath);
+  
+  TestReportAddExternalRef("url", "Bit information", logFileName);
+}
+
+//Initialize the bit masks, connect to scope
+testfunction Init ()
+{
+  maxNumOfErrorsToShow =10;
+  
+  InitBitMaskArbitration();
+  InitBitMaskBRS();
+  InitBitMaskData();
+  InitBitMaskCRCdel();
+
+  strncpy(testStepName, "Test Prepration", testStepNameLength);
+  
+  //testWaitForTimeout(1000); //needed for virtual scope, if test modul is started immiditly
+  if(DoScopeConnect() <= 0 ) return;
+  
+  if(!WaitForAnyCANMessage()) 
+  {
+    write("Waiting for CAN message failed");
+    return;
+  }
+
+  
+  if(!DoScopeTrigger()) 
+  {
+    write("Scope trigger failed");
+    return;
+  }
+  
+  {
+    long res;
+    res = testWaitForScopeFitData(canTestMessage, eCAPLScopeDataField_CAN_MESSAGE, eCAPLScopeDataField_CAN_MESSAGE);
+    if(CheckStatusInternal(res, "testWaitForScopeFitData"))
+    {
+      const long bufLength = 256;
+      char buffer[bufLength];
+      snprintf(buffer, bufLength, "Frame under test. ID = %d, DLC = %d, EDL = %d, BRS = %d",
+        valOfId(canTestMessage.id), canTestMessage.dlc, canTestMessage.edl, canTestMessage.BRS);
+      TestReportAddWindowCapture("Scope", scopeTestStepName, buffer);
+    }
+  }
+}
+
+int WaitForAnyCANMessage()
+{
+  long res;
+  res = TestWaitForMessage(1000);
+
+  if(res < 0){
+    testStepFail(testStepName, "No message received", "");
+    return 0;
+  }
+  
+  res = TestGetWaitEventMsgData(canTestMessage);
+  if(res != 0){
+    testStepFail(testStepName, "No message received", "");
+    return 0;
+  }
+  return 1;
+}
+
+testcase TestArbitrationField()
+{
+  if(canTestMessage.edl)
+    DoBitAnlyz(bitMaskArb, eCAPLScopeDataField_CAN_StartofFrame, eCAPLScopeDataField_CAN_ControlBit_IDE_R1_Bit, 
+      "Arbitration field", bitLengthArb);
+  else
+    DoBitAnlyz(bitMaskArb, eCAPLScopeDataField_CAN_StartofFrame, eCAPLScopeDataField_CAN_Arbitration_RTR_Bit, 
+      "Arbitration field", bitLengthArb);
+}
+
+testcase TestArbitrationFieldError()
+{
+  maxNumOfErrorsToShow = 3;
+  
+  //provoke an error with a big bit mask
+  bitMaskArb.data_0_Mask[2] = domVoltageThreshold + 2000; //mV
+  
+  if(canTestMessage.edl)
+    DoBitAnlyz(bitMaskArb, eCAPLScopeDataField_CAN_StartofFrame, eCAPLScopeDataField_CAN_ControlBit_IDE_R1_Bit, 
+      "Arbitration field", bitLengthArb);
+  else
+    DoBitAnlyz(bitMaskArb, eCAPLScopeDataField_CAN_StartofFrame, eCAPLScopeDataField_CAN_Arbitration_RTR_Bit, 
+      "Arbitration field", bitLengthArb);
+}
+
+
+testcase TestBRS()
+{
+  if(canTestMessage.EDL)
+  {
+    if(canTestMessage.BRS)
+    {
+      DoBitAnlyz(bitMaskBRS, eCAPLScopeDataField_CAN_FD_ControlBit_BRS, eCAPLScopeDataField_CAN_FD_ControlBit_BRS, "BRS", bitLengthBRS);
+    }
+    else
+    {
+      DoBitAnlyz(bitMaskArb, eCAPLScopeDataField_CAN_FD_ControlBit_BRS, eCAPLScopeDataField_CAN_FD_ControlBit_BRS, "BRS", bitLengthArb);
+    }
+  }
+  else
+  {
+    TestStepPass("BRS check is skipped for Classic CAN frame");
+  }
+}
+
+testcase TestDataPhase()
+{
+  dword startField, endField;
+
+  endField = eCAPLScopeDataField_CAN_CRC;
+  
+  if(@BitmaskTest::UseDataPhaseLimits)
+  {
+     startField = eCAPLScopeDataField_CAN_DataField_Byte_1 + @BitmaskTest::DataPhaseByteStart;
+     endField = eCAPLScopeDataField_CAN_DataField_Byte_1 + @BitmaskTest::DataPhaseByteEnd;
+  }
+
+  if(canTestMessage.EDL && canTestMessage.BRS)
+  {
+    if(!@BitmaskTest::UseDataPhaseLimits) startField = eCAPLScopeDataField_CAN_FD_ControlBit_ESI;
+    DoBitAnlyz(bitMaskData, startField, endField, "Data phase", bitLengthData);
+  }
+  else
+  {
+    if(!@BitmaskTest::UseDataPhaseLimits)startField = eCAPLScopeDataField_CAN_Data_Length_Code;
+    DoBitAnlyz(bitMaskArb, startField, endField, "Data phase", bitLengthArb);
+  }
+}
+
+testcase TestCRCdel()
+{
+  if(canTestMessage.EDL && canTestMessage.BRS)
+  {
+    DoBitAnlyz(bitMaskCRCdel, eCAPLScopeDataField_CAN_CRC_Delimiter, eCAPLScopeDataField_CAN_CRC_Delimiter, "CRCdel", bitLengthCRCdel);
+  }
+  else
+  {
+    DoBitAnlyz(bitMaskArb, eCAPLScopeDataField_CAN_CRC_Delimiter, eCAPLScopeDataField_CAN_CRC_Delimiter, "CRCdel", bitLengthArb);
+  }
+}
+
+testcase TestAckField()
+{
+  DoBitAnlyz(bitMaskArb, eCAPLScopeDataField_CAN_ACK_Field, eCAPLScopeDataField_CAN_ACK_Field, "Ack field", bitLengthArb);
+}
+
+testcase TestTransitionTime()
+{
+  long result;
+  
+  
+   switch(@sysvar::TransitionTimeMeasurement::AnalysisRange)
+    
+  {
+    case 0:
+      result = DoTransitionTimeMeasurement(GetFlags(), eCAPLScopeDataField_CAN_CONTROL_Field, eCAPLScopeDataField_CAN_CRC_Field, @sysvar::TransitionTimeMeasurement::ThresholdStart, @sysvar::TransitionTimeMeasurement::ThresholdEnd);  
+      break;
+    case 1:
+      result = DoTransitionTimeMeasurement(GetFlags(), eCAPLScopeDataField_CAN_Arbitration_Field, eCAPLScopeDataField_CAN_Arbitration_Field, @sysvar::TransitionTimeMeasurement::ThresholdStart, @sysvar::TransitionTimeMeasurement::ThresholdEnd);  
+      break;
+    case 2:
+      result = DoTransitionTimeMeasurement(GetFlags(), eCAPLScopeDataField_CAN_MESSAGE, eCAPLScopeDataField_CAN_MESSAGE, @sysvar::TransitionTimeMeasurement::ThresholdStart, @sysvar::TransitionTimeMeasurement::ThresholdEnd);  
+      break;
+  }
+  CheckStatusInternal(result, "TestTransitionTime");
+}
+
+testcase TestTransitionTimeByNodeName()
+{
+  char nodeName[32];
+  long result;
+  SysGetVariableString("TransitionTimeMeasurement", "ECUName", nodeName, 32);
+  
+  
+  switch(@sysvar::TransitionTimeMeasurement::AnalysisRange)
+    
+  {
+    
+    case 0:
+      result = DoTransitionTimeMeasurement(nodeName,  GetFlags(), eCAPLScopeDataField_CAN_CONTROL_Field, eCAPLScopeDataField_CAN_CRC_Field, @sysvar::TransitionTimeMeasurement::ThresholdStart, @sysvar::TransitionTimeMeasurement::ThresholdEnd);  
+      break;
+    case 1:
+      result = DoTransitionTimeMeasurement(nodeName,  GetFlags(), eCAPLScopeDataField_CAN_Arbitration_Field, eCAPLScopeDataField_CAN_Arbitration_Field, @sysvar::TransitionTimeMeasurement::ThresholdStart, @sysvar::TransitionTimeMeasurement::ThresholdEnd);  
+      break;
+    case 2:
+      result = DoTransitionTimeMeasurement(nodeName,  GetFlags(), eCAPLScopeDataField_CAN_MESSAGE, eCAPLScopeDataField_CAN_MESSAGE, @sysvar::TransitionTimeMeasurement::ThresholdStart, @sysvar::TransitionTimeMeasurement::ThresholdEnd);  
+      break;
+  }
+  
+  
+  CheckStatusInternal(result, "TestTransitionTimebyNodeName");
+}
+
+long GetFlags()
+{
+  long flags;
+   flags |=  @sysvar::TransitionTimeMeasurement::ThresholdInPercent;
+    
+    
+   if(@sysvar::TransitionTimeMeasurement::Edges == 0)
+   {
+    flags |= kTTCFFallingEdge;
+   }
+  
+   if(@sysvar::TransitionTimeMeasurement::Edges == 1)
+   {
+    flags |= kTTCFRisingEdge;
+   }
+  
+  switch(@sysvar::TransitionTimeMeasurement::SignalUsedForMeasurement)
+  {
+    case 0: flags |= kTTCFSignal0;break; 
+    case 1: flags |= kTTCFSignal1;break;
+    case 2: flags |= kTTCFSignal2;break;
+    default: flags |= kTTCFSignal2;break;
+  }
+  return flags;
+}
+

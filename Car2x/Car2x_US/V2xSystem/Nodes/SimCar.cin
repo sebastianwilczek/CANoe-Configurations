@@ -1,0 +1,186 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "Car2xAPI.cin"
+  #include "TrackLoader.cin"
+  #include "Position.cin"
+  #include "..\DataSources_Templates\ASNV_Template_BaseDatatypes.cin"
+  #include "..\DataSources_Templates\ASNV_Template_BasicSafetyMessage.cin"
+}
+
+variables
+{
+  char gErrorString[1024];
+
+  struct Vehicle // vehicle information
+  {
+    int64  timestampTai;    // position update milli seconds tai 2004
+    double latitude;
+    double longitude;
+    double elevation;
+    double speed;
+    double heading;
+    char   event[13];
+    double obDist;
+    double obDir;
+    int    mobileOrStationaryFlag;
+    char   stationId[4];
+  };
+  struct Vehicle gVehicle; // =
+//    { 0, 0.0, 0.0, 355.90, 0, 0, {0,0,0,0,0,0,0,0,0,0,0,0,0}, 0, 0, 128, {0,0,0,0} };
+
+  struct Gps
+  {
+    char   name[256];
+    long   handle;
+  };
+  struct Gps gGps =
+   { "", 0 };
+
+  const float gMultiplier = 10000000.0;
+  const int kMaxNumbOfCars = 10;
+  
+  float gLatDuT  = 0;  // stores the last latitude of the device under test
+  float gLonDuT  = 0;  // stores the last longitude of the device under test
+  float gHeadDuT = 0;  // stores the last heading of the device under test
+  
+  float gDistanceSimCar2ToRCHA    = 100;
+  float gDirectionSimCar2ToRCHA = 0;
+  
+  msTimer tim_oneRound;
+  int counterSecondsOneRound = 0;
+  
+  int gMessageCount = 0;
+}
+
+/****************************************************************/
+// Called on simulation start
+/****************************************************************/
+on start
+{
+  LONG errCode;
+
+  VehicleSetup() ;
+
+  C2xRegisterCallback(kPreTxIndication, "OnPreTxBSM" , "BasicSafetyMessage" ) ;
+    
+  // open gps route file
+  gGps.handle = API_SetFilePathLogFile(gGps.name, 1); // GPS file
+  UpdatePosition() ;
+  
+  setTimerCyclic(tim_oneRound, 100);
+}
+
+on timer tim_oneRound
+{
+  counterSecondsOneRound++;
+
+  if(counterSecondsOneRound % 674 == 0)
+  {    
+    VehicleSetup() ;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// update DUT position data
+////////////////////////////////////////////////////////////////////////////////
+void UpdatePosition()
+{
+  struct PositionData gpsPos;
+
+  API_GetTrackData(gGps.Handle, gpsPos) ;
+
+  gVehicle.timestampTai = C2xConvertTimeToMSSinceUTC(C2xGetITSTimestamp(), 0);
+  
+  gVehicle.latitude   = gpsPos.latitude;
+  gVehicle.longitude  = gpsPos.longitude;
+  gVehicle.speed      = gpsPos.speed;
+  gVehicle.heading    = gpsPos.heading;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//  Callback called before BasicSafetyMessage is transmitted
+////////////////////////////////////////////////////////////////////////////////
+void OnPreTxBSM(LONG packet)
+{
+  struct BasicSafetyMessage bsmData;
+  byte first = 1;
+  long errCode;
+  int j = 0;
+  
+  UpdatePosition();
+  
+  bsmData.messageId = 20;
+  
+  bsmData.value.basicSafetyMessage.coreData.msgCnt = gMessageCount;
+  
+  if(gMessageCount == 128) // max
+  {
+    bsmData.value.basicSafetyMessage.coreData.msgCnt = 0;
+    gMessageCount = 0;
+  }
+  else
+  {
+    gMessageCount++;
+  }
+  
+  bsmData.value.basicSafetyMessage.coreData.id.stringLength = 4;
+  memcpy(bsmData.value.basicSafetyMessage.coreData.id.string, gVehicle.stationId, bsmData.value.basicSafetyMessage.coreData.id.stringLength);
+
+  bsmData.value.basicSafetyMessage.coreData.lat     = gVehicle.latitude * gMultiplier;
+  bsmData.value.basicSafetyMessage.coreData.lon     = gVehicle.longitude * gMultiplier;
+  
+  bsmData.value.basicSafetyMessage.coreData.heading = HeadingToBSMValue(gVehicle.heading);
+  bsmData.value.basicSafetyMessage.coreData.speed   = SpeedToBSMValue(gVehicle.speed);
+    
+  switch(gVehicle.stationId[3])
+  {
+    case 2: // Road Hazard Vehicle
+    {
+      bsmData.value.basicSafetyMessage.partII.isValidFlag = 1;
+      bsmData.value.basicSafetyMessage.partII.length = 1;
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Id = 2;
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].isValidFlag = 1;
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.supplementalVehicleExt.isValidFlag = 1;
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.supplementalVehicleExt.obstacle.isValidFlag = 1;
+      
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.supplementalVehicleExt.obstacle.obDist = gVehicle.obDist;
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.supplementalVehicleExt.obstacle.obDirect = gVehicle.obDir;
+    }
+    break;
+    case 4: // Hard Braking
+    {
+      bsmData.value.basicSafetyMessage.partII.isValidFlag = 1;
+      bsmData.value.basicSafetyMessage.partII.length = 1;
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Id = 0;
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].isValidFlag = 1;
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.vehicleSafetyExt.isValidFlag = 1;
+      
+      // Set the event code
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.vehicleSafetyExt.events.isValidFlag = 1;
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.vehicleSafetyExt.events.stringLength = elCount(gVehicle.event);
+      memcpy(bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.vehicleSafetyExt.events.string, gVehicle.event, bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.vehicleSafetyExt.events.stringLength );
+    }
+    break;
+    case 5: // Disabled Vehicle
+    {
+      bsmData.value.basicSafetyMessage.partII.isValidFlag = 1;
+      bsmData.value.basicSafetyMessage.partII.length = 1;
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Id = 0;
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].isValidFlag = 1;
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.vehicleSafetyExt.isValidFlag = 1;
+      
+      // Set the event code
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.vehicleSafetyExt.events.isValidFlag = 1;
+      bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.vehicleSafetyExt.events.stringLength = elCount(gVehicle.event);
+      memcpy(bsmData.value.basicSafetyMessage.partII.arrayValue[0].partII_Value.vehicleSafetyExt.events.string, gVehicle.event, elcount(gVehicle.event));
+    }
+    break;
+  }
+  
+  API_SetBasicSafetyMessageParams(packet, bsmData);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// EOF
+////////////////////////////////////////////////////////////////////////////////

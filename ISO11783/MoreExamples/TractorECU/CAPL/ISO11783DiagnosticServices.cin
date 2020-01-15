@@ -1,0 +1,426 @@
+/*@!Encoding:1252*/
+variables
+{
+
+/*
+ * ISO11783 Diagnostics Services (ISO11783-12)              Version 1.0
+ * 
+ * Copyright Vector Informatik GmbH - All rights reserved
+ * 
+ * This CAPL Library provides function for ISO11783-12 Diagnostics
+ * Services. The acronym ids is used as prefix for types/variables/
+ * functions defined in this module. It needs the ISO11783 Node Layer.
+ * 
+ * History:
+ * 1.0   (amr)  First public version
+ */
+
+  struct IdsDTC
+  {
+    dword spn ;     // Suspect Parameter Number (19bit)
+    word  fmi ;     // Fault Mode Identifier (5bit)
+    byte  oc ;      // occurence counter (7bit)
+    byte  active ;  // DTC is active (bool)
+  } ;
+
+  struct IdsDTC gIdsDtcActive[long] ;   // key is spn<<8 | fmi
+  struct IdsDTC gIdsDtcPrevious[long] ; // key is spn<<8 | fmi
+
+  long    gIdsEcuHdl = 0 ; // ECU Handle for ISO11783 Node Layer
+
+  struct // parameter for ECUID PG (ISO11783-12 B.1)
+  {
+    char EcuPartNumber[100] ;
+    char EcuSerialNumber[100] ;
+    char EcuLocation[100] ;
+    char EcuType[100] ;
+    char EcuManufacturerName[100] ;
+  } gIdsEcuidParam ;
+
+  struct // paramter for SOFT PG (ISO11783-12 B.2)
+  {
+    int  SoftwareIdentFields ; // max 7
+    char SoftwareIdent[7][100] ;
+  } gIdsSoftParam ;
+
+  struct // parameter for ICC PG (ISO11783-12 B.3)
+  {
+    byte TestProtocolPublicationYear  ; //  6bit
+    byte TestProtocolRevision         ; //  5bit
+    byte CertificateLaboratoryType    ; //  2bit
+    word CertificationLaboratoryID    ; // 11bit
+    word CertificationReferenceNumber ; // 16bit
+  } gIdsIccParam ;
+
+  struct // parameter for DP PG (ISO11783-12 B.5)
+  {
+    byte J1939_73       ; // 1bit
+    byte ISO14230       ; // 1bit
+    byte ISO15765_3     ; // 1bit
+  } gIdsDpParam ;
+
+  enum IdsFMI // failure mode identification codes (ISO11783-12 E.3)
+  {
+    kIdsFMI_DataAboveNormal_MostSevereLevel                  =  0,
+    kIdsFMI_DataBelowNormal_MostSevereLevel                  =  1,
+    kIdsFMI_DataErraticIntermittentOrIncorrect               =  2,
+    kIdsFMI_VoltageAboveNormalOrShortedToHighSource          =  3,
+    kIdsFMI_VoltageBelowNormalOrShortedToLowSource           =  4,
+    kIdsFMI_CurrentBelowNormalOrOpenCircuit                  =  5,
+    kIdsFMI_CurrentAboveNormalOrGroundedCircuit              =  6,
+    kIdsFMI_MechanicalSystemNotRespondingOrOutOfAdjustment   =  7,
+    kIdsFMI_AbnormalFrequencyOrPulseWidthOrPeriod            =  8,
+    kIdsFMI_AbnormalUpdateRate                               =  9,
+    kIdsFMI_AbnormalRateOfChange                             = 10,
+    kIdsFMI_RootCauseNotKnown                                = 11,
+    kIdsFMI_BadIntelligentDeviceOrComponent                  = 12,
+    kIdsFMI_OutOfCalibration                                 = 13,
+    kIdsFMI_SpecialInstructions                              = 14,
+    kIdsFMI_DataAboveNormal_LeastSevereLevel                 = 15,
+    kIdsFMI_DataAboveNormal_ModeratelySevereLevel            = 16,
+    kIdsFMI_DataBelowNormal_LeastSevereLevel                 = 17,
+    kIdsFMI_DataBelowNormal_ModeratelySevereLevel            = 18,
+    kIdsFMI_ReceivedNetworkDataInError                       = 19,
+    kIdsFMI_DataDriftedHigh                                  = 20,
+    kIdsFMI_DataDriftedLow                                   = 21,
+    kIdsFMI_ConditionExists                                  = 31
+  } ;
+
+  msTimer idsDm1Tmr ; // timer for cyclic (1s) DM1 messages
+}
+
+// workaround
+
+void idsMemcpy(struct IdsDTC dst, struct IdsDTC src)
+{
+  memcpy(dst, src) ;
+}
+
+// activate an "spn"/"fmi" in the "dtcs" table
+// if DTC already present increase OC if not already active and less than 126
+
+void idsDtcActivate(struct IdsDTC dtcs[long], word spn, word fmi)
+{
+  struct IdsDTC dtc ;
+  long keySpnFmi ;
+
+  keySpnFmi = spn<<8 | fmi ;
+
+  if (!dtcs.containsKey(keySpnFmi))
+  {
+    dtc.spn    = spn ;
+    dtc.fmi    = fmi ;
+    dtc.oc     = 0 ;
+    dtc.active = 0 ;
+  }
+  else
+    idsMemcpy(dtc, dtcs[keySpnFmi]) ;
+
+  if (!dtc.active)
+  {
+    if (dtc.oc < 126)
+      dtc.oc += 1 ;
+    dtc.active = 1 ;
+
+    idsMemcpy(dtcs[keySpnFmi], dtc) ;
+  }
+}
+
+// deactivate an "spn"/"fmi" in the "dtcs" table
+
+void idsDtcDeactivate(struct IdsDTC dtcs[long], word spn, word fmi)
+{
+  dtcs[spn<<8|fmi].active = 0 ;
+}
+
+// activate an "spn"/"fmi" in Active (DM1) and Previous (DM2) DTC tables
+
+void idsDtcActivate(word spn, word fmi)
+{
+  idsDtcActivate(gIdsDtcActive,   spn, fmi) ;
+  idsDtcActivate(gIdsDtcPrevious, spn, fmi) ;
+}
+
+// deactivate an "spn"/"fmi" in Active (DM1) and Previous (DM2) DTC tables
+
+void idsDtcDeactivate(word spn, word fmi)
+{
+  idsDtcDeactivate(gIdsDtcActive,   spn, fmi) ;
+  idsDtcDeactivate(gIdsDtcPrevious, spn, fmi) ;
+}
+
+// remove all entries in Active (DM1) DTC table
+
+void idsDtcDeactivateActive()
+{
+  gIdsDtcActive.clear() ;
+}
+
+// remove all entries in Previous (DM2) DTC table
+
+void idsDtcDeactivatePrevious()
+{
+  gIdsDtcPrevious.clear() ;
+}
+
+// build a "dm" PG with DTCs from the "dtcs" table
+// if "all" is false only add active DTCs 
+
+void idsFillDM1withDTCs(pg DM1 dm, struct IdsDTC dtcs[long], byte all)
+{
+  long spn ;
+  word fmi ;
+  byte oc ;
+  word offset ;
+
+  offset = 0 ;
+  dm.word(offset) = 0xffff ;
+  offset += 2 ;
+
+  for (long keySpnFmi: dtcs)
+  {
+    if (all || dtcs[keySpnFmi].active)
+    {
+      spn = dtcs[keySpnFmi].spn ;
+      fmi = dtcs[keySpnFmi].fmi ;
+      oc  = dtcs[keySpnFmi].oc ;
+
+      dm.dword(offset) = (spn & 0x3ffff) <<  0 |
+                         (fmi &    0x1f) << 16 |
+                         (oc  &    0x7f) << 24 ;
+      offset += 4 ;
+    }
+  }
+
+  switch (offset)
+  {
+  case 2: // no active
+    dm.dlc      = 8 ;
+    dm.dword(2) = 0 ;
+    dm.word(6)  = 0xffff ;
+    break ;
+  case 6: // one active
+    dm.dlc      = 8 ;
+    dm.word(6)  = 0xffff ;
+    break ;
+  default: // more active
+    dm.dlc      = offset ;
+    break ;
+  }
+}
+
+// helper, expects dest global, prio 6, dp 0
+
+void idsSend(pg CAPL_IDS pgIso)
+{
+  int i ;
+  char txBuffer[1785] ;
+
+  for (i = 0 ; i < pgIso.dlc ; ++i)
+    txBuffer[i] = pgIso.byte(i) ;
+
+  Iso11783TxReqPG(gIdsEcuHdl, pgIso.pgn, 255, 6, pgIso.dlc, txBuffer) ;
+}
+
+// ISO11783-12 B.6
+// send DM1 PG
+
+void idsDm1Send()
+{
+  pg DM1 dm1 = { dlc = 1785};
+
+  idsFillDM1withDTCs(dm1, gIdsDtcActive, 0) ;
+  idsSend((pg CAPL_IDS) dm1) ;
+}
+
+// ISO11783-12 B.7
+// send DM2 PG
+
+void idsDm2Send()
+{
+  pg DM2 dm2 ;
+
+  idsFillDM1withDTCs((pg DM1) dm2, gIdsDtcPrevious, 1) ;
+  idsSend((pg CAPL_IDS) dm2) ;
+}
+
+// append string "src" to PG "dstPg" data at "dstOffset"
+// returns length of "dstPg" data
+
+int idsConcat(pg CAPL_IDS dstPg, int dstOffset, char src[])
+{
+  int len ;
+  int i ;
+
+  if ((dstOffset < 0) || (dstOffset >= dstPg.dlc))
+    return -1 ;
+
+  len = strlen(src) ;
+  for (i = 0 ; (i < len) && (dstOffset < dstPg.dlc) ; ++i)
+    dstPg.byte(dstOffset++) = src[i] ;
+  if (dstOffset < dstPg.dlc)
+    dstPg.byte(dstOffset++) = '*' ;
+
+  return dstOffset ;
+}
+
+// ISO11783-12 B.1
+// send ECUID PG
+
+void idsEcuidSend()
+{
+  pg ECUID ecuid = {dlc = 1785};
+  int  offset ;
+
+  offset = 0 ;
+  offset = idsConcat((pg CAPL_IDS) ecuid, offset, gIdsEcuidParam.EcuPartNumber) ;
+  offset = idsConcat((pg CAPL_IDS) ecuid, offset, gIdsEcuidParam.EcuSerialNumber) ;
+  offset = idsConcat((pg CAPL_IDS) ecuid, offset, gIdsEcuidParam.EcuLocation) ;
+  offset = idsConcat((pg CAPL_IDS) ecuid, offset, gIdsEcuidParam.EcuType) ;
+  offset = idsConcat((pg CAPL_IDS) ecuid, offset, gIdsEcuidParam.EcuManufacturerName) ;
+
+  while ((offset > 0) && (offset < 8))
+    ecuid.byte(offset++) = 0xff ;
+
+  ecuid.dlc = offset ;
+  idsSend((pg CAPL_IDS) ecuid) ;
+}
+
+// ISO11783-12 B.2
+// send SOFT PG
+
+void idsSoftSend()
+{
+  pg SOFT soft = {dlc = 1785};
+  int offset ;
+  int iIdent ;
+
+  offset = 0 ;
+
+  soft.byte(offset++) = gIdsSoftParam.SoftwareIdentFields ;
+  for (iIdent = 0 ; iIdent < gIdsSoftParam.SoftwareIdentFields ; ++iIdent)
+  {
+    char param[100] ;
+
+    //offset = idsConcat((pg CAPL_IDS) soft, offset, gIdsSoftParam[iIdent]) ;
+
+    strncpy(param, gIdsSoftParam.SoftwareIdent[iIdent], 100) ;
+    offset = idsConcat((pg CAPL_IDS) soft, offset, param) ;
+  }
+
+  while ((offset > 0) && (offset < 8))
+    soft.byte(offset++) = 0xff ;
+
+  soft.dlc = offset ;
+  idsSend((pg CAPL_IDS) soft) ;
+}
+
+// ISO11783-12 B.3
+// send ICC PG
+
+void idsIccSend()
+{
+  pg ICC icc ;
+
+  icc.qword(0) = 0xffffffffffffffffLL ;
+  
+  icc.MessageRevision = 1;
+  icc.TestProtocolPublicationYear  = gIdsIccParam.TestProtocolPublicationYear;
+  icc.TestProtocolRevision         = gIdsIccParam.TestProtocolRevision;
+  icc.TestProtocolRevision_MSBits  = (gIdsIccParam.TestProtocolRevision >> 3) & 0x03;
+  icc.CertLaboratoryType_SecondDef = gIdsIccParam.CertificateLaboratoryType;
+  icc.CertificationLaboratoryID    = gIdsIccParam.CertificationLaboratoryID;
+  icc.CertificationReferenceNumber = gIdsIccParam.CertificationReferenceNumber;
+
+  icc.dlc = 8 ;
+  idsSend((pg CAPL_IDS) icc) ;
+}
+
+// ISO11783-12 B.4
+// send ECUNAME PG --- not implemented
+
+void idsEcuNameSend()
+{
+  write("ECU ISO 11783 NAME (ISO11783-12 B.4) not implemented") ;
+}
+
+// ISO11783-12 B.5
+// send DP PG
+
+void idsDpSend()
+{
+  pg DP dp ;
+
+  dp.qword(0) = 0xffffffffffffffffLL ;
+  dp.J1939_73       = gIdsDpParam.J1939_73       ;
+  dp.ISO14230       = gIdsDpParam.ISO14230       ;
+  dp.ISO15765_3     = gIdsDpParam.ISO15765_3     ;
+
+  dp.dlc = 8 ;
+  idsSend((pg CAPL_IDS) dp) ;
+}
+
+// handle DM3 PG
+// send ACKM PG if "sourceAddr" < 254
+
+void idsHandleDm3(long sourceAddr)
+{
+  idsDtcDeactivatePrevious() ;
+
+  if (sourceAddr < 254)
+  {
+    pg ACKM ack ;
+    ack.qword(0) = 0xffffffffffffffffLL;
+    ack.ControlByte = 0 ;
+    ack.ParameterGroupNumber = 0xfecc ;
+    ack.AddressAcknowledged = sourceAddr ;
+
+    idsSend((pg CAPL_IDS) ack) ;
+  }
+}
+
+// handle RQST PG requesting "rqPgn" PG
+
+byte idsHandleRq(long rqPgn, long source)
+{
+  if (gIdsEcuHdl)
+  {
+    switch (rqPgn)
+    {
+    case 0xfdc5: idsEcuidSend()       ; return 1 ;
+    case 0xfeda: idsSoftSend()        ; return 1 ;
+    case 0xfd42: idsIccSend()         ; return 1 ;
+      // ecuName not impelemented
+    case 0xfd32: idsDpSend()          ; return 1 ;
+    case 0xfeca: idsDm1Send()         ; return 1 ;
+    case 0xfecb: idsDm2Send()         ; return 1 ;
+    case 0xfecc: idsHandleDm3(source) ; return 1 ;
+    default:                         return 0 ;
+    }
+  }
+  return 0 ;
+}
+
+// handle DM1 timer
+// send cyclic (1s) DM1 PG 
+
+on timer idsDm1Tmr
+{
+  if (gIdsEcuHdl)
+    idsDm1Send() ;
+  setTimer(idsDm1Tmr, 1000) ;
+}
+
+// initialize this module
+// "ecuHdl" from ISO11783 node layer
+
+void idsInit(long ecuHdl)
+{
+  gIdsEcuHdl = ecuHdl ;
+
+  if (ecuHdl)
+    setTimer(idsDm1Tmr, 1000) ;
+  else
+    cancelTimer(idsDm1Tmr) ;
+}
+

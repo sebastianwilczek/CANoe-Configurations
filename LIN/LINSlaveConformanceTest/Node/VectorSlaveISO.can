@@ -1,0 +1,354 @@
+/*@!Encoding:1252*/
+variables
+{
+  const byte gkSinkSystem           = 0;  // System tab is the target of a notification to Write window
+  const byte gkSinkCAPL             = 1;  // CAPL tab is the target of a notification to Write window
+  const byte gkSinkTest             = 4;  // Test tab is the target of a notification to Write window
+  const byte gkSevError             = 3;  // Error severity of a notification to Write window
+  const byte gkSevWarn              = 2;  // Warning severity of a notification to Write window
+ 
+// ################# Simulation of TP-Layer ##########################################
+  const byte  gkNAD = 5;
+  const dword gk_N_Cr_LIN = 1000;         // N_Cr_LIN timeout [in ms]
+  const byte  gkTP_SegmReqSID = 0x23;     // service ID of segmented request
+  const byte  gkTP_SegmRespSID = 0x22;    // service ID of request with segmented response
+  const long  gkTP_RespLength = 105;      // length of diagnostic response [in bytes]
+
+  const int gUseRespPending  = 1;
+  const int gNumRespPending  = 3;
+  const int gDelta2FirstResp =  200;  // delta between last request frame and response pending or first frame in ms; has to be less than 500 ms
+  const int gDeltaRP2RP      =  100;  // delta between two consecutive response pendings in ms; has to be less than 2000 ms
+  const int gDeltaRP2FF      =  100;  // delta between last response pendings and first frame in ms; has to be less than 2000 ms
+  const int gDeltaCF2CF      =  100;  // delta between two consecutive frames in ms; has to be less than 1000 ms
+  int gCurrentRespPending = 0;
+
+  mstimer gTP_CFDistanceTimer;            // timer to ensure distance between two consecutive frames in segmented request/response (monitoring)
+  mstimer gTP_RespPendingTimer;           // timer to activate response pending and the FF after the last response pending
+  mstimer gTP_CFTimer;                    // timer to activate consecutive frames
+
+  byte gTP_SID_AfterRespPending;          // sid to be used in FF after response pending
+
+  byte gTP_Request_MonitorCF;             // 1 if Consequtive Frames (CF) in the segmented request have to be monitored, 0 - otherwise
+  long gTP_Request_FrameNum;              // total number of frames expected in segmented diagnostic request
+  long gTP_Request_CrnFrame;              // number of already received frames in segmented diagnostic request
+  byte gTP_Request_MonitoredService;      // service ID of monitored CF
+
+  byte gTP_Response_MonitorCF;            // 1 if Consequtive Frames (CF) in the segmented response have to be monitored, 0 - otherwise
+  long gTP_Response_TotalSegNum;          // total number of frames to be sent in segmented diagnostic response
+  long gTP_Response_CrnSegFrame;          // number of already sent frames in segmented diagnostic response
+// ######################################################################################
+}
+
+on start
+{
+  dword arrayOfSixteenthBits[9];
+  int i;
+
+  if (IsSimulated()) // don't activate tests when running in simulated mode
+  {
+    WriteLineEx(gkSinkCAPL, gkSevError
+      , "VectorSlave2_1: Conformance tests cannot run in simulated mode!");     
+    stop();
+    return;
+  }
+
+  // set 2 bits interbyte between all databytes and cs-byte
+  for (i = 1; i < 9; ++i)
+  {
+    arrayOfSixteenthBits[i] = 32;
+  }
+  linSetInterByteSpaces(arrayOfSixteenthBits);
+  linSetInterByteSpaces(0x3D, arrayOfSixteenthBits);
+
+}
+
+on preStart
+{
+  linSetDominantViewNode("VectorSimulatedSlave");
+}
+
+on sysvar sysvar::SlaveConfTesterDemo::SendWakeupSequencies
+{
+  if (@this == 1)
+  {
+    linSendWakeup();
+  }
+}
+
+on sysvar sysvar::SlaveConfTesterDemo::TriggerETF
+{
+  if (@this == 1)
+  {
+    if ($MotorTemp.raw >= 0 || $MotorTemp.raw < 255)
+    {
+      $MotorTemp.raw = $MotorTemp.raw + 1;
+    }
+    else
+    {
+      $MotorTemp.raw = $MotorTemp.raw - 1;
+    }	
+  }
+}
+
+on linFrame 0x3C
+{
+  if (this.byte(0) != gkNAD)
+    return; // Only requests for the simulated slave are of interest
+
+  cancelTimer(gTP_CFTimer);
+
+  if (1 == gTP_Request_MonitorCF && TP_GetPCIType(this.byte(1)) != 2)
+  { 
+    // new request while waiting for CF frame of previous request - cancel CF monitoring in request
+    TP_Request_CancelCFMonitoring();
+  }
+
+  if (1 == gTP_Response_MonitorCF)
+  { // new request while waiting transmitting segmented response - cancel the transmission
+    TP_Response_CancelCFMonitoring();
+  }
+
+  if (TP_GetPCIType(this.byte(1)) == 0 && TP_IsKnownService(this.byte(2))==1)
+  { 
+    // Single Frame request - set response
+    if (gUseRespPending)
+    {
+      gCurrentRespPending = 0;
+      gTP_SID_AfterRespPending = this.byte(2);
+      setTimer(gTP_RespPendingTimer, gDelta2FirstResp);
+    }
+    else
+    {
+      TP_Response_SetData_FF(this.byte(2));
+    }
+  }
+  else if (TP_GetPCIType(this.byte(1)) == 1 && 1==TP_IsKnownService(this.byte(3)))
+  { 
+    // First Frame of request - start monitoring consecutive frames of this request  
+    TP_Request_StartCFMonitoring(this.byte(3), ((this.byte(1) & 0xF) * 256) + this.byte(2) - 1); 
+  }
+  else if (1 == gTP_Request_MonitorCF && TP_GetPCIType(this.byte(1)) == 2)
+  { 
+    // Consecutive Frame of request
+    if ((this.byte(1) & 0xF) == (gTP_Request_CrnFrame) % 16)
+    {
+      
+      ++gTP_Request_CrnFrame; // increase number of received frames
+
+      if (gTP_Request_CrnFrame == gTP_Request_FrameNum)
+      { 
+        // all CF frames of the request have been received - set response and cancel CF monitoring in request
+        TP_Request_CancelCFMonitoring();
+        if (gUseRespPending)
+        {
+          gCurrentRespPending = 0;
+          gTP_SID_AfterRespPending = gTP_Request_MonitoredService;
+          setTimer(gTP_RespPendingTimer, gDelta2FirstResp);
+        }
+        else
+        {
+          TP_Response_SetData_FF(gTP_Request_MonitoredService);
+        }
+      }
+      else
+      {
+        // continue monitoring of further request frames
+        TP_Request_ContinueCFMonitoring();
+      }
+    }
+    else
+    {
+      // wrong frame counter in consecutive frame of the current request -  - cancel CF monitoring in request
+      TP_Request_CancelCFMonitoring();
+    }
+  }
+}
+
+void TP_Request_StartCFMonitoring(byte sid, long dataLength)
+{
+  gTP_Request_FrameNum = TP_GetSegmentsNum(dataLength); 
+  gTP_Request_CrnFrame = 1;
+  gTP_Request_MonitoredService = sid;
+  gTP_Request_MonitorCF = 1;
+  setTimer(gTP_CFDistanceTimer, gk_N_Cr_LIN);
+}
+
+void TP_Request_ContinueCFMonitoring()
+{
+  cancelTimer(gTP_CFDistanceTimer);
+  setTimer(gTP_CFDistanceTimer, gk_N_Cr_LIN);
+}
+
+void TP_Request_CancelCFMonitoring()
+{
+  gTP_Request_MonitorCF = 0;
+  gTP_Request_FrameNum = 0;
+  gTP_Request_CrnFrame = 0;
+  cancelTimer(gTP_CFDistanceTimer);
+
+}
+
+on timer gTP_CFDistanceTimer
+{
+  if (1 == gTP_Request_MonitorCF)
+  {
+    TP_Request_CancelCFMonitoring();
+  }
+  else if (1 == gTP_Response_MonitorCF)
+  {
+    TP_Response_CancelCFMonitoring();
+  }
+}
+
+byte TP_GetPCIType(byte pciField)
+{
+  return pciField >> 4;
+}
+
+void TP_Response_SetData_FF(byte sid)
+{
+  linFrame SlaveResp   slaveResponse;
+
+  slaveResponse.byte(0) = gkNAD;                     // NAD
+  slaveResponse.byte(1) = (gkTP_RespLength+1) / 256; // PCI Field (4 least significant bits): the four most significant bits of the data length only
+  slaveResponse.byte(1) |= 0x10;                     // PCI Field (4 most significant bits): PCI Type - First Frame
+  slaveResponse.byte(2) = gkTP_RespLength + 1;       // the total number of databytes in message plus one (for the SID or RSID)
+  slaveResponse.byte(3) = sid + 0x40;                // RSID: positive response
+  slaveResponse.byte(4) = 1; // D1
+  slaveResponse.byte(5) = 2; // D2
+  slaveResponse.byte(6) = 3; // D3
+  slaveResponse.byte(7) = 4; // D4
+  slaveResponse.RTR = 0;
+  output(slaveResponse);
+  linSetRespCounter(0x3D, 1);
+
+  TP_Response_StartCFMonitoring(gkTP_RespLength);
+}
+
+byte TP_IsKnownService(byte sid)
+{
+  if ( sid == gkTP_SegmReqSID || sid == gkTP_SegmRespSID )
+  {
+    return 1;
+  }
+  return 0;
+}
+
+long TP_GetSegmentsNum(long dataLength)
+{
+  // dataLength does not include SID/RSID
+  if (dataLength <= 0)
+  {
+    return 0;
+  }
+
+  return _ceil((dataLength - 4) / 6.0) + 1; // + 1 for first frame
+}
+
+void TP_Response_SetData_CF()
+{
+  linFrame SlaveResp   slaveResponse;
+
+  slaveResponse.byte(0) = gkNAD;                       // NAD
+  slaveResponse.byte(1) = gTP_Response_CrnSegFrame % 16;  // PCI Field (4 least significant bits): Frame counter
+  slaveResponse.byte(1) |= 0x20;                       // PCI Field (4 most significant bits): PCI Type - Consecutive Frame
+
+  slaveResponse.byte(2) = 1; // D1      
+  slaveResponse.byte(3) = 2; // D2      
+  slaveResponse.byte(4) = 3; // D3
+  slaveResponse.byte(5) = 4; // D4
+  slaveResponse.byte(6) = 5; // D5
+  slaveResponse.byte(7) = 6; // D6
+  slaveResponse.RTR = 0;
+  output(slaveResponse);
+  linSetRespCounter(0x3D, 1);
+}
+
+void TP_Response_StartCFMonitoring(long totalSegNum)
+{
+  gTP_Response_TotalSegNum = TP_GetSegmentsNum(totalSegNum); 
+  gTP_Response_CrnSegFrame = 0;
+  gTP_Response_MonitorCF = 1;
+
+  setTimer(gTP_CFDistanceTimer, gk_N_Cr_LIN);
+}
+
+void TP_Response_CancelCFMonitoring()
+{
+  gTP_Response_MonitorCF = 0;
+  gTP_Response_TotalSegNum = 0;
+  gTP_Response_CrnSegFrame = 0;
+  cancelTimer(gTP_CFDistanceTimer);
+}
+
+void TP_Response_ContinueCFMonitoring()
+{
+  cancelTimer(gTP_CFDistanceTimer);
+  setTimer(gTP_CFDistanceTimer, gk_N_Cr_LIN);
+}
+
+on linFrame 0x3D
+{
+  if (this.byte(0) == gkNAD && this.byte(1) == 0x3 && this.byte(2) == 0x7F && this.byte(4) == 0x78) // response pending
+  {
+    setTimer(gTP_RespPendingTimer, gCurrentRespPending == gNumRespPending ? gDeltaRP2FF : gDeltaRP2RP);
+    return;
+  }
+
+  if (1 == gTP_Response_MonitorCF)
+  {     
+    ++gTP_Response_CrnSegFrame; // inrease the number of already sent frames in segmented response
+
+    if (gTP_Response_TotalSegNum > 0 && gTP_Response_CrnSegFrame >= gTP_Response_TotalSegNum)
+    {
+      // all response frames have been sent - cancel further transmission
+      TP_Response_CancelCFMonitoring();
+    }
+    else
+    {
+      TP_Response_ContinueCFMonitoring();
+      // transmit next frame of segmented response
+      if (gUseRespPending)
+      {
+        setTimer(gTP_CFTimer, gDeltaCF2CF);
+      }
+      else
+      {
+        TP_Response_SetData_CF();
+      }
+    }
+  }
+}
+
+void TP_Response_SetData_RespPending()
+{
+  linFrame SlaveResp   slaveResponse;
+
+  slaveResponse.byte(0) = gkNAD;  // NAD
+  slaveResponse.byte(1) = 0x3;    // response pending is a negative response (single frame)
+  slaveResponse.byte(2) = 0x7F;   // negative response
+  slaveResponse.byte(3) = gTP_SID_AfterRespPending;    // SID
+  slaveResponse.byte(4) = 0x78;   // code for response pending
+  slaveResponse.RTR = 0;
+  output(slaveResponse);
+  linSetRespCounter(0x3D, 1);
+  ++gCurrentRespPending;
+}
+
+on timer gTP_RespPendingTimer
+{
+  if (gCurrentRespPending == gNumRespPending)
+  {
+    TP_Response_SetData_FF(gTP_SID_AfterRespPending);
+  }
+  else
+  {
+    TP_Response_SetData_RespPending();
+  }
+}
+
+on timer gTP_CFTimer
+{
+  TP_Response_SetData_CF();
+}
+

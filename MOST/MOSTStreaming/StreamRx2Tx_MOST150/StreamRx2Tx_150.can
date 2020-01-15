@@ -1,0 +1,588 @@
+/*@!Encoding:1252*/
+includes
+{
+  // include DLL with file streaming extensions
+  // path relative to this CAPL file
+  #pragma library ("MostSyncStrmRx2Tx.dll")
+}
+
+variables
+{
+  //
+  // This CAPL program applies the CAPL DLL MostSyncStrmRx2Tx.dll
+  // to stream received data of synchronous MOST channels directly back on MOST.
+  // 
+
+  // channel of MOST interface
+  long  gChannel        = 1;
+  // name of extension DLL for streaming (path relative to cfg file)
+  char  gDllName[200]   = "MostSyncStrmRx2Tx.dll";
+  
+  // latency: 0 (short reaction time, high CPU load)...
+  //          4 (slow reaction time, low CPU load)
+  const int kLatencyVeryLow  = 0;
+  const int kLatencyLow      = 1;
+  const int kLatencyMedium   = 2;
+  const int kLatencyhigh     = 3;
+  const int kLatencyVeryHigh = 4; // This can not be used for direct RX to TX streaming!!
+
+
+  // streaming states (see OnMostSyncStrmState)
+  const int kClosed  = 1;
+  const int kOpened  = 2;
+  const int kStarted = 3;
+  const int kStopped = 4;
+
+  // streaming errors (see OnMostSyncStrmError)
+  const int kOK                          =   0;
+  const int kOpenFailed                  =   1;
+  const int kCloseFailed                 =   2;
+  const int kStartFailed                 =   3;
+  const int kStopFailed                  =   4;
+  const int kDriverCallFailed            =  10; // call of the bus interface driver failed
+  const int kDirectionNotSupported       =  11; // the streaming direction is not supported by the client
+  const int kNumSyncChannelsNotSupported =  12; // the number of streaming channels is not supported by the client
+  const int kOptionsNotSupported         =  13; // the streaming options are not supported by the client
+  const int kLatencyNotSupported         =  14; // the suggested latency is not supported by the client
+  const int kInvalidInterface            =  15;
+  const int kBufferUnderrunHW            =  40; // 0-data was streamed (TX only)
+  const int kBufferUnderrunClient        =  41; // client didn't provide buffer in time (TX only)
+  const int kBufferOverflowHW            =  42; // synchr data got lost (RX only)
+  const int kBufferOverflowClient        =  43; // client didn't provide buffer in time (RX only)
+  const int kBufferErrorClient           =  44; // streaming client was unable to prepare/process a buffer
+  const int kBufferErrorStart            =  45; // no buffers provided at start of streaming (TX: 0-data was streamed; RX: data got lost)
+  const int kBufferErrorStop             =  46; // buffer underrun or overflow reported after the stream has been stopped
+  const int kUnknownError                = 255; 
+
+  dword gHandleRx;        // handle for synchronous channel streaming
+  byte  gChannelsRx[60];  // channels to stream
+  long  gNumChannelsRx;
+  byte  gOpenFailedRx;
+
+  dword gHandleTx;        // handle for synchronous channel streaming
+  byte  gChannelsTx[60];  // channels to stream
+  long  gNumChannelsTx;
+  byte  gOpenFailedTx;
+
+  // Muting of audio channels
+  const int kMuteLeftAudioChannel  = 0;
+  const int kMuteRightAudioChannel = 1;
+  const int kMuteBothAudioChannel  = 2;
+
+  char  gPanelName[40] = "Rx To Tx Streaming";
+  
+  // valid label numbers for MOST150
+  const long kLabelMin = 0x000C;
+  const long kLabelMax = 0x017F;
+  
+  long  gAllocTableReported = 0;
+  
+  const int kMaxNumBytesPerFrame = 152;
+}
+
+on preStart
+{
+  // initialize extension DLL for file streaming
+  // binds the CAPL node exclusively to the DLL
+  gHandleRx = mostSyncStrmInit(gChannel, RX, gDllName);
+  gHandleTx = mostSyncStrmInit(gChannel, TX, gDllName);
+
+  if(0 == gHandleRx || 0 == gHandleTx)
+    write("Initialization of streaming client failed (%s)", gDllName);
+}
+
+on start
+{
+  if(gHandleRx == 0 || gHandleTx == 0)
+  {
+    writeLineEx(0,3,"Streaming not possible!");
+    writeLineEx(0,3,"Please check you have a VN2640 interface box connected!");
+    stop();
+  }
+
+  @sysvar::RxSysVar::State = kClosed;
+  @sysvar::TxSysVar::State = kClosed;
+  UpdateControls();
+}
+
+void OnMostSyncStrmError(dword handle, long errorcode)
+{
+  // this callback reports a general streaming error
+  if( (errorcode == 41) || (errorcode == 46) )
+    return;
+
+  if(handle == gHandleRx)
+  {
+    write("Rx Stream: Error %d occured while streaming", errorcode);
+    
+    if(errorcode == 1) // Rx Stream: open failed
+    {
+      gOpenFailedRx = 1;
+      if(@sysvar::TxSysVar::State == kOpened)
+      {
+        // also close Tx Stream since no Rx data will be streamed from MOST
+        mostSyncStrmClose(gHandleTx);
+      }
+    }
+  }
+  else if(handle == gHandleTx)
+  {
+    write("Tx Stream: Error %d occured while streaming", errorcode);
+
+    if(errorcode == 1) // Tx Stream: open failed
+    {
+      gOpenFailedTx = 1;
+      if(@sysvar::RxSysVar::State == kOpened)
+      {
+        // also close Rx Stream since no Rx data will be streamed back on MOST
+        mostSyncStrmClose(gHandleRx);
+      }
+    }
+  }
+}
+
+void OnMostSyncStrmState(dword handle, long state)
+{
+  // state of a stream is reported
+  
+  if(handle == gHandleRx)
+  {
+    switch( state )
+    {
+      case kClosed:
+      case kOpened:
+      case kStarted:
+      case kStopped:
+        
+        if(state == kOpened && gOpenFailedTx)
+        {
+          // also close Rx Stream since no Rx data will be streamed back on MOST
+          mostSyncStrmClose(gHandleRx);
+        }
+
+        @sysvar::RxSysVar::State = state;
+        UpdateControls();
+        break;
+
+      default: 
+        break;
+    }
+  }
+  else if(handle == gHandleTx)
+  {
+    switch( state )
+    {
+      case kClosed:
+      case kOpened:
+      case kStarted:
+      case kStopped:
+        
+        if(state == kOpened && gOpenFailedRx)
+        {
+          // also close Tx Stream since no Rx data will be streamed from MOST
+          mostSyncStrmClose(gHandleTx);
+        }
+        else if(state == kStopped)
+        {
+          // clear any buffers, since no "old" data should be streamed, in case of re-starting Tx streaming
+          mostSyncStrmClearAllBuffers(gHandleTx);
+        }
+
+        @sysvar::TxSysVar::State = state;
+        UpdateControls();
+        break;
+
+      default:
+        break;
+    }
+  }
+}
+
+void UpdateControls()
+{
+  // switch user controls on/off
+
+  int state;
+
+  ///////////////////////////////////////////////////
+  // Rx Stream
+  ///////////////////////////////////////////////////
+  state = @sysvar::RxSysVar::State;
+
+  enableControl(gPanelName, "Radio_Btn_Rx_Label", state == kClosed);
+  enableControl(gPanelName, "Radio_Btn_Rx_Channels", state == kClosed);
+
+  enableControl(gPanelName, "Rx_Stream_Channels", @sysvar::RxSysVar::ChannelsSel != 0 && state == kClosed);
+
+  enableControl(gPanelName, "Rx_Stream_Label", @sysvar::RxSysVar::ChannelsSel == 0 && state == kClosed);
+  enableControl(gPanelName, "Rx_Stream_Label_Up", @sysvar::RxSysVar::ChannelsSel == 0 && state == kClosed);
+  enableControl(gPanelName, "Rx_Stream_Label_Down", @sysvar::RxSysVar::ChannelsSel == 0 && state == kClosed);
+
+
+  ///////////////////////////////////////////////////
+  // Tx Stream
+  ///////////////////////////////////////////////////
+  state = @sysvar::TxSysVar::State;
+
+  enableControl(gPanelName, "Chk_Box_Use_Same_Channels", state == kClosed);
+  enableControl(gPanelName, "Radio_Btn_Tx_Label", state == kClosed);
+  enableControl(gPanelName, "Radio_Btn_Tx_Channels", state == kClosed);
+
+  enableControl(gPanelName, "Tx_Stream_Channels",@sysvar::TxSysVar::ChannelsSel != 0 && state == kClosed);
+  enableControl(gPanelName, "Tx_Stream_Label", @sysvar::TxSysVar::ChannelsSel == 0 && state == kClosed);
+  enableControl(gPanelName, "Tx_Stream_Label_Up", @sysvar::TxSysVar::ChannelsSel == 0 && state == kClosed);
+  enableControl(gPanelName, "Tx_Stream_Label_Down", @sysvar::TxSysVar::ChannelsSel == 0 && state == kClosed);
+
+
+  ///////////////////////////////////////////////////
+  // Volume
+  ///////////////////////////////////////////////////
+  enableControl(gPanelName, "Radio_Btn_MuteAll", @sysvar::TxSysVar::Mute);
+  enableControl(gPanelName, "Radio_Btn_MuteLeft", @sysvar::TxSysVar::Mute && (gNumChannelsTx == 4));
+  enableControl(gPanelName, "Radio_Btn_MuteRight", @sysvar::TxSysVar::Mute && (gNumChannelsTx == 4));
+
+  enableControl(gPanelName, "Volume_Value", (gNumChannelsTx == 4));
+  enableControl(gPanelName, "Volume_Slider", (gNumChannelsTx == 4));
+
+  ///////////////////////////////////////////////////
+  // Latency
+  ///////////////////////////////////////////////////  
+  enableControl(gPanelName, "Grp_Box_RxTx_Stream_Latency", state == kClosed);
+
+  ///////////////////////////////////////////////////
+  // Buttons
+  ///////////////////////////////////////////////////
+  enableControl(gPanelName, "Btn_OpenStreams",  state == kClosed);
+  enableControl(gPanelName, "Btn_StartStreams", state == kOpened || state == kStopped);
+  enableControl(gPanelName, "Btn_StopStreams",  state == kStarted);
+  enableControl(gPanelName, "Btn_CloseStreams", state == kOpened || state == kStopped);
+}
+
+OnMostAllocTable()
+{
+  gAllocTableReported = 1;
+  if(@RxSysVar::State == kClosed)
+  {
+    if(!IsLabelInRange(@RxSysVar::Label))
+    {
+      // find first valid label, if an invalid label is displayed
+      long i, noOfLabels; 
+      long label;
+
+      noOfLabels = MostAllocTableGetSize(gChannel);
+  
+      for(i = 0; i < noOfLabels; ++i)
+      {
+        label = MostAllocTableGetCL(gChannel, i);
+        if(IsLabelInRange(label))
+        {
+          @RxSysVar::Label = label;
+          @RxSysVar::Width = LabelWidth(label);
+        }
+      }
+    }
+  }
+  UpdateControls();
+}
+
+long GetChannelsOfLabel(byte label, byte channels[])
+{
+  // The function gets all channel numbers of a connection 
+  // label. Therefore the allocation table is parsed.
+  // Returns the number of channels.
+
+  byte allocTable[60];
+  byte i, chnidx;
+
+  // copy allocation table to local buffer
+  mostGetAllocTable(gChannel, allocTable,  elcount(allocTable));
+
+  for(i = 0; i < 60; ++i)
+    channels[i] = 0xFF;
+
+  chnidx = 0;
+  for(i = 0; i < 60; ++i)
+  {
+    if((allocTable[i] & 0x7F) == label)
+    {
+      channels[chnidx] = i;
+      ++chnidx;
+    }
+  }
+  return chnidx;
+}
+
+on sysvar RxSysVar::LabelUp
+{
+  long nextlabel, currentlabel;
+  long i, noOfLabels; 
+  int label;
+  
+  if(@this)
+    return;
+
+  if(@sysvar::RxSysVar::State != kClosed)
+    return; // no modification if stream is open
+  
+  noOfLabels = MostAllocTableGetSize(gChannel);
+  
+  // search nearest label
+  currentlabel = @RxSysVar::Label;
+  nextlabel = -1;
+  for(i = 0; i < noOfLabels; ++i)
+  {
+    label = MostAllocTableGetCL(gChannel, i);
+    
+    if((label <= kLabelMax) && (label > currentlabel) 
+       && (label > nextlabel))
+    {
+      nextlabel = label;
+    }
+  }
+  if(nextlabel >= kLabelMin)
+    @RxSysVar::Label = nextlabel;
+}
+
+on sysvar RxSysVar::LabelDown
+{
+  long nextlabel, currentlabel;
+  long i, noOfLabels; 
+  long label;
+
+  if(@this)
+    return;
+
+  if(@sysvar::RxSysVar::State != kClosed)
+    return; // no modification if stream is open
+  
+   noOfLabels = MostAllocTableGetSize(gChannel);
+  
+  // search nearest label
+  currentlabel = @RxSysVar::Label;
+  nextlabel = -1;
+  for(i = 0; i < noOfLabels; ++i)
+  {
+    label = MostAllocTableGetCL(gChannel, i);
+    
+    if((label <= kLabelMax) && (label < currentlabel) 
+       && (label > nextlabel))
+    {
+      nextlabel = label;
+    }
+  }
+  if(nextlabel >= kLabelMin)
+    @RxSysVar::Label = nextlabel;
+}
+
+on sysvar RxSysVar::Label
+{
+  UpdateControls(  );
+}
+
+on sysvar TxSysVar::Label
+{
+  UpdateControls(  );
+}
+
+on sysvar RxSysVar::ChannelsSel
+{
+  UpdateControls();
+}
+
+on sysvar TxSysVar::ChannelsSel
+{
+  UpdateControls();
+}
+
+on sysvar Rx2TxSysVar::CloseStreams
+{
+  if(@this)
+    return;
+
+  mostSyncStrmClose(gHandleRx);
+  mostSyncStrmClose(gHandleTx);
+}
+
+on sysvar Rx2TxSysVar::OpenStreams
+{
+  long ret, label, labelWidth;
+  dword options;
+
+  if(@this)
+    return;
+
+  ///////////////////////////////////////////////////////
+  // Rx Stream
+  ///////////////////////////////////////////////////////
+
+  label = @RxSysVar::Label;
+  labelWidth = LabelWidth(label);
+
+  if(labelWidth == 0)
+  {
+    write("Cannot open RX stream. Label 0x%03X does not exist.", label);
+    return;
+  }
+
+  ret = mostSyncStrmOpen(gHandleRx, labelWidth, 0, @sysvar::RxSysVar::Latency);
+
+  if(ret != 0)
+    write("Failed to open Rx stream (%d)", ret);
+
+  
+  ///////////////////////////////////////////////////////
+  // Tx Stream
+  ///////////////////////////////////////////////////////
+  ret = mostSyncStrmOpen(gHandleTx, labelWidth, 0, 1); // hard coded latency for tx stream => low
+  
+  MostSyncStrmRx2TxMute(@sysvar::TxSysVar::Mute, @sysvar::TxSysVar::MuteType);
+
+  if(ret != 0)
+    write("Failed to open Tx stream"); 
+}
+
+on sysvar Rx2TxSysVar::StartStreams
+{
+  long ret;
+  word labels[8];
+  word labelWidths[8];
+
+  if(@this)
+    return;
+
+  // start streaming
+
+  ///////////////////////////////////////////////////////
+  // Rx Stream
+  ///////////////////////////////////////////////////////
+  labels[0] = @RxSysVar::Label;
+  labelWidths[0] = LabelWidth(labels[0]);
+
+  if(labelWidths[0] == 0)
+  {
+    write("Cannot start Rx streaming. Label 0x%03X does not exist.", labels[0]);
+    return;
+  }
+  ret = mostSyncStrmStart(gHandleRx, labels, labelWidths, 1);
+  if(ret != 0)
+    write("Failed to start Rx stream (%d)", ret);
+
+
+  ///////////////////////////////////////////////////////
+  // Tx Stream
+  ///////////////////////////////////////////////////////
+  
+  // inform the DLL to fill up any Tx buffer first
+  mostSyncStrmFillAllBuffers(gHandleTx);
+
+  // The TX stream will be started as soon as enough RX buffers were received.
+  // (see OnMostStartTxStream)
+}
+
+on sysvar Rx2TxSysVar::StopStreams
+{
+  if(@this)
+    return;
+
+  mostSyncStrmStop(gHandleRx);
+  mostSyncStrmStop(gHandleTx);
+}
+
+on sysvar TxSysVar::Mute
+{
+  // Call provided DLL function
+  MostSyncStrmRx2TxMute(@this, @sysvar::TxSysVar::MuteType);
+
+  // update panel controls
+  UpdateControls();
+}
+
+on sysvar TxSysVar::Volume
+{
+  // Call provided DLL function
+  MostSyncStrmRx2TxSetVolume(@this);
+}
+
+on stopMeasurement
+{
+  gAllocTableReported = 0;
+  @sysvar::RxSysVar::State = 0;
+  @sysvar::TxSysVar::State = 0;
+}
+
+on sysvar TxSysVar::MuteType
+{
+  MostSyncStrmRx2TxMute(@sysvar::TxSysVar::Mute, @this);
+}
+
+OnMostStartTxStream  ()
+{
+  long ret;
+  word labels[8];
+  word labelWidths[8];
+  
+  // start Tx stream now, since buffers filled for streaming
+  labels[0] = @RxSysVar::Label;
+  labelWidths[0] = LabelWidth(labels[0]);
+  
+  gNumChannelsTx = labelWidths[0];
+
+  if(labelWidths[0] == 0)
+  {
+    write("Cannot start Tx streaming. Label 0x%03X does not exist.", labels[0]);
+    return;
+  }
+  ret = mostSyncStrmStart(gHandleTx, labels, labelWidths, 1);
+  if(ret != 0)
+    write("Failed to start Tx stream (%d)", ret);
+}
+
+long IsLabelInRange(long label)
+{
+  if((label < kLabelMin) || (label > kLabelMax))
+    return 0;
+  return 1;
+}
+
+long LabelWidth(long label)
+{
+  // Get width of a label.
+  // Retruns 0 if label does not exists in the allocation table.
+
+  long i, noOfLabels,locallabel;
+
+  if(!gAllocTableReported)
+    return 0;
+
+  if(!IsLabelInRange(label))
+    return 0; // invalid label number
+
+  noOfLabels = MostAllocTableGetSize(gChannel);
+  for(i = 0; i < noOfLabels; ++i)
+  {
+    locallabel = MostAllocTableGetCL(gChannel, i);
+    if(IsLabelInRange(locallabel))
+    {
+      if(locallabel == label)
+        return MostAllocTableGetWidth(gChannel, i);
+    }
+  }
+  return 0;
+}
+
+void OnMostSyncStrmTxLabel(dword handle, long errorInfo, long label, long labelWidth)
+{
+  // label of Tx stream is reported
+  if(handle != gHandleTx)
+    return;
+
+  if(errorInfo == 0)
+  {
+    @sysvar::TxSysVar::Label = label;
+    @sysvar::TxSysVar::Width = labelWidth;
+  }
+  else
+  {
+    @sysvar::TxSysVar::Label = 0;
+  }
+}

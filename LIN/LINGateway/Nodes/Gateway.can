@@ -1,0 +1,225 @@
+/*@!Encoding:1252*/
+variables
+{
+  const int kACTIVE   = 1;
+  const int kINACTIVE = 0;
+  const int kTABLE_0       = 0;
+  const int kERROR_TABLE_1 = 1;
+  const int kERROR_TABLE_2 = 2;
+
+  //declare millisecond timers
+  msTimer tStoredPosition;
+  msTimer tResetDriverIDError;
+  msTimer tResetIgnitionError;
+  msTimer tResetCorruptScheduleError;
+  msTimer tResetSlowScheduleError;
+
+  //declare timer
+  Timer t_Seatheating;
+
+  long gDriverErrorStatus   = 0;
+  long gIgnitionErrorStatus = 0;
+  long gRespReqErrorActTime = 500; // in ms
+  long gDistErrorActTime    = 500; // in ms
+
+  dword linbus_context = 0;
+  dword canbus_context = 0;
+}
+
+on preStart
+{
+  linbus_context = GetBusNameContext( "LIN");
+  canbus_context = GetBusNameContext( "CAN");
+  SetBusContext(linbus_context);
+
+  // Stop LIN scheduler before measurement starts
+  LINStopScheduler();
+}
+
+on message CarLockingSystem
+{
+  $GW_Ignition::LockingSystem = $CarLockingSystem::ActualState;
+
+  if(this.ActualState)  //on opening the car start LIN scheduler
+  {
+    LINStartScheduler();
+  }
+  else  // on closing the car stop LIN scheduler
+  { 
+    LINStopScheduler();
+  }
+}
+
+on message Driver_ID
+{
+  // route CAN signals to LIN bus
+  $StoreSeatposition::Storeposition = $Driver_ID::StoreSeatposition; 
+  $Seatposition::Driver = $Driver_ID::Driver;
+
+  // *************************************************** //
+  // error stimulation
+  // *************************************************** //
+  if(gDriverErrorStatus == kACTIVE)
+  {
+    $Seatposition::Driver = ($Seatposition::Driver == 1) ? 0 : 1;
+  }
+  // *************************************************** //
+  // end of error stimulation
+  // *************************************************** //
+
+}
+
+on timer tStoredPosition
+{
+  $StoreSeatposition::Storeposition = 0;
+}
+
+on linFrame Seatsensor
+{
+  if (this.Seatsensor)
+    @LIN::SeatSensor_Dsp = 1;
+  else
+    @LIN::SeatSensor_Dsp = 0;
+}
+
+on timer t_Seatheating
+{
+  @LIN::Seatheating = 1;
+  $Heating = @LIN::Seatheating;
+}
+
+on sysVar LIN::Head_down
+{
+  $Seatsetting::Head_down = @this;
+}
+
+on sysVar LIN::Head_up
+{
+  $Seatsetting::Head_up = @this;
+}
+
+on sysVar LIN::Seat_back
+{
+  $Seatsetting::Seat_back = @this;
+}
+
+on sysVar LIN::Seat_down
+{
+  $Seatsetting::Seat_down = @this;
+}
+
+on sysVar LIN::Seat_forward
+{
+  $Seatsetting::Seat_forward = @this;
+}
+
+on sysVar LIN::Seat_up
+{
+  $Seatsetting::Seat_up = @this;
+}
+
+on sysVar LIN::Seatback_back
+{
+  $Seatsetting::Seatback_back = @this;
+}
+
+on sysVar LIN::Seatback_forward
+{
+  $Seatsetting::Seatback_forward = @this;
+}
+
+on sysVar LIN::Seatheating
+{
+  $Heating = @this;
+
+  if(@this == 2)
+  {
+    cancelTimer(t_Seatheating);
+    setTimer(t_Seatheating, 100);
+  }
+}
+
+on message Ignition
+{
+  $GW_Ignition::PowerOn = $Ignition::PowerOn; // route CAN signal to LIN bus
+
+  // *************************************************** //
+  // error stimulation
+  // *************************************************** //
+  if(gIgnitionErrorStatus == kACTIVE)
+  {
+    $GW_Ignition::PowerOn = (1 == $GW_Ignition::PowerOn) ? 0 : 1; // toggle the value
+  }
+  // *************************************************** //
+  // end of error stimulation
+  // *************************************************** //
+}
+
+on timer tResetIgnitionError
+{
+  @CAN::SetReqRespErrorPowerOn  = kINACTIVE; 
+  gIgnitionErrorStatus        = kINACTIVE;
+}
+
+on timer tResetDriverIDError
+{
+  gDriverErrorStatus        = kINACTIVE;
+  @CAN::SetReqRespErrorDriver = kINACTIVE;
+}
+
+on sysvar CAN::SetSlowScheduleError
+{
+  if(@CAN::SetSlowScheduleError == kACTIVE)
+  {
+    linChangeSchedTable(kERROR_TABLE_2);
+    cancelTimer(tResetSlowScheduleError);
+    setTimer(tResetSlowScheduleError,gDistErrorActTime);
+  }
+}
+
+on timer tResetSlowScheduleError
+{    
+  @CAN::SetSlowScheduleError = kINACTIVE;
+  linChangeSchedTable(kTABLE_0);
+}
+
+on sysvar CAN::SetCorruptScheduleError
+{
+  if(@CAN::SetCorruptScheduleError == kACTIVE)
+  {
+    linChangeSchedTable(kERROR_TABLE_1);
+    cancelTimer(tResetCorruptScheduleError);
+    setTimer(tResetCorruptScheduleError,gDistErrorActTime);
+  }
+}
+
+on timer tResetCorruptScheduleError
+{
+  @CAN::SetCorruptScheduleError = kINACTIVE;
+  linChangeSchedTable(kTABLE_0);
+}
+
+on sysvar CAN::SetReqRespErrorPowerOn
+{
+  if (@this == kACTIVE)
+  {
+    gIgnitionErrorStatus = kACTIVE;
+
+    // activate timer to stop the error stimulation 
+    cancelTimer(tResetIgnitionError);
+    SetTimer(tResetIgnitionError,gRespReqErrorActTime);
+  }
+}
+
+on sysvar CAN::SetReqRespErrorDriver
+{
+  if (@this == kACTIVE)
+  {
+    gDriverErrorStatus = kACTIVE;
+
+    // activate timer to stop the error stimulation 
+    cancelTimer(tResetDriverIDError);
+    SetTimer(tResetDriverIDError,gRespReqErrorActTime);
+  }
+}
+

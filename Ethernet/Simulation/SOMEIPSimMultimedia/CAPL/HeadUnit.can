@@ -1,0 +1,1607 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "Avb.cin"
+  #include "Listener.cin"
+    
+  #include "ServiceCD_Player.cin"  
+}
+
+//
+// Simulation of a head unit.
+//
+//
+// Abbreviations:
+// ADP - AudioDiskPlayer
+// NAV - Navigation
+//
+variables
+{
+  // Property shadow: VectorSystemManager.CurrentAudioSource
+  // currently active sound source
+  const byte kSourceIdNone        = 0;
+  const byte kSourceIdDiscPlayer  = 1;
+  const byte kSourceIdTuner       = 2;
+  const byte kSourceIdTv          = 3;
+  byte       gCurrentAudioSource  = kSourceIdNone;
+
+  // Control topic
+  const byte kTopicNone           = 0;
+  const byte kTopicDiscPlayer     = 1;
+  const byte kTopicTuner          = 2;
+  const byte kTopicTv             = 3;
+  const byte kTopicNavi           = 4;
+  byte       gCurrentTopic        = kTopicNone;
+
+  byte       gDisplayMap          = 1;
+
+  // Automatic start of audio source after initialisation
+  msTimer    tAudioAutoStart;
+  const long kAudioAutoStartDelay = 700; // in ms
+  byte       gLastActiveAudioSource = kSourceIdDiscPlayer; // will be activated on next start
+
+  // Navigation (the Navigation FBlock is not implemented in detail)
+  char       gRouteFrom[100] = "Vector Informatik; Stuttgart";
+  char       gRouteTo[100]   = "Schloss Solitude; Stuttgart";
+  const long kRouteMaxPos = 18;
+  const double kRouteDistance = 6.12;
+  long       gRouteDirection = 1;
+
+  // AudioDiskPlayer
+
+  // AudioDiskPlayer properties of interest
+  byte  gShadowProp_ADP_DeckStatus;
+  dword gShadowProp_ADP_TrackTime;
+  byte  gShadowProp_ADP_TrackPosition;
+  byte  gShadowProp_ADP_MagazineStatus;
+  byte  gShadowProp_ADP_ActiveDisk;
+  char  gShadowProp_ADP_MediaInfo_MediaTitle[6][50];
+  byte  gShadowProp_ADP_MediaInfo_MediaType[6];
+  char  gShadowProp_ADP_AudioDiskInfo_AudioTitle_Current[50];
+
+  // Navigation
+  long  gShadowProp_Nav_CurrentPosition;
+  
+  const int kUdpClientPort = 30490;
+
+	LONG gBusContext;
+  
+  dword gAppEndpointHandle;  
+  
+  const int kIndexCD_Player = 0;
+  const int kIndexNavigation = 1;
+  const int kIndexTV_Receiver = 2;  
+  
+  const int kIndexCD_PlayerAudioDiskInfo = 0;
+  const int kIndexCD_PlayerActiveDisk = 1;
+  const int kIndexCD_PlayerDeckStatus = 2;
+  const int kIndexCD_PlayerMagazineStatus = 3;
+  const int kIndexCD_PlayerMediaInfo = 4;
+  const int kIndexCD_PlayerPeakLevel = 5;
+  const int kIndexCD_PlayerTimePosition = 6;
+  const int kIndexCD_PlayerTrackPosition = 7;
+  const int kIndexCD_PlayerIncrementTrack = 8;
+  const int kIndexCD_PlayerDecrementTrack = 9;
+  const int kIndexCD_PlayerIncrementDisc = 10;
+  const int kIndexCD_PlayerDecrementDisc = 11;
+  const int kIndexCD_PlayerMax = 12;
+  
+  dword gMethodHandle[kIndexCD_PlayerMax][3];  
+  
+  dword gEventConsumerHandle;
+  
+  dword gMethodHandleTV_ReceiverStart,
+        gMethodHandleTV_ReceiverStop;
+  
+  dword gListenerHandle;
+  
+  long gCDPlayerMinorVersion;
+  
+  byte gOn;
+}
+
+on sysvar HU::Button_Play
+{
+  dword ret;
+  
+  if(@this == 0)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+
+  switch (gCurrentAudioSource)
+  {
+    case kSourceIdDiscPlayer:
+    {
+      // set mode to 'Play'      
+      ret = SomeIpSetValueDword(gMethodHandle[kIndexCD_PlayerDeckStatus][2], "", kDeckStatusPlay);
+            
+      if (ret != 0)
+      {
+        write("Error: HeadUnit, SomeIpSetValueDword returned %d", ret);
+        Stop();
+        return;
+      }
+      
+      ret = SomeIpCallMethod(gMethodHandle[kIndexCD_PlayerDeckStatus][2]);
+      
+      if (ret != 0)
+      {
+        write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+        return;
+      }
+      
+      break;
+    }
+    default:
+    case kSourceIdTv:
+    {     
+      if (gListenerHandle != kInvalidHandle)
+      {
+        break;
+      }
+      
+      ret = SomeIpCallMethod(gMethodHandleTV_ReceiverStart);
+      
+      if (ret != 0)
+      {
+        write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+        return;
+      }
+      
+      StartListener();
+      break;
+    }
+     
+  }
+}
+
+on sysvar HU::Button_Stop
+{
+  dword ret;
+  
+  if (@this == 0)
+  {
+    return;
+  }
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+  
+  switch (gCurrentAudioSource) 
+  {
+    case kSourceIdDiscPlayer:
+    {
+      // set mode to 'Stop'
+      ret = SomeIpSetValueDword(gMethodHandle[kIndexCD_PlayerDeckStatus][2], "", kDeckStatusStop);
+                  
+      if (ret != 0)
+      {
+        write("Error: HeadUnit, SomeIpSetValueDword returned %d", ret);
+        Stop();
+        return;
+      }
+      
+      ret = SomeIpCallMethod(gMethodHandle[kIndexCD_PlayerDeckStatus][2]);
+      
+      if (ret != 0)
+      {
+        write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+        return;
+      }
+    
+      break;
+    }
+    case kSourceIdTv:
+    default:
+    {
+      break;
+    }
+  }
+}
+
+on sysvar HU::Button_MagLoad
+{
+  dword ret;
+  
+  if(@this == 0)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+
+  ret = SomeIpSetValueDword(gMethodHandle[kIndexCD_PlayerDeckStatus][2], "", kDeckStatusLoad);
+         
+  if (ret != 0)
+  {
+    write("Error: HeadUnit, SomeIpSetValueDword returned %d", ret);
+    Stop();
+    return;
+  }
+  
+  ret = SomeIpCallMethod(gMethodHandle[kIndexCD_PlayerDeckStatus][2]);
+
+  if (ret != 0)
+  {
+    write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+    return;
+  }
+}
+
+on sysvar HU::Button_MagUnload
+{
+  dword ret;
+  
+  if(@this == 0)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+
+  ret = SomeIpSetValueDword(gMethodHandle[kIndexCD_PlayerDeckStatus][2], "", kDeckStatusUnload);
+          
+  if (ret != 0)
+  {
+    write("Error: HeadUnit, SomeIpSetValueDword returned %d", ret);
+    Stop();
+    return;
+  }
+  
+  ret = SomeIpCallMethod(gMethodHandle[kIndexCD_PlayerDeckStatus][2]);
+
+  if (ret != 0)
+  {
+    write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+    return;
+  }
+}
+
+on sysvar HU::Button_VolumeInc
+{
+  if(@this == 0)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+    
+  if(gCurrentAudioSource == kSourceIdNone)
+    return;
+
+  // increment volume by 1
+  if (@sysvar::HU::Display_Volume != 255)
+  {
+    @sysvar::HU::Display_Volume += 1;
+  }
+}
+
+on sysvar HU::Button_VolumeDec
+{
+  if(@this == 0)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+  
+  if(gCurrentAudioSource == kSourceIdNone)
+    return;
+
+  // decrement volume by 1
+  if (@sysvar::HU::Display_Volume != 0)
+  {
+    @sysvar::HU::Display_Volume -= 1;
+  }
+}
+
+// initializes the multi media system
+on sysvar HU::Button_OnOff
+{ 
+  if(@this == 1)
+    return;
+
+  if(gOn)
+  {
+    AppShutdown();
+  }
+  else
+  {
+    AppInit();
+  }
+}
+
+on sysvar HU::Button_SkipFwdTrack
+{
+  dword ret;
+  
+  if(@this == 0)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+    return;
+  
+  ret = SomeIpSetValueDword(gMethodHandle[kIndexCD_PlayerIncrementTrack][0], kCDPlayerParameterNSteps, 1);
+              
+  if (ret != 0)
+  {
+    write("Error: HeadUnit, SomeIpSetValueDword returned %d", ret);
+    Stop();
+    return;
+  }
+      
+  ret = SomeIpCallMethod(gMethodHandle[kIndexCD_PlayerIncrementTrack][0]);
+  
+  if (ret != 0)
+  {
+    write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+
+    return;
+  }
+}
+
+on sysvar HU::Button_SkipBckTrack
+{
+  dword ret;
+  
+  if(@this == 0)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+    return;
+
+  ret = SomeIpSetValueDword(gMethodHandle[kIndexCD_PlayerDecrementTrack][0], kCDPlayerParameterNSteps, 1);
+              
+  if (ret != 0)
+  {
+    write("Error: HeadUnit, SomeIpSetValueDword returned %d", ret);
+    Stop();
+    return;
+  }
+  
+  ret = SomeIpCallMethod(gMethodHandle[kIndexCD_PlayerDecrementTrack][0]);
+  
+  if (ret != 0)
+  {
+    write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+    return;
+  }
+}
+
+on sysvar HU::Button_DiscPlayer
+{
+  byte newSourceId;
+  
+  if(!@this)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+
+  if((gShadowProp_ADP_MagazineStatus == 1))
+  {
+    // activate source disc player
+    newSourceId = kSourceIdDiscPlayer;
+    SwitchAudioSource(newSourceId);
+  }
+  else
+  {
+    // deactivate current source
+    newSourceId = kSourceIdNone;
+    SwitchAudioSource(newSourceId);
+  }
+
+  SetCurrentTopic(kTopicDiscPlayer);
+  
+  CurrentAudioSourceChanged(newSourceId);
+}
+
+ClearPeakLevel()
+{
+  @sysvar::HU::Display_PeakLevelMaxLeft = 0;
+  @sysvar::HU::Display_PeakLevelMaxRight = 0;
+  @sysvar::HU::Display_PeakLevelLeft = 0;
+  @sysvar::HU::Display_PeakLevelRight = 0;
+}
+
+on sysvar HU::Button_Left1
+{
+  if(@this == 0)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+  
+  ButtonLeft(1);
+}
+
+on sysvar HU::Button_Left2
+{
+  if(@this == 0)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+  
+  ButtonLeft(2);
+}
+
+on sysvar HU::Button_Left3
+{
+  if(@this == 0)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+  
+  ButtonLeft(3);
+}
+
+on sysvar HU::Button_Left4
+{
+  if(@this == 0)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+  
+  ButtonLeft(4);
+}
+
+on sysvar HU::Button_Left5
+{
+  if(@this == 0)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+  
+  ButtonLeft(5);
+}
+
+on sysvar HU::Button_Left6
+{
+  if(@this == 0)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+  
+  ButtonLeft(6);
+}
+
+void OnAvbListen(dword listenerHandle, dword result)
+{  
+  if (result != kAvbOK)
+  {
+    WriteErrorAndStop(result, "OnAvbListen");
+    return;
+  }
+  
+  Listener_Accept(listenerHandle);
+}
+
+void AppInit()
+{  
+  dword ret;
+	
+  char strMH_FileAbs[400];
+  char strMH_FileName[400];
+
+  cancelTimer(tAudioAutoStart);
+  setTimer(tAudioAutoStart, kAudioAutoStartDelay);
+	
+  // Start IL manually
+  SomeIpILControlStart();
+  
+	if (SomeIpRegisterCallback(SomeIpGetConsumedObjectHandle("MediaInfo"), "OnMediaInfoNotify") > 0)
+  {
+    write("Error: MediaInfo, SomeIpRegisterCallback fails, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;
+  }  
+    
+	if (SomeIpRegisterCallback(SomeIpGetConsumedObjectHandle("Position"), "OnPositionNotify") > 0)
+  {
+    write("Error: Position, SomeIpRegisterCallback fails, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;
+  }
+  
+  gMethodHandle[kIndexCD_PlayerAudioDiskInfo][1] = SomeIpGetConsumedObjectHandle("get_AudioDiskInfo");
+  
+  if (SomeIpRegisterCallback(gMethodHandle[kIndexCD_PlayerAudioDiskInfo][1], "OnAudioDiskInfoGet") > 0)
+  {
+    write("Error: AudioDiskInfo, SomeIpRegisterCallback fails, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;
+  }
+  
+  gMethodHandle[kIndexCD_PlayerActiveDisk][2] = SomeIpGetConsumedObjectHandle("set_ActiveDisk");
+  gMethodHandle[kIndexCD_PlayerDeckStatus][2] = SomeIpGetConsumedObjectHandle("set_DeckStatus");
+  gMethodHandle[kIndexCD_PlayerIncrementTrack][0] = SomeIpGetConsumedObjectHandle("IncrementTrack");
+  gMethodHandle[kIndexCD_PlayerDecrementTrack][0] = SomeIpGetConsumedObjectHandle("DecrementTrack");
+  gMethodHandle[kIndexCD_PlayerIncrementDisc][0] = SomeIpGetConsumedObjectHandle("IncrementDisc");
+  gMethodHandle[kIndexCD_PlayerDecrementDisc][0] = SomeIpGetConsumedObjectHandle("DecrementDisc");
+  gMethodHandleTV_ReceiverStart = SomeIpGetConsumedObjectHandle("Start");  
+  gMethodHandleTV_ReceiverStop = SomeIpGetConsumedObjectHandle("Stop");
+  
+  ret = SomeIpSetProperty(SomeIpGetConsumedObjectHandle("CDPlayer"), "MinorVersion", gCDPlayerMinorVersion);
+	  
+  if (ret != 0)
+  {
+    write("Error: AudioDiskPlayer, SomeIpSetProperty[MinorVersion] returned %d)", ret);
+    Stop();
+    return;
+  }
+  
+  Display_Map();
+  
+  gOn = 1;
+}
+
+void AppExit()
+{
+  // Called on final exit of the application.
+
+  SetCurrentTopic(kTopicNone);
+  @sysvar::HU::Button_LowTraffic = 0;
+  @sysvar::HU::Display_Map = 0;
+}
+
+void AppShutdown()
+{
+  dword ret;
+
+  gOn = 0;
+
+  // Called for a regular shut down of the application.
+  cancelTimer(tAudioAutoStart);
+  
+  SetCurrentTopic(kTopicNone);
+  @sysvar::HU::Display_Map = 2;
+
+  // deactivate audio source
+  SwitchAudioSource(kSourceIdNone);
+  
+  CurrentAudioSourceChanged(kSourceIdNone);
+  
+  // Stop the IL
+  SomeIpILControlStop();
+}
+
+void SwitchAudioSource(byte sourceID)
+{
+  dword ret;
+  // Activates a audio source.
+
+  if (gCurrentAudioSource == sourceID)
+  {
+    return; // nothing to do
+  }
+
+  // note: the application will be notified through 
+  // VectorSystemManager.CurrentAudioSource on completion.
+  if (gCurrentAudioSource == kSourceIdDiscPlayer)
+  {
+    ret = SomeIpSetValueDword(gMethodHandle[kIndexCD_PlayerDeckStatus][2], "", kDeckStatusPause);
+             
+    if (ret != 0)
+    {
+      write("Error: HeadUnit, SomeIpSetValueDword returned %d", ret);
+      Stop();
+      return;
+    }
+    
+    ret = SomeIpCallMethod(gMethodHandle[kIndexCD_PlayerDeckStatus][2]);
+
+    if (ret != 0)
+    {
+      write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+      return;
+    }
+  }
+  else if (gCurrentAudioSource == kSourceIdTv)
+  {
+    ret = SomeIpCallMethod(gMethodHandleTV_ReceiverStop);
+      
+    if (ret != 0)
+    {
+      write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+      return;
+    }
+    
+    StopListener();
+  }
+  
+  if (sourceID == kSourceIdDiscPlayer && gShadowProp_ADP_DeckStatus == kDeckStatusPause)
+  {
+    ret = SomeIpSetValueDword(gMethodHandle[kIndexCD_PlayerDeckStatus][2], "", kDeckStatusPlay);
+             
+    if (ret != 0)
+    {
+      write("Error: HeadUnit, SomeIpSetValueDword returned %d", ret);
+      Stop();
+      return;
+    }
+    
+    ret = SomeIpCallMethod(gMethodHandle[kIndexCD_PlayerDeckStatus][2]);
+
+    if (ret != 0)
+    {
+      write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+      return;
+    }
+  }
+  else if (sourceID == kSourceIdTv)
+  {
+    ret = SomeIpCallMethod(gMethodHandleTV_ReceiverStart);
+      
+    if (ret != 0)
+    {
+      write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+      return;
+    }
+    
+    StartListener();
+  }
+}
+
+on sysvar HU::Error_InterfaceVersion
+{  
+  dword ret;
+  
+  gCDPlayerMinorVersion = @this == 0 ? 0 : 1;
+    
+  ret = SomeIpSetProperty(SomeIpGetConsumedObjectHandle("CDPlayer"), "MinorVersion", gCDPlayerMinorVersion);
+	  
+  if (ret != 0)
+  {
+    write("Error: AudioDiskPlayer, SomeIpSetProperty[MinorVersion] returned %d)", ret);
+    Stop();
+    return;
+  }
+}
+
+on sysvar HU::Error_WrongCommand
+{
+  dword ret;
+  
+  ret = SomeIpSetValueDword(gMethodHandle[kIndexCD_PlayerDeckStatus][2], "", 7); // send invalid deck status
+             
+  if (ret != 0)
+  {
+    write("Error: HeadUnit, SomeIpSetValueDword returned %d", ret);
+    Stop();
+    return;
+  }
+  
+  ret = SomeIpCallMethod(gMethodHandle[kIndexCD_PlayerDeckStatus][2]);
+
+  if (ret != 0)
+  {
+    write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+    return;
+  }
+}
+
+void OnMagazineStatusSet(dword fieldHandle, dword messageHandle)
+{
+}
+
+on sysvar HU::Error_NonExistingSetter
+{
+  dword methodHandle, ret;
+  char data[1];
+   
+  methodHandle = SomeIpCreateMethodCall(SomeIpGetConsumedObjectHandle("CDPlayer"), 41, "OnMagazineStatusSet");
+  
+  if (methodHandle == 0)
+  {
+    write("Error: HeadUnit, SomeIpCreateMethodCall returned 0, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;
+  }
+  
+  ret = SomeIpSetData(methodHandle, 0, data);
+  
+  if (ret != 0)
+  {
+    write("Error: HeadUnit, SomeIpSetData returned %d", ret);
+    Stop();
+    return;
+  }
+  
+  ret = SomeIpCallMethod(methodHandle);
+  
+  if (ret != 0)
+  {
+    write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+    Stop();
+    return;  
+  }
+}
+
+void CurrentAudioSourceChanged(byte sourceId)
+{
+  // Stores value of the shadowed property VectorSystemManager.CurrentAudioSource
+  // and updates the user interface
+
+  byte oldAudioSource, newTopic;
+
+  if(gCurrentAudioSource == sourceId)
+    return;
+
+  oldAudioSource = gCurrentAudioSource;
+
+  // store value of property
+  gCurrentAudioSource = sourceId;
+
+  // sound source has changed 
+  // visualize in user interface
+  switch(gCurrentAudioSource)
+  {
+    case kSourceIdDiscPlayer:
+      gLastActiveAudioSource = kSourceIdDiscPlayer;
+      if(gCurrentTopic == kTopicTuner)
+        newTopic = kTopicDiscPlayer;
+      else
+        newTopic = gCurrentTopic;
+      break;
+
+    case kSourceIdTuner:
+      gLastActiveAudioSource = kSourceIdTuner;
+      if(gCurrentTopic == kTopicDiscPlayer)
+        newTopic = kTopicTuner;
+      else
+        newTopic = gCurrentTopic;
+      break;
+          
+    case kSourceIdTv:                    
+      gLastActiveAudioSource = kSourceIdTv;
+      if(gCurrentTopic == kTopicDiscPlayer)
+        newTopic = kSourceIdTv;
+      else
+        newTopic = gCurrentTopic;
+      break;
+
+    default:
+      newTopic = gCurrentTopic;
+      break;
+  }
+
+  // refresh topic
+  SetCurrentTopic(newTopic);
+}
+
+on timer tAudioAutoStart
+{
+  byte newSourceId = 0xFF;
+  // Automatic start of the last active audio source.
+ 
+  if(gCurrentAudioSource != kSourceIdNone)
+    return;
+
+  newSourceId = gLastActiveAudioSource;
+  SwitchAudioSource(newSourceId);
+
+  if(gLastActiveAudioSource == kSourceIdDiscPlayer)
+    SetCurrentTopic(kTopicDiscPlayer);
+  else if(gLastActiveAudioSource == kSourceIdTuner)
+    SetCurrentTopic(kTopicTuner);
+  
+  if (newSourceId != 0xFF)
+  {
+    CurrentAudioSourceChanged(newSourceId);
+  }
+}
+
+Display_ADP_MediaInfo()
+{
+  // display meanings of left buttons on the left only if disc player is the source
+  char textNoDiscLeft[20] = "  - -";
+  char textNoDisc[20] = "- no disc -";
+    
+  if((gCurrentTopic != kTopicDiscPlayer) && (gCurrentTopic != kTopicNavi))
+    return;
+
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+  {
+    Display_ClearList();
+    return;
+  }
+  if(gShadowProp_ADP_MediaInfo_MediaType[0] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow1Left, "CD 1");
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow1Left, textNoDiscLeft);
+
+  if(gShadowProp_ADP_MediaInfo_MediaType[1] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow2Left, "CD 2");
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow2Left, textNoDiscLeft);
+
+  if(gShadowProp_ADP_MediaInfo_MediaType[2] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow3Left, "CD 3");
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow3Left, textNoDiscLeft);
+
+  if(gShadowProp_ADP_MediaInfo_MediaType[3] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow4Left, "CD 4");
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow4Left, textNoDiscLeft);
+
+  if(gShadowProp_ADP_MediaInfo_MediaType[4] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow5Left, "CD 5");
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow5Left, textNoDiscLeft);
+
+  if(gShadowProp_ADP_MediaInfo_MediaType[5] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow6Left, "CD 6");
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow6Left, textNoDiscLeft);
+
+  // show media titles only if map is not visible
+  if(gDisplayMap == 1)
+    return;
+
+  // display media titles only if disc player is the current topic
+  if(gCurrentTopic != kTopicDiscPlayer)
+    return;
+
+  if(gShadowProp_ADP_MediaInfo_MediaType[0] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow1, gShadowProp_ADP_MediaInfo_MediaTitle[0]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow1, textNoDisc);
+  if(gShadowProp_ADP_MediaInfo_MediaType[1] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow2, gShadowProp_ADP_MediaInfo_MediaTitle[1]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow2, textNoDisc);
+  if(gShadowProp_ADP_MediaInfo_MediaType[2] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow3, gShadowProp_ADP_MediaInfo_MediaTitle[2]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow3, textNoDisc);
+  if(gShadowProp_ADP_MediaInfo_MediaType[3] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow4, gShadowProp_ADP_MediaInfo_MediaTitle[3]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow4, textNoDisc);
+  if(gShadowProp_ADP_MediaInfo_MediaType[4] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow5, gShadowProp_ADP_MediaInfo_MediaTitle[4]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow5, textNoDisc);
+  if(gShadowProp_ADP_MediaInfo_MediaType[5] > 0)
+    sysSetVariableString(sysvar::HU::Display_ListRow6, gShadowProp_ADP_MediaInfo_MediaTitle[5]);
+  else
+    sysSetVariableString(sysvar::HU::Display_ListRow6, textNoDisc);
+}
+
+Display_ADP_Info()
+{
+  // Displays disc player infos
+
+  char buf[20];
+  long min,sec;
+
+  if((gCurrentTopic != kTopicDiscPlayer) && (gCurrentTopic != kTopicNavi))
+    return;
+
+  if(gCurrentAudioSource == kSourceIdDiscPlayer)
+  {
+    sysSetVariableString(sysvar::HU::Display_InfoHeader1,"Track");
+    sysSetVariableString(sysvar::HU::Display_InfoHeader2,"Time");
+    
+    // ActiveDisk
+    @sysvar::HU::Display_ListCursor = gShadowProp_ADP_ActiveDisk;
+
+    Display_ADP_TrackTime();
+
+    // display song title or magazine status
+    if(gShadowProp_ADP_MagazineStatus == 0)
+    {
+      sysSetVariableString(sysvar::HU::Display_TopText1, "<<< Please insert disc magazine >>>");
+    }
+    else
+    {
+      sysSetVariableString(sysvar::HU::Display_TopText1, gShadowProp_ADP_AudioDiskInfo_AudioTitle_Current);
+    }
+
+    Display_ADP_MediaInfo();
+  }
+  else
+  {
+    if(gShadowProp_ADP_MagazineStatus == 1)
+      sysSetVariableString(sysvar::HU::Display_TopText1, "");
+    else
+      sysSetVariableString(sysvar::HU::Display_TopText1, "<<< Please insert disc magazine >>>");
+
+    ClearPeakLevel();
+    Display_ClearList();
+    Display_ClearAudioInfo();
+  }
+}
+
+Display_ClearList()
+{
+  sysSetVariableString(sysvar::HU::Display_ListRow1, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow2, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow3, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow4, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow5, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow6, "");
+}
+
+SetCurrentTopic(byte newTopic)
+{
+  dword ret;
+  
+  // Sets topic for the display.
+
+  if(newTopic != gCurrentTopic)
+  {
+    @sysvar::HU::Display_DiscPlayer = newTopic == kTopicDiscPlayer;
+    @sysvar::HU::Display_Tuner = newTopic == kTopicTuner;
+    @sysvar::HU::Display_Tv = newTopic == kSourceIdTv;
+    @sysvar::HU::Display_Navi = newTopic == kTopicNavi;
+    
+    //@sysvar::TV::PlayMode = 0;
+  }
+
+  gCurrentTopic = newTopic;
+  
+  // update display
+  switch(gCurrentTopic)
+  {
+    case kTopicDiscPlayer:
+      Display_ADP_Info();
+      break;
+
+    case kTopicTuner:
+      break;
+
+    case kTopicTv:
+      //@sysvar::TV::PlayMode = 1;
+      break;
+
+    case kTopicNavi:
+      Display_Nav_Info();
+      break;
+
+    default:
+      @sysvar::HU::Display_Waypoint = 0;
+      sysSetVariableString(sysvar::HU::Display_TopText1, "");
+      Display_ClearAudioInfo();
+      Display_ClearList();
+      break;
+  }
+
+  ShowHide_Controls();
+}
+
+void StartListener()
+{
+  dword ret;
+  
+  ret = Listener_Start(
+    "OnAvbListen",
+    gListenerHandle
+  );
+  
+  if (StopIfError(ret, "Listener_Start") != 0)
+  {
+    return;
+  }
+}
+
+void StopListener()
+{
+  dword ret;
+  
+  ret = Listener_Stop(gListenerHandle);
+  
+  if (StopIfError(ret, "Listener_Stop") != 0)
+  {
+    return;
+  }
+  
+  gListenerHandle = kInvalidHandle;  
+}
+
+on sysvar HU::Button_Navi
+{
+  if(!@this)
+    return;
+
+  if (gOn == 0)
+  {
+    return;
+  }
+  
+  SetCurrentTopic(kTopicNavi);
+}
+
+on sysvar HU::Button_Tv
+{
+  byte newSourceId;
+  
+  if(!@this)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+
+  // activate source tuner
+  newSourceId = kSourceIdTv;
+  SwitchAudioSource(newSourceId);
+
+  SetCurrentTopic(kTopicTv);
+  
+  CurrentAudioSourceChanged(newSourceId);
+}
+
+on sysvar HU::Button_Map
+{
+  if(!@this)
+    return;
+  
+  if (gOn == 0)
+  {
+    return;
+  }
+  
+  Display_Map();
+}
+
+Display_ADP_TrackTime()
+{
+  // Displays disc player infos
+
+  char buf[20];
+  long min,sec;
+
+  if((gCurrentTopic != kTopicDiscPlayer) && (gCurrentTopic != kTopicNavi))
+    return;
+
+  if(gCurrentAudioSource == kSourceIdDiscPlayer)
+  {
+    // Track
+    snprintf(buf, elcount(buf), "%d", gShadowProp_ADP_TrackPosition);
+    sysSetVariableString(sysvar::HU::Display_InfoText1, buf);
+
+    // TrackTime
+    sec = gShadowProp_ADP_TrackTime / 1000;
+    min = sec / 60;
+    sec = sec - (min * 60);
+    snprintf(buf,20,"%02d:%02d",min,sec);
+    sysSetVariableString(sysvar::HU::Display_InfoText2, buf);
+  }
+}
+
+on sysvar HU::Button_Info
+{
+  if(!@this)
+    return;
+
+  if (gOn == 0)
+  {
+    return;
+  }
+  
+  //if(gAppPhase == kAppOn)
+  {
+    Display_Info();
+  }
+}
+
+Display_Nav_Position()
+{
+  char buf[100];
+  double distance;
+
+  if(gDisplayMap == 1)
+  {
+    @sysvar::HU::Display_Waypoint = gShadowProp_Nav_CurrentPosition; 
+  }
+  else
+  {
+    @sysvar::HU::Display_Waypoint = 0; 
+  }
+
+  if((gCurrentTopic == kTopicNavi))
+  {
+    // do some distance calculations
+    if((gShadowProp_Nav_CurrentPosition == 0) || (gShadowProp_Nav_CurrentPosition == kRouteMaxPos))
+      distance = 0;
+    else
+    {
+      if(gRouteDirection == 1)
+        distance = kRouteDistance - (kRouteDistance / (kRouteMaxPos + 1)) * gShadowProp_Nav_CurrentPosition;
+      else
+        distance = (kRouteDistance / (kRouteMaxPos + 1)) * gShadowProp_Nav_CurrentPosition;
+    }
+    if(gCurrentAudioSource == kSourceIdNone)
+    {
+      snprintf(buf, elcount(buf), "%5.2f km", distance);
+      sysSetVariableString(sysvar::HU::Display_TopText1, buf);
+    }
+  }
+}
+
+Display_Map()
+{
+  gDisplayMap = 1;
+  @sysvar::HU::Display_Map = 1;
+  Display_ClearList();
+  Display_Nav_Position();
+  
+  // refresh display
+  SetCurrentTopic(gCurrentTopic);
+}
+
+Display_Info()
+{
+  gDisplayMap = 0;
+  @sysvar::HU::Display_Map = 0;
+  Display_Nav_Position();
+  
+  // refresh display
+  SetCurrentTopic(gCurrentTopic);
+}
+
+ShowHide_Controls()
+{
+  long showTV, showInfo, showMap;
+  
+  showTV = (gCurrentTopic == kTopicTv);
+  showInfo = !gDisplayMap && !showTV;
+  showMap = gDisplayMap && !showTV;
+
+  
+  // map
+	setControlVisibility("Head Unit", "SwitchControlBSI1", showMap);
+  setControlVisibility("Head Unit", "SwitchControlBSI2", showMap);
+  
+  // text (center)
+  setControlVisibility("Head Unit", "TextBoxControl47", showInfo);
+  setControlVisibility("Head Unit", "TextBoxControl48", showInfo);
+  setControlVisibility("Head Unit", "TextBoxControl49", showInfo);
+  setControlVisibility("Head Unit", "TextBoxControl50", showInfo);
+  setControlVisibility("Head Unit", "TextBoxControl51", showInfo);
+  setControlVisibility("Head Unit", "TextBoxControl52", showInfo);
+  
+  // yellow arrows (left)
+  setControlVisibility("Head Unit", "SwitchControlBSI6", !showTV);
+  
+  // text (left)
+  setControlVisibility("Head Unit", "TextBoxControl15", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl16", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl17", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl18", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl19", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl20", !showTV);
+  
+  // text (right)
+  setControlVisibility("Head Unit", "TextBoxControl22", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl23", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl24", !showTV);
+  setControlVisibility("Head Unit", "TextBoxControl25", !showTV);
+  
+  // text (bottom)
+  setControlVisibility("Head Unit", "TextBoxControl21", !showTV);
+  
+  // Volume Peak level (right))
+  setControlVisibility("Head Unit", "SysVar:_HU_Display_PeakLevelLeft", !showTV);
+  setControlVisibility("Head Unit", "SysVar:_HU_Display_PeakLevelRight", !showTV);
+  setControlVisibility("Head Unit", "SysVar:_HU_Display_PeakLevelMaxLeft", !showTV);
+  setControlVisibility("Head Unit", "SysVar:_HU_Display_PeakLevelMaxRight", !showTV);
+
+  setControlVisibility("Head Unit", "Media Player", showTV); 
+}
+
+Display_Nav_Info()
+{
+  char buf[100];
+
+  if(gCurrentTopic != kTopicNavi)
+    return;
+    
+                                     
+  setControlVisibility("Head Unit", "SwitchControlBSI1", 1);
+  setControlVisibility("Head Unit", "SwitchControlBSI2", 1);
+  
+  setControlVisibility("Head Unit", "Media Player", 0);
+  
+  setControlVisibility("Head Unit", "TextBoxControl47", 0);
+  setControlVisibility("Head Unit", "TextBoxControl48", 0);
+  setControlVisibility("Head Unit", "TextBoxControl49", 0);
+  setControlVisibility("Head Unit", "TextBoxControl50", 0);
+  setControlVisibility("Head Unit", "TextBoxControl51", 0);
+  setControlVisibility("Head Unit", "TextBoxControl52", 0);
+
+
+  if(gDisplayMap == 0)
+  {
+    snprintf(buf, elcount(buf), "Total distance: %5.2f km", kRouteDistance);
+    sysSetVariableString(sysvar::HU::Display_ListRow1, "");
+    sysSetVariableString(sysvar::HU::Display_ListRow2, "Route information:");
+    sysSetVariableString(sysvar::HU::Display_ListRow3, gRouteFrom);
+    sysSetVariableString(sysvar::HU::Display_ListRow4, "to");
+    sysSetVariableString(sysvar::HU::Display_ListRow5, gRouteTo);
+    sysSetVariableString(sysvar::HU::Display_ListRow6, buf);
+  }
+}
+
+Display_ClearAudioInfo()
+{
+  @sysvar::HU::Display_ListCursor = 0;
+  sysSetVariableString(sysvar::HU::Display_ListRow1Left, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow2Left, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow3Left, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow4Left, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow5Left, "");
+  sysSetVariableString(sysvar::HU::Display_ListRow6Left, "");
+  sysSetVariableString(sysvar::HU::Display_InfoHeader1, "");
+  sysSetVariableString(sysvar::HU::Display_InfoHeader2, "");
+  sysSetVariableString(sysvar::HU::Display_InfoText1, "");
+  sysSetVariableString(sysvar::HU::Display_InfoText2, "");
+  ClearPeakLevel();
+  @sysvar::HU::Display_Volume = 0;
+}
+
+on sysvar HU::Button_ImageGet
+{
+  char filepath[400];
+
+  if(!@this)
+    return;
+
+  if (gOn == 0)
+  {
+    return;
+  }
+  
+  sysGetVariableString(sysvar::HU::ImageFile, filepath, elCount(filepath));
+}
+
+on preStart
+{
+  // Prevent auto start
+  SomeIpILControlInit();
+}
+
+on start
+{     
+  AppInit();
+}
+
+on preStop
+{
+  AppExit();
+}
+
+void ButtonLeft(byte button)
+{
+  dword ret;
+
+  if (gCurrentAudioSource == kSourceIdDiscPlayer)
+  {
+    // load disc
+
+    ret = SomeIpSetValueDword(gMethodHandle[kIndexCD_PlayerActiveDisk][2], "", button);
+                
+    if (ret != 0)
+    {
+      write("Error: HeadUnit, SomeIpSetValueDword returned %d", ret);
+      Stop();
+      return;
+    }
+      
+    ret = SomeIpCallMethod(gMethodHandle[kIndexCD_PlayerActiveDisk][2]);
+    
+    if (ret != 0)
+    {
+      write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+      return;
+    }
+  }
+  else if (gCurrentAudioSource == kSourceIdTuner)
+  {
+  }
+}
+
+CreateFileName (char in[], char out[])
+{
+  long rc = -1;
+  long dotPos = -1;
+  char ext[200];
+  // search for the last dot
+  while(1)
+  {
+    rc = strstr_off(in, rc + 1, ".");
+    if(rc >= 0)
+      dotPos = rc;
+    else
+      break;
+  }
+  if(dotPos >= 0)
+  {
+    substr_cpy(ext, in, dotPos, -1, elcount(ext));
+    substr_cpy(out, in, 0, dotPos, elcount(out));
+    strncat(out, "_MHP", elcount(out));
+    strncat(out, ext, elcount(out));
+  }
+  else
+  {
+    strncpy(out, in, elcount(out));
+    strncat(out, "_MHP", elcount(out));
+  }
+}
+
+ExtractFileName (char in[], char out[])
+{
+  long rc = -1;
+  long slashPos = -1;
+  // search for the last dot
+  while(1)
+  {
+    rc = strstr_off(in, rc + 1, "\\");
+    if(rc >= 0)
+      slashPos = rc;
+    else
+      break;
+  }
+  if(slashPos >= 0)
+  {
+    substr_cpy(out, in, slashPos+1, -1, elcount(in));
+  }
+  else
+  {
+    strncpy(out, in, elcount(out));
+  }
+}
+
+void OnAudioDiskInfoGet(dword methodCallHandle, dword messageHandle)
+{
+  char str[20], val[2];
+     
+  if (gShadowProp_ADP_TrackPosition == 0)
+  {
+    return;
+  }
+  
+  strncpy(str, "[", elCount(str) - 1);
+  ltoa(gShadowProp_ADP_TrackPosition - 1, val, 10);
+  strncat(str, val, elCount(str) - 1);
+  strncat(str, "].", elCount(str) - 1);
+  strncat(str, kAudioDiskInfoAudioTitle, elCount(str) - 1);
+  
+  if (SomeIpGetValueString(messageHandle, str, 50, gShadowProp_ADP_AudioDiskInfo_AudioTitle_Current) == 0)
+  {
+    write("Error: HeadUnit, SomeIpGetValueString returned 0, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;
+  }
+  
+  write("Current: %s", gShadowProp_ADP_AudioDiskInfo_AudioTitle_Current);
+  
+  Display_ADP_Info();
+}
+
+on serviceSignal ActiveDisk
+{
+  dword ret;
+  
+  gShadowProp_ADP_ActiveDisk = this;
+
+  // clear current title 
+  strncpy(gShadowProp_ADP_AudioDiskInfo_AudioTitle_Current, "", 20);
+
+  // display
+  Display_ADP_Info();
+
+  // get current AudioTitle
+  if(gShadowProp_ADP_TrackPosition > 0 && gShadowProp_ADP_ActiveDisk > 0)
+  {
+    ret = SomeIpCallMethod(gMethodHandle[kIndexCD_PlayerAudioDiskInfo][1]);
+    
+    if (ret != 0)
+    {
+      write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+      Stop();
+      return;
+    }
+  }
+}
+
+on serviceSignal DeckStatus
+{
+  gShadowProp_ADP_DeckStatus = this;
+  
+  Display_ADP_Info();
+
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+    return;
+
+  ClearPeakLevel();
+}
+
+on serviceSignal MagazineStatus
+{
+  byte oldStatus;
+  oldStatus = gShadowProp_ADP_MagazineStatus;
+  
+  gShadowProp_ADP_MagazineStatus = this;
+
+  // magazine was just inserted and topic is disc player
+  if((gShadowProp_ADP_MagazineStatus == 1) && (oldStatus != 1) &&
+     (gCurrentTopic == kTopicDiscPlayer))
+  {
+    // activate source disc player
+    SwitchAudioSource(kSourceIdDiscPlayer);
+    SetCurrentTopic(kTopicDiscPlayer);
+  }
+  else
+  {
+    Display_ADP_Info();
+  }
+}
+
+void OnMediaInfoNotify(dword fieldHandle, dword messageHandle)
+{
+  // MediaInfo has been reported from player.
+  // Update shadowed property MediaInfo.
+  dword err, ret;
+  long i;
+  char str[20], val[2];
+
+  for(i = 0; i < 6; ++i)
+  {
+    strncpy(str, "[", elCount(str) - 1);
+    ltoa(i, val, 10);
+    strncat(str, val, elCount(str) - 1);
+    strncat(str, "].", elCount(str) - 1);
+    strncat(str, kMediaInfoMediaTitle, elCount(str) - 1);
+
+    err = SomeIpGetValueString(messageHandle, str, 50, gShadowProp_ADP_MediaInfo_MediaTitle[i]); 
+    
+    if (err == 0)
+    {
+      ret = SomeIpGetLastError();
+      
+      if (ret != 0)
+      {
+        write("Error: HeadUnit, SomeIpGetValueString returned 0, SomeIpGetLastError() = %d", ret);
+        Stop();
+        return;
+      }
+    }
+    
+    strncpy(str, "[", elCount(str) - 1);
+    ltoa(i, val, 10);
+    strncat(str, val, elCount(str) - 1);
+    strncat(str, "].", elCount(str) - 1);
+    strncat(str, kMediaInfoMediaType, elCount(str) - 1);
+    
+    err = SomeIpGetValueDword(messageHandle, str);
+   
+    if (err == 0)
+    {
+      ret = SomeIpGetLastError();
+      
+      if (ret != 0)
+      {
+        write("Error: HeadUnit, SomeIpGetValueDword returned 0, SomeIpGetLastError() = %d", ret);
+        Stop();
+        return;
+      }
+    }
+    
+    gShadowProp_ADP_MediaInfo_MediaType[i] = err;
+  }
+
+  Display_ADP_Info();
+}
+
+on serviceSignal CDPlayer::PeakLevel.levelLeft
+{
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+    return;
+  
+  if(this > @sysvar::HU::Display_PeakLevelLeft) 
+  {
+    @sysvar::HU::Display_PeakLevelMaxLeft = this;
+  }
+
+  @sysvar::HU::Display_PeakLevelLeft = this;  
+}
+
+on serviceSignal CDPlayer::PeakLevel.levelRight
+{
+  if(gCurrentAudioSource != kSourceIdDiscPlayer)
+    return;
+
+  if(this > @sysvar::HU::Display_PeakLevelRight)
+  {
+    @sysvar::HU::Display_PeakLevelMaxRight = this;
+  }
+  
+  @sysvar::HU::Display_PeakLevelRight = this; 
+}
+
+on serviceSignal MM::VECTOR::CDPlayer::TimePosition.trackTime
+{
+  gShadowProp_ADP_TrackTime = this;
+  
+  Display_ADP_TrackTime();
+}
+
+on serviceSignal TrackPosition
+{
+  dword ret;
+  
+  // store property value
+  gShadowProp_ADP_TrackPosition = this;
+  // clear current title 
+  strncpy(gShadowProp_ADP_AudioDiskInfo_AudioTitle_Current, "", 20);
+
+  // display
+  Display_ADP_Info();
+
+  // get current AudioTitle
+  if(gShadowProp_ADP_TrackPosition > 0 && gShadowProp_ADP_ActiveDisk > 0)
+  {
+    ret = SomeIpCallMethod(gMethodHandle[kIndexCD_PlayerAudioDiskInfo][1]);
+    
+    if (ret != 0)
+    {
+      write("Error: HeadUnit, SomeIpCallMethod returned %d", ret);
+      Stop();
+      return;
+    }
+  }
+}
+
+void OnPositionNotify(dword eventHandle, dword messageHandle)
+{
+  gShadowProp_Nav_CurrentPosition = gShadowProp_Nav_CurrentPosition + gRouteDirection;
+  if(gShadowProp_Nav_CurrentPosition >= kRouteMaxPos)
+    gRouteDirection = -1;
+  else if(gShadowProp_Nav_CurrentPosition <= 1)
+    gRouteDirection = 1;
+  
+  Display_Nav_Position();
+}

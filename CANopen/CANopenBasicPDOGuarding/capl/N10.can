@@ -1,0 +1,81 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "CANopenHelper.cin"
+}
+
+variables
+{
+  // ------------------------------------------------
+  // File information
+  // Copyright         : 2019, Vector Informatik GmbH
+  // ------------------------------------------------
+  
+  // Globals for "Display" device
+  BYTE gNodeId          = 10;
+  char gNodeLabel[32]   = "Display";
+  
+  sysvarInt * gRunLEDVar;
+  sysvarInt * gErrLEDVar;
+}
+
+on preStart
+{
+  gRunLEDVar = sysvar::GUIControls::Node10_State;
+  gErrLEDVar = sysvar::GUIControls::Node10ErrLed;
+}
+
+on start
+{
+  @sysvar::GUIControls::Node10_ID = gNodeId;
+  @sysvar::CANopen::CAN::Display::Control::Enabled = 1;
+}
+
+on sysvar sysvar::CANopen::CAN::Display::Control::CommunicationState
+{
+  CANopenUpdateState(@this);
+}
+
+ShutDownLights()
+{
+  @sysvar::GUIControls::Node10_State = 0;
+  @sysvar::GUIControls::Node10_ID = 0;
+}
+
+on sysVar GUIControls::DisplayConnected
+{
+  // write the actual state
+  if(@this == 1)
+  {
+    sysSetVariableString(sysvar::GUIControls::Display_CnxnState, "");
+  } // if
+  else
+  {
+    sysSetVariableString(sysvar::GUIControls::Display_CnxnState,"!! unplugged !!");
+  } // else
+  
+  if(@sysvar::GUIControls::MainSwitch == 0){
+    return;
+  } // if
+  
+  EnableDevice(@this);
+}
+
+void EnableDevice(byte enable)
+{
+  if(enable == 1)
+  {
+    @sysvar::CANopen::CAN::Display::Control::Enabled = 1;
+    @sysvar::GUIControls::Node10_ID = gNodeId;
+  }
+  else
+  {
+    @sysvar::CANopen::CAN::Display::Control::Enabled = 0;
+    ShutDownLights();
+  }
+}
+
+on sysVar GUIControls::MainSwitch
+{
+  EnableDevice(@sysvar::GUIControls::DisplayConnected == 1 && @this);
+}

@@ -1,0 +1,116 @@
+/*@!Encoding:1252*/
+variables
+{
+  // ------------------------------------------------
+  // File information
+  // Copyright         : 2017, Vector Informatik GmbH
+  // ------------------------------------------------
+
+  //Globals for "TTGateway" device
+  BYTE gNodeId          = 2;
+  char gNodeLabel[32]   = "TTGateway";
+  int  gStartNode       = 1;
+
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel         = kDbgInfo; // Set debug level for output to write window
+  
+  pg can2.PowerTakoffInfo PTO = {sa=77};
+  pg can2.EngineConfig    EC  = {sa=77};
+  pg can2.TSC1            TSC = {sa=77};
+  mstimer ptoTimer;
+  const word ptoTime = 500;
+}
+
+on start
+{
+  settimer(ptoTimer, ptoTime);
+}
+
+on preStart
+{
+  setWriteDbgLevel( gDbgLevel );
+}
+
+on sysvar CANopen::CANopen::TTGateway::Control::CommunicationState
+{
+  switch(@this)
+  {
+    case 0:
+      writeDbgLevel( kDbgInfo, "<%s> Changed state to 'Not active'", gNodeLabel );
+      break;
+    case 5:
+      writeDbgLevel( kDbgInfo, "<%s> Changed state to 'Operational'", gNodeLabel );
+      break;
+    case 127: 
+      writeDbgLevel( kDbgInfo, "<%s> Changed state to 'Preoperational'", gNodeLabel );
+      break;
+    default:  
+      writeDbgLevel( kDbgInfo, "<%s> Changed state", gNodeLabel );
+      break;
+  }
+}
+
+on pg EEC1
+{
+  @sysvar::CANopen::CANopen::TTGateway::EngineSpeed::EngineSpeed = this.EngineSpeed.phys;
+}
+
+on pg WheelSpeedInfo
+{
+  @sysvar::CANopen::CANopen::TTGateway::wheel_based_vehicle_speed::wheel_based_vehicle_speed_value = this.FrontAxleSpeed.phys;
+}
+
+on pg ETC2
+{
+  @sysvar::CANopen::CANopen::TTGateway::CurrentGear::CurrentGearValue = this.CurrentGear;
+}
+
+on pg Brakes
+{
+  @sysvar::CANopen::CANopen::TTGateway::ParkBrakeDemandValue::ParkBrakeDemandValue = this.ParkingBrakeActuator.phys;
+}
+
+on pg PowerTakoffInfo
+{
+  if(this.sa!=77)
+  {
+    @sysvar::CANopen::CANopen::TTGateway::PTOFeedBack::first_engine_mounted_PTO_feedback_Bit_1 = (this.PowerTakeoffSpeed.phys > 0) ? 1 : 0;
+  }
+}
+
+on sysvar CANopen::CANopen::TTGateway::ClutchPTOSwitch::first_clutch_dependent_PTO_switch_Bit_1
+{
+  PTO.PowerTakeoffSetSpeed.phys = @this==0? 0 : 100;
+}
+
+on timer ptoTimer
+{
+  setTimer(ptoTimer, ptoTime);
+  
+  output(PTO);
+}
+
+on sysvar CANopen::CANopen::TTGateway::ReqEngSpeedUpperLimit::requested_engine_speed_upper_limit_value
+{
+  EC.RqstedSpeedCtrlRangeUpperLimit.phys = @this;
+  output(EC);
+}
+
+on sysvar CANopen::CANopen::TTGateway::ReqEngSpeedLowerLimit::requested_engine_speed_lower_limit_value
+{
+  EC.RqstedSpeedCtrlRangeLowerLimit.phys = @this;
+  output(EC);
+}
+
+on sysvar CANopen::CANopen::TTGateway::ReqEngSpeed::requested_engine_speed_value
+{
+  TSC.RqstedSpeed_SpeedLimit.phys = @this;
+  TSC.OverrideCtrlModes = TSC.OverrideCtrlModes::SpeedControl;
+  output(TSC);
+}

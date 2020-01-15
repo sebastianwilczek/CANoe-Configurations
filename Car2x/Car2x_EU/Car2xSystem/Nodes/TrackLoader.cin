@@ -1,0 +1,451 @@
+/*@!Encoding:1252*/
+
+variables
+{
+  // Defines how many tracks can be loaded in the simulation
+  const int MAX_TRACKS = 10;
+
+  // Position data, part of Track data
+  struct PositionData
+  {
+    int   availableFlag;
+    float latitude;
+    float longitude;
+    float heading;
+    float speed;    
+    char  timeStamp[20];
+  };
+
+  // Track data, contains data for handling the GPS Logfile
+  struct TrackData
+  {
+    int   trackIsUsed;
+    int   trackIsActive;
+    char  filePath[50];
+    DWORD fileHandle;
+    byte  fileType; // 0: degree, 1: decimal
+
+    struct PositionData posData;
+  };
+  
+  // Array of TrackData structs 
+  struct TrackData gTrackDataList[MAX_TRACKS];
+  
+  msTimer timReadFile;
+}
+
+/********************************/
+// Called on simulation start
+/********************************/
+on start
+{
+  // Read from files every 100 ms
+  setTimerCyclic(timReadFile, 100);
+}
+
+/**********************************/
+// cyclic timer for reading files.
+// called every 100ms
+/**********************************/
+on timer timReadFile
+{
+  int i = 0;
+  
+  // read next line of all files
+  for(i = 0; i < MAX_TRACKS; i++)
+  {
+    if(gTrackDataList[i].trackIsActive != 0)
+    {
+      // Read the next line of the file
+      GPS_FileReadLine(i) ;
+    }
+  }
+}
+
+
+/********************************************************/
+// Adds a track file to the list
+// param filePath:  the path to the GPS Logfile
+//       fileType:  0: degree/minute
+//                  1: degree decimal
+// return:          id (handle to the current position in 
+//                  the trackData array
+/********************************************************/
+int API_SetFilePathLogFile(char filePath[], byte fileType)
+{
+  int id = -1;
+  
+  // Finds the first free place in the array
+  id = GetFirstFreeKey();
+  
+  if(id == -1)
+  {
+    write("gTrackDataList Error: No more free list elements!");
+  }
+  else
+  {
+    strncpy(gTrackDataList[id].filePath, filePath, elcount(gTrackDataList[id].filePath));
+    gTrackDataList[id].trackIsUsed = 1; // 0 = false, 1 = true
+  
+    // Open the file and save the handle
+    gTrackDataList[id].fileHandle = GPS_FileOpen(gTrackDataList[id].filePath);
+    gTrackDataList[id].fileType   = fileType;
+    
+    GPS_FileReadLine(id) ;
+  }
+  return id;
+}
+
+/****************************************************************/
+// call this function to start reading positions from 
+// the assigned file
+// param id:  vehicle id
+/****************************************************************/
+void API_StartReadingPositions(int id)
+{
+  gTrackDataList[id].trackIsActive = 1; // 0 = false, 1 = true
+}
+
+/****************************************************************/
+// call this function to stop reading positions from 
+// the assigned file
+// param id:  vehicle id
+/****************************************************************/
+void API_StopReadingPositions(int id)
+{
+  gTrackDataList[id].trackIsActive = 0; // 0 = false, 1 = true
+}
+
+/****************************************************************/
+// Get the current position element of track with the assigned id
+// param id:      vehicle id
+// param posData: current latitude, longitude, heading and speed
+/****************************************************************/
+int API_GetTrackData(int id, struct PositionData posData)
+{
+  if( (gTrackDataList[id].posData.latitude  == 0) &&
+      (gTrackDataList[id].posData.longitude == 0)    )
+  {
+    return 0; // invalid position
+  }
+  else
+  {
+    if(id != -1)
+    {
+      posData.latitude   = gTrackDataList[id].posData.latitude;
+      posData.longitude  = gTrackDataList[id].posData.longitude;
+      posData.heading    = gTrackDataList[id].posData.heading;
+      posData.speed      = gTrackDataList[id].posData.speed;
+    }
+  }
+  return 1; // positions ok
+}
+
+/****************************************************************/
+// reset the trackfile for the selected track
+// param id:      vehicle id
+/****************************************************************/
+int API_GPS_FileReset(int id)
+{
+  int ret ;
+  
+  ret = GPS_FileReset(gTrackDataList[id].fileHandle);
+  GPS_FileReadLine(id) ;
+  
+  return ret;
+}
+
+/****************************************************************/
+// Searches for the first free key/position in a array
+// return: First free position in the array
+/****************************************************************/
+int GetFirstFreeKey()
+{
+  int i;
+  for(i = 0; i < MAX_TRACKS; i++)
+  {
+    if(gTrackDataList[i].trackIsUsed == 0)
+    {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/****************************************************************/
+// Remove a track from the list by using the assigned id
+// param id: vehicle id
+/****************************************************************/
+void API_ReleaseTrack(int id)
+{
+  gTrackDataList[id].trackIsUsed = 0;
+}
+
+/****************************************************************/
+// read a line (position info) from GPS file (degrees decimal)
+//
+// the format of the GPS file (degrees decimal or degrees minute
+// second) can be selected in the track editor
+//
+// return: 1=line could be read, 0=end of file
+/****************************************************************/
+BYTE GPS_FileReadLine_DD (DWORD fileHandle, struct TrackData trackData)
+{
+  char buff[500];         // buffer to read line
+  long buffsize = 500;
+  char clineDesc[7];
+  char clatitude[11];
+  char clatSide[2];
+  int  degreeValueLati = 0;
+  char clongitude[11];
+  char clongSide[2];
+  int  degreeValueLong = 0;
+  char cspeed[10];
+  char cheading[10];
+  int i=0;
+  BYTE visible = 1;
+  BYTE visCounter = 0;
+  int pos,pos2;
+
+  pos=0;
+  pos2=0;
+
+  // read next position line
+  if (fileGetStringSZ (buff, buffsize, fileHandle) == 0)
+  {
+    GPS_FileReset(fileHandle);
+    if (fileGetStringSZ (buff, buffsize, fileHandle) == 0)
+      return 0 ;
+  }
+
+  {
+    /***************************************************/
+    // get the time stamp
+    pos=0;
+    pos = strstr_off(buff,pos,",") + 1;
+    pos2 = strstr_off(buff,pos,",");
+    
+    substr_cpy(trackData.posData.timeStamp, buff, pos, (pos2-pos), elcount(trackData.posData.timeStamp) );
+
+    // check if it is a GPRMC line
+    substr_cpy(clineDesc, buff, 0, 6, elcount(clineDesc) );
+    if (strncmp(clineDesc,"$GPRMC", elcount(clineDesc)) == 0)
+    {
+      /************************************************************/
+      // get latitude from line
+      pos=0;
+      for (i=0; i<2; i++)
+      {
+        pos = strstr_off(buff,pos,",") + 1;
+      }
+      pos2 = strstr_off(buff,pos-1,",");
+      
+      substr_cpy(clatitude, buff, pos, (pos2-pos), elcount(clatitude) );
+      
+      trackData.posData.latitude = atodbl(clatitude);
+      
+      
+      /************************************************************/
+      // get longitude from line
+      pos = 0;
+      for (i=0; i<3; i++)
+      {
+        pos = strstr_off(buff,pos,",") + 1;
+      }
+      pos2 = strstr_off(buff,pos-1,",");
+      substr_cpy(clongitude, buff, pos, (pos2-pos), elcount(clongitude) );
+      
+      trackData.posData.longitude = atodbl(clongitude);
+      
+      /************************************************************/
+      // get speed from line
+      pos = 0;
+      for (i=0; i<4; i++)
+      {
+        pos = strstr_off(buff,pos,",") + 1;
+      }
+      pos2 = strstr_off(buff,pos-1,",");
+      substr_cpy(cspeed, buff, pos, (pos2-pos), elcount(cspeed) );
+      trackData.posData.speed = atodbl(cspeed);
+
+      /************************************************************/
+      // heading
+      pos = 0;
+      for (i=0; i<5; i++)
+      {
+        pos = strstr_off(buff,pos,",") + 1;
+      }
+      pos2 = strstr_off(buff,pos-1,",");
+
+      substr_cpy(cheading, buff, pos, (pos2-pos), elcount(cheading) );
+      
+      trackData.posData.heading = atodbl(cheading);
+
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
+/**********************************************************/
+//
+// read a line (position info) from GPS file (degree minute second
+// return 1: line could be read
+// return 0: end of file
+//
+/**********************************************************/
+BYTE GPS_FileReadLine_DMS (DWORD /*in*/ fileHandle, struct TrackData /*out*/ trackData)
+{
+  char buff[500];         // buffer to read line
+  long buffsize = 500;
+  char clineDesc[7];
+  char clatitude[11];
+  char clatSide[2];
+  int  degreeValueLati = 0;
+  char clongitude[11];
+  char clongSide[2];
+  int  degreeValueLong = 0;
+  char cspeed[10];
+  char cheading[10];
+  int i=0;
+  BYTE visible = 1;
+  BYTE visCounter = 0;
+  int pos,pos2;
+
+  pos=0;
+  pos2=0;
+
+  // read next position line
+  if (fileGetStringSZ (buff, buffsize, fileHandle) == 0)
+  {
+    GPS_FileReset(fileHandle);
+    if (fileGetStringSZ (buff, buffsize, fileHandle) == 0)
+      return 0; // file end
+  }
+
+  {
+    /***************************************************/
+    // get the time stamp
+    pos=0;
+    pos = strstr_off(buff,pos,",") + 1;
+    substr_cpy(trackData.posData.timeStamp, buff, pos, 6, elcount(trackData.posData.timeStamp) );
+
+    // check if it is a GPRMC line
+    substr_cpy(clineDesc, buff, 0, 6, elcount(clineDesc) );
+    if (strncmp(clineDesc,"$GPRMC", elcount(clineDesc)) == 0)
+    {
+      /************************************************************/
+      // get latitude from line
+      pos=0;
+      for (i=0; i<3; i++)
+      {
+        pos = strstr_off(buff,pos,",") + 1;
+      }
+
+      substr_cpy(clatitude, buff, pos, 9, elcount(clatitude) );
+      trackData.posData.latitude    = atodbl(clatitude);
+
+      trackData.posData.latitude    = trackData.posData.latitude/100;
+      degreeValueLati               = trackData.posData.latitude;
+      trackData.posData.latitude    = trackData.posData.latitude - degreeValueLati;
+      trackData.posData.latitude    = trackData.posData.latitude / 60;
+      trackData.posData.latitude    = trackData.posData.latitude*100;
+      trackData.posData.latitude    = trackData.posData.latitude + degreeValueLati;
+
+      pos = strstr_off(buff,pos,",") + 1;
+      substr_cpy(clatSide, buff, pos, 1, elcount(clatSide) );
+
+      if (clatSide[0] != 'N') {
+        trackData.posData.latitude = trackData.posData.latitude * (-1);
+      }
+
+      /************************************************************/
+      // get longitude from line
+      pos = 0;
+      for (i=0; i<5; i++)
+      {
+        pos = strstr_off(buff,pos,",") + 1;
+      }
+      substr_cpy(clongitude, buff, pos, 10, elcount(clongitude) );
+      trackData.posData.longitude   = atodbl(clongitude);
+      trackData.posData.longitude   = trackData.posData.longitude/100;
+      degreeValueLong               = trackData.posData.longitude;
+      trackData.posData.longitude   = trackData.posData.longitude - degreeValueLong;
+      trackData.posData.longitude   = trackData.posData.longitude*1000;
+      trackData.posData.longitude   = trackData.posData.longitude / 60 / 10;
+      trackData.posData.longitude   = trackData.posData.longitude + degreeValueLong;
+
+      pos = strstr_off(buff,pos,",") + 1;
+      substr_cpy(clongSide, buff, pos, 1, elcount(clongSide) );
+
+      if (clongSide[0] != 'E') {
+        trackData.posData.longitude = trackData.posData.longitude * (-1);
+      }
+
+      /************************************************************/
+      // get speed from line
+      pos = 0;
+      for (i=0; i<7; i++)
+      {
+        pos = strstr_off(buff,pos,",") + 1;
+      }
+      pos2 = strstr_off(buff,pos,",");
+      substr_cpy(cspeed, buff, pos, (pos2-pos), elcount(cspeed) );
+      trackData.posData.speed = atodbl(cspeed) * 1.852;
+
+      /************************************************************/
+      // heading
+      pos = 0;
+      for (i=0; i<8; i++)
+      {
+        pos = strstr_off(buff,pos,",") + 1;
+      }
+      pos2 = strstr_off(buff,pos,",");
+
+      pos2 = pos2-pos;
+      if(pos2>=elcount(cheading)) pos2=elcount(cheading)-1;
+      substr_cpy(cheading, buff, pos, (pos2), elcount(cheading) );
+      trackData.posData.heading = atodbl(cheading);
+
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
+BYTE GPS_FileReadLine(DWORD index)
+{
+  if (gTrackDataList[index].fileType == 1)
+    return GPS_FileReadLine_DD (gTrackDataList[index].fileHandle, gTrackDataList[index]);
+  else
+    return GPS_FileReadLine_DMS(gTrackDataList[index].fileHandle, gTrackDataList[index]);
+}
+
+
+/**********************************************************/
+// Open the GPS file
+// param fileName: the path to the GPS Logfile
+// return:         the handle to the file
+/**********************************************************/
+DWORD GPS_FileOpen (char fileName[])
+{
+  DWORD retValue;
+
+  retValue = openFileRead (fileName,0);
+  if (retValue == 0)
+  {
+    write ("File open error: cannot open file %s",fileName);
+  }
+
+  return retValue;
+}
+
+/**********************************************************/
+// reset the line pos to 0
+/**********************************************************/
+int GPS_FileReset (DWORD fileHandle)
+{
+  return fileRewind(fileHandle);
+}

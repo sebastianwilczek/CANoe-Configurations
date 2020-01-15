@@ -1,0 +1,712 @@
+/*@!Encoding:1252*/
+/***************************************************************************************
+ * Demo- and Example-Programs
+ *
+ * Please note: The demo and example programs only show special aspects of the software.
+ * With regard to the fact that these programs are meant for demonstration purposes only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * Beta-Version
+ *
+ * These programs are fully operative programs. However, they are not thoroughly tested
+ * yet (beta-version). With regard to the fact that the programs are a beta-version only,
+ * Vector Informatik's liability shall be expressly excluded in cases of ordinary
+ * negligence, to the extent admissible by law or statute.
+ *
+ * DESCRIPTION:
+ *
+ * Demo test implementation of the 'OPEN Alliance Automotive Ethernet ECU Test
+ * Specification - TC8 ECU Test' (Document Version 2.0, August 23, 2017)
+ *
+ * Copyright (c) Vector Informatik GmbH. All rights reserved.
+ ***************************************************************************************/
+
+variables
+{
+  const word ARRAY_LENGTH = 1500;
+  const word kMAX_VINT8_ARRAY_LENGTH = 1500;
+  const word SIZE_LENGTH = 2;
+  const word BOM_LENGTH  = 3;
+  const word kIPv4_ADDRESS_LENGTH_SIZE = 4;
+  const word kIPv6_ADDRESS_LENGTH_SIZE = 16;
+  const word kMAX_RESP_PARAM_SIZE = 20; // enough for response parameters, current only 3 parameters
+  const dword kMAX_TESTABILITY_PARAM_LENGTH = 4 + SIZE_LENGTH + kIPv6_ADDRESS_LENGTH_SIZE + SIZE_LENGTH + kMAX_VINT8_ARRAY_LENGTH; 
+                                              //fullLen(uint16) + srcPort(uint16) + srcAdr(2+16) + VINT8(2+ {0-maxFwd})
+  
+  const word kTESTABILITY_SERVICEID_DEFAULT = 0x0105;
+  const int  kTESTABILITY_HEADER_SIZE = 16;
+  const byte kTESTABILITY_PROTOCOL_VERSION = 0x01;
+  const byte kTESTABILITY_INTERFACE_VERSION = 0x01;
+  const word kTESTABILITY_PARAMETER_SIZE_OFFSET = 8; //real parameter length is shorter than the LEN indicating the Testability header
+  const word kTESTABILITY_RECV_FWD_CNT_NOLIMIT = 0xFFFF;
+  
+  const word kTABIT_MAJOR_VER = 1;
+  const word kTABIT_MINOR_VER = 2;
+  const word kTABIT_PATCH_VER = 0;
+  
+  const word kTESTABILITY_PARAMETER_MAX_SIZE = 1500;
+    
+  //testabilty verbosity setting
+  enum Testability_Verbosity_Level
+  {
+    TABIT_LV_ERROR = 0,   // only critical error
+    TABIT_LV_WARNING = 1, // error + warning
+    TABIT_LV_INFO    = 2, // error + warning + info
+    TABIT_LV_DEBUG   = 4  // debug
+  };
+  
+  // testability protocol acceptance state
+  enum TestAbility_State
+  {
+    TestAbility_State_Idle = 0x00,
+    TestAbility_State_Run = 0x01,
+    
+    TestAbility_State_Invalid = 0xFF
+  };  
+  
+  // GID
+  enum Service_Group
+  {
+    GID_General = 0x00,
+    GID_UDP = 0x01,
+    GID_TCP = 0x02,
+    GID_ICMP = 0x03,
+    GID_ICMPv6 = 0x04,
+    GID_IP = 0x05,
+    GID_IPv6 = 0x06,
+    GID_DHCP = 0x07,
+    GID_DHCPv6 = 0x08,
+    GID_ARP = 0x09,
+    GID_NDP = 0x0A,
+    GID_ETH = 0x0B,
+    GID_PHY = 0x0C,
+    
+    GID_SOMEIP = 0x7F,
+    GID_Invalid = 0xFF
+  };
+  
+  // PID
+  enum Service_Primitive
+  {
+    PID_GET_VERSION = 0x01,
+    PID_START_TEST = 0x02,
+    PID_END_TEST = 0x03,
+    PID_CLOSE_SOCKET = 0x00,
+    PID_CREATE_AND_BIND = 0x01,
+    PID_SEND_DATA = 0x02,
+    PID_RECEIVE_AND_FORWARD = 0x03,
+    PID_LISTEN_AND_ACCEPT = 0x04,
+    PID_CONNECT = 0x05,
+    PID_CONFIGURE_SOCKET = 0x06,
+    PID_SHUTDOWN = 0x07,
+    PID_ECHO_REQUEST = 0x00,
+    PID_STATIC_ADDRESS = 0x00,
+    PID_STATIC_ROUTE = 0x01,
+    PID_INTERFACE_UP = 0x00,
+    PID_INTERFACE_DOWN = 0x01,
+    PID_INIT_DHCP_CLIENT = 0x00,
+    PID_STOP_DHCP_OPTION = 0x01,
+    PID_SET_DHCP_OPTION = 0x02,
+    PID_READ_SIGNAL_QUALITY = 0x00,
+    PID_READ_DIAG_RESULT = 0x01,
+    PID_ACTIVATE_TEST_MODE = 0x02,
+    PID_SET_PHY_TX_MODE = 0x03,
+    
+    PID_Invalid = 0x7F,
+    
+    // For user-defined Service Primitive    
+    PID_SOMEIP_TRIGGER_EVENT = 0xF6,
+    PID_SOMEIP_STOP_SERVICE  = 0xF7,
+    PID_SOMEIP_START_SERVICE = 0xF8,
+    
+    PID_CALL_RECEIVE = 0xF4,
+    PID_TCP_GET_STATE = 0xF5,
+    
+    PID_RECEIVE_AND_FORWARD_ICMP = 0xF9,
+    PID_CLEAR_DYNAMIC_ARP_CHCHE_TIMEOUT = 0xFA,
+    PID_SET_DYNAMIC_ARP_CHCHE_TIMEOUT = 0xFB,
+    
+    PID_DEL_STATIC_ARP_ENTRY = 0xFC,
+    PID_ADD_STATIC_ARP_ENTRY = 0xFD,
+    PID_CREAR_ARP_TABLE = 0xFF,
+    
+    PID_DHCP_INIT_CLIENT = 0x00,
+    PID_DHCP_STOP_CLIENT = 0x01,
+    PID_DHCP_SETOPTION   = 0x02,
+    
+    PID_ETH_INTERFACE_UP   = 0x00,
+    PID_ETH_INTERFACE_DOWN = 0x01
+  };
+  
+  // TID
+  enum Message_Type
+  {
+    TID_REQUEST = 0x00,
+    TID_EVENT = 0x02,
+    TID_RESPONSE = 0x80,
+    
+    TID_Invalid = 0x7F
+  };
+  
+  // RID
+  enum Result_ID
+  {
+    //Standard Result
+    RID_E_OK = 0x00,
+    RID_E_NOK = 0x01,
+    
+    RID_Invalid = 0x7F,
+    // Testability Specific
+    RID_E_NTF = 0xFF, // The requested service primitive was not found
+    RID_E_PEN = 0xFE, // The Upper Tester or a service primitive is pending 
+    RID_E_ISB = 0xFD, // Insufficient buffer size
+    RID_E_INV = 0xFC, // Invalid Input or Parameter
+    
+    // SP specific
+    // TCP/UDP error code
+    RID_E_ISD = 0xEF, //Invalid Socket
+    RID_E_UCS = 0xEE, //Unable to create socket or no free
+    RID_E_UBS = 0xED, //Unable to bind socket, port taken
+    RID_E_IFF = 0xEC, //Invalid network or virtual interface
+    RID_E_TCP_PNA = 0xEB, //  TCP error:  Ågprecedence not allowedÅh
+    RID_E_TCP_FSU = 0xEA, //  TCP error: Ågforeign socket unspecifiedÅh
+    RID_E_TCP_ILP = 0xE9, //  TCP error: Ågconnection illegal for this process"
+    RID_E_TCP_INR = 0xE8, //  TCP error: Åginsufficient resources"
+    RID_E_TCP_CAE = 0xE7, //  TCP error: Ågconnection already exists"
+    RID_E_TCP_COC = 0xE6, //  TCP error: Ågconnection closing"
+    RID_E_TCP_CNE = 0xE5, //  TCP error: Ågconnection does not exist"
+    RID_E_TCP_CRE = 0xE4, //  TCP error: Ågconnection reset"
+    RID_E_TCP_CAT = 0xE3, //  TCP error: Ågconnection aborted due to user timeout"
+    RID_E_TCP_COR = 0xE2 //  TCP Error: Ågconnection refusedÅh    
+  };
+  
+  //Parameter ID used for CONFIGURE_SOCKET
+  enum Config_Param_ID
+  {
+    PARAM_ID_IP_TTL_HOP    = 0x0000, //TTL/HopLmit
+    PARAM_ID_IP_PRIORITY   = 0x0001, // Priority (traffic class/DSCP & ECN) 
+    PARAM_ID_IP_DONT_FLAG  = 0x0002, // IP DF DontFragment
+    PARAM_ID_IP_TIM_OPT    = 0x0003, // IP Timestamp Option data as stored in the IP header option 4 as described by RFC 791 page 22    
+    PARAM_ID_IP_TOS        = 0x0004, // IP Type of Service TOS encoded as defined by RFC 791 page 29
+                                     // (Delay, Throughout, Reliability, Cost, MBZ) 
+    PARAM_ID_TCP_MSS       = 0x0005, // Set MSS MaxSegmentSize (valid values 5001460) 
+    PARAM_ID_TCP_NAGLE     = 0x0006, // Enable/disable Nagle Algorithm parameter (enabled=1) 
+    PARAM_ID_UDP_CHECK_SUM = 0x0007, // Enable/disable the transmission of the UDP checksum (enabled=1) 
+	  PARAM_ID_TCP_TXBUFF    = 0xFFFE, // Configure TCP buffer size(TX)
+	  PARAM_ID_TCP_RXBUFF    = 0xFFFF  // Configure TCP buffer size(RX)
+  };
+  
+  // response length of testability protocol
+  enum Res_Length_TestAbility
+  {
+    RES_LENGTH_PID_GET_VERSION = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_START_TEST = kTESTABILITY_HEADER_SIZE,
+    RES_LENGTH_PID_END_TEST = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_CLOSE_SOCKET = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_CREATE_AND_BIND = kTESTABILITY_HEADER_SIZE + 2,
+    RES_LENGTH_PID_SEND_DATA = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_RECEIVE_AND_FORWARD = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_LISTEN_AND_ACCEPT = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_CONNECT = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_CONFIGURE_SOCKET = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_SHUTDOWN = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_ECHO_REQUEST = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_STATIC_ADDRESS = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_STATIC_ROUTE = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_INTERFACE_UP = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_INTERFACE_DOWN = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_INIT_DHCP_CLIENT = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_STOP_DHCP_OPTION = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_SET_DHCP_OPTION = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_READ_SIGNAL_QUALITY = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_READ_DIAG_RESULT = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_ACTIVATE_TEST_MODE = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_SET_PHY_TX_MODE = kTESTABILITY_HEADER_SIZE + 0,
+
+    RES_LENGTH_PID_SET_DYNAMIC_ARP_CHCHE_TIMEOUT = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_CLEAR_DYNAMIC_ARP_CHCHE_TIMEOUT = kTESTABILITY_HEADER_SIZE + 0,
+    
+    RES_LENGTH_PID_SEND_ICMPv4 = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_DEL_STATIC_ARP_ENTRY = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_ADD_STATIC_ARP_ENTRY = kTESTABILITY_HEADER_SIZE + 0,
+    RES_LENGTH_PID_CREAR_ARP_TABLE = kTESTABILITY_HEADER_SIZE + 0
+  };  
+  
+  struct _IPxADDR
+  {
+    word wAddrLength;
+    dword dwIpv4Addr;
+    byte ipv6Addr[kIPv6_ADDRESS_LENGTH_SIZE];
+  };
+  
+  struct _TEXT
+  {
+    word wTextLength;
+    byte bBom[BOM_LENGTH];
+    char text[ARRAY_LENGTH];
+  };
+  
+  struct _vINT8
+  {
+    word wLength;
+    byte bData[kTESTABILITY_PARAMETER_MAX_SIZE];
+  };
+  
+  struct _VERSION
+  {
+    word wMajorVer;
+    word wMinorVer;
+    word wPatchVer;
+  };
+  
+  struct _END_TEST
+  {
+    word wTcId;
+    struct _TEXT tsName;
+  };
+  
+  struct _CLOSE_SOCKET
+  {
+    word wSocketId;
+    byte bAbort;
+  };
+  
+  struct _CREATE_AND_BIND
+  {
+    byte bDoBind;
+    word wLocalPort;
+    struct _IPxADDR localAddr;
+  };
+  
+  struct _SEND_DATA
+  {
+    word wSocketId;
+    word wTotalLen;
+    word wDestPort;
+    struct _IPxADDR ipxaddr;
+    byte bFlags;
+    
+    struct _vINT8 data;
+  };
+  
+  struct _RECEIVE_AND_FORWARD
+  {
+    word wSocketId;
+    word wMaxFwd;
+    word wMaxLen;
+  };
+    
+  struct _LISTEN_AND_ACCEPT
+  {
+    word wListenSocketId;
+    word wMaxCon;
+  };
+  
+  struct _CONNECT
+  {
+    word wSocketId;
+    word wDestPort;
+    struct _IPxADDR destAddr;
+  };
+  
+  struct _CONFIGURE_SOCKET
+  {
+    word wSocketId;
+    word wParamId;
+    struct _vINT8 ParamVal;
+  };
+    
+  struct _ECHO_REQUEST
+  {
+    struct _TEXT ifName;
+    struct _vINT8 data;
+    struct _IPxADDR ipxaddr;
+  };
+  
+  struct _ADD_STATIC_ARP_ENTRY
+  {
+    struct _IPxADDR ip;
+    qword qwMac;
+  };
+  
+  struct _DEL_STATIC_ARP_ENTRY
+  {
+    struct _IPxADDR ip;
+    qword qwMac;
+  };
+  
+  struct _SET_DYNAMIC_ARP_CHCHE_TIMEOUT
+  {
+    dword dwTime;
+  };
+  
+  struct _EVENT_RECV_FWD // event for receive and forward
+  {
+    word wFullLen;
+    word wSrcPort;
+    struct _IPxADDR ip;
+    struct _vINT8 payload;
+  };
+  
+  struct _EVENT_RECV_FWD_ICMPv4 // event for receive and forward
+  {
+    struct _IPxADDR srcip;
+    struct _IPxADDR dstip;
+    byte  bType;
+    byte  bCode;
+    word  wCheckSum;
+    struct _vINT8 payload;
+  };  
+
+  struct _EVENT_PARAMS_LISTEN_ACCEPT // event for listen and accept
+  {
+    word wListenSocket;
+    word wNewSocketId;
+    word wPort;
+    struct _IPxADDR ip;
+  };
+  
+  struct _GET_STATE
+  {
+    word wSocketId;
+  };
+
+  struct _EXTRACT_DATA
+  {
+    word wSocketId;
+    byte bFlag;
+  };
+  
+  struct _CALL_RECEIVE
+  {
+    word wSocketId;
+    word dataLength;
+  };
+  
+  struct _RES_CALL_RECEIVE
+  {
+    word wSocketId;
+    struct _vINT8 data;
+  };
+  
+  struct _SHUTDOWN
+  {
+    word wSocketId;
+    byte bTypeId;
+  };
+  
+  struct _DHCP_INIT_CLIENT
+  {
+    struct _TEXT ifName;
+  };
+
+  struct _DHCP_SET_OPTION
+  {
+    struct _TEXT ifName;
+    byte         code;
+  };
+  
+  struct _ETH_INTERFACE_UP_DOWN
+  {
+    struct _TEXT ifName;
+  };
+  
+  struct _Testabilty_Message_Header
+  {
+    word wSid;                  // Service ID
+    byte bEvb;                  // Event bit
+    enum Service_Group      gid; // Service Group ID
+    enum Service_Primitive  pid; // Service Primitive ID
+    dword dwLen;                 // data length
+    byte bProtoVersion;       // protocol version
+    byte bIfVersion;          // interface version
+    enum Message_Type       tid; // message exchange type ID 
+    enum Result_ID          rid; // result ID, only for response
+  };
+
+  struct _Testabilty_Message
+  {
+    struct _Testabilty_Message_Header Header;
+    byte bParameters[kMAX_TESTABILITY_PARAM_LENGTH]; //limit 64K Byte
+  };
+  
+  
+    // Testabilit protocol data structure 
+  struct _Token_Testabilty
+  {
+    struct _Testabilty_Message TestabilityMsg;
+    
+    struct _ECHO_REQUEST Echo_Request;
+    struct _SEND_DATA Send_Data;
+    struct _ADD_STATIC_ARP_ENTRY Add_Static_Arp_Entry;
+    struct _DEL_STATIC_ARP_ENTRY Del_Static_Arp_Entry;
+    struct _END_TEST End_Test;
+    struct _SET_DYNAMIC_ARP_CHCHE_TIMEOUT Set_Dynamic_Arp_Chche_Timeout;    
+  };
+
+}
+
+/// <initialize/object>
+//
+void initIpxAddr(struct _IPxADDR data)
+{
+  data.wAddrLength = 0;
+  data.dwIpv4Addr = 0;
+}
+
+/// <initialize/object>
+//
+void initText(struct _TEXT data)
+{
+  data.wTextLength = 0;
+  clearArray(data.bBom);
+  clearChar(data.text);
+}
+
+/// <initialize/object>
+//
+void initData(struct _vINT8 data)
+{
+  data.wLength = 0;
+  clearArray(data.bData);
+}
+
+/// <initialize>
+//
+void initEchoRequestData(struct _ECHO_REQUEST data)
+{
+  initText(data.ifName);
+  initData(data.data);
+  initIpxAddr(data.ipxaddr);
+}
+
+/// <initialize>
+//
+void initSendData(struct _SEND_DATA data)
+{
+  data.wSocketId = 0;
+  data.wTotalLen = 0;
+  data.wDestPort = 0;
+  data.bFlags = 0;
+  initIpxAddr(data.ipxaddr);
+  initData(data.data);
+}
+
+/// <initialize>
+//
+void initAddStaticArpEntry(struct _ADD_STATIC_ARP_ENTRY data)
+{
+  initIpxAddr(data.ip);
+  data.qwMac = 0;
+}
+
+/// <initialize>
+//
+void initDelStaticArpEntry(struct _DEL_STATIC_ARP_ENTRY data)
+{
+  initIpxAddr(data.ip);
+  data.qwMac = 0;
+}
+
+/// <initialize>
+//
+void initEndTest(struct _END_TEST data)
+{
+  data.wTcId = 0;
+  initText(data.tsName);
+}
+
+/// <initialize>
+void initReceiveAndForward(struct _RECEIVE_AND_FORWARD data)
+{
+  data.wSocketId = 0;
+  data.wMaxFwd = 0;
+  data.wMaxLen = 0;  
+}
+
+/// <initialize>
+//
+void initSetDynamicArpChcheTimeout(struct _SET_DYNAMIC_ARP_CHCHE_TIMEOUT data)
+{
+  data.dwTime = 0;
+}
+
+/// <initialize/object>
+//
+void clearChar(char str[])
+{
+  word i;  
+  for(i=0; i<elCount(str); i++)
+  {
+    str[i] = 0;
+  }
+}
+
+/// <struct>
+//
+void setIpAddr(struct _IPxADDR data, int offset)
+{
+  // data length
+  data.wAddrLength = EthGetThisMotorolaValue16(offset);
+  
+  // IP
+  if(data.wAddrLength == 16)
+  {
+    // IPv6
+    EthGetThisData(offset + SIZE_LENGTH, elCount(data.ipv6Addr), data.ipv6Addr);
+  }
+  else
+  {
+    // IPv4
+    data.dwIpv4Addr = EthGetThisValue32(offset + SIZE_LENGTH);
+  }
+}
+
+/// <struct>
+//
+void setText(struct _TEXT data, int offset)
+{
+  // data length
+  data.wTextLength = EthGetThisMotorolaValue16(offset);
+  
+  // bom
+  EthGetThisData(offset + SIZE_LENGTH, elCount(data.bBom), data.bBom);
+  
+  // check buffer and read data length
+  if(elCount(data.text) < data.wTextLength)
+  {
+    data.wTextLength = elCount(data.text);
+  }
+  
+  // text
+  EthGetThisData(offset + SIZE_LENGTH + elCount(data.bBom), data.wTextLength, data.text);  
+}
+
+/// <struct>
+//
+void setData(struct _vINT8 data, int offset)
+{
+  // data length
+  data.wLength = EthGetThisMotorolaValue16(offset);
+  
+  // check buffer and read data length
+  if(elCount(data.bData) < data.wLength)
+  {
+    data.wLength = elCount(data.bData);
+  }
+  
+  // data
+  if(data.wLength > 0)
+    EthGetThisData(offset + SIZE_LENGTH, data.wLength, data.bData);
+}
+
+/// <initialize/object>
+//
+void clearArray(byte array[])
+{
+  word i;  
+  for(i=0; i<elCount(array); i++)
+  {
+    array[i] = 0;
+  }
+}
+
+/// <copy/object>
+//
+void copyArray(byte source[], byte destination[])
+{
+  dword i;
+  for(i=0; i<elCount(source) && i<elCount(destination); i++)
+  {
+    destination[i] = source[i];
+  }
+}
+
+/// <copy/object>
+//
+void copyChar(char source[], char destination[])
+{
+  dword i;
+  for(i=0; i<elCount(source) && i<elCount(destination); i++)
+  {
+    destination[i] = source[i];
+  }
+}
+
+/// <copy/object>
+//
+void copyIpxAddr(struct _IPxADDR source, struct _IPxADDR destination)
+{
+  destination.wAddrLength = source.wAddrLength;
+  destination.dwIpv4Addr = source.dwIpv4Addr;
+}
+
+/// <copy/object>
+void copyText(struct _TEXT source, struct _TEXT destination)
+{
+  destination.wTextLength = source.wTextLength;
+  copyArray(source.bBom, destination.bBom);
+  copyChar(source.text, destination.text);
+}
+
+/// <copy/object>
+//
+void copyData(struct _vINT8 source, struct _vINT8 destination)
+{
+  destination.wLength = source.wLength;
+  copyArray(source.bData, destination.bData);
+}
+
+
+/// <copy>
+//
+void copyEchoRequestData(struct _ECHO_REQUEST source, struct _ECHO_REQUEST destionation)
+{
+  copyText(source.ifName, destionation.ifName);
+  copyData(source.data, destionation.data);
+  copyIpxAddr(source.ipxaddr, destionation.ipxaddr);
+}
+
+
+///// <copy>
+////
+void copySendData(struct _SEND_DATA source, struct _SEND_DATA destination)
+{
+  destination.wSocketId = source.wSocketId;
+  destination.wTotalLen = source.wTotalLen;
+  destination.wDestPort = source.wDestPort;
+  destination.bFlags = source.bFlags;
+  copyIpxAddr(source.ipxaddr, destination.ipxaddr);
+  copyData(source.data, destination.data);
+}
+
+/// <copy>
+//
+void copyAddStaticArpEntry(struct _ADD_STATIC_ARP_ENTRY source, struct _ADD_STATIC_ARP_ENTRY destination)
+{
+  copyIpxAddr(source.ip, destination.ip);
+  destination.qwMac = source.qwMac;
+}
+
+/// <copy>
+//
+void copyDelStaticArpEntry(struct _DEL_STATIC_ARP_ENTRY source, struct _DEL_STATIC_ARP_ENTRY destination)
+{
+  copyIpxAddr(source.ip, destination.ip);
+  destination.qwMac = source.qwMac;
+}
+
+/// <copy>
+//
+void copySetDynamicArpChcheTimeout(struct _SET_DYNAMIC_ARP_CHCHE_TIMEOUT source, struct _SET_DYNAMIC_ARP_CHCHE_TIMEOUT destination)
+{
+  destination.dwTime = source.dwTime;
+}
+
+/// <initialize>
+void initCallReceive(struct _CALL_RECEIVE data)
+{
+  data.wSocketId = 0;
+  data.dataLength = 0;
+}

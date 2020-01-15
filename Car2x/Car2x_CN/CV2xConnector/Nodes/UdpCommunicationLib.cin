@@ -1,0 +1,248 @@
+/*@!Encoding:1252*/
+
+variables
+{
+  const long defaultUDPBufSize = 1020;
+  char gErrorText[1000];
+  byte gRxBuffer[1020]; 
+  
+  enum VRegisterCallback
+  {
+    kRxIndication    = 0,
+    kPreTxIndication = 1
+  };
+  
+  dword gTargetIP;
+  
+  byte tx_stream[1020];         // Array containing Meta data an C-V2X data
+  int  tx_stream_length;        // Length of complete stream, including meta data and C-V2X data
+  
+  byte tx_metaData[20];         // Array containing Meta data
+  byte tx_cv2x_message[1000];   // Array containing C-V2X data
+}
+
+// Zeroes send and error counters
+void ResetAllCounters()
+{
+  @sysvar::UDPTunnel::UDPErrorCounter = 0;
+  @sysvar::UDPTunnel::UDPSendCounter = 0;
+  @sysvar::UDPTunnel::UDPRxCounter = 0;
+  sysSetVariableString(sysvar::UDPTunnel::UDPLastError, "N/A");
+}
+
+// Creates tx/rx UDP sockets
+void CreateUDPTunnel()
+{
+  dword socketHandleTx;
+  dword socketHandleRx;
+  char  ipstr[100];  
+  
+  sysGetVariableString(sysvar::UDPTunnel::TargetIP, ipstr, elCount(ipstr));
+  gTargetIP = IpGetAddressAsNumber(ipstr);
+  
+  socketHandleTx = UdpOpen(0, @UDPTunnel::TxUDPPort);
+  if (socketHandleTx == ~0)
+  {
+    write("<%BASE_FILE_NAME%> UdpOpen on port %d failed: Result %d", 
+    @UDPTunnel::TxUDPPort, IpGetLastError());
+  }
+  
+  @sysvar::UDPTunnel::UDPTxSocketHandle = socketHandleTx;
+
+  socketHandleRx = UdpOpen(0, @UDPTunnel::RxUDPPort);
+  if (socketHandleRx == ~0)
+  {
+    write("<%BASE_FILE_NAME%> UdpOpen on port %d failed: Result %d", 
+    @UDPTunnel::RxUDPPort, IpGetLastError());
+  }
+  
+  @sysvar::UDPTunnel::UDPRxSocketHandle = socketHandleRx;
+  
+  // Get received data
+  UdpReceiveFrom(socketHandleRx, gRxBuffer, elcount(gRxBuffer));
+
+  // Check for error
+  if ( IpGetLastSocketError(socketHandleRx) != 997 )
+  {
+    IpGetLastSocketErrorAsString(socketHandleRx, gErrorText, elcount(gErrorText));
+    write("UdpReceiveFrom failed, %s (Result %d)", gErrorText, IpGetLastSocketError(socketHandleRx));
+  }
+}
+
+// Closes tx/rx UDP sockets
+void ShutdownUDPTunnel() 
+{
+  if (UdpClose(@sysvar::UDPTunnel::UDPTxSocketHandle) != 0)
+  {
+    write("Closing UDP Tx socket failed");
+  }
+
+  if (UdpClose(@sysvar::UDPTunnel::UDPRxSocketHandle) != 0)
+  {
+    write("Closing UDP Rx socket failed");
+  }
+}
+
+// API function for setting up an UDP communication
+void API_OpenUDPCommunication()
+{
+  ResetAllCounters();
+  CreateUDPTunnel();
+}
+
+// API function for shutting down an UDP communication
+void API_CloseUDPCommunication()
+{
+  ShutdownUDPTunnel();
+}
+
+void API_TxFrameviaUdp(long packet, byte tx_metaData[])
+{
+  // Gets all data from the packet and copies the data to a byte array. Returns the stream length (includes meta data and c-v2x data)
+  tx_stream_length = PacketToByte(packet, tx_cv2x_message);
+  
+  // Saves the meta data and the cv2x data in the all data array
+  AddMetaData(tx_metaData, tx_cv2x_message, tx_stream);
+  
+    // Send the byte array with the meta and c-v2x data to the UDP target. The values from the Panel "UDP Connection Settings" are used therefore
+  UdpSendTo(tx_stream_length, 
+                tx_stream, 
+                @sysvar::UDPTunnel::UDPTxSocketHandle, 
+                gTargetIP, 
+                @sysvar::UDPTunnel::TxUDPPort);
+  
+  // Do not send the packet, but enqueue it as Tx in trace
+  C2xDispatchPacket(packet, 1); // 0 = Rx; 1 = Tx
+}
+
+/* Function for getting all bytes from a packet and copying them to an array
+ * param packet (in): Packet Handle to the C-V2X packet
+ * param tx_cv2x_message (out): Array containing all C-V2X data from the packet */
+int PacketToByte(long packet, byte tx_cv2x_message[])
+{
+  byte tx_cv2x_data[999];
+  
+  long tx_cv2x_message_length;
+  long tx_cv2x_data_length;
+  
+  // Important, otherwise ASN.1 Data and Sec-Headers would not be set correct to the packet
+  C2xCompletePacket(packet);
+  
+  tx_cv2x_data_length = C2xGetTokenData(packet, "cv2x", "data", elCount(tx_cv2x_data), tx_cv2x_data);
+  
+  tx_cv2x_message_length = tx_cv2x_data_length + 1;  // message family byte
+  
+  tx_cv2x_message[0] = C2xGetTokenInt(packet, "cv2x", "messageFamily");
+  
+  memcpy_off(tx_cv2x_message, 1, tx_cv2x_data, 0, tx_cv2x_data_length);
+  
+  return tx_cv2x_message_length + @sysvar::UDPTunnel::MetaDataLength;
+}
+
+/* Function for adding meta data before c-v2x data and copying them to an array
+ * param tx_metaData (in): Byte array containing meta data
+ * param tx_cv2x_message (in): Byte array containing  c-v2x data
+ * param tx_allData (out): Byte array containing meta and c-v2x data */
+void AddMetaData(byte tx_metaData[], byte tx_cv2x_message[], byte tx_allData[])
+{
+  memcpy(tx_allData, tx_metaData, @sysvar::UDPTunnel::MetaDataLength);
+  memcpy_off(tx_allData, @sysvar::UDPTunnel::MetaDataLength, tx_cv2x_message, 0, elCount(tx_cv2x_message));
+}
+
+/* Function for sending a byte array to specified UDP socket immediately
+ * param txBufferSize (in): Size of the byte array to transmit
+ * param txBuffer (in): Byte array to transmit
+ * param socketHandle (in): Socket to where the byte array should be transmitted
+ * param targetIP (in): IP address to where the byte array should be transmitted
+ * param targetPort (in): Port to where the byte array should be transmitted */
+long UdpSendTo(long txBufferSize, byte txBuffer[], dword socketHandle, dword targetIP, dword targetPort)
+{
+  long result;
+  char gErrorText[200];
+  
+  if (targetIP == 0xFFFFFFF)
+  {
+    return -1;
+  }
+  
+  result = UdpSendTo(socketHandle, targetIP, targetPort, txBuffer, txBufferSize);
+  
+  if ( (result != 0) && (IpGetLastSocketError(socketHandle) != 997/*Async*/) )
+  {
+    IpGetLastSocketErrorAsString(socketHandle, gErrorText, elcount(gErrorText));
+    sysSetVariableString(sysvar::UDPTunnel::UDPLastError, gErrorText);
+    @sysvar::UDPTunnel::UDPErrorCounter = @sysvar::UDPTunnel::UDPErrorCounter + 1;
+    
+    write("<%BASE_FILE_NAME%> UdpSendTo failed, %s (Result %d)", gErrorText, IpGetLastSocketError(socketHandle));
+  }
+  else
+  {
+    @sysvar::UDPTunnel::UDPSendCounter = @sysvar::UDPTunnel::UDPSendCounter + 1;
+    sysSetVariableData(sysvar::UDPTunnel::UDPTxStream, txBuffer, (long)txBufferSize);
+  }
+  
+  return result;
+}
+
+// System callback called upon receiving UDP datagram
+// This routine copy the UDP payload data to system variables UDP*Stream*Rx
+OnUdpReceiveFrom(dword rxSocketHandle, long rxResult, dword rxClientIpAddress, dword rxClientUpdPort, byte rxBuffer[], dword rxBufferSize)
+{
+  int asnvVal = 0;
+  
+  char rxClientIpAddressString[15];
+    
+  byte rx_cv2x_data[999];
+  byte rx_meta_data[20];
+  
+  long rx_cv2x_data_length;
+  long rx_cv2x_packetHandle = 0;
+  
+  if ( rxResult == 0 )
+  {
+    IpGetAddressAsString(rxClientIpAddress, rxClientIpAddressString, elcount(rxClientIpAddressString));
+
+    @sysvar::UDPTunnel::UDPRxCounter++;
+    sysSetVariableData(sysvar::UDPTunnel::UDPRxStream, rxBuffer, (long)rxBufferSize);
+    
+    if (rxSocketHandle == @UDPTunnel::UDPRxSocketHandle)
+    {
+      rx_cv2x_packetHandle = C2xInitPacket("cv2x");
+      
+      rx_cv2x_data_length = rxBufferSize - @sysvar::UDPTunnel::MetaDataLength - 1;
+  
+      C2xResizeToken(rx_cv2x_packetHandle, "cv2x", "data", rx_cv2x_data_length * 8);
+      C2xSetTokenInt(rx_cv2x_packetHandle, "cv2x", "messageFamily", rxBuffer[@sysvar::UDPTunnel::MetaDataLength]);
+  
+      // Save the meta data in the rx_meta_data array
+      memcpy(rx_meta_data, rxBuffer, @sysvar::UDPTunnel::MetaDataLength);
+      
+      memcpy_off(rx_cv2x_data, 0, rxBuffer, @sysvar::UDPTunnel::MetaDataLength + 1, rx_cv2x_data_length);
+      C2xSetTokenData(rx_cv2x_packetHandle, "cv2x", "data", rx_cv2x_data_length, rx_cv2x_data);
+  
+      C2xCompletePacket(rx_cv2x_packetHandle);
+      C2xDispatchPacket(rx_cv2x_packetHandle, 0); // 0 = Rx; 1 = Tx
+      
+      // Send the packetHandle and the meta data to this function in the main "Node", so that a use as callback is possible
+      OnRxViaUdp(rx_cv2x_packetHandle, rx_meta_data);
+    }
+  }
+  else
+  {
+    IpGetLastSocketErrorAsString(rxSocketHandle, gErrorText, elcount(gErrorText));
+    write("OnUdpReceiveFrom failed, %s (Result %d)", gErrorText, IpGetLastSocketError(rxSocketHandle));
+  }
+  
+  // Get next received data
+  if (rxSocketHandle == @UDPTunnel::UDPRxSocketHandle)
+  {
+    UdpReceiveFrom(@sysvar::UDPTunnel::UDPRxSocketHandle, gRxBuffer, elcount(gRxBuffer));
+  }
+
+  // Check for error
+  if ( IpGetLastSocketError(@sysvar::UDPTunnel::UDPRxSocketHandle) != 997 )
+  {
+    IpGetLastSocketErrorAsString(@sysvar::UDPTunnel::UDPRxSocketHandle, gErrorText, elcount(gErrorText));
+    write("UdpReceiveFrom failed, %s (Result %d)", gErrorText, IpGetLastSocketError(@sysvar::UDPTunnel::UDPRxSocketHandle));
+  }
+}

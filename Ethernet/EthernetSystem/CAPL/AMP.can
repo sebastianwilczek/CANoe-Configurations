@@ -1,0 +1,235 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "include\PDU-NM-ASR_Eth.cin"
+}
+
+variables
+{
+  byte kStreamSourceMacAddress[6] = { 0x5C, 0x00, 0x53, 0x00, 0x2D, 0x00 };
+  word kStreamUniqueId            = 0x0001;
+    
+  dword gListenerHandle;
+  dword gStreamListenerHandle;
+  byte  gRxBuffer[32*1024];
+  dword gAudioRenderer;
+  dword gAudioWriter;
+}
+
+on start
+{
+  //
+  // Configure PTP
+  //
+
+  PtpSetProperty( "PortRole", 4 /* DisabledPort */ );
+  PtpSetProperty( "VlanId", 1 );
+ 
+  ListenerOpen();
+}
+
+on preStop
+{
+  ListenerClose();
+}
+
+/// <Listener>
+void ListenerOpen()
+{
+  long result;
+  
+  //
+  // Open listener
+  //
+ 
+  gListenerHandle = AvbOpenListener( kStreamUniqueId );
+  
+  if (gListenerHandle == 0)
+  {
+    writeLineEx( 0, 3, "<%BASE_FILE_NAME%> ERROR: AvbOpenListener failed (%d)", AvbGetLastError() );
+    return;
+  }
+
+  result = AvbSetProperty( "StreamReservation", 0 );
+  
+  result = AvbListen( gListenerHandle, "OnAvbListen" );
+
+  if ((result != 0) && (result != 460609))
+  {
+    writeLineEx( 0, 3, "<%BASE_FILE_NAME%> ERROR: AvbListen failed (%d)", AvbGetLastError() );
+    return;
+  }
+ 
+  //
+  // Open audio renderer
+  //
+  
+  gAudioRenderer = MediaCreateAudioRenderer();
+  
+  if (gAudioRenderer == 0)
+  {
+    writeLineEx( 0, 3, "<%BASE_FILE_NAME%> ERROR: MediaCreateAudioRenderer failed (%d), ensure a speaker or headphone is attached.", MediaGetLastError() );
+  }
+  
+  gAudioWriter = MediaCreateSinkWriterFromMediaSink(gAudioRenderer);
+
+  if (gAudioWriter == 0)
+  {
+    writeLineEx( 0, 3, "<%BASE_FILE_NAME%> ERROR: MediaCreateSinkWriterFromMediaSink failed (%d)", MediaGetLastError() );
+  }
+  
+  return;
+}
+
+/// <Listener>
+void ListenerClose()
+{
+  if (gAudioRenderer)
+  {
+    MediaReleaseAudioRenderer( gAudioRenderer );
+  }
+  
+  if (gAudioWriter)
+  {
+    MediaReleaseSinkWriter( gAudioWriter );
+  }
+  
+  if (gListenerHandle)
+  {
+    AvbCloseListener( gListenerHandle );
+  }
+  
+  gAudioRenderer  = 0;
+  gAudioWriter    = 0;
+  gListenerHandle = 0;
+}
+
+/// <Listener_Callbacks>
+void OnAvbListen(dword listenerHandle, dword _result)
+{
+  long  result;
+  dword length;
+  
+  gStreamListenerHandle = AvbAccept( listenerHandle );
+  
+  if (gStreamListenerHandle == 0)
+  {
+    writeLineEx( 0, 3, "<%BASE_FILE_NAME%> ERROR: AvbReceive failed (%d)", AvbGetLastError() );
+    return;
+  }
+  
+  //
+  // Begin receive
+  //
+  
+  length = elcount(gRxBuffer);
+  result = AvbReceive( gStreamListenerHandle, gRxBuffer, length, "OnListenerReceive" );
+  
+  if ((result != 0) && (result != 460609))
+  {
+    writeLineEx( 0, 3, "<%BASE_FILE_NAME%> ERROR: AvbReceive failed (%d)", AvbGetLastError() );
+    return;
+  }
+}
+
+/// <Listener_Callbacks>
+void OnListenerReceive(dword listenerHandle, long result, byte buffer[], dword length)
+{
+  dword bufferLength;
+  dword mediaTypeHandle;
+  dword i;
+  int64 startTimeNs, timeNowNs;
+
+  if (result)
+  {
+    return;
+  }
+  
+  // Calc min/max amplitude
+  {
+    int amplMin;
+    int amplMax;
+    int ampl;
+    
+    amplMin = amplMax = 0 ;
+    // 2 channels per frame, with 16bit samples
+    for( i = 0; i+1 < length; i += 4 )
+    {
+      ampl = (int)((word)buffer[i] | ((word)buffer[i+1] << 8));
+      
+      amplMax = _max(amplMax, ampl );
+      amplMin = _min(amplMin, ampl );
+    }
+    
+    @sysvar::AMP::AmplitudeMax = amplMax;
+    @sysvar::AMP::AmplitudeMin = amplMin;
+  }
+  
+  //
+  // Write to audio renderer
+  //
+
+  if (mediaTypeHandle == 0)
+  {
+    mediaTypeHandle = AvbGetMediaType(listenerHandle);
+    
+    if (mediaTypeHandle == 0)
+    {
+      writeLineEx( 0, 3, "<%BASE_FILE_NAME%> ERROR: AvbGetMediaType failed (%d)", MediaGetLastError() );
+      return;
+    }
+    
+    result = MediaSetMediaType(gAudioWriter, 0, mediaTypeHandle);
+     
+    if (result)
+    {
+      writeLineEx( 0, 3, "<%BASE_FILE_NAME%> ERROR: MediaSetMediaType failed (%d)", MediaGetLastError() );
+      return;
+    }
+  }
+
+  if (startTimeNs == 0)
+  {
+    startTimeNs = PtpTimeNow();
+    timeNowNs = startTimeNs;
+  }
+  else
+  {
+    timeNowNs = PtpTimeNow();
+  }
+
+  if (gAudioWriter)
+  {
+    result = MediaWrite( gAudioWriter, 0, timeNowNs - startTimeNs, buffer, length);
+    
+    if (result)
+    {
+      writeLineEx( 0, 3, "<%BASE_FILE_NAME%> ERROR: MediaWrite failed (%d)", MediaGetLastError() );
+    }
+  }
+  
+  //
+  // Receive next
+  //
+  
+  bufferLength = elcount(gRxBuffer);
+  result = AvbReceive( gStreamListenerHandle, gRxBuffer, bufferLength, "OnListenerReceive" );
+  
+  if ((result != 0) && (result != 460609))
+  {
+    writeLineEx( 0, 3, "<%BASE_FILE_NAME%> ERROR: AvbReceive failed (%d)", AvbGetLastError() );
+  }
+}
+
+
+/// <NM>
+void UdpNm_NetworkModeInd()
+{
+  PtpSetProperty( "PortRole", 2 /*SlavePort*/ );
+}
+
+/// <NM>
+void UdpNm_BusSleepModeInd()
+{
+  PtpSetProperty( "PortRole", 4 /* DisabledPort */ );
+}

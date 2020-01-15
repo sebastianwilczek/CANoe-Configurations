@@ -1,0 +1,458 @@
+/*@@includes:*/
+includes
+{
+  #include "IPCommon.can"
+}
+/*@@end*/
+
+/*@@var:*/
+variables
+{
+}
+/*@@end*/
+
+/*@@caplFunc:SetupIp():*///function
+void SetupIp()
+{
+  int   adapterIndex = 1;
+  char  text[512] = "";
+  char  info[512] = "";
+  int   size = 512;
+  long  result = 0;
+  dword addresses[1];
+
+  writeClear(0);
+
+  if (1 > IpGetAdapterCount())
+  {
+    writelineex(0, 3, "Error: There is no network interface available!");
+    
+    stop();
+  }
+
+  if (0 != IpGetAdapterAddress(adapterIndex, addresses, 1))
+  {
+    writelineex(0, 3, "Error: Could not retrieve ip address!");
+    
+    stop();
+  }
+
+  gIpAddress = addresses[0]; // the interface used
+
+  if (INVALID_IP == gIpAddress)
+  {
+    writelineex(0, 3, "Error: ip address to be used is invalid!");
+    
+    stop();
+  }
+ 
+  IpGetAdapterDescription(adapterIndex, text, size);
+  snprintf(info, size, "Interface: %s", text);
+  writelineex(0, 1, info);
+
+  IpGetAdapterAddressAsString(adapterIndex, text, size);
+  snprintf(info, size, "Ip address: %s", text);
+  writelineex(0, 1, info);
+
+  SysSetVariableString(sysvar::TCPIP::TcpClientIp, text);
+
+  SysSetVariableString(sysvar::UDP::UdpClientIp, text);
+
+
+  IpGetAdapterMaskAsString(adapterIndex, text, size);
+  snprintf(info, size, "Subnet mask: %s", text);
+  writelineex(0, 1, info);
+
+  IpGetAdapterGatewayAsString(adapterIndex, text, size);
+  snprintf(info, size, "Gateway address: %s", text);
+  writelineex(0, 1, info);
+ 
+  gStatus = gkSTATUS_INITIALISED;
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+  SetupIp();  
+}
+/*@@end*/
+
+/*@@stop:StopMeasurement:*/
+on stopMeasurement
+{
+  ResetIp();
+}
+/*@@end*/
+
+/*@@caplFunc:OnTcpReceive(dword,long,dword,dword,char[],dword):*///function
+void OnTcpReceive( dword socket, long result, dword address, dword port, char buffer[], dword size)
+{
+  char  addressString[64] = "";
+
+  if ( gTcpDataSocket != socket)
+  {
+    writelineex(0, 2, "OnTcpReceive called for unknown socket 0x%X", socket);
+
+    return;
+  }
+
+  if (0 != result)
+  {
+    IpGetLastSocketErrorAsString( socket, gIpLastErrStr, elcount( gIpLastErrStr));
+
+    writelineex( 0, 2, "OnTcpReceive error (%d): %s", IpGetLastSocketError( socket), gIpLastErrStr);
+
+    return;
+  }
+ 
+  IpGetAddressAsString(address, addressString, elcount(addressString));
+
+  SysSetVariableString(sysvar::TCPIP::TcpData, buffer);
+ 
+  TcpRecv( socket);
+}
+/*@@end*/
+
+/*@@caplFunc:OnTcpSend(dword,long,char[],dword):*///function
+void OnTcpSend( dword socket, long result, char buffer[], dword size)
+{
+  if ( gTcpDataSocket != socket)
+  {
+    writelineex(0, 2, "OnTcpSend called for unknown socket 0x%X", socket);
+  }
+
+  if (0 != result)
+  {
+    IpGetLastSocketErrorAsString( socket, gIpLastErrStr, elcount( gIpLastErrStr));
+
+    writelineex( 0, 2, "OnTcpSend error (%d): %s", IpGetLastSocketError( socket), gIpLastErrStr);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:ConnectTcp():*///function
+void ConnectTcp()
+{ 
+  char buffer[64];
+  dword serverIp;
+
+  SysGetVariableString(sysvar::TCPIP::TcpServerIp, buffer, elcount(buffer));
+
+  serverIp = IpGetAddressAsNumber(buffer);
+
+  if (INVALID_IP == serverIp)
+  {
+    writelineex(0, 1, "Error: invalid server Ip address!");
+    
+    return;
+  }
+
+  gTcpPort = @sysvar::TCPIP::TcpClientPort;
+  
+  gTcpDataSocket = TcpOpen(gIpAddress, gTcpPort);
+
+  if ( INVALID_SOCKET == gTcpDataSocket)
+  {
+    writelineex(0, 1, "Error: could not open Tcp socket!");
+
+    return;
+  }
+  else
+  {
+    writelineex(0, 1, "Tcp socket opened.");
+  }
+
+  if (0 == TcpConnect(gTcpDataSocket, serverIp, @sysvar::TCPIP::TcpServerPort))
+  {
+    writelineex(0, 1, "Successfully connected to server %s:%d", buffer, @sysvar::TCPIP::TcpServerPort);
+
+    TcpRecv( gTcpDataSocket);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:DisconnectTcp():*///function
+void DisconnectTcp()
+{
+  if (INVALID_SOCKET != gTcpDataSocket)
+  {
+    TcpClose(gTcpDataSocket);
+    
+    gTcpDataSocket = INVALID_SOCKET;
+  }
+
+  writelineex(0, 1, "Tcp socket is closed.");
+}
+/*@@end*/
+
+/*@@caplFunc:SendTcpData():*///function
+void SendTcpData()
+{
+  char buffer[8192];
+  
+  SysGetVariableString(sysvar::TCPIP::TcpClientData, buffer, elcount(buffer));
+
+  if (INVALID_SOCKET == gTcpDataSocket)
+  {
+    writelineex( 0, 2, "Tcp socket is invalid!");
+
+    return;
+  }
+  
+  if (0 != TcpSend( gTcpDataSocket, buffer, elcount(buffer)))
+  {
+    gIpLastErr = IpGetLastSocketError( gTcpDataSocket);
+
+    if ( WSA_IO_PENDING != gIpLastErr)
+    {
+      IpGetLastSocketErrorAsString( gTcpDataSocket, gIpLastErrStr, elcount( gIpLastErrStr));
+
+      writelineex( 0, 2, "Tcp send error (%d): %s", gIpLastErr, gIpLastErrStr);
+    }
+  }
+  else
+  {
+    writelineex( 0, 1, "Tcp data sent successfully!");
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:SendUdpData():*///function
+void SendUdpData()
+{
+  char buffer[64]; // used for ip address
+
+  char data[4096]; // user data
+
+  dword serverIp;
+
+  int serverPort;
+
+  if ( INVALID_SOCKET == gUdpSocket)
+  {
+    writelineex(0, 1, "Error: Udp socket is not opened!");
+
+    return;
+  }
+
+  SysGetVariableString(sysvar::UDP::UdpServerIp, buffer, elcount(buffer));
+  
+
+  serverIp = IpGetAddressAsNumber(buffer);
+  
+  if (INVALID_IP == serverIp)
+  {
+    writelineex(0, 1, "Error: invalid server Ip address!");
+    return;
+  }
+
+  SysGetVariableString(sysvar::UDP::UdpClientData, data, elcount(data));
+
+  if (0 == UdpSendTo(gUdpSocket, serverIp, @sysvar::UDP::UdpServerPort, data, elcount(data)))
+  {
+    writelineex(0, 1, "Successfully sent Udp data.");
+  }
+  else
+  {
+    writelineex(0, 1, "Error: an error occured while connecting to server %s:%d", serverIp, @sysvar::TCPIP::TcpServerPort);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:OpenUdpPort():*///function
+void OpenUdpPort()
+{
+  gUdpPort = @sysvar::UDP::UdpClientPort;
+  
+  gUdpSocket = UdpOpen( gIpAddress, gUdpPort);
+
+  if ( INVALID_SOCKET == gUdpSocket)
+  {
+    writelineex(0, 1, "Error: could not create Udp socket!");
+  }
+  else
+  {
+    writelineex(0, 1, "Udp socket is opened successfully.");
+    
+    UdpRecv( gUdpSocket);
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:CloseUdpPort():*///function
+void CloseUdpPort()
+{
+  if (INVALID_SOCKET != gUdpSocket)
+  {
+    UdpClose(gUdpSocket);
+    
+    gUdpSocket = INVALID_SOCKET;
+
+    writelineex(0, 2, "Udp port is closed.");
+  }
+
+  SysSetVariableString(sysvar::UDP::UdpServerIp, "");
+
+  @sysvar::UDP::UdpServerPort = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:ResetIp():*///function
+void ResetIp()
+{
+  if (INVALID_SOCKET != gTcpDataSocket)
+  {
+    TcpClose(gTcpDataSocket);
+    
+    gTcpDataSocket = INVALID_SOCKET;
+  }
+
+  if (INVALID_SOCKET != gUdpSocket)
+  {
+    UdpClose(gUdpSocket);
+    
+    gUdpSocket = INVALID_SOCKET;
+  }
+
+}
+/*@@end*/
+
+/*@@caplFunc:OnUdpReceiveFrom(dword,long,dword,dword,char[],dword):*///function
+void OnUdpReceiveFrom( dword socket, long result, dword address, dword port, char buffer[], dword count)
+{
+  char  addressString[64] = "";
+
+  if ( gUdpSocket != socket)
+  {
+    writelineex(0, 2, "OnUdpReceiveFrom called for unknown socket!");
+  }
+
+  if (0 != result)
+  {
+    IpGetLastSocketErrorAsString( socket, gIpLastErrStr, elcount( gIpLastErrStr));
+
+    writelineex( 0, 2, "OnUdpReceiveFrom error (%d): %s", IpGetLastSocketError( socket), gIpLastErrStr);
+  }
+ 
+  IpGetAddressAsString(address, addressString, elcount(addressString));
+
+  SysSetVariableString(sysvar::UDP::UdpServerIp, addressString);
+
+  @sysvar::UDP::UdpServerPort = port;
+
+  SysSetVariableString(sysvar::UDP::UdpData, buffer);
+
+ 
+  UdpRecv( socket);
+}
+/*@@end*/
+
+/*@@caplFunc:OnUdpSendTo(dword,long,char[],dword):*///function
+void OnUdpSendTo( dword socket, long result, char buffer[], dword size)
+{
+  if ( gUdpSocket != socket)
+  {
+    writelineex(0, 2, "OnUdpSendTo called for unknown socket 0x%X", socket);
+  }
+
+  if (0 != result)
+  {
+    IpGetLastSocketErrorAsString( socket, gIpLastErrStr, elcount( gIpLastErrStr));
+
+    writelineex( 0, 2, "OnUdpSendTo error (%d): %s", IpGetLastSocketError( socket), gIpLastErrStr);
+  }
+  else
+  {
+    writelineex(0, 1, "Successfully sent Udp data.");
+  }
+}
+/*@@end*/
+
+/*@@caplFunc:OnTcpConnect(dword,long):*///function
+void OnTcpConnect( dword socket, long result)
+{
+  if ( gTcpDataSocket != socket)
+  {
+    writelineex(0, 2, "OnTcpConnect called for unknown socket 0x%X", socket);
+
+    return;
+  }
+
+  if (0 != result)
+  {
+    IpGetLastSocketErrorAsString( socket, gIpLastErrStr, elcount( gIpLastErrStr));
+
+    writelineex( 0, 2, "OnTcpConnect error (%d): %s", IpGetLastSocketError( socket), gIpLastErrStr);
+
+    return;
+  }
+  else
+  {
+    writelineex(0, 1, "Successfully connected to server via Tcp");
+
+    TcpRecv( socket);
+  }
+}
+/*@@end*/
+
+/*@@sysvarUpdate:TCPIP::TcpConnect:*/
+on sysvar_update sysvar::TCPIP::TcpConnect
+{
+  if (@this)
+  {
+    ConnectTcp();
+  }
+}
+/*@@end*/
+
+/*@@sysvarUpdate:TCPIP::TcpDisconnect:*/
+on sysvar_update sysvar::TCPIP::TcpDisconnect
+{
+  if (@this)
+  {
+    DisconnectTcp();
+  }
+}
+/*@@end*/
+
+/*@@sysvarUpdate:TCPIP::TcpSend:*/
+on sysvar_update sysvar::TCPIP::TcpSend
+{
+  if (@this)
+  {
+    SendTcpData();
+  }
+}
+/*@@end*/
+
+/*@@sysvarUpdate:UDP::UdpClose:*/
+on sysvar_update sysvar::UDP::UdpClose
+{
+  if (@this)
+  {
+    CloseUdpPort();
+  }
+}
+/*@@end*/
+
+/*@@sysvarUpdate:UDP::UdpOpen:*/
+on sysvar_update sysvar::UDP::UdpOpen
+{
+  if (@this)
+  {
+    OpenUdpPort();
+  }
+}
+/*@@end*/
+
+/*@@sysvarUpdate:UDP::UdpSend:*/
+on sysvar_update sysvar::UDP::UdpSend
+{
+  if (@this)
+  {
+    SendUdpData();
+  }
+}
+/*@@end*/
+

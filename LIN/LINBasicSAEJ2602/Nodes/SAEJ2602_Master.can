@@ -1,0 +1,161 @@
+/*@!Encoding:1252*/
+variables
+{
+  const int kRESET           = 1;
+  const int kDATAERROR       = 4;
+  const int kCHECKSUMERROR   = 5;
+  const int kFRAMEINGERROR   = 6;
+  const int kPARITYERROR     = 7;
+
+  const dword wrCAPLSink = 1;
+  const dword wrSYSSink = 0;
+  const dword wrInfo = 1;
+  const dword wrError = 3;
+
+  byte      gSetParityError = 0;
+  int       gResetTable = 0; 
+  msTimer   errorResetTimer;
+
+  linFrame LeftTurn frmLeftTurn;
+}
+
+on sysvar LIN::ChecksumError
+{
+  if (1 == @this)
+  {
+
+    linSetManualChecksum(frmLeftTurn, linGetChecksum(frmLeftTurn) - 1);
+  
+    output(frmLeftTurn);
+  }
+}
+
+on sysvar LIN::ParityError
+{
+  byte linID, protectedID, corParity, errParity, errPID;
+
+  if (1 == @this)
+  {
+    gSetParityError = 1;
+  }
+}
+
+on sysvar LIN::FramingError
+{
+  linInvertRespBit(0x04, 1, 8);
+}
+
+on sysvar LIN::DataError
+{
+  linInvertRespBit(0x05, 1, 3);
+}
+
+on signal Left_TurnIndicator_RespErr
+{
+  switch ($Left_TurnIndicator_RespErr)
+  {
+    case kDATAERROR:
+    {
+      @LIN::DataErrorState = 1;
+    }
+    break;
+    case kCHECKSUMERROR:
+    {
+      @LIN::ChecksumErrorState = 1;
+    }
+    break;
+    case kFRAMEINGERROR:
+    {
+      @LIN::FramingErrorState = 1;
+    }
+    break;
+    case kPARITYERROR:
+    {
+      @LIN::ParityErrorState = 1;
+    }
+    break;
+    case kRESET:
+    {
+      @LIN::ResetState = 1;
+    }
+    break;
+    default:
+      return;
+    break;
+  }
+  
+  @LIN::LastResponseError = $Left_TurnIndicator_RespErr;
+
+  cancelTimer(errorResetTimer);
+  setTimer(errorResetTimer, 200);
+}
+
+on sysvar LIN::TargetedReset
+{
+  if (1 == @this)
+  {
+    LINChangeSchedtable(1, 0, -1);
+    gResetTable = 1;
+  }
+}
+
+on linSchedulerModeChange
+{
+  if (1 == gResetTable)
+  {
+    LINChangeSchedtable(0, 0, -1);
+    gResetTable = 0;
+  }
+}
+
+on timer errorResetTimer
+{
+   @LIN::DataErrorState      = 0;
+   @LIN::ChecksumErrorState  = 0;
+   @LIN::FramingErrorState   = 0;
+   @LIN::ParityErrorState    = 0;
+   @LIN::ResetState  = 0;
+}
+
+on sysvar LIN::BroadcastReset
+{
+  if (1 == @this)
+  {
+    LINChangeSchedtable(2, 0, -1);
+    gResetTable = 1;
+  }
+}
+
+on start
+{
+  if (IsSimulated()) // don't activate tests when running in simulated mode
+  {
+    WriteLineEx(wrCAPLSink, wrError
+      , "Error indication cannot run in simulated mode!");     
+    stop();
+  }
+}
+
+on linCsError
+{
+  if (this.id == frmLeftTurn.id)
+  {
+    linResetManualChecksum(frmLeftTurn);
+    output(frmLeftTurn);
+  }
+}
+
+on linFrame 0x38
+{
+  dword byteIndices[1]           = { 1 }; // protected Id byte
+  dword bitIndices[1]            = { 6 }; // first parity bit position
+  dword numberOfDisturbedBits[1] = { 2 }; // both parity bits
+  dword levels[1]                = { 0 }; // set to dominant level
+
+  if(1 == gSetParityError)
+  {
+    gSetParityError = 0;
+    linInvertMultipleHeaderBits(byteIndices, bitIndices, numberOfDisturbedBits, levels, 1, 1);
+  }
+}
+

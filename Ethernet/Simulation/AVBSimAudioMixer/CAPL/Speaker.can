@@ -1,0 +1,235 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "General.cin"
+  #include "Avb.cin"
+  #include "Media.cin"
+}
+
+variables
+{
+  const dword kSpeaker_MaxBufferSize = 1024 * 64;
+  
+  dword gSpeaker_ListenerWildcardHandle,
+        gSpeaker_ListenerHandle,
+        gSpeaker_AudioRendererHandle,
+        gSpeaker_SinkWriterHandle;
+  
+  byte gSpeaker_Buffer[kSpeaker_MaxBufferSize];
+}
+
+void OnAvbListen(dword listenerHandle, dword result)
+{
+  long ret;
+  dword handle, streamUniqueId;
+    
+  if (result != kAvb_OK)
+  {
+    Avb_WriteErrorAndStop(result, "OnAvbListen");
+    return;
+  }
+  
+  handle = AvbAccept(listenerHandle);
+  
+  if (Avb_CheckHandleAndStopIfError(handle, "AvbAccept") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbGetStreamUniqueId(handle, streamUniqueId);
+  
+  if (Avb_StopIfError(ret, "AvbGetStreamUniqueId") != 0)
+  {
+    return;
+  }
+    
+  if (streamUniqueId != 0xFF)
+  {
+    ret = AvbCloseListener(handle);
+    
+    if (Avb_StopIfError(ret, "AvbCloseListener") != 0)
+    {
+      return;
+    }
+    
+    return;
+  }
+  
+  gSpeaker_ListenerHandle = handle; 
+  
+  Speaker_Receive();
+}
+
+void OnAvbReceive(dword listenerHandle, dword result, byte buffer[], dword length)
+{
+  dword mediaTypeHandle;
+  int64 startTimeNs;
+  long ret;
+  
+  if (result == kAvb_InsufficientBuffer)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: insufficient buffer, data truncated...", result);
+  }
+  else if (result == kAvb_PresentationTimeLessThanPacketTime)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: presentation time is less than global PTP time at packet reception...", result);
+  }
+  else if (result != 0)
+  {
+    write("%BASE_FILE_NAME%: OnAvbRead: result is %d", result);
+    Stop();
+    return;
+  }
+  
+  if (gSpeaker_SinkWriterHandle != kMedia_InvalidHandle)
+  {
+    if (mediaTypeHandle == 0)
+    {
+      mediaTypeHandle = AvbGetMediaType(listenerHandle);
+      
+      if (Media_CheckHandleAndStopIfError(mediaTypeHandle, "AvbGetMediaType") != 0)
+      {
+        return;
+      }
+      
+      ret = MediaSetMediaType(gSpeaker_SinkWriterHandle, 0, mediaTypeHandle);
+       
+      if (Media_StopIfError(ret, "MediaSetMediaType") != 0)
+      {
+        return;
+      }
+    }
+    
+    if (startTimeNs == 0)
+    {
+      startTimeNs = timeNowNS();
+    }
+    
+    ret = MediaWrite(gSpeaker_SinkWriterHandle, 0, timeNowNS() - startTimeNs, buffer, length);
+      
+    if (Media_StopIfError(ret, "MediaWrite") != 0)
+    {
+      return;
+    }
+  }
+  
+  Speaker_Receive();
+}
+
+on preStop
+{
+  dword ret;
+  
+  if (gSpeaker_ListenerHandle != 0)
+  {
+    ret = AvbCloseListener(gSpeaker_ListenerHandle);
+    
+    if (Avb_StopIfError(ret, "AvbCloseTalker") != 0)
+    {
+      return;
+    }
+  
+    gSpeaker_ListenerHandle = kAvb_InvalidHandle;
+  }
+     
+  if (gSpeaker_ListenerWildcardHandle != 0)
+  {
+    ret = AvbCloseListener(gSpeaker_ListenerWildcardHandle);
+    
+    if (Avb_StopIfError(ret, "AvbCloseTalker") != 0)
+    {
+      return;
+    }
+  
+    gSpeaker_ListenerWildcardHandle = kAvb_InvalidHandle;
+  }
+  
+  if (gSpeaker_SinkWriterHandle != kMedia_InvalidHandle)
+  {
+    ret = MediaReleaseSinkWriter(gSpeaker_SinkWriterHandle);
+    
+    if (Media_StopIfError(ret, "MediaReleaseSinkWriter") != 0)
+    {
+      return;
+    }
+  }
+  
+  if (gSpeaker_AudioRendererHandle != kMedia_InvalidHandle)
+  {
+    ret = MediaReleaseAudioRenderer(gSpeaker_AudioRendererHandle);
+    
+    if (Media_StopIfError(ret, "MediaReleaseAudioRenderer") != 0)
+    {
+      return;
+    }
+  }
+}
+
+on start
+{
+  long ret;
+  
+  gSpeaker_AudioRendererHandle = MediaCreateAudioRenderer();
+  
+  if (gSpeaker_AudioRendererHandle == kMedia_InvalidHandle)
+  {
+    write("Please attach a speaker or headphone to playback audio.");
+    gSpeaker_SinkWriterHandle = kMedia_InvalidHandle;
+  }
+  else
+  {
+    gSpeaker_SinkWriterHandle = MediaCreateSinkWriterFromMediaSink(gSpeaker_AudioRendererHandle);
+        
+    if (Media_CheckHandleAndStopIfError(gSpeaker_SinkWriterHandle, "MediaCreateSinkWriterFromMediaSink") != 0)
+    {
+      return;
+    }
+  }
+  
+  ret = AvbSetVerbosity(kAvb_VerbosityWarning);
+  
+  if (Avb_StopIfError(ret, "AvbSetVerbosity") != 0)
+  {
+    return;
+  }
+    
+  ret = AvbSetProperty("StreamReservation", 0);
+    
+  if (Avb_StopIfError(ret, "AvbSetProperty") != 0)
+  {
+    return;
+  }
+  
+  gSpeaker_ListenerWildcardHandle = AvbOpenListener();
+    
+  if (Avb_CheckHandleAndStopIfError(gSpeaker_ListenerWildcardHandle, "AvbOpenListener") != 0)
+  {
+    return;
+  }
+  
+  ret = AvbListen(gSpeaker_ListenerWildcardHandle, "OnAvbListen");
+  
+  if (Avb_StopIfError(ret, "AvbListen") != 0)
+  {
+    return;
+  }
+}
+
+void Speaker_Receive()
+{
+  dword ret, length;
+  
+  length = elCount(gSpeaker_Buffer);
+  
+  ret = AvbReceive(gSpeaker_ListenerHandle, gSpeaker_Buffer, length, "OnAvbReceive");
+  
+  if (Avb_StopIfError(ret, "AvbReceive") != kAvb_OK)
+  {
+    return;
+  }
+  
+  if (ret != kAvb_IoPending)
+  {
+    OnAvbReceive(gSpeaker_ListenerHandle, ret, gSpeaker_Buffer, length);
+  }
+}

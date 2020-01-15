@@ -1,0 +1,158 @@
+/*@!Encoding:1252*/
+
+///////////////////////////////////////
+// v. 2.0
+///////////////////////////////////////
+includes
+{
+  #include "CommonConst.CIN"  
+}
+
+variables
+{
+  int lastTIMClientStatusTime = 0;
+  int lastTIMServerStatusTime = 0;
+                              
+  int lastAUTHClientStatusTime = 0;
+  int lastAUTHServerStatusTime = 0;
+  
+  msTimer timClientStatusTimeout;
+  msTimer timServerStatusTimeout;
+  msTimer authClientStatusTimeout;
+  msTimer authServerStatusTimeout;
+  
+  int clientAuthState_Autenticated = 0;
+  int serverAuthState_Autenticated = 0;
+  
+  enum StatusMsgState
+  {
+    cNotInitialized             = 0,
+    cMsgTimeout                 = 1,
+    cCyclicOK                   = 2,
+    cCyclicSuccessfullFinished  = 3
+  };
+}
+
+on start
+{
+  ResetStates();
+}
+
+on timer timClientStatusTimeout
+{
+  @TIMClientObserver::State_TIMStatusMsg = cMsgTimeout;
+}
+
+on timer authClientStatusTimeout
+{
+  if(clientAuthState_Autenticated == 0)
+    @TIMClientObserver::State_AuthStatusMsg = cMsgTimeout;
+  else
+    @TIMClientObserver::State_AuthStatusMsg = cCyclicSuccessfullFinished;
+}
+
+on timer timServerStatusTimeout
+{
+  @TIMServerObserver::State_TIMStatusMsg = cMsgTimeout;
+}
+
+on timer authServerStatusTimeout
+{
+  if(clientAuthState_Autenticated == 0)
+    @TIMServerObserver::State_AuthStatusMsg = cMsgTimeout;
+  else
+    @TIMServerObserver::State_AuthStatusMsg = cCyclicSuccessfullFinished;
+}
+
+on pg *
+{
+  switch (this.pgn)
+  {
+    case TIM12_PGN:
+    {
+      if(this.byte(0) == 0xFA)
+      {
+        if(@TIMServerObserver::State_TIMStatusMsg == cNotInitialized)
+          @TIMServerObserver::State_TIMStatusMsg = cCyclicOK;
+        
+        cancelTimer(timServerStatusTimeout);
+        setTimer(timServerStatusTimeout, cTIMStatusTimeout);
+      }
+    }
+    break;
+    
+    case TIM21_PGN:
+    {
+      if(this.byte(0) == 0xF9)
+      {
+        if(@TIMClientObserver::State_TIMStatusMsg == cNotInitialized)
+          @TIMClientObserver::State_TIMStatusMsg = cCyclicOK;
+        
+        cancelTimer(timClientStatusTimeout);
+        setTimer(timClientStatusTimeout, cTIMStatusTimeout);
+      }
+    }
+    break;
+    
+    case AUTH12_PGN:
+    {
+      if(this.byte(0) == 0xF9) // Auth_ServerAuthenticationStatus
+      {
+        if (this.byte(3) & 0x80) // (Re)Start bit is set 
+        {
+          @TIMServerObserver::State_TIMStatusMsg  = cNotInitialized;
+          @TIMServerObserver::State_AuthStatusMsg = cCyclicOK;    
+          serverAuthState_Autenticated = 0;
+        }
+        
+        if(@TIMServerObserver::State_AuthStatusMsg == cNotInitialized)
+          @TIMServerObserver::State_AuthStatusMsg = cCyclicOK;
+        else if(@TIMServerObserver::State_AuthStatusMsg == cCyclicOK && this.byte(2) == 0x1)
+          serverAuthState_Autenticated = 1;
+
+        cancelTimer(authServerStatusTimeout);
+        setTimer(authServerStatusTimeout, cAUTHStatusTimeout);
+      }
+    }
+    break;
+    
+    case AUTH21_PGN:
+    {
+      
+      if(this.byte(0) == 0xFA) // Auth_ClientAuthenticationStatus
+      {
+        if (this.byte(3) & 0x80) // (Re)Start bit is set 
+        {
+          @TIMClientObserver::State_TIMStatusMsg  = cNotInitialized;
+          @TIMClientObserver::State_AuthStatusMsg = cCyclicOK;
+          clientAuthState_Autenticated = 0;
+        }
+        
+        if(@TIMClientObserver::State_AuthStatusMsg == cNotInitialized)
+          @TIMClientObserver::State_AuthStatusMsg = cCyclicOK;
+        else if(@TIMClientObserver::State_AuthStatusMsg == cCyclicOK && this.byte(2) == 0x1)
+          clientAuthState_Autenticated = 1;
+        
+        cancelTimer(authClientStatusTimeout);
+        setTimer(authClientStatusTimeout, cAUTHStatusTimeout);
+      }
+    }
+    break;
+  }
+}
+
+on sysvar_update sysvar::TIMObserver::Reset
+{
+  if (@this)
+  {
+    ResetStates();
+  }
+}
+
+void ResetStates()
+{
+  @TIMClientObserver::State_TIMStatusMsg  = cNotInitialized;
+  @TIMClientObserver::State_AuthStatusMsg = cNotInitialized;
+  @TIMServerObserver::State_TIMStatusMsg  = cNotInitialized;
+  @TIMServerObserver::State_AuthStatusMsg = cNotInitialized;  
+}

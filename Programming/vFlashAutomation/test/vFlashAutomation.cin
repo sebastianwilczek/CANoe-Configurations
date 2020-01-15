@@ -1,0 +1,148 @@
+/*@!Encoding:1252*/
+includes
+{
+}
+
+variables
+{
+  // If run locally, the log files are located in the directory of the TestEnvironment
+  char gReadLog[150] = "ERROR: For details, please consult the log files vFlashCaller.log and vFlashWrapper.log";
+
+  // If run remotely, the vFlashCaller.exe and vFlashWrapper.exe must be copied to this location.
+  // There, the logfiles will be created.
+  // If the flashpack is given with a relative path, the path is relative to this directory.
+  char gWorkingDir[100] = "";
+  
+  int gComplete = 0;
+  
+  char  gProject[400] = "";
+}
+
+/*
+  Executes the complete flashing all-in-one using the 'Simple Use Case'
+  All the commands (INIT, LOAD, FLASH, UNLOAD, DEINIT) are executed consecutively.
+*/
+void VFlashComplete(char flashpack[], dword timeout)
+{
+  TestStep("VFlashComplete", "Doing init, load, flash, unload and deinit.");
+
+  gComplete = 1;
+  snprintf(gProject, elcount(gProject), flashpack);
+
+  // Initialize vFlash
+  vFlashInitialize();
+  testWaitForTextEvent("flashing done", timeout);
+}
+
+// Will be called when the vFlashGetLastErrorMessage() has been called
+void vFlashErrorMessage(char msg[])
+{
+  write(msg);
+}
+
+// Will be called when vFlash is initialized
+void vFlashInitCompleted(long statusCode)
+{
+  if (statusCode == 0)
+  {
+    if (gComplete)
+    {
+      vFlashLoad(gProject);
+    }
+  }
+  else
+  {
+    testCaseFail();
+    vFlashGetLastErrorMessage();
+  }
+}
+
+// Will be called when project loading is completed
+void vFlashLoadCompleted(long statusCode)
+{
+  if (statusCode == 0)
+  {
+    if (gComplete)
+    {
+      //vFlashActivateNetwork();
+      vFlashStart();
+    }
+  }
+  else
+  {
+    testCaseFail();
+    vFlashGetLastErrorMessage();
+    vFlashDeinitialize();
+  }
+}
+
+// Will be called when the FlexRay Network is activated
+void vFlashNetworkActivated(long statusCode)
+{
+  if (statusCode == 0)
+  {
+    if (gComplete)
+    {
+      vFlashStart();
+    }
+  }
+  else
+  {
+    testCaseFail();
+    vFlashGetLastErrorMessage();
+    vFlashDeinitialize();
+  }
+}
+
+// Will be called when project unloading is completed
+void vFlashUnloadCompleted(long statusCode)
+{
+  if (statusCode == 0)
+  {
+    if (gComplete)
+    {
+      vFlashDeinitialize();
+    }
+  }
+  else
+  {
+    testCaseFail();
+    vFlashGetLastErrorMessage();
+    vFlashDeinitialize();
+  }
+}
+
+// Will be called when vFlash has been stopped manually
+void vFlashStopped(long statusCode)
+{
+  vFlashUnload();
+}
+
+// Will be called when vFlash is deinitialized
+void vFlashDeinitCompleted(long statusCode)
+{
+  TestSupplyTextEvent("flashing done");
+}
+
+// Will be called when the vFlash Status changed
+void vFlashStatusCallback(DWORD statusCode)
+{
+  if (statusCode == 0)
+  {
+    write("Flashing successfully finished");
+    vFlashUnload();
+  }
+  else
+  {
+    testCaseFail();
+    vFlashGetLastErrorMessage();
+    write("Flashing failed: %d", statusCode);
+    vFlashUnload();
+  }
+}
+
+// Will be called when the flash progress changed
+void vFlashProgressCallback(DWORD progressInPercent, DWORD remainingTimeInS)
+{
+  @vFlash::Progress = progressInPercent;
+}

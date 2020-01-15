@@ -1,0 +1,1439 @@
+/*@!Encoding:1252*/
+includes
+{  
+  #include "ServiceCD_Player.cin"
+}
+
+//
+// Simulation of a CD_Changer (with disc changer capability)
+//
+variables
+{
+  // Property: TimePosition
+  mstimer tTimePosition;
+  const dword kTimePositionCycle = 1000; // update cycle for time position
+
+  
+  // Property: MediaInfo
+  // virtual magazine
+  const long kMediaInfoSize = 6;  // maximum number of CDs of the changer
+  // media info will be derived from gAudioDiskInfoAudioTime[] 
+  // as soon as the magazine is loaded
+  word  gMediaInfoMediaType[kMediaInfoSize];
+  word  gMediaInfoMediaFilesystem[kMediaInfoSize];
+  word  gMediaInfoFirstTrack[kMediaInfoSize];
+  word  gMediaInfoLastTrack[kMediaInfoSize];
+  dword gMediaInfoPlayTime[kMediaInfoSize];
+  // MediaTitles are fix for simulation
+  char  gMediaInfoMediaTitle[kMediaInfoSize][50] = {
+    "Pink Floyd - The Wall",
+    "Beethoven - 9. Symphonie",
+    "Metallica - Reload",
+    "Depeche Mode  - Violator",
+    "Badesalz - Diwodaso",
+    "Mike Oldfield - Tubular Bells"};
+
+
+  // Property: AudioDiskInfo
+  // virtual CDs
+  const long kAudioDiskInfoSize = 10; // maximum number of titles on a CD
+  // title length of virtual CDs in ms
+  dword gAudioDiskInfoAudioTime[kMediaInfoSize][kAudioDiskInfoSize] = {
+    { 10000,  9000, 12000,  9000,  8000,     0,     0,     0,     0,     0 },
+    { 15000, 14000, 13000, 12000,     0,     0,     0,     0,     0,     0 },
+    {     0,     0,     0,     0,     0,     0,     0,     0,     0,     0 },
+    { 13000, 11000,  5000, 10000, 19000,  9000,     0,     0,     0,     0 },
+    {     0,     0,     0,     0,     0,     0,     0,     0,     0,     0 },
+    {  8000,     0,     0,     0,     0,     0,     0,     0,     0,     0 }};
+  char  gAudioDiskInfoAudioTitle[kMediaInfoSize][kAudioDiskInfoSize][50] = {
+    { "Another Brick in the Wall", "Goodbye blue Sky", "The thin Ice", "Empty Spaces", "Don't leave me now", "", "", "", "", "" },
+    { "First Movement", "Second Movement", "Third Movement", "Fourth Movement", "", "", "", "", "", "" },
+    { "Fuel", "The Memory Remains", "Low Man's Lyric", "Attitude", "", "", "", "", "", "" },
+    { "World In My Eyes", "Sweetest Perfection", "Personal Jesus", "Halo", "Waiting For The Night", "Enjoy The Silence", "", "", "", "" },
+    { "In Der Waschaalaach", "Verirrt", "Hessi James", "Alles Wie Vorher", "", "", "", "", "", "" },
+    { "Part One", "Part Two", "", "", "", "", "", "", "", "" }};
+  
+  const long kLabelWidth = 4;
+
+  // Property: PeakLevel
+  msTimer tPeakLevel;
+  const long kPeakLevelCycle = 300; // in ms
+
+  long gPeakLevelCycle = kPeakLevelCycle;
+  
+  word gServiceId = kCDPlayerServiceId;
+  
+  const int kUdpServerPort = 30490;
+
+	LONG gBusContext;
+  
+  const int kIndexAudioDiskInfo = 0;
+  const int kIndexActiveDisk = 1;
+  const int kIndexDeckStatus = 2;
+  const int kIndexMagazineStatus = 3;
+  const int kIndexMediaInfo = 4;
+  const int kIndexPeakLevel = 5;
+  const int kIndexTimePosition = 6;
+  const int kIndexTrackPosition = 7;
+  const int kIndexMax = 8;
+  
+  dword gProvidedFieldHandle[kIndexMax];  
+}
+
+on start
+{ 
+  // Register callbacks for methods requests
+  if (SomeIpRegisterCallback(SomeIpGetProvidedObjectHandle("IncrementTrack"), "OnIncrementTrackRequest") > 0)
+  {
+    write("Error: IncrementTrack, SomeIpRegisterCallback fails, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;   
+  }
+  
+  if (SomeIpRegisterCallback(SomeIpGetProvidedObjectHandle("DecrementTrack"), "OnDecrementTrackRequest") > 0)
+  {
+    write("Error: DecrementTrack, SomeIpRegisterCallback fails, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;   
+  }
+  
+  if (SomeIpRegisterCallback(SomeIpGetProvidedObjectHandle("IncrementDisc"), "OnIncrementDiscRequest") > 0)
+  {
+    write("Error: IncrementDisc, SomeIpRegisterCallback fails, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;   
+  }
+  
+  if (SomeIpRegisterCallback(SomeIpGetProvidedObjectHandle("DecrementDisc"), "OnDecrementDiscRequest") > 0)
+  {
+    write("Error: DecrementDisc, SomeIpRegisterCallback fails, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;
+  }
+  
+  // Register callbacks for fields getter/setter requests  
+  if (SomeIpRegisterCallback(SomeIpGetProvidedObjectHandle("get_AudioDiskInfo"), "OnAudioDiskInfoGetRequest") > 0)
+  {
+    write("Error: get_AudioDiskInfo, SomeIpRegisterCallback fails, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;   
+  }
+
+  if (SomeIpRegisterCallback(SomeIpGetProvidedObjectHandle("set_ActiveDisk"), "OnActiveDiskSetRequest") > 0)
+  {
+    write("Error: set_ActiveDisk, SomeIpRegisterCallback fails, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;   
+  }
+  
+  if (SomeIpRegisterCallback(SomeIpGetProvidedObjectHandle("set_DeckStatus"), "OnDeckStatusSetRequest") > 0)
+  {
+    write("Error: set_DeckStatus, SomeIpRegisterCallback fails, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;   
+  }
+  
+  if (SomeIpRegisterCallback(SomeIpGetProvidedObjectHandle("set_TrackPosition"), "OnTrackPositionSetRequest") > 0)
+  {
+    write("Error: set_TrackPosition, SomeIpRegisterCallback fails, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;   
+  }
+  
+  // Get fields handles
+	gProvidedFieldHandle[kIndexAudioDiskInfo] = SomeIpGetProvidedObjectHandle("AudioDiskInfo");
+	
+  if (gProvidedFieldHandle[kIndexAudioDiskInfo] == 0)
+  {
+    write("Error: AudioDiskInfo, SomeIpGetProvidedObjectHandle returned 0, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;
+  }
+    
+  gProvidedFieldHandle[kIndexActiveDisk] = SomeIpGetProvidedObjectHandle("ActiveDisk");
+		
+  if (gProvidedFieldHandle[kIndexActiveDisk] == 0)
+  {
+    write("Error: ActiveDisk, SomeIpGetProvidedObjectHandle returned 0, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;
+  }
+    
+  gProvidedFieldHandle[kIndexDeckStatus] = SomeIpGetProvidedObjectHandle("DeckStatus");
+		
+  if (gProvidedFieldHandle[kIndexDeckStatus] == 0)
+  {
+    write("Error: DeckStatus, SomeIpGetProvidedObjectHandle returned 0, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;
+  }
+    
+  gProvidedFieldHandle[kIndexMagazineStatus] = SomeIpGetProvidedObjectHandle("MagazineStatus");
+		
+  if (gProvidedFieldHandle[kIndexMagazineStatus] == 0)
+  {
+    write("Error: MagazineStatus, SomeIpGetProvidedObjectHandle returned 0, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;
+  }
+    
+  gProvidedFieldHandle[kIndexMediaInfo] = SomeIpGetProvidedObjectHandle("MediaInfo");
+		
+  if (gProvidedFieldHandle[kIndexMediaInfo] == 0)
+  {
+    write("Error: MediaInfo, SomeIpGetProvidedObjectHandle returned 0, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;
+  }
+    
+  gProvidedFieldHandle[kIndexPeakLevel] = SomeIpGetProvidedObjectHandle("PeakLevel");
+			
+  if (gProvidedFieldHandle[kIndexPeakLevel] == 0)
+  {
+    write("Error: PeakLevel, SomeIpGetProvidedObjectHandle returned 0, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;
+  }
+    
+  gProvidedFieldHandle[kIndexTimePosition] = SomeIpGetProvidedObjectHandle("TimePosition");
+			
+  if (gProvidedFieldHandle[kIndexTimePosition] == 0)
+  {
+    write("Error: TimePosition, SomeIpGetProvidedObjectHandle returned 0, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;
+  }
+    
+  gProvidedFieldHandle[kIndexTrackPosition] = SomeIpGetProvidedObjectHandle("TrackPosition");
+			
+  if (gProvidedFieldHandle[kIndexTrackPosition] == 0)
+  {
+    write("Error: TrackPosition, SomeIpGetProvidedObjectHandle returned 0, SomeIpGetLastError() = %d", SomeIpGetLastError());
+    Stop();
+    return;
+  }  
+
+  // simulate loaded magazine
+  @sysvar::CDC::ADP_MagazineStatus = kMagazineStatusMagazineLoaded;
+}
+
+on sysvar CDC::Error_InterfaceVersion
+{
+  dword ret;
+  
+  ret = SomeIpSetProperty(SomeIpGetProvidedObjectHandle("CDPlayer"), "MinorVersion", @this == 0 ? 0 : 1);
+	  
+  if (ret != 0)
+  {
+    write("Error: CD_Changer, SomeIpSetProperty[MinorVersion] returned %d)", ret);
+    Stop();
+    return;
+  }
+}
+
+on sysvar CDC::Error_WrongService
+{
+  if (@this == 0)
+  {
+    gServiceId = kCDPlayerServiceId;
+  }
+  else
+  {
+    gServiceId = 100;
+  }
+}
+
+on sysvar CDC::Error_PeakLevelCycle
+{
+  if (@this == 0)
+  {
+    gPeakLevelCycle = kPeakLevelCycle;
+  }
+  else
+  {
+    gPeakLevelCycle = 50;
+  }
+}
+
+on sysvar CDC::ADP_MagazineStatus
+{
+  dword ret;
+  long numbytes;
+  byte buffer[500];
+
+  // simulate actions when magazine status changes
+
+  switch(@sysvar::CDC::ADP_MagazineStatus)
+  {
+    case kMagazineStatusMagazineLoaded:
+    {
+      // magazine loaded
+
+      // calculate media info from simulated discs
+      MediaInfoCalculate();
+
+      // update property MediaInfo
+      FillMediaInfoStatusMsg(gProvidedFieldHandle[kIndexMediaInfo]);
+      
+      ret = SomeIpCommitField(gProvidedFieldHandle[kIndexMediaInfo]);
+      
+      if (ret != 0)
+      {
+        write("Error: CD_Changer, SomeIpCommitField returned %d", ret);
+        Stop();
+        return;
+      }
+
+      // update property ActiveDisk
+      @sysvar::CDC::ADP_ActiveDisk = NextDiscNumber();
+
+      // update property DeckStatus
+      @sysvar::CDC::ADP_DeckStatus = kDeckStatusStop; // Stop
+
+      break;
+    }
+    default:
+    { 
+      // magazine not loaded
+      PlaybackStop();
+
+      // calculate media info from simulated discs
+      MediaInfoCalculate();
+
+      // update property MediaInfo
+      FillMediaInfoStatusMsg(gProvidedFieldHandle[kIndexMediaInfo]);
+      ret = SomeIpCommitField(gProvidedFieldHandle[kIndexMediaInfo]);
+      //SomeIpCommitField(gProvidedFieldHandle[kIndexMediaEvent]);
+
+      if (ret != 0)
+      {
+        write("Error: CD_Changer, SomeIpCommitField returned %d", ret);
+        Stop();
+        return;
+      }
+      
+      // stop current track
+      canceltimer(tTimePosition); 
+
+      // update property ActiveDisk
+      @sysvar::CDC::ADP_ActiveDisk = 0;
+
+      break;
+    }
+  }
+
+  // send status message to all notification clients
+
+  ret = SomeIpSetValueDword(gProvidedFieldHandle[kIndexMagazineStatus], "", @sysvar::CDC::ADP_MagazineStatus);
+              
+  if (ret != 0)
+  {
+    write("Error: CD_Changer, SomeIpSetValueDword returned %d", ret);
+    Stop();
+    return;
+  }
+      
+  ret = SomeIpCommitField(gProvidedFieldHandle[kIndexMagazineStatus]);
+  
+  if (ret != 0)
+  {
+    write("Error: CD_Changer, SomeIpCommitField returned %d", ret);
+    Stop();
+    return;
+  }
+}
+
+long IsDiscValid(long disc)
+{
+  // Description:
+  //   Checks if disc is available.
+  // Parameter:
+  //   disc   disc number
+  // Return:
+  //   0: failed; 1: Ok
+
+  if (!IsMagazineLoaded())
+  {
+    return 0;
+  }
+
+  if ((disc > 0) && (disc <= kMediaInfoSize))
+  {
+    // is there a disc at the current magazine position
+    if(gMediaInfoMediaType[disc - 1] != 0)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+
+long NextDiscNumber ()
+{
+  // Description:
+  //   Returns the next disc number.
+  //   Wraps around if kMediaInfoSize is reached.
+  // Return: 
+  //   Disc number or 0 if there is no disc/magazine inserted.
+
+  long current, next;
+
+  if (!IsMagazineLoaded())
+  {
+    return 0; // magazine not loaded
+  }
+
+  current = @sysvar::CDC::ADP_ActiveDisk;
+  
+  if(current >= kMediaInfoSize)
+  {
+    current = 0;
+  }
+  
+  next = current + 1;
+  while (next != current)
+  {
+    if (gMediaInfoMediaType[next-1] != 0)
+    {
+      break;
+    }
+    next++;
+    if(next > kMediaInfoSize) // wrap around
+    {
+      if(current == 0)
+      {
+        next = 0;
+        break;
+      }
+      next = 1;
+    }
+  }
+
+  if (next == current)
+  {
+    return 0; // no disk found
+  }
+
+  return next;
+}
+
+long IsMagazineLoaded()
+{
+  // Description:
+  //   Checks if magazine is loaded.
+  // Return:
+  //   0: failed; 1: Ok
+
+  if (kMagazineStatusMagazineLoaded != @sysvar::CDC::ADP_MagazineStatus)
+  {
+    return 0;
+  }
+  
+  return 1;
+}
+
+on sysvar CDC::ADP_ActiveDisk
+{
+  dword ret;
+  byte disc;
+
+  disc = @sysvar::CDC::ADP_ActiveDisk;
+  if (IsDiscValid(disc))
+  {
+    @sysvar::CDC::ADP_TrackPosition = gMediaInfoFirstTrack[disc - 1];
+  }
+  
+  TimePositionSetTrack(0);
+
+  // send status message to all notification clients
+
+  ret = SomeIpSetValueDword(gProvidedFieldHandle[kIndexActiveDisk], "", @sysvar::CDC::ADP_ActiveDisk);
+                
+  if (ret != 0)
+  {
+    write("Error: CD_Changer, SomeIpSetValueDword returned %d", ret);
+    Stop();
+    return;
+  }
+  
+  ret = SomeIpCommitField(gProvidedFieldHandle[kIndexActiveDisk]);
+  
+  if (ret != 0)
+  {
+    write("Error: CD_Changer, SomeIpCommitField returned %d", ret);
+    Stop();
+    return;
+  }
+}
+
+on sysvar CDC::ADP_TrackPosition
+{
+  dword ret;
+
+  if (!IsTrackPositionValid(@sysvar::CDC::ADP_ActiveDisk, @sysvar::CDC::ADP_TrackPosition))
+  {
+    // error: track doesn't exist
+    PlaybackStop();
+  }
+
+  // start new track at position 0
+  TimePositionSetTrack(0);
+
+  // send status message to all notification clients
+
+  ret = SomeIpSetValueDword(gProvidedFieldHandle[kIndexTrackPosition], "", @sysvar::CDC::ADP_TrackPosition);
+                
+  if (ret != 0)
+  {
+    write("Error: CD_Changer, SomeIpSetValueDword returned %d", ret);
+    Stop();
+    return;
+  }
+  
+  ret = SomeIpCommitField(gProvidedFieldHandle[kIndexTrackPosition]);
+  
+  if (ret != 0)
+  {
+    write("Error: CD_Changer, SomeIpCommitField returned %d", ret);
+    Stop();
+    return;
+  }
+}
+
+on sysvar CDC::ADP_TimePosition_Track
+{    
+  // Set signals
+  $TimePosition.diskTime = @sysvar::CDC::ADP_TimePosition_Disk;
+  $TimePosition.titleTime = @sysvar::CDC::ADP_TimePosition_Track;
+  $TimePosition.trackTime = @sysvar::CDC::ADP_TimePosition_Title;
+}
+
+void MediaInfoCalculate()
+{
+  // Description:
+  //   Fills the gMediaInfo arrays by analyzing gAudioDiskInfoAudioTime[]
+
+  word disc, title;
+  dword playtime;
+
+  if (IsMagazineLoaded())
+  {
+    // check all discs
+    for (disc = 0; disc < kMediaInfoSize; ++disc)
+    {
+      // is disc inserted?
+      if (gAudioDiskInfoAudioTime[disc][0] > 0)
+      {
+        gMediaInfoMediaType[disc] = kMediaTypeAudio;
+        gMediaInfoMediaFilesystem[disc] = kMediaFileSystemCDDA;
+        gMediaInfoFirstTrack[disc] = 1;
+        
+        // find last track and get play time
+        playtime = 0;
+        title = 0;
+        while ((title < kAudioDiskInfoSize) && (gAudioDiskInfoAudioTime[disc][title] != 0))
+        {
+          // summarize play time
+          playtime = playtime + gAudioDiskInfoAudioTime[disc][title];
+          // next title
+          title++;
+        }
+        gMediaInfoLastTrack[disc] = title;
+        gMediaInfoPlayTime[disc] = playtime;
+      }
+      else
+      {
+        // no disc present
+        gMediaInfoMediaType[disc] = kMediaTypeNoDiskUnknown;
+        gMediaInfoMediaFilesystem[disc] = kMediaFileSystemNoDiskUnknown;
+        gMediaInfoFirstTrack[disc] = 0;
+        gMediaInfoLastTrack[disc] = 0;
+        gMediaInfoPlayTime[disc] = 0;
+      }
+    }
+  }
+  else
+  {
+    // no magazine -> no media info
+    for(disc = 0; disc < kMediaInfoSize; ++disc)
+    {
+      gMediaInfoMediaType[disc] = kMediaTypeNoDiskUnknown;
+      gMediaInfoMediaFilesystem[disc] = kMediaFileSystemNoDiskUnknown;
+      gMediaInfoFirstTrack[disc] = 0;
+      gMediaInfoLastTrack[disc] = 0;
+      gMediaInfoPlayTime[disc] = 0;
+    }
+  }
+}
+
+on timer tTimePosition
+{
+  // Property: TimePosition
+
+  dword currenttracktime, tracktime;
+  long disc, track, newtrack;
+
+  currenttracktime = @sysvar::CDC::ADP_TimePosition_Track;
+  disc = @sysvar::CDC::ADP_ActiveDisk;
+  track = @sysvar::CDC::ADP_TrackPosition;
+
+  if(!IsTrackPositionValid(disc, track))
+  {
+    // error: playing an invalid track
+    PlaybackStop();
+  }
+  else
+  {
+    // track complete?
+    tracktime = gAudioDiskInfoAudioTime[disc - 1][track - 1]; // length of track
+    if ((currenttracktime + kTimePositionCycle) > tracktime)
+    {
+      // next track
+      newtrack = track + 1;
+      if (newtrack > gMediaInfoLastTrack[disc - 1])
+      {
+        // load next disc
+        disc = NextDiscNumber();
+        newtrack = 1; 
+      }
+      
+      PlaybackStartTrack(disc, newtrack);
+    }
+    else
+    {
+      canceltimer(tTimePosition);
+      settimer(tTimePosition, kTimePositionCycle);
+      TimePositionSetTrack(currenttracktime + kTimePositionCycle);
+    }
+  }
+}
+
+long IsTrackPositionValid(long disc, long track)
+{
+  // Description:
+  //   Checks if track is available.
+  // Parameter:
+  //   disc   disc number
+  //   track  track number
+  // Return:
+  //   0: failed; 1: Ok
+
+  if (!IsDiscValid(disc))
+  {
+    return 0;
+  }
+  
+  if ((track > 0) && (track <= kAudioDiskInfoSize))
+  {
+    if (gAudioDiskInfoAudioTime[disc - 1][track - 1] != 0)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+void PlaybackStartTrack(long disc, long track)
+{
+  // Description:
+  //   Starts playback of a track.
+
+  // stop current track
+  canceltimer(tTimePosition);
+  
+  if(IsTrackPositionValid(disc, track))
+  {
+    // set DeckStatus
+    @sysvar::CDC::ADP_DeckStatus = kDeckStatusPlay; // play
+
+    // set ActiveDisk
+    @sysvar::CDC::ADP_ActiveDisk = disc;
+
+    // set TrackPosition
+    @sysvar::CDC::ADP_TrackPosition = track;
+
+    // set TimePosition
+    TimePositionSetTrack(@sysvar::CDC::ADP_TimePosition_Track);
+
+    // set play timer
+    settimer(tTimePosition, kTimePositionCycle);
+
+    // set peak level timer
+    cancelTimer(tPeakLevel);
+    setTimer(tPeakLevel, gPeakLevelCycle);
+  }
+  else
+  {
+    // set DeckStatus
+    @sysvar::CDC::ADP_DeckStatus = kDeckStatusStop; // stop
+
+    // invalid track
+    // set ActiveDisk
+    if (!IsDiscValid(disc))
+    {
+      disc = 0;
+    }
+    @sysvar::CDC::ADP_ActiveDisk = disc;
+
+    // set TrackPosition
+    @sysvar::CDC::ADP_TrackPosition = 0;
+
+    // set TimePosition
+    TimePositionSetTrack(0);
+  }
+}
+
+void PlaybackStop()
+{
+  // Description:
+  //   Stops playback of a track.
+
+  // stop play timer
+  canceltimer(tTimePosition);
+
+  // stop peak level timer
+  ResetPeakLevel();
+
+  // set DeckStatus
+  @sysvar::CDC::ADP_DeckStatus = kDeckStatusStop; // stop
+
+  // set TrackPosition
+  @sysvar::CDC::ADP_TrackPosition = 1;
+
+  // set TimePosition
+  TimePositionSetTrack(0);
+}
+
+void PlaybackPause ()
+{
+  // Description:
+  //   Pauses playback of a track.
+
+  // stop play timer
+  canceltimer(tTimePosition);
+
+  // stop peak level timer
+  ResetPeakLevel();
+
+  // set DeckStatus
+  @sysvar::CDC::ADP_DeckStatus = kDeckStatusPause; // pause
+}
+
+void TimePositionSetTrack(dword tracktime)
+{
+  // Description:
+  //   Sets the track time of property TimePosition
+  //   DiskTime and TitleTime will be calculated from TrackTime
+  //   and the title play times.
+
+  dword disctime;
+  byte disc, i;
+  word track;
+
+  // disk time calculation
+  disc = @sysvar::CDC::ADP_ActiveDisk;
+  track = @sysvar::CDC::ADP_TrackPosition;
+  disctime = 0;
+  if (IsTrackPositionValid(disc, track))
+  {
+    for (i = 1; i < track; ++i)
+    {
+      disctime = disctime + gAudioDiskInfoAudioTime[disc - 1][i - 1];
+    }
+    disctime = disctime + tracktime;
+  }
+
+  // set disk time
+  @sysvar::CDC::ADP_TimePosition_Disk = disctime;
+
+  // set title time; same as track time here
+  @sysvar::CDC::ADP_TimePosition_Title = tracktime;
+
+  // set track time
+  @sysvar::CDC::ADP_TimePosition_Track = tracktime;
+}
+
+on sysvar CDC::ADP_DeckStatus
+{
+  dword ret;
+
+  switch (@sysvar::CDC::ADP_DeckStatus)
+  {
+  case 0: // Play
+    PlaybackStartTrack(@sysvar::CDC::ADP_ActiveDisk, @sysvar::CDC::ADP_TrackPosition);
+    break;
+  case 1: // Stop
+    PlaybackStop();
+    break;
+  case 2: // Pause
+    PlaybackPause();
+    break;
+  case 3: // Load
+    @sysvar::CDC::ADP_MagazineStatus = kMagazineStatusMagazineLoaded;
+    break;
+  case 4: // Unload
+    @sysvar::CDC::ADP_MagazineStatus = kMagazineStatusNoMagazine;
+    PlaybackStop();
+    break;
+  default:
+    // ignore
+    break;
+  }
+
+  // HINT: Calling Notification Service to inform all notified clients
+
+  ret = SomeIpSetValueDword(gProvidedFieldHandle[kIndexDeckStatus], "", @sysvar::CDC::ADP_DeckStatus);
+                
+  if (ret != 0)
+  {
+    write("Error: CD_Changer, SomeIpSetValueDword returned %d", ret);
+    Stop();
+    return;
+  }
+  
+  ret = SomeIpCommitField(gProvidedFieldHandle[kIndexDeckStatus]);
+  
+  if (ret != 0)
+  {
+    write("Error: CD_Changer, SomeIpCommitField returned %d", ret);
+    Stop();
+    return;
+  }
+}
+
+on timer tPeakLevel
+{
+  dword ret;
+  int x, y;
+
+  x = random(127);
+  y = random(127);
+
+  @sysvar::CDC::ADP_PeakLevel_Left = x / 2;
+  @sysvar::CDC::ADP_PeakLevel_Right = y / 2;
+
+  // Set signals
+  $PeakLevel.levelLeft = @sysvar::CDC::ADP_PeakLevel_Left;
+  $PeakLevel.levelRight = @sysvar::CDC::ADP_PeakLevel_Right;   
+  
+  canceltimer(tPeakLevel);
+  setTimer(tPeakLevel, gPeakLevelCycle);
+}
+
+ResetPeakLevel()
+{
+  cancelTimer(tPeakLevel);
+  @sysvar::CDC::ADP_PeakLevel_Left = 0;
+  @sysvar::CDC::ADP_PeakLevel_Right = 0;
+}
+
+void FillMediaInfoStatusMsg(dword fieldHandle)
+{
+  dword ret;
+  char s[20], index[20], whole[40];
+  int i;
+  
+  // copy data
+  for (i = 0; i < kMediaInfoSize; i++)
+  {    
+    strncpy(s, "[", 19);
+    ltoa(i, index, 10);
+    strncat(s, index, 19);
+    strncat(s, "].", 19);
+    
+    strncpy(whole, s, elcount(whole));
+    strncat(whole, kMediaInfoMediaTitle, 39);
+    
+    if (gMediaInfoPlayTime[i] == 0)
+    {
+      ret = SomeIpSetValueString(fieldHandle, whole, " ");
+    }
+    else
+    {
+      ret = SomeIpSetValueString(fieldHandle, whole, gMediaInfoMediaTitle[i]);
+    }
+                   
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpSetValueString[kIndexMediaInfo] returned %d", ret);
+      Stop();
+      return;
+    }
+  
+    strncpy(whole, s, elcount(whole));
+    strncat(whole, kMediaInfoMediaType, 39);
+    
+    ret = SomeIpSetValueDword(fieldHandle, whole, gMediaInfoMediaType[i]);
+                 
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpSetValueDword returned %d", ret);
+      Stop();
+      return;
+    }
+    
+    strncpy(whole, s, elcount(whole));
+    strncat(whole, kMediaInfoMediaFileSystem, 39);
+    
+    ret = SomeIpSetValueDword(fieldHandle, whole, gMediaInfoMediaFilesystem[i]);
+                  
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpSetValueDword returned %d", ret);
+      Stop();
+      return;
+    }
+    
+    strncpy(whole, s, elcount(whole));
+    strncat(whole, kMediaInfoFirstTrack, 39);
+    
+    ret = SomeIpSetValueDword(fieldHandle, whole, gMediaInfoFirstTrack[i]);
+                  
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpSetValueDword returned %d", ret);
+      Stop();
+      return;
+    }
+    
+    strncpy(whole, s, elcount(whole));
+    strncat(whole, kMediaInfoLastTrack, 39);
+    
+    ret = SomeIpSetValueDword(fieldHandle, whole, gMediaInfoLastTrack[i]);
+                  
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpSetValueDword returned %d", ret);
+      Stop();
+      return;
+    }
+
+    strncpy(whole, s, elcount(whole));
+    strncat(whole, kMediaInfoPlayTime, 39);
+    
+    ret = SomeIpSetValueDword(fieldHandle, whole, gMediaInfoPlayTime[i]);
+                  
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpSetValueDword returned %d", ret);
+      Stop();
+      return;
+    }
+  }
+}
+
+on sysvar CDC::Button_Eject
+{
+  // unload magazine
+
+  if (@this != 0)
+  {
+    return;
+  }
+
+  @sysvar::CDC::ADP_MagazineStatus = kMagazineStatusNoMagazine;
+}
+
+void FillAudioDiskInfoStatusMsg(dword msgHandle)
+{
+  dword ret;
+
+  byte i, disc, tracks;
+  char bufferFilename[50];
+  char s[20], index[20], whole[20];
+  
+  // check posx, posy
+  disc = @sysvar::CDC::ADP_ActiveDisk;
+  
+  tracks = NumberOfTracks(disc);
+  
+  // copy data
+  for (i = 0; i < tracks; i++)
+  {    
+    strncpy(s, "[", 19);
+    ltoa(i, index, 10);
+    strncat(s, index, 19);
+    strncat(s, "].", 19);
+    
+    strncpy(whole, s, elcount(whole));
+    strncat(whole, kAudioDiskInfoAudioTitle, 19);
+      
+    write(gAudioDiskInfoAudioTitle[disc - 1][i]);
+    
+    ret = SomeIpSetValueString(msgHandle, whole, gAudioDiskInfoAudioTitle[disc - 1][i]);
+                    
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpSetValueString[kIndexAudioDiskInfo] returned %d", ret);
+      Stop();
+      return;
+    }
+    
+    strncpy(whole, s, elcount(whole));
+    strncat(whole, kAudioDiskInfoAudioTime, 19);
+    ret = SomeIpSetValueDword(msgHandle, whole, gAudioDiskInfoAudioTime[disc - 1][i]); 
+                 
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpSetValueDword returned %d", ret);
+      Stop();
+      return;
+    }
+    
+    strncpy(whole, s, elcount(whole));
+    strncat(whole, kAudioDiskInfoTrackNo, 19);
+    
+    ret = SomeIpSetValueDword(msgHandle, whole, i + 1);  
+                  
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpSetValueDword returned %d", ret);
+      Stop();
+      return;
+    }
+    
+    strncpy(whole, s, elcount(whole));
+    strncat(whole, kAudioDiskInfoAudioFilename, 19); 
+    snprintf(bufferFilename, elcount(bufferFilename), "Track%02d.mp3", i + 1);
+    
+    ret = SomeIpSetValueString(msgHandle, whole, bufferFilename);
+                  
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpSetValueString[kIndexAudioDiskInfo] returned %d", ret);
+      Stop();
+      return;
+    }
+  }
+}
+
+long NumberOfTracks(long disc)
+{
+  // Returns number of tracks on the current disc.
+
+  long i;
+
+  if (!IsDiscValid(disc))
+  {
+    return 0;
+  }
+
+  i = 0;
+  while (gAudioDiskInfoAudioTime[disc - 1][i] > 0)
+  {
+    ++i;
+  }
+
+  return i;
+}
+
+void OnIncrementTrackRequest(DWORD methodHandle, DWORD messageHandle, DWORD responseMessageHandle)
+{
+  long disc;
+  word newtrack;
+  dword ret, val;
+  
+  disc = @sysvar::CDC::ADP_ActiveDisk;
+  if (!IsDiscValid(disc))
+  {
+    // no disk in drive
+    return;
+  }
+
+  // next track
+  newtrack = @sysvar::CDC::ADP_TrackPosition;
+  
+  val = SomeIpGetValueDword(messageHandle, kCDPlayerParameterNSteps);
+  
+  if (val == 0)
+  {
+    ret = SomeIpGetLastError();
+    
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpGetValueDword returned 0, SomeIpGetLastError() = %d", ret);
+      Stop();
+      return;
+    }
+  }
+  
+  newtrack += val;
+    
+  // verify track
+  if (newtrack > gMediaInfoLastTrack[disc - 1])
+  {
+    newtrack = gMediaInfoLastTrack[disc - 1];
+  }
+
+  // set TrackPosition
+  @sysvar::CDC::ADP_TrackPosition = newtrack;
+
+  if (@sysvar::CDC::ADP_DeckStatus == 0) // play
+  {
+    // start playback
+    PlaybackStartTrack(disc, newtrack);
+  }  
+}
+
+void OnDecrementTrackRequest(DWORD methodHandle, DWORD messageHandle, DWORD responseMessageHandle)
+{
+  long disc;
+  word newtrack;
+  dword ret, val;
+  
+  disc = @sysvar::CDC::ADP_ActiveDisk;
+  if (!IsDiscValid(disc))
+  {
+    // no disk in drive
+    return;
+  }
+
+  // next track
+  newtrack = @sysvar::CDC::ADP_TrackPosition;
+  
+  val = SomeIpGetValueDword(messageHandle, kCDPlayerParameterNSteps);
+  
+  if (val == 0)
+  {
+    ret = SomeIpGetLastError();
+    
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpGetValueDword returned 0, SomeIpGetLastError() = %d", ret);
+      Stop();
+      return;
+    }
+  }
+  
+  newtrack -= val;
+  
+  // verify track
+  if (newtrack < gMediaInfoFirstTrack[disc - 1])
+  {
+    newtrack = gMediaInfoFirstTrack[disc - 1];
+  }
+
+  // set TrackPosition
+  @sysvar::CDC::ADP_TrackPosition = newtrack;
+
+  if (@sysvar::CDC::ADP_DeckStatus == 0) // play
+  {
+    // start playback
+    PlaybackStartTrack(disc, newtrack);
+  }    
+}
+
+void OnIncrementDiscRequest(DWORD methodHandle, DWORD messageHandle, DWORD responseMessageHandle)
+{
+  long currdisc, nextdisc;
+  dword ret, val;
+  
+  if (!IsMagazineLoaded())
+  {
+    // no magazine
+    return;
+  }
+
+  // check if current disc is valid
+  currdisc = @sysvar::CDC::ADP_ActiveDisk;
+  if (IsDiscValid(currdisc))
+  {  
+    val = SomeIpGetValueDword(messageHandle, kCDPlayerParameterNSteps);
+      
+    if (val == 0)
+    {
+      ret = SomeIpGetLastError();
+      
+      if (ret != 0)
+      {
+        write("Error: CD_Changer, SomeIpGetValueDword returned 0, SomeIpGetLastError() = %d", ret);
+        Stop();
+        return;
+      }
+    }
+    
+    // next disc
+    nextdisc = currdisc + val;
+
+    if (!IsDiscValid(nextdisc))
+    {
+      nextdisc = NextDiscNumber();    // skip ahead to next valid disc
+      if (!IsDiscValid(nextdisc))
+      {
+        nextdisc = currdisc; // set a valid value
+      }
+    }
+  }
+  else
+  {
+    nextdisc = 1;
+    if (!IsDiscValid(nextdisc))
+    {
+      nextdisc = 0; // set a valid value
+    }
+  }
+  
+  // set property
+  @sysvar::CDC::ADP_ActiveDisk = nextdisc;
+
+  // start playback
+  if (@sysvar::CDC::ADP_DeckStatus == 0) // play
+  {
+    PlaybackStartTrack(nextdisc, 1);
+  }
+}
+
+void OnDecrementDiscRequest(DWORD methodHandle, DWORD messageHandle, DWORD responseMessageHandle)
+{
+  dword val, ret;
+  long currdisc, nextdisc;
+  
+  if (!IsMagazineLoaded())
+  {
+    // no magazine
+    return;
+  }
+
+  // check if current disc is valid
+  currdisc = @sysvar::CDC::ADP_ActiveDisk;
+  if (IsDiscValid(currdisc))
+  {  
+    val = SomeIpGetValueDword(messageHandle, kCDPlayerParameterNSteps);
+    
+    if (val == 0)
+    {
+      ret = SomeIpGetLastError();
+      
+      if (ret != 0)
+      {
+        write("Error: CD_Changer, SomeIpGetValueDword returned 0, SomeIpGetLastError() = %d", ret);
+        Stop();
+        return;
+      }
+    }
+
+    // next disc
+    nextdisc = currdisc - val;
+
+    if(!IsDiscValid(nextdisc))
+    {
+      nextdisc = currdisc; // set a valid value
+    }
+  }
+  else
+  {
+    nextdisc = 1;
+    if (!IsDiscValid(nextdisc))
+    {
+      nextdisc = 0; // set a valid value
+    }
+  }
+
+  // set property
+  @sysvar::CDC::ADP_ActiveDisk = nextdisc;
+
+  // start playback
+  if (@sysvar::CDC::ADP_DeckStatus == 0) // play
+  {
+    PlaybackStartTrack(nextdisc, 1);
+  }  
+}
+
+void OnAudioDiskInfoGetRequest(DWORD methodHandle, DWORD messageHandle, DWORD responseMessageHandle)
+{
+  byte disc;
+
+  disc = @sysvar::CDC::ADP_ActiveDisk;
+
+  // fill message
+  FillAudioDiskInfoStatusMsg(responseMessageHandle);  
+}
+
+void OnActiveDiskSetRequest(DWORD methodHandle, DWORD messageHandle, DWORD responseMessageHandle)
+{
+  dword val, ret;
+  byte activeDisk;
+  
+  if (!IsMagazineLoaded())
+  {
+    // no magazine
+    return;
+  }
+  
+  val = SomeIpGetValueDword(messageHandle, "");
+  
+  if (val == 0)
+  {
+    ret = SomeIpGetLastError();
+    
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpGetValueDword returned 0, SomeIpGetLastError() = %d", ret);
+      Stop();
+      return;
+    }
+  }
+    
+  activeDisk = val;
+
+  // verify position
+  if ((activeDisk == 0) || (activeDisk > kMediaInfoSize))
+  {
+    return;
+  }
+
+  // verify CD is inserted
+  if (!IsDiscValid(activeDisk))
+  {
+    return;
+  }
+
+  // set property
+  @sysvar::CDC::ADP_ActiveDisk = activeDisk;
+
+  // start playback
+  if (@sysvar::CDC::ADP_DeckStatus == 0) // play
+  {
+    PlaybackStartTrack(activeDisk, 1);
+  }  
+}
+
+void OnDeckStatusSetRequest(DWORD methodHandle, DWORD messageHandle, DWORD responseMessageHandle)
+{
+  dword val, ret;
+  enum DeckStatus deckStatus;
+  
+  val = SomeIpGetValueDword(messageHandle, "");
+ 
+  if (val == 0)
+  {
+    ret = SomeIpGetLastError();
+    
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpGetValueDword returned 0, SomeIpGetLastError() = %d", ret);
+      Stop();
+      return;
+    }
+  }
+  
+  deckStatus = (enum DeckStatus)val;
+  
+  if (deckStatus > kDeckStatusUnload) // CD_Changer.DeckStatus.Status.DeckStatus::Unload)
+  {
+    ret = SomeIpSetReturnCode(responseMessageHandle, 1);
+    
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpSetReturnCode returned %d", ret);
+      Stop();
+    }
+    
+    return;
+  }
+
+  // any changes?
+  if (deckStatus == @sysvar::CDC::ADP_DeckStatus)
+  {
+    return;
+  }
+
+  // load magazine?
+  if (deckStatus != kDeckStatusLoad)
+  {
+    // verify player can play
+    if (!IsTrackPositionValid(@sysvar::CDC::ADP_ActiveDisk, @sysvar::CDC::ADP_TrackPosition))
+    {
+      return;
+    }
+  }
+  else
+  {
+    // magazine already loaded?
+    if (IsMagazineLoaded())
+    {
+      return;
+    }
+  }
+
+  // set property
+  @sysvar::CDC::ADP_DeckStatus = deckStatus;
+
+  //// set internal state of device
+  if (deckStatus == kDeckStatusPlay)
+  {
+    cancelTimer(tPeakLevel);
+    setTimer(tPeakLevel, gPeakLevelCycle);
+  }
+  else
+  {
+    ResetPeakLevel();
+  }  
+}
+
+void OnTrackPositionSetRequest(DWORD methodHandle, DWORD messageHandle, DWORD responseMessageHandle)
+{
+  byte disc;
+  word newtrack;
+  dword val, ret;
+
+  val = SomeIpGetValueDword(messageHandle, "");
+  
+  if (val == 0)
+  {
+    ret = SomeIpGetLastError();
+    
+    if (ret != 0)
+    {
+      write("Error: CD_Changer, SomeIpGetValueDword returned 0, SomeIpGetLastError() = %d", ret);
+      Stop();
+      return;
+    }
+  }
+  
+  newtrack = val;
+  disc = @sysvar::CDC::ADP_ActiveDisk;
+
+  // verify track
+  if (!IsTrackPositionValid(disc, newtrack))
+  {
+    return;
+  }
+
+  // set TrackPosition
+  @sysvar::CDC::ADP_TrackPosition = newtrack;
+  
+  if (@sysvar::CDC::ADP_DeckStatus == 0) // play
+  {
+    // start playback
+    PlaybackStartTrack(disc, newtrack);
+  }  
+}
+
+LONG OnSomeIpProcessTxMessage(DWORD messageHandle, LONG txChannel)
+{
+  // Description:
+  //    if "Wrong Service" is checked in the fault injection panel gServiceId 
+  //    is set to a unknown service ID (see "on sysvar CDC::Error_WrongService")
+  //    which will be detected by the test module
+
+  dword result;
+
+  if (SomeIpGetMessageId(messageHandle) == 0xFFFF8100)
+  {
+    if (SomeIpGetValueLong(messageHandle, "Entry[0]") == 1 /*OfferService*/)
+    {
+      result = SomeIpSetValueLong(messageHandle, "Entry[0].OfferService.ServiceID", gServiceId);
+      
+      if (result != 0)
+      {       
+        write("Error: CD_Changer, SomeIpSetValueLong[Entry[0].OfferService.ServiceID] returned %d)", result);
+        Stop();
+        return 0;
+      }
+    }
+  }
+   
+  return 1;
+}

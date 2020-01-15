@@ -1,0 +1,81 @@
+/*@!Encoding:1252*/
+variables
+{
+  const long gACTIVE      = 1;
+  const long gINACTIVE    = 0;
+  const long kLIN_CHANNEL = 1;
+
+  enum enumWiper_State{kPARK = 0, kLEVEL1 = 1, kLEVEL2 = 2, kINTERVAL = 3};
+  enum enumWiper_Pos{kPARK_POS = 0, kHIGH_POS = 6, kMIDDLE_POS = 7, kLOW_POS = 16};
+
+  msTimer tWiperMotor;
+  const long gMOTOR_SPEED = 100; //in ms
+
+  long gWiperPosition = 0;
+  long gWiperIsActive = 0;
+  long IsWiperRising  = +1;
+  long IsWiperFalling = -1; 
+  long gCondition     = 0;
+}
+
+on linFrame GWE_02
+{
+  if(this.MsgChannel == kLIN_CHANNEL)
+  {
+    if(this.GWE_Wiper == kLEVEL1)
+    {
+      $WWS_01::WWS_RainSensor = gACTIVE;
+
+      if(gWiperIsActive == gINACTIVE && gWiperPosition == kPARK_POS) 
+      {
+        gWiperIsActive = gACTIVE;
+        CancelTimer(tWiperMotor);
+        SetTimer(tWiperMotor,gMOTOR_SPEED);    
+        gCondition = 0;
+      }
+    }
+    else  
+    { 
+      gWiperIsActive = gINACTIVE;
+      $WWS_01::WWS_RainSensor = gINACTIVE;
+    }
+  }
+}
+
+on timer tWiperMotor
+{
+  switch(gCondition)
+  {
+    case 0:
+            if(gWiperIsActive == gINACTIVE && gWiperPosition == kPARK_POS)
+            {
+              CancelTimer(tWiperMotor);    
+              gCondition = 0;
+              gWiperPosition = kPARK_POS;
+              break;
+            }
+            gWiperPosition = gWiperPosition + IsWiperRising;
+            if(gWiperPosition == kHIGH_POS) gCondition = 1;    
+    break; 
+    case 1:
+            gWiperPosition = gWiperPosition + IsWiperFalling;
+            if(gWiperPosition == kPARK_POS) gCondition = 2;    
+    break; 
+    case 2:
+            gWiperPosition = gWiperPosition + IsWiperRising;
+            if(gWiperPosition == kLOW_POS) gCondition = 3;    
+    break; 
+    case 3:
+            gWiperPosition = gWiperPosition + IsWiperFalling;
+            if(gWiperPosition == kMIDDLE_POS) gCondition = 0;    
+    break;      
+  }
+
+  if(gCondition == 2 && gWiperPosition == kPARK_POS)   gWiperPosition = kMIDDLE_POS;
+  if(gCondition == 0 && gWiperPosition == kMIDDLE_POS) gWiperPosition = kPARK_POS;
+
+  $ExteriorLight::WWS_01::WWS_WiperPos = gWiperPosition;
+  cancelTimer(this);
+  Settimer(this,gMOTOR_SPEED); 
+}
+

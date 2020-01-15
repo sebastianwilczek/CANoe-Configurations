@@ -1,0 +1,211 @@
+/*@!Encoding:1252*/
+variables
+{
+  // ------------------------------------------------
+  // File information
+  // Copyright         : 2017, Vector Informatik GmbH
+  // ------------------------------------------------
+  
+  //Hint: Please define the following variables in your .can file
+  //  sysvarInt * gRunLEDVar;
+  //  sysvarInt * gErrLEDVar;
+  
+  // Definition of debugging constants
+  const int kDbgInfo    = 10;
+  const int kDbgWarning = 5;
+  const int kDbgError   = 1;
+  const int kDbgQuiet   = 0;
+
+  // General global variables
+  int gDbgLevel         = kDbgInfo; // Set debug level for output to write window
+
+  // variables for LED handling
+  msTimer runLEDTimer;           // timer for RUN LED control
+  msTimer errLEDTimer;           // timer for ERR LED control
+  int errLEDFlashCnt;            // flash counter for ERR LED (ON)
+  int errLEDType;                // type of error signalled via ERR LED
+  int commState;                 // current communication state
+
+  // constant values for LED handling
+  const int kErrLEDWarning = 0x08;	// mask for ERR LED
+  const int kErrLEDErrCtrl = 0x10;	// mask for ERR LED
+  const int kErrLEDBusOff  = 0x80;  // mask for ERR LED
+  const int kShortTime     = 200;   // timing value for LED
+  const int kLongTime      = 1000;  // timing value for LED
+}
+
+//
+// Handle CAN controller events
+//
+on busOff
+{
+  CANopenNewError(kErrLEDBusOff);
+}
+
+on errorActive
+{
+  errLEDType &= ~kErrLEDBusOff;  // reset flag
+  errLEDType &= ~kErrLEDWarning; // reset flag
+}
+
+on warningLimit
+{
+  CANopenNewError(kErrLEDWarning);
+}
+
+//
+// This function updates the LED accoring to the CANopen state.
+//
+// newState   Not active     = 0
+//            Stopped        = 4
+//            Operational    = 5
+//            Rest Node      = 6
+//            Reset Comm.    = 7
+//            Preoperational = 127
+//
+void CANopenUpdateState(long newState)
+{
+  
+  if (commState != newState) {
+    cancelTimer(runLEDTimer);          // stop RUN LED flashing
+    commState = newState;
+  }
+
+  switch(commState)
+  {
+    case 0: // Not active
+      @gRunLEDVar = 0;        // set RUN LED -> OFF
+      writeDbgLevel( kDbgInfo, "<%s>: Changed state to 'Not active'", gNodeLabel );
+      break;
+    case 4: // Prepared
+      setTimer(runLEDTimer, 200);      // start first cycle for RUN LED
+      @gRunLEDVar = 0;        // set RUN LED -> OFF
+      writeDbgLevel( kDbgInfo, "<%s>: Changed state to 'Prepared'", gNodeLabel );
+      break;
+    case 5: // Operational
+      @gRunLEDVar = 3;        // set RUN LED -> ON
+      writeDbgLevel( kDbgInfo, "<%s>: Changed state to 'Operational'", gNodeLabel );
+      break;
+    case 6: // Reset Node
+      @gRunLEDVar = 0;        // set RUN LED -> OFF
+      errLEDType &= ~kErrLEDErrCtrl;   // reset flag
+      writeDbgLevel( kDbgInfo, "<%s>: 'Reset Node' command received", gNodeLabel );
+      break;
+    case 7: // Reset Communication
+      @gRunLEDVar = 0;        // set RUN LED -> OFF
+      errLEDType &= ~kErrLEDErrCtrl;   // reset flag
+      writeDbgLevel( kDbgInfo, "<%s>: 'Reset Communication' command received", gNodeLabel );
+      break;
+    case 127: // Preoperational
+      setTimer(runLEDTimer, 200);      // start first cycle for RUN LED
+      @gRunLEDVar = 0;        // set RUN LED -> OFF
+      writeDbgLevel( kDbgInfo, "<%s>: Changed state to 'Preoperational'", gNodeLabel );
+      break;
+    default:
+      @gRunLEDVar = 0;       // set RUN LED -> OFF
+      writeDbgLevel( kDbgInfo, "<%s>: Changed state (?)", gNodeLabel );
+      break;
+  }
+}
+
+void CANopenNewError(int ErrType)
+{
+  if (errLEDType == 0)
+  {
+    // timer is not running
+    cancelTimer(errLEDTimer);
+    setTimer(errLEDTimer, 0);
+  }
+  if (errLEDType < ErrType)
+  {
+    // there is no higher priority error active
+    @gErrLEDVar = 1;                    // set ERR LED -> ON
+    errLEDFlashCnt = 0;
+  }
+  errLEDType |= ErrType;                          // set flag
+}
+
+on timer errLEDTimer
+{
+  if (errLEDType)
+  {
+    // check error flags according to their priority
+    if (errLEDType >= kErrLEDBusOff)
+    {
+      // always ON
+      setTimer(errLEDTimer, kShortTime);
+      return;
+    }
+    if (errLEDType >= kErrLEDErrCtrl)
+    {
+      // double flash
+      if (@gErrLEDVar != 0)
+      {
+        @gErrLEDVar = 0;               // set ERR LED -> OFF
+        if (errLEDFlashCnt == 1)
+        {
+          errLEDFlashCnt = 0;
+          setTimer(errLEDTimer, kLongTime);
+        }
+        else
+        {
+          errLEDFlashCnt++;
+          setTimer(errLEDTimer, kShortTime);
+        }
+      }
+      else
+      {
+        @gErrLEDVar = 1;               // set ERR LED -> ON
+        setTimer(errLEDTimer, kShortTime);
+      }
+      return;
+    }
+    if (errLEDType >= kErrLEDWarning)
+    {
+      // single flash
+      if (@gErrLEDVar != 0)
+      {
+        @gErrLEDVar = 0;               // set ERR LED -> OFF
+        setTimer(errLEDTimer, kLongTime);
+      }
+      else
+      {
+        @gErrLEDVar = 1;               // set ERR LED -> ON
+        setTimer(errLEDTimer, kShortTime);
+      }
+      return;
+    }
+  }
+  else
+  {
+    // no active error
+    @gErrLEDVar = 0;                   // set ERR LED -> OFF
+    errLEDFlashCnt = 0;
+  }
+}
+
+on timer runLEDTimer
+{
+  if (@gRunLEDVar == 0)
+  {
+    // LED is actually OFF
+    setTimer(runLEDTimer, kShortTime);           // start first cycle for RUN LED
+    @gRunLEDVar = 3;                    // set RUN LED -> ON
+  }
+  else
+  {
+    // LED is actually ON
+    @gRunLEDVar = 0;                    // set RUN LED -> OFF
+    switch (commState)
+    {
+      case 4: // stopped
+        setTimer(runLEDTimer, kLongTime);        // OFF cycle for RUN LED
+        break;
+      case 127: // pre-operational
+        setTimer(runLEDTimer, kShortTime);       // OFF cycle for RUN LED
+        break;
+      default:
+        break;
+    }
+  }
+}

@@ -1,0 +1,174 @@
+/*@!Encoding:1252*/
+includes
+{
+}
+
+variables
+{
+  const int kPortCount   = 4;  // number of Ethernet ports
+  const int kBufferCount = 16; // number of Ethernet packets that can be buffered
+  
+  struct Port
+  {
+    int waitForTxAck; // 1 = if switch has transmitted a packet on this port and is waiting for Tx indication
+    int status;       // 1 = link is up
+    int bitrate;
+  };
+  
+  ethernetPacket gBuffer[kBufferCount];           // buffer for Ethernet packets are pending and
+                                                  // have to be forwarded to the destination port
+  dword          gBufferOutPortMask[kBufferCount];// bit field for every buffer entry, which indicates
+                                                  // to which port the packet must be forwarded
+  
+  struct Port    gPort[kPortCount];
+  dword          gActivePortMask;                 // one bit for every port, which indicates if link is up
+  
+  dword          gMacAddrTable[int64];            // key is MAC address, value is the Ethernet channel number (1..32)
+}
+
+on key 'd'
+{
+  int i;
+  char macAddrStr [20];
+  
+  write( "MAC Table" );
+  write( "+-------------------+-------+" );
+  
+  for( int64 macAddr : gMacAddrTable )
+  {
+    EthGetMacAddressAsString( macAddr, macAddrStr, elcount(macAddrStr) );
+
+    write( "| %s | Eth %d |", macAddrStr, gMacAddrTable[macAddr] );
+  }
+
+  write( "+-------------------+-------+" );
+}
+
+on sysvar sysvar::EthernetSwitch::ResetMacAddressTable
+{
+  gMacAddrTable.clear();
+  
+  write( "<%BASE_FILE_NAME%> Reset MAC address table." );
+}
+
+on ethernetPacket *
+{
+  if ((this.msgChannel > 0) && (this.msgChannel <= kPortCount))
+  {
+    if (this.dir == TX)
+    {
+      gPort[this.msgChannel - 1].waitForTxAck = 0;
+      
+      OutputPendingPackets();
+    }
+    else
+    {
+      int bufferIndex;
+      
+      // store the MAC address in the mac address table, if
+      //   -it is not a multicast address (note: this.source is network byte order) and
+      //   -the address table is not too big
+      if (((this.source & 0x000000000001LL) == 0) && (gMacAddrTable.size() < 100))
+      {
+        gMacAddrTable[this.source] = this.msgChannel;
+      }
+      
+      // find free buffer entry
+      for( bufferIndex = 0; bufferIndex < kBufferCount; bufferIndex++ )
+      {
+        if (gBufferOutPortMask[bufferIndex] == 0)
+        {
+          break;
+        }
+      }
+      
+      // copy RX packet to buffer, if it must be forwarded
+      if (bufferIndex < kBufferCount)
+      {
+        dword outPortMask;
+        dword inPortMask;
+        
+        inPortMask  = 1 << (this.msgChannel - 1);
+        outPortMask = (~inPortMask) & DetermineOutputPorts( this );
+        
+        if (outPortMask)
+        {
+          gBuffer[bufferIndex]            = this;
+          gBufferOutPortMask[bufferIndex] = outPortMask;
+
+          OutputPendingPackets();
+        }
+      }
+    }
+  }  
+}
+
+on ethernetStatus *
+{
+  if ((this.msgChannel > 0) && (this.msgChannel <= kPortCount))
+  {
+    gPort[this.msgChannel-1].status  = this.status;
+    gPort[this.msgChannel-1].bitrate = this.bitrate;
+    
+    if (this.status == 1)
+    {
+      // set active port flag
+      gActivePortMask |= 1 << (this.msgChannel-1);
+    }
+    else
+    {
+      int bufferIndex;
+      
+      // clear active port flag
+      gActivePortMask &= ~(1 << (this.msgChannel-1));
+      
+      // clear TX pending flag
+      for( bufferIndex = 0; bufferIndex < kBufferCount; bufferIndex++ )
+      {
+        gBufferOutPortMask[bufferIndex] &= ~(1 << (this.msgChannel-1));
+      }
+    }
+  }
+}
+
+dword DetermineOutputPorts( ethernetPacket * packet )
+{
+  if (gMacAddrTable.containsKey(packet.destination))
+  {
+    // forward to port where the MAC address it
+    return (1 << (gMacAddrTable[packet.destination] - 1)) & gActivePortMask;
+  }
+  else
+  {
+    // broadcast to all ports
+    return 0xFFFFFFFF & gActivePortMask;
+  }
+}
+
+void OutputPendingPackets()
+{
+  int portIndex;
+  
+  // check for every port, if there are buffered packets
+  for( portIndex = 0; portIndex < kPortCount; portIndex++ )
+  {
+    dword portMask;
+    int   bufferIndex;
+    
+    portMask = (1 << portIndex);
+
+    // look for pending packets in buffer, which must be forwarded on a free port
+    for( bufferIndex = 0; bufferIndex < kBufferCount; bufferIndex++ )
+    {
+      if ((gPort[portIndex].waitForTxAck == 0) && (gBufferOutPortMask[bufferIndex] & portMask))
+      {
+        gBufferOutPortMask[bufferIndex] &= ~portMask;
+        gBuffer[bufferIndex].msgChannel  = portIndex + 1;
+        
+        output( gBuffer[bufferIndex] );
+        
+        gPort[portIndex].waitForTxAck = 1;
+      }
+    }
+  }
+}

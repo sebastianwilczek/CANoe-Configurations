@@ -1,0 +1,127 @@
+/*@@var:*/
+variables
+{
+    msTimer udpTimer;
+    dword udpSock = 0;
+    dword gMacroHandle = 0;
+
+    byte bUdpBuf[16*8];
+
+    struct
+    {
+      double dUdpData[16];
+    } udpDataStruct;
+
+    // time between UDP packets [ms]
+    dword udpTimeBetweenPackets = 20;
+}
+/*@@end*/
+
+/*@@timer:udpTimer:*/
+on timer udpTimer
+{
+    SysGetVariableFloatArray("ModelStates", "VehicleStates", udpDataStruct.dUdpData, 16);
+    memcpy( bUdpBuf, udpDataStruct );
+    
+    // Send data through socket
+    // IP address 127.0.0.1  (127 = 0x7F = BYTE0, ...)
+    // Port 64000
+    // Buffer length = 16*8 Bytes (16 doubles)
+    //UdpSendTo( udpSock, 0x0100007F, 64000, bUdpBuf, 16*8 );
+
+    setTimer(udpTimer, udpTimeBetweenPackets);
+}
+/*@@end*/
+
+/*@@startStart:Start:*/
+on start
+{
+    // Enable timer
+    //setTimer( udpTimer, udpTimeBetweenPackets );
+
+    // Open socket, listening on port 64001 (actually, no data reception is needed)
+    //udpSock = UdpOpen( 0x0100007F, 64001 );
+    //write("UDP Socket opened: %d", udpSock);
+
+    //startMacro();
+}
+/*@@end*/
+
+/*@@stop:StopMeasurement:*/
+on stopMeasurement
+{
+    // Clean up
+    if( udpSock > 0 )
+        UdpClose( udpSock );
+
+    cancelTimer( udpTimer );
+}
+/*@@end*/
+
+/*@@sysvarChange:Visualization::StartMacro:*/
+on sysvar sysvar::Visualization::StartMacro
+{
+  if (@this == 1)
+  {
+    startMacro();
+  }
+}
+/*@@end*/
+
+/*@@sysvarChange:Visualization::StopMacro:*/
+on sysvar sysvar::Visualization::StopMacro
+{
+  if (@this == 1)
+  {
+    stopMacro();
+  }
+}
+/*@@end*/
+
+/*@@preStop:PreStop:*/
+on preStop
+{
+  stopCar();
+}
+/*@@end*/
+
+/*@@caplFunc:stopCar():*///function
+void stopCar ()
+{
+    @sysvar::ModelStimuli::Driver_Accelerator = 0.0;
+    @sysvar::ModelStimuli::Driver_Gear = 1;
+    @sysvar::ModelStimuli::Driver_Brake = 1.0;
+    @sysvar::ModelStimuli::Driver_Handbrake = 1.0;
+    @sysvar::ModelStimuli::Crse_Ctrl_Enable = 0;
+    @sysvar::ModelStimuli::Driver_Steer = 0.0;
+    //@sysvar::ModelStimuli::Susp_Ctrl_Select = 0;
+}
+/*@@end*/
+
+/*@@caplFunc:startMacro():*///function
+void startMacro ()
+{
+  if (gMacroHandle != 0)
+  {
+    StopMacroFile(gMacroHandle);
+  }
+  write("starting macro ...");
+  gMacroHandle = StartMacroFile("Macro1.asc");
+  //write("  macro: got handle %d.", gMacroHandle);
+}
+/*@@end*/
+
+/*@@caplFunc:stopMacro():*///function
+void stopMacro ()
+{
+  if (gMacroHandle != 0)
+  {
+    write("stopping macro ...");
+    StopMacroFile(gMacroHandle);
+    gMacroHandle = 0;
+  }
+
+  stopCar();
+}
+/*@@end*/
+

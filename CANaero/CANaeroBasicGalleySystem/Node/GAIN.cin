@@ -1,0 +1,371 @@
+/*@!Encoding:1252*/
+includes
+{
+  #include "ARINCNode.cin"
+}
+
+/*
+ * GAIN - Galley Insert Basic Functionality        Version 1.0
+ *
+ * Copyright 2007, Vector Informatik GmbH - All right reserved
+ *
+ * History:
+ * 1.0 (Pr) Created 
+ */
+variables
+{
+  // Globals
+
+  enum GAINState  gGAIN_State;
+  enum GAINPCMode gGAIN_PCMode;
+
+  enum GAIN_DTAState
+  {
+    kGAIN_DTAStateReady,
+    kGAIN_DTAStateWaitForAck,
+    kGAIN_DTAStateWaitForData,
+    kGAIN_DTAStateSending
+  };
+
+  enum GAIN_DTAState       gGAIN_DTAState;
+
+  enum GAIN_DTAMode
+  {
+    kGAIN_DTAModeUpload,
+    kGAIN_DTAModeDownload
+  };
+
+  enum GAIN_DTAMode       gGAIN_DTAMode;
+
+  int       gGAIN_DTA_MasterLevelId  = -1;
+  int       gGAIN_DTA_MasterDeviceId = -1;
+
+  int       gGAIN_DTAMasterCapacity;
+  int       gGAIN_DTABlock;
+  int       gGAIN_DTAParamNr;
+  int       gGAIN_DTASubParamNr;
+
+  int       gGAIN_DTABlockNr;
+  int       gGAIN_DTAPacketNr;
+  int       gGAIN_DTAMaxPacketsPerBlock;
+  int       gGAIN_DTABytesCount;
+
+  word      gGAIN_UsedPowerBudget = 0;
+  dword     gGAIN_PBRemainingTime10ms = 0;
+  enum PBType gGAIN_PBType;
+
+  int       gGAIN_MaxPowerBudget;
+  int       gGAIN_StandbyPowerBudget = 0;
+}
+
+void GAIN_ChangeState (enum GAINState newState)
+{
+  int oldState;
+
+  switch (newState) {
+    case kGAINStateStandbyOn:
+      if (gGAIN_State == kGAINStateError || gGAIN_State == kGAINStateInitialization) {
+        //GAIN_NM_STA_SendBufferedMessages();
+        Node_NM_STA_Begin(gNode_NM_STA_CycleTimeMs);
+      }
+      gGAIN_UsedPowerBudget = gGAIN_StandbyPowerBudget;
+      break;
+
+    case kGAINStateError:
+      break;
+
+    case kGAINStateStandbyOff:
+      Node_NM_STA_End();
+      break;
+  }
+
+  oldState    = gGAIN_State;
+  gGAIN_State = newState;
+
+  OnGAIN_ChangeState(oldState, newState);
+}
+
+void GAIN_PowerUp()
+{
+  GAIN_ChangeState(kGAINStateInitialization);
+
+  GAIN_ChangeState(kGAINStateStandbyOn);
+}
+
+void GAIN_PowerDown ()
+{
+  GAIN_ChangeState(kGAINStateStandbyOff);
+}
+
+void GAIN_DTA_Handle_DTA (BYTE dir, BYTE prio, BYTE levelId, BYTE deviceId, BYTE codeExt, BYTE sysId, message * msg)
+{
+  int dtaType, i;
+  message DTA dta;
+  byte data[8];
+
+  dta = msg;
+
+  switch(gGAIN_DTAState) {
+    case kGAIN_DTAStateReady:
+      if (dta.DTA_Descr_Type == 1) {
+        switch (dta.DTA_Descr_HandshakeType) {
+          case kDTAAOTCodeHandshakeFrameAOTUpBlock:
+            gGAIN_DTAMode = kGAIN_DTAModeUpload;
+            break;
+
+          case kDTAAOTCodeHandshakeFrameAOTDownBlock:
+            gGAIN_DTAMode = kGAIN_DTAModeDownload;
+            break;
+        }
+        gGAIN_DTAMasterCapacity = dta.byte(2) & 0x7F;
+        gGAIN_DTABlock          = dta.byte(3);
+        gGAIN_DTAParamNr        = dta.byte(4);
+        gGAIN_DTASubParamNr     = dta.byte(5);
+
+        dta.DTA_SrcLevelId  = gNode_LevelId;
+        dta.DTA_SrcDeviceId = gNode_DeviceId;
+        dta.DTA_Descr_Type = 1;
+        dta.DTA_Descr_HandshakeType = kDTAAOTCodeHandshakeFrameRFT;
+        dta.byte(2)                 = kDTAMaxDataPacketsPerBlock;
+        for (i = 3; i < dta.dlc; i++) {
+          dta.byte(i) = 0;
+        }
+
+        CAN_GetDataFromMessage(dta, data);
+        Node_SendMessageRx(ARINC812_GetPrioFromId(dta.id), ARINC812_GetMsgCodeFromId(dta.id), levelId, deviceId, ARINC812_GetCodeExtFromId(dta.id), dta.dlc, data);
+      }
+      break;
+    
+    case kGAIN_DTAStateWaitForData:
+      if (dta.DTA_Descr_Type == 0) {
+        for (i = 2; i < dta.dlc; i++) {
+          GAIN_DTA_UploadSetByte(gGAIN_DTABytesCount++, dta.byte(i));
+        }
+        if (dta.byte(1) & 0x80) {
+          dta.DTA_SrcLevelId  = gNode_LevelId;
+          dta.DTA_SrcDeviceId = gNode_DeviceId;
+          dta.DTA_Descr_Type = 1;
+          dta.DTA_Descr_HandshakeType = kDTAAOTCodeHandshakeFrameAcknowledge;
+          dta.dlc                     = 2;
+
+          CAN_GetDataFromMessage(dta, data);
+          Node_SendMessageRx(ARINC812_GetPrioFromId(dta.id), ARINC812_GetMsgCodeFromId(dta.id), levelId, deviceId, ARINC812_GetCodeExtFromId(dta.id), dta.dlc, data);
+        }
+      }
+      else {
+        switch (dta.DTA_Descr_HandshakeType) {
+          case kDTAAOTCodeHandshakeFrameAbort:
+          case kDTAAOTCodeHandshakeFrameEOT:
+            break;
+        }
+      }
+      break;
+
+    case kGAIN_DTAStateWaitForAck:
+      if (dta.DTA_Descr_Type == 0 && dta.DTA_Descr_HandshakeType == kDTAAOTCodeHandshakeFrameAcknowledge) {
+        gGAIN_DTAState = kGAIN_DTAStateSending;
+        GAIN_DTA_SendNextPacket();
+      }
+  }
+}
+
+void GAIN_DTA_SendNextPacket()
+{
+  message DTA dta;
+  int i;
+  byte levelId, deviceId;
+  byte data[8];
+
+  levelId  = dta.DTA_SrcLevelId;
+  deviceId = dta.DTA_SrcDeviceId;
+
+  if (GAIN_DTA_DownloadGetRemainingByteCount(gGAIN_DTABlockNr * gGAIN_DTAMaxPacketsPerBlock * 6 + gGAIN_DTAPacketNr * 6) > 0) {
+    dta.DTA_SrcLevelId         = gNode_LevelId;
+    dta.DTA_SrcDeviceId        = gNode_DeviceId;
+    dta.DTA_Descr_Type         = 0;
+    dta.DTA_Descr_DataPacketNr = gGAIN_DTAPacketNr;
+
+    for (i = 2; i < 8; i++) {
+      dta.byte(i) = GAIN_DTA_UploadGetByte(gGAIN_DTAPacketNr * 6 + i - 2);
+    }
+
+    CAN_GetDataFromMessage(dta, data);
+    Node_SendMessageRx(ARINC812_GetPrioFromId(dta.ID), ARINC812_GetMsgCodeFromId(dta.ID), levelId, deviceId, ARINC812_GetCodeExtFromId(dta.ID), dta.dlc, data);
+  }
+  else {
+    GAIN_DTA_DownloadEnd();
+  }
+}
+
+void GAIN_DTA_UploadSetByte(int index, byte byteToSet)
+{
+  int b, p, s, pos;
+
+  pos = 0;
+
+  for (b = gGAIN_DTABlock; b < (gGAIN_DTABlock == 255) ? kDTAMaxBlocks : gGAIN_DTABlock + 1; b++) {
+    for (p = gGAIN_DTAParamNr; p < (gGAIN_DTAParamNr = 255) ? kDTAParamsPerBlock[b] : gGAIN_DTAParamNr + 1; p++) {
+      for (s = gGAIN_DTASubParamNr; s < (gGAIN_DTASubParamNr = 255) ? kDTASubParamsPerParam[b][p] : gGAIN_DTASubParamNr + 1; s++) {
+        if (pos == index) {
+          gNode_DTA[b][p][s] = byteToSet;
+        }
+        pos++;
+      }
+    }
+  }
+}
+
+int GAIN_DTA_DownloadGetRemainingByteCount(int index)
+{
+  int b, p, s, pos;
+
+  pos = 0;
+
+  for (b = gGAIN_DTABlock; b < (gGAIN_DTABlock == 255) ? kDTAMaxBlocks : gGAIN_DTABlock; b++) {
+    for (p = gGAIN_DTAParamNr; p < (gGAIN_DTAParamNr = 255) ? kDTAParamsPerBlock[b] : gGAIN_DTAParamNr; p++) {
+      for (s = gGAIN_DTASubParamNr; s < (gGAIN_DTASubParamNr = 255) ? kDTASubParamsPerParam[b][p] : gGAIN_DTASubParamNr; s++) {
+        pos++;
+      }
+    }
+  }
+
+  return pos - index;
+}
+
+void GAIN_DTA_DownloadEnd()
+{
+  message DTA msg;
+  byte levelId, deviceId;
+  byte data[8];
+
+  levelId  = msg.DTA_SrcLevelId;
+  deviceId = msg.DTA_SrcDeviceId;
+
+  msg.DTA_SrcLevelId          = gNode_LevelId;
+  msg.DTA_SrcDeviceId         = gNode_DeviceId;
+  msg.DTA_Descr_Type          = 1;
+  msg.DTA_Descr_HandshakeType = kDTAAOTCodeHandshakeFrameEOT;
+
+  CAN_GetDataFromMessage(msg, data);
+  Node_SendMessageRx(ARINC812_GetPrioFromId(msg.ID), ARINC812_GetMsgCodeFromId(msg.ID), levelId, deviceId, ARINC812_GetCodeExtFromId(msg.ID), msg.dlc, data);
+}
+
+int GAIN_DTA_UploadGetByte(int index)
+{
+  int b, p, s, pos;
+
+  pos = 0;
+
+  for (b = gGAIN_DTABlock; b < (gGAIN_DTABlock == 255) ? kDTAMaxBlocks : gGAIN_DTABlock; b++) {
+    for (p = gGAIN_DTAParamNr; p < (gGAIN_DTAParamNr = 255) ? kDTAParamsPerBlock[b] : gGAIN_DTAParamNr; p++) {
+      for (s = gGAIN_DTASubParamNr; s < (gGAIN_DTASubParamNr = 255) ? kDTASubParamsPerParam[b][p] : gGAIN_DTASubParamNr; s++) {
+        if (pos == index) {
+          return gNode_DTA[b][p][s];
+        }
+        pos++;
+      }
+    }
+  }
+
+  return -1;
+}
+
+void GAIN_PBR_Send (enum PBType PBRtype, word nominalPB, word nominalTime, word minPB, word minTime)
+{
+  // send out request for power. Start timer for timeout
+
+  int i;
+  BYTE data[8];
+  message PBR msgPBR;
+
+  msgPBR.PBR_BudgetType               = PBRtype;
+  msgPBR.PBR_NominalPB.phys           = nominalPB;
+  msgPBR.PBR_NeededTimeWithNominalPB  = nominalTime;
+  msgPBR.PBR_MinPB                    = minPB;
+  msgPBR.PBR_NeededTimeWithMinPB      = minTime;
+
+  for (i = 0; i < msgPBR.dlc; i++) {
+    data[i] = msgPBR.byte(i);
+  }
+
+  Node_SendMessageTx(
+  	ARINC812_GetPrioFromId(msgPBR.ID), 
+	  ARINC812_GetMsgCodeFromId(msgPBR.ID), 
+	  ARINC812_GetCodeExtFromId(msgPBR.ID), 
+	  msgPBR.dlc,
+	  data
+    );
+}
+
+void OnNode_Message (BYTE dir, BYTE prio, BYTE msgCode, BYTE levelId, BYTE deviceId, BYTE codeExt, BYTE sysId, message * msg)
+{
+  message STA_GAIN msgSTA_GAIN;
+  message STA_MGCU msgSTA_MGCU;
+  message DTA      msgGAIN_DTA;
+  message PBR      msgPBR;
+  message PBM      msgPBM;
+
+  if (msgCode == ARINC812_GetMsgCodeFromId(msgSTA_GAIN.ID) && levelId == gNode_LevelId) {
+    if (dir == TX) {   
+      CancelTimer(gNode_NM_STA_TimeoutTimer);
+      SetTimer(gNode_NM_STA_TimeoutTimer, gNode_NM_STA_TimeoutTimeMs);
+    }
+    else {
+      Node_NM_Handle_STA_GAIN(prio, levelId, deviceId, codeExt, sysId, msg);
+    }
+  }
+  else if (msgCode == ARINC812_GetMsgCodeFromId(msgSTA_MGCU.ID)) {
+    Node_NM_Handle_STA_MGCU(prio, levelId, deviceId, codeExt, sysId, msg);
+  }
+  else if (msgCode == ARINC812_GetMsgCodeFromId(msgPBM.ID)) {
+    if(levelId == gNode_LevelId && deviceId == gNode_DeviceId) {
+		  OnGAIN_PBM(((message PBM)msg).PBM_PBMax.phys, ((message PBM)msg).PBM_Time.phys);// time currently ignored
+	  }
+  }
+  else if (msgCode == ARINC812_GetMsgCodeFromId(msgGAIN_DTA.ID)) {
+    if (dir == TX) {
+      if (msgGAIN_DTA.DTA_Descr_Type == 1) { // Handshake packet
+        switch (msgGAIN_DTA.DTA_Descr_HandshakeType) {
+          case kDTAAOTCodeHandshakeFrameRFT:
+            if (gGAIN_DTAMode == kGAIN_DTAModeUpload) {
+              gGAIN_DTAState = kGAIN_DTAStateWaitForData;
+            }
+            else {
+              gGAIN_DTAState = kGAIN_DTAStateSending;
+              GAIN_DTA_SendNextPacket();
+            }
+            break;
+          case kDTAAOTCodeHandshakeFrameAcknowledge:
+            break;
+        }
+      }
+      else {  // Data packet
+        gGAIN_DTAPacketNr = msgGAIN_DTA.DTA_Descr_DataPacketNr;
+        if (gGAIN_DTAPacketNr < gGAIN_DTAMaxPacketsPerBlock) {
+          GAIN_DTA_SendNextPacket();
+        }
+        else {
+          gGAIN_DTAState = kGAIN_DTAStateWaitForAck;
+        }
+      }
+    }
+    else GAIN_DTA_Handle_DTA(dir, prio, levelId, deviceId, codeExt, sysId, msg);
+  }
+}
+
+void OnNode_GetSTA (message* msg)
+{
+  message STA_GAIN msgSTA;
+
+  msgSTA.STA_GAIN_Mode                        = gGAIN_PCMode;
+  msgSTA.STA_GAIN_State                       = gGAIN_State;
+  msgSTA.STA_GAIN_UsedPB.phys                 = gGAIN_UsedPowerBudget;
+  msgSTA.STA_GAIN_FallbackPB                  = 0;
+  msgSTA.STA_GAIN_PBRemainingTime             = gGAIN_PBRemainingTime10ms / 100;
+  msgSTA.STA_GAIN_ImplFunc                    = gNode_FuncFlags;
+  msgSTA.STA_GAIN_PBudgetType                 = gGAIN_PBType;
+  msgSTA.STA_GAIN_FlightInfoRcvd              = 0;
+  
+  msg = msgSTA;
+}
+
