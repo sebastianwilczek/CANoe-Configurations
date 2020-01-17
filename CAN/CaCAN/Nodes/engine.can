@@ -1,0 +1,56 @@
+/*@!Encoding:1252*/
+variables 
+{
+  int64 sharedSecret; 
+  long randomNonce1;
+  long randomNonce2;
+  long digest1;
+  long digest2;
+  
+  message CaCAN_AuthReply msg_CaCAN_AuthReply;
+  message BrakeState msg_BrakeState;
+}
+
+on preStart
+{
+  sharedSecret = 84364362;
+}
+
+on start
+{
+}
+
+on message CaCAN_Nonce
+{
+  write("ENGINE: Received nonce");
+  randomNonce1 = this.Authentication_1;
+  randomNonce2 = this.Authentication_2;
+  
+  //calculate digest
+  digest1 = hash(randomNonce1+sharedSecret);
+  digest2 = hash(randomNonce2+sharedSecret);
+}
+
+on message CaCAN_AuthRequest
+{
+  if(digest1 == this.Authentication_1){
+    write("ENGINE: Received correct digest from monitor, responding with rest of digest");
+    msg_CaCAN_AuthReply.Authentication_2 = digest2;
+    output(msg_CaCAN_AuthReply);
+  } else {
+    write("ENGINE: Digest received by monitor mismatch. Error establishing authentication");
+  }
+}
+
+on sysvar sysvar::Brakes::BrakePressure
+{
+  write("ENGINE: Brake pressure applied");
+  msg_BrakeState.BrakePressure = @this;
+  msg_BrakeState.CaCAN_Auth = (hash(msg_BrakeState.BrakePressure + randomNonce1 + randomNonce2 + sharedSecret) % 256);
+  output(msg_BrakeState);
+}
+
+long hash(long data)
+{
+  return data * 5325 % 4294967295;
+}
