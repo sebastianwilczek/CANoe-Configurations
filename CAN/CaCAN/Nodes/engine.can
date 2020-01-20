@@ -1,4 +1,10 @@
 /*@!Encoding:1252*/
+/**
+ * This ECU simulates the engine of a car.
+ * It's job is to notice physical brake pressure and to send out the according message.
+ * CaCAN authentication is built into this ECU.
+**/
+
 variables 
 {
   int64 sharedSecret; 
@@ -11,26 +17,32 @@ variables
   message BrakeState msg_BrakeState;
 }
 
+/**
+ * On start, the shared secret is written to memory.
+ * The shared secret is the same as the one in memory of the monitor ECU.
+**/
 on preStart
 {
   sharedSecret = 84364362;
 }
 
-on start
-{
-}
-
+/**
+ * On start of the monitor ECU a random nonce is sent out.
+ * This ECU takes the random nonce and computes a hash from the nonce and the shared secret.
+**/
 on message CaCAN_Nonce
 {
   write("ENGINE: Received nonce");
   randomNonce1 = this.Authentication_1;
   randomNonce2 = this.Authentication_2;
-  
-  //calculate digest
   digest1 = hash(randomNonce1+sharedSecret);
   digest2 = hash(randomNonce2+sharedSecret);
 }
 
+/**
+ * The monitor ECU sends out a part of the hash computed by both ECUs.
+ * If the first part matches, this ECU replies with the second part.
+**/
 on message CaCAN_AuthRequest
 {
   if(digest1 == this.Authentication_1){
@@ -42,6 +54,11 @@ on message CaCAN_AuthRequest
   }
 }
 
+/**
+ * In the event that the physical brake pressure changes, a message is sent to the CAN bus.
+ * This message contains the brake pressure in percentage.
+ * It also contains an 8 bit hash of the brake pressure, the random nonce and the shared secret.
+**/
 on sysvar sysvar::Brakes::BrakePressure
 {
   write("ENGINE: Brake pressure applied");
@@ -50,6 +67,11 @@ on sysvar sysvar::Brakes::BrakePressure
   output(msg_BrakeState);
 }
 
+/**
+ * Helper functions to hash a long value.
+ * PROOF OF CONCEPT IMPLEMENTATION, NOT CRYPTOPGRAPHIC!
+ * DO NOT USE IN PRACTISE!
+**/
 long hash(long data)
 {
   return data * 5325 % 4294967295;

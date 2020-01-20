@@ -1,4 +1,12 @@
 /*@!Encoding:1252*/
+/**
+ * This ECU establishes a trust relationship with other ECUs.
+ * It monitors messages on the CAN bus, sending error frames when it sees unauthenticated messages.
+ * The resulting collision stops the malicious message from taking effect.
+ * THIS IS NOT IMPLEMENTED HERE, THIS IS A PROOF OF CONCEPT!
+ * If a message is noticed, only a log is printed.
+**/
+
 variables
 {
   int64 sharedSecrets[int64]; 
@@ -12,12 +20,20 @@ variables
   message CaCAN_AuthRequest msg_CaCAN_AuthRequest;
 }
 
+/**
+ * On start, all shared secrets with other ECUs are loaded into memory.
+**/
 on preStart
 {
   sharedSecrets[1] = 84364362;
   write("MONITOR: Node surveillance initialized");
 }
 
+/**
+ * On start, a random nonce is sent out to the CAN bus.
+ * Afterwards, a hash is calculated for every shared secrets combined with the random nonce.
+ * The hash is then sent to the CAN bus to be confirmed by the target ECU.
+**/
 on start
 {
   //send out random nonce for digest
@@ -39,6 +55,10 @@ on start
   output(msg_CaCAN_AuthRequest);
 }
 
+/**
+ * Once the ECU receives a reply to CaCAN authentication, it checks if the received hash is the same it calculated.
+ * If yes, a trust relationship is established between the monitor and the replying ECU.
+**/
 on message CaCAN_AuthReply
 {
   if(digest2 == this.Authentication_2)
@@ -49,6 +69,12 @@ on message CaCAN_AuthReply
   }
 }
 
+/**
+ * Once the monitor receives a BrakeState message, it computes the hash of the message using the pressure, the random nonce and the shared secret of the engine ECU.
+ * If the authentication code is not the same as the calculated hash, it destroys the message by sending an error frame.
+ * THIS IS NOT IMPLEMENTED HERE, PROOF OF CONCEPT.
+ * This implementation only prints a log to showcase whether a message was deemed legitimate or not.
+**/
 on message BrakeState
 {
   receivedAuth = hash(this.BrakePressure + randomNonce1 + randomNonce2 + sharedSecrets[1]) % 256;
@@ -59,25 +85,16 @@ on message BrakeState
   if(this.CaCAN_Auth == receivedAuth)
   {
     write("MONITOR: Legitimate brake message.");
-    write("MONITOR: Legitimate brake message.");
-    write("MONITOR: Legitimate brake message.");
-    write("MONITOR: Legitimate brake message.");
-    write("MONITOR: Legitimate brake message.");
-    write("MONITOR: Legitimate brake message.");
-    write("MONITOR: Legitimate brake message.");
-    write("MONITOR: Legitimate brake message.");
-    write("MONITOR: Legitimate brake message.");
-    write("MONITOR: Legitimate brake message.");
-    write("MONITOR: Legitimate brake message.");
-    write("MONITOR: Legitimate brake message.");
-    write("MONITOR: Legitimate brake message.");
-    write("MONITOR: Legitimate brake message.");
-    write("MONITOR: Legitimate brake message.");
   } else {
-    write("MONITOR: Unauthorized brake message. Potentially compromised ECU. Sending error frame IN THEORY");
+    write("MONITOR: Unauthorized brake message. Potentially compromised ECU. Sending error frame IN THEORY.");
   }
 }
 
+/**
+ * Helper functions to hash a long value.
+ * PROOF OF CONCEPT IMPLEMENTATION, NOT CRYPTOPGRAPHIC!
+ * DO NOT USE IN PRACTISE!
+**/
 long hash(long data)
 {
   return data * 5325 % 4294967295;
