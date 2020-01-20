@@ -1,0 +1,363 @@
+/*@!Encoding:1252*/
+/*variables
+{
+
+  Timer   tSystemCheck;
+
+  int gSystemCheckTime        = 1.5;
+  int gGear                   = 1;            // 0 == reverse; 1 == neutral; 2 - 6 = forward
+  int gPowerIdle;
+  
+  //double gBrakeForce;
+  double gPedal;                              // ppwer of the system ( 0 - 100)
+  double gSpeed;                              // meter/sec
+  double gEngSpeed;                           // revolution/sec
+  double gForce;                              // Newton
+  double kMass                = 800.0;        // kg
+  double kAirFriction         = 0.6;          // F = kFriction*v*v
+  double kRollingFriction     = 100.0;        // Newton
+
+  // differential equations (systemClock)
+  const int kDeltaT           = 10;           // sampling rate of engine
+  const double kDeltaTInSec   = kDeltaT / 1000.0;
+
+  int gEngTemp;
+  msTimer tEngTempTimer;
+  msTimer tSystemClockTimer;                  // timer for calculations of the dynamic system model
+
+  // Variables for petrol   
+  int gEngPetrolCount         = 0;
+  int gEmpty                  = 0;
+  int gPetrolTimeFaktor       = 15;
+
+  int SystemCheck             = 0;
+
+  const int cPetrolFaktor     = 8 ;
+  const int cEngPetrolTime    = 5;
+  const int ACTIVE            = 1;
+  const int INACTIVE          = 0;
+
+  msTimer tEngPetrol;
+
+  msTimer tPedalPos;
+  int gPedalPosTime           = 10;
+  int gPressAcceleratorPedal  = 0;
+
+  msTimer tResetAcceleratorPedal;
+
+  const int cPEDAL_PRESSURE   = 1;
+  const int cNoPEDAL_PRESSURE = 0; 
+}
+
+on start
+{
+
+  // set to 1 to get more information into write-window 
+  setWriteDbgLevel(1);
+  writeDbgLevel(2,"Engine"); 
+
+  gEngTemp = 0;
+  gSpeed = 0;
+  gForce = 0;
+
+  //@sysvar::Panel::EngineRunningPowerTrain = 1;
+  //setTimer(tPedalPos,gPedalPosTime);
+  //setTimer(tSystemCheck,gSystemCheckTime);
+
+  //EnableSystemLamps ();
+}
+
+on timer tEngPetrol
+{
+  // calculations of the petrol capacity
+  cancelTimer(tEngPetrol);
+
+  // Start with full tank capacity
+  if(gEngPetrolCount <= 44)  
+  {
+    gEngPetrolCount ++;
+    $PetrolLevel = gEngPetrolCount;
+  }
+  // The tank capacity drops
+  else if(gEngPetrolCount == 45)  
+  {   
+    gEmpty ++;
+
+    if(gEmpty == gPetrolTimeFaktor)
+      {
+        $PetrolLevel = gEngPetrolCount - (gEmpty / 15);
+        gPetrolTimeFaktor = gPetrolTimeFaktor + 15; 
+      }
+  }
+
+  if(gEmpty == 675) 
+  {
+    //stop(); the configuration will stop after the fuel is empty, when this function is active
+  }
+  setTimer(tEngPetrol,cEngPetrolTime + (gEngPetrolCount * cPetrolFaktor) );
+}
+
+on timer tEngTempTimer
+{
+  if (gEngTemp < 75.) 
+  {
+    gEngTemp+=2;   
+    $EngTemp = gEngTemp;
+  }
+  setTimer(tEngTempTimer,1000);
+}
+
+on timer tSystemClockTimer
+{
+  // timer for calculations of the dynamic system model
+  double pedal, oldpedal, power, frictionForce,accelerationForce;
+  double correspondingEngineSpeed, ratio,brakePressure;
+
+  setTimer(tSystemClockTimer,kDeltaT);   
+
+  oldpedal = pedal;
+  pedal = @sysvar::Panel::PedalPosition;
+
+  if( @sysvar::Panel::AcceleratorPedal == 1 )
+    @sysvar::Panel::AcceleratorPedalPressure = pedal;
+  
+  if ( pedal < 6 ) // idle running
+    power = 6 * 1.5; 
+  else 
+    power = pedal * 1.5;
+  
+  gEngSpeed = CalcEngSpeed(gSpeed,gGear);
+  gForce = Force(gEngSpeed,power,gGear);
+  frictionForce = (kAirFriction*gSpeed*gSpeed)
+                  + ( 1.0 * gSpeed )
+                  + kRollingFriction;
+
+  accelerationForce = CalcAccelerationForce(gForce,frictionForce);
+
+  // workaround for error
+  if ( accelerationForce != 0.0 ) 
+    gSpeed = gSpeed + (( accelerationForce / kMass) * kDeltaTInSec);  
+
+  // reset idle indicator
+  if ( accelerationForce >= -1.0 ) 
+    gPowerIdle = 0;
+
+  if ( gPowerIdle == 0 ) 
+    $IdleRunning = 1;
+  else 
+    $IdleRunning = 0;
+ 
+  ////////////////////////
+  // check stationary condition
+  ////////////////////////
+
+  if ( gSpeed < 0 )
+    gSpeed = 0.0;
+
+  if ( gGear != 1 )   
+  {
+    correspondingEngineSpeed = CalcEngSpeed(gSpeed,gGear);
+    ratio = EngSpeedToSpeedRatio(gGear);
+    gSpeed = correspondingEngineSpeed / ratio;
+  }
+  else 
+    gEngSpeed = gPedal;    
+   
+  if( gPressAcceleratorPedal == 0 && gGear < @sysvar::Panel::GearDown )  
+    gEngSpeed = gPedal; 
+
+  // assign to signals
+  $EngSpeed = gEngSpeed * 75.0;
+  $EngForce = gForce;
+  $EngPower = power;
+  $CarSpeed    = gSpeed * 2.1;
+  if( accelerationForce > 0 )
+    $AccelerationForce = accelerationForce;
+  
+}
+
+
+
+on sysvar sysvar::Panel::EngineRunningPowerTrain
+{
+  // Engine gets info directly via an environment variable
+
+  if(@this) 
+  {
+    cancelTimer(tEngTempTimer);
+    cancelTimer(tSystemClockTimer);
+    cancelTimer(tEngPetrol);
+
+    setTimer(tEngTempTimer,1000);
+    setTimer(tSystemClockTimer,kDeltaT);
+    setTimer(tEngPetrol,cEngPetrolTime);
+  }
+  else 
+  {
+    cancelTimer(tEngTempTimer);
+    cancelTimer(tSystemClockTimer);
+    cancelTimer(tEngPetrol);
+  }  
+}
+
+double CalcEngSpeed(double speed, int gear)
+{
+  // in Newton
+  double engSpeed, ratio;
+  
+  if ((gear < 0) || (gear > 6)) runError(1002,55);
+
+  ratio = EngSpeedToSpeedRatio(gear);
+  engSpeed = speed * ratio;
+
+  if (engSpeed > 100) engSpeed = 100;
+  return engSpeed;
+}
+
+double EngSpeedToSpeedRatio(int gear) 
+{
+  return (7-gear) * 1.0;
+}
+
+double Force(double engSpeed, double power, int gear)
+{
+  // gear==0: idle gear 
+  // force in Newton
+  // power in kW
+  double reducedEngSpeed, force;
+
+  double kGearForceFactor[7] =    { 18.0,  // max at 100 kW  
+                                    0.0, 
+                                    50.0,  // max at 150 kW  
+                                    36.0,  // max at 100 kW
+                                    20.0,  // max at 120 kW
+                                    18.0,  // max at 100 kW   
+                                    30.0   // max at 100 kW 
+                                    };
+  double kMaxGearForce[7] = {3000, 0.0, 5500, 4600, 4200, 3500, 3000 };
+
+  //   reducedEngSpeed = engSpeed - kNormalEngSpeed;
+  if ((gear < 0) || (gear > 6)) runError(1001,55);
+
+  force = power * ( kGearForceFactor[gear] );
+
+  // limit force   
+  if( force > kMaxGearForce[gear]) 
+  {
+    force = kMaxGearForce[gear];
+  }
+  return force;
+}
+
+on sysvar sysvar::Panel::AcceleratorPedal
+{
+  double oldPedal;
+
+  if(@this == 1)  gPressAcceleratorPedal = 1;
+  else 
+  {
+    gPressAcceleratorPedal = 0;
+    @sysvar::Panel::AcceleratorPedalPressure = gPressAcceleratorPedal;
+  }
+  gPedal = @sysvar::Panel::PedalPosition;  
+}
+
+on timer tPedalPos
+{
+  if(gPressAcceleratorPedal == 1)
+    if(@sysvar::Panel::PedalPosition < 100)
+      @sysvar::Panel::PedalPosition = @sysvar::Panel::PedalPosition + 1;
+
+  if(gPressAcceleratorPedal == 0)
+    if(@sysvar::Panel::PedalPosition > 0)
+      @sysvar::Panel::PedalPosition = @sysvar::Panel::PedalPosition - 1;
+
+  gPedal = @sysvar::Panel::PedalPosition;
+
+  setTimer(tPedalPos,gPedalPosTime);
+}
+
+double CalcAccelerationForce(double force, double friction_force)
+{
+  double brakePressure, accelerationForce;
+
+  if(gPressAcceleratorPedal  == cPEDAL_PRESSURE)
+    accelerationForce = force - friction_force - $BrakePressure;
+  else if(gPressAcceleratorPedal == cNoPEDAL_PRESSURE)
+  {
+    if($BrakePressure > 0)  
+      brakePressure = $BrakePressure - 1000;
+    else 
+      brakePressure = 0.0;     
+      accelerationForce = (force - friction_force - (1000 + brakePressure));
+  }
+
+  return accelerationForce;
+}
+
+on sysvar sysvar::Panel::WaterError
+{
+  if(SystemCheck == ACTIVE)
+    return;
+  else
+    $WaterWarningLamp = @this; 
+}
+
+DisableSystemLamps ()
+{
+  SystemCheck = INACTIVE;
+  $BatteryWarningLamp = 0;
+  $OilWarningLamp     = 0;
+  $WaterWarningLamp   = 0;
+}
+
+EnableSystemLamps ()
+{
+  SystemCheck = ACTIVE;
+  $BatteryWarningLamp = 1;
+  $OilWarningLamp     = 1;
+  $WaterWarningLamp   = 1;
+}
+
+on timer tSystemCheck
+{
+  DisableSystemLamps(); 
+}
+
+on sysvar sysvar::Panel::OilError
+{
+  if(SystemCheck == ACTIVE)
+    return;
+  else
+    $OilWarningLamp = @this; 
+}
+
+on sysvar sysvar::Panel::BatteryError
+{
+  if(SystemCheck == ACTIVE)
+    return;
+  else
+    $BatteryWarningLamp = @this; 
+}
+
+on key ' '
+{
+  CancelTimer(tResetAcceleratorPedal);
+  @sysvar::Panel::AcceleratorPedal = 1;
+  gPressAcceleratorPedal = 1;
+  @sysvar::Panel::AcceleratorPedalPressure = gPressAcceleratorPedal;
+  SetTimer(tResetAcceleratorPedal,550);
+}
+
+on timer tResetAcceleratorPedal
+{
+  gPressAcceleratorPedal = 0;
+  @sysvar::Panel::AcceleratorPedal = 0;
+}
+
+on signal_update GearBoxInfo::Gear
+{
+  if((this == 1) && ($CarSpeed > 6)) return;
+  gGear = this; 
+}
+*/
