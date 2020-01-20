@@ -1,4 +1,10 @@
 /*@!Encoding:1252*/
+/**
+ * This ECU is responsible to show the effects of messages on the CAN bus.
+ * It does not have a physical equivalent.
+ * It's only purpose is to showcase effects for this simulation.
+**/
+
 variables 
 {
   const long kOFF = 0;
@@ -13,12 +19,18 @@ variables
   int64 generatedKey;
 }
 
+/**
+ * Before starting, the ECU generates a key to be used in later exchanges.
+**/
 on preStart
 {
   generatedKey = generateKey(presharedKey, 0);
   write("ENGINE: First generated key: %d", generatedKey);
 }
 
+/**
+ * Sets the debug level of the logs on startup.
+**/
 on start
 {
   setwriteDbgLevel(0); // set DbgLevel = 1 to get more information in Write-Window 
@@ -26,15 +38,20 @@ on start
   write("Press key 0 to set DbgLevel = 0 for less information in the Write-Window");
 }
 
+/**
+ * Once a BrakeState message is received, the ECU checks if the contained pressure is above 0%.
+ * If the hash coming with the message does not match the one that can be calculated based on the pressure, the message is discarded.
+ * If this is the case, the brake lights are turned on.
+ * If not, they are turned off.
+**/
 on message BrakeState
 {
   if(hash(this.BrakePressure) != this.Hash)
   {
-    //write("DISPLAY: Hash Unmatch. Potential compromised ECU"); 
+    write("DISPLAY: Hash Unmatch. Potential compromised ECU"); 
   } else {
     counter++;
     write("DISPLAY: Received vaild brake pressure message.");
-    // engine state received
     if (this.BrakePressure > 0)
     {
       @sysvar::Lights::BrakeLight = 1;
@@ -44,6 +61,10 @@ on message BrakeState
   }
 }
 
+/**
+ * Once a BrakeState message is received, the ECU checks if both the counter and the hash match the one it calculates.
+ * If it does, the key counter is increased and the new key is generated and stored.
+**/
 on message KeyRenew
 {
   if(this.Counter == keyCounter+1)
@@ -61,6 +82,9 @@ on message KeyRenew
   }
 }
 
+/**
+ * Once a LightState message is received, the ECU changes the display of lights accordingly.
+**/
 on message LightState 
 {
   gDebugCounter++;
@@ -85,6 +109,9 @@ on message LightState
   }
 }
 
+/**
+ * Helper method to set the display of lights.
+**/
 SetLightDsp (long headLight, long hazardFlasher)
 {
   if(headLight == kON) 
@@ -111,26 +138,47 @@ SetLightDsp (long headLight, long hazardFlasher)
   }
 }
 
+/**
+ * Sets the debug log level to 0.
+**/
 on key '0'
 {
   setwriteDbgLevel(0);
 }
 
+/**
+ * Sets the debug log level to 1.
+**/
 on key '1'
 {
   setwriteDbgLevel(1);
 }
 
+/**
+ * Helper method to create a hash from the counter, the group ID and the generated key in combination with input data.
+ * THIS IS NOT CRYPTOGRAPHIC, PROOF OF CONCEPT!
+ * DO NOT USE IN PRACTISE!
+**/
 int64 hash(int64 data)
 {
   return (groupId + generatedKey + counter + data) * 5325 % 16777216;
 }
 
+/**
+ * Helper method to create a new key from an existing key, a counter and a random value.
+ * THIS IS NOT CRYPTOGRAPHIC, PROOF OF CONCEPT!
+ * DO NOT USE IN PRACTISE!
+**/
 int64 keyRenewHash(int64 genKey, int64 rValue, int c)
 {
   return (genKey + rValue + c) * 5325 % 16777216;
 }
 
+/**
+ * Generates a new key from an old key and a random value.
+ * THIS IS NOT CRYPTOGRAPHIC, PROOF OF CONCEPT!
+ * DO NOT USE IN PRACTISE!
+**/
 int64 generateKey(int64 previousKey, int64 randomValue)
 {
   return (previousKey + randomValue + keyCounter) % 100000000;

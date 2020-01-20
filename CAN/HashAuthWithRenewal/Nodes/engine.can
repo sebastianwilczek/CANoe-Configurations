@@ -1,4 +1,9 @@
 /*@!Encoding:1252*/
+/**
+ * This ECU simulates the engine of a car.
+ * It's job is to notice physical brake pressure and to send out the according message.
+**/
+
 variables 
 {
   int groupId = 1;
@@ -11,17 +16,18 @@ variables
   message KeyRenew msg_KeyRenew;
 }
 
+/**
+ * Before starting, the ECU generates a key to be used in later exchanges.
+**/
 on preStart
 {
   generatedKey = generateKey(presharedKey, 0);
   write("ENGINE: First generated key: %d", generatedKey);
 }
 
-on start
-{
-  
-}
-
+/**
+ * Pressing the 'r' key starts the key renewal procedure.
+**/
 on key 'r'
 {
   write("ENGINE: Signaling new key generation");
@@ -29,6 +35,11 @@ on key 'r'
   write("ENGINE: New key is %d", generatedKey);
 }
 
+/**
+ * In the event that the physical brake pressure changes, a message is sent to the CAN bus.
+ * This message contains the brake pressure in percentage.
+ * It also contains the hash of the pressure in combination with the counter, the group ID and the generated key.
+**/
 on sysvar sysvar::Brakes::BrakePressure
 {
   msg_BrakeState.BrakePressure = @this;
@@ -37,16 +48,32 @@ on sysvar sysvar::Brakes::BrakePressure
   counter++;
 }
 
+/**
+ * Helper method to create a hash from the counter, the group ID and the generated key in combination with input data.
+ * THIS IS NOT CRYPTOGRAPHIC, PROOF OF CONCEPT!
+ * DO NOT USE IN PRACTISE!
+**/
 int64 hash(int64 data)
 {
   return (groupId + generatedKey + counter + data) * 5325 % 16777216;
 }
 
+/**
+ * Helper method to create a new key from an existing key, a counter and a random value.
+ * THIS IS NOT CRYPTOGRAPHIC, PROOF OF CONCEPT!
+ * DO NOT USE IN PRACTISE!
+**/
 int64 keyRenewHash(int64 genKey, int64 rValue, int c)
 {
   return (genKey + rValue + c) * 5325 % 16777216;
 }
 
+/**
+ * Increases the key counter.
+ * Then it generates a random value.
+ * The counter, the random value and the hash of the old generated key with the counter and the random value are sent to the CAN bus.
+ * Then, a new key is generated from the old generated key and the new random value.
+**/
 renewKey()
 {
   keyCounter++;
@@ -61,6 +88,11 @@ renewKey()
   generatedKey = generateKey(generatedKey, randomValue);
 }
 
+/**
+ * Generates a new key from an old key and a random value.
+ * THIS IS NOT CRYPTOGRAPHIC, PROOF OF CONCEPT!
+ * DO NOT USE IN PRACTISE!
+**/
 int64 generateKey(int64 previousKey, int64 randomValue)
 {
   return (previousKey + randomValue + keyCounter) % 100000000;
