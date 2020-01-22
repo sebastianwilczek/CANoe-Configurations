@@ -5,11 +5,87 @@
  * It's only purpose is to showcase effects for this simulation.
 **/
 
+variables 
+{
+  qword presharedKey = 243524100;
+  qword generatedKey;
+  int groupId = 1;
+  int counter = 0;
+  int keyCounter = 0;
+}
+
+/**
+ * Before starting, the ECU generates a key to be used in later exchanges.
+**/
+on preStart
+{
+  generatedKey = generateKey(presharedKey, 0);
+  write("BLU: First generated key: %x", generatedKey);
+}
+
+/**
+ * Generates a new key from an old key and a random value.
+ * THIS IS NOT CRYPTOGRAPHIC, PROOF OF CONCEPT!
+ * DO NOT USE IN PRACTISE!
+**/
+qword generateKey(qword previousKey, qword randomValue)
+{
+  return (previousKey + randomValue + keyCounter) % 9223372036854775807LL;
+}
+
 /**
  * When this ECU receives a FlexRay PDU for BackLightInfo, it sets the brake light to the BrakeLight signal inside the PDU.
 **/
 on frPDU BackLightInfo
 {
-  write("BLU: Received BrakeControl PDU, %d", this.BrakeLight);
-  @sysvar::Panel::BackLightStatus = this.BrakeLight;
+  write("BLU: Received hash %x", this.Hash);
+  if(hash(this.BrakeLight) != this.Hash)
+  {
+    write("BLU: Hash Unmatch. Potential compromised ECU");
+  } else {
+    counter++;
+    write("BLU: Received vaild brake pressure message.");
+    @sysvar::Panel::BackLightStatus = this.BrakeLight;
+  }
+}
+
+/**
+ * Helper method to create a hash from the counter, the group ID and the generated key in combination with input data.
+ * THIS IS NOT CRYPTOGRAPHIC, PROOF OF CONCEPT!
+ * DO NOT USE IN PRACTISE!
+**/
+qword hash(qword data)
+{
+  return (groupId + generatedKey + counter + data) * 385305542 % 268435456;
+}
+
+/**
+ * Once a KeyRenew message is received, the ECU checks if both the counter and the hash match the one it calculates.
+ * If it does, the key counter is increased and the new key is generated and stored.
+**/
+on frPDU KeyRenewal
+{
+  if(this.Counter == keyCounter+1)
+  {
+    if(keyRenewHash(generatedKey, this.RandomValue, keyCounter+1) == this.KRHash)
+    {
+      keyCounter++;
+      generatedKey = generateKey(generatedKey, this.RandomValue);
+      write("BLU: New generated key is %x", generatedKey);
+    } else {
+      write("BLU: Key Renewal Hash mismatch, ignoring key renewal"); 
+    }
+  } else {
+    write("BLU: Counter out of sync, ignoring key renewal"); 
+  }
+}
+
+/**
+ * Helper method to create a new key from an existing key, a counter and a random value.
+ * THIS IS NOT CRYPTOGRAPHIC, PROOF OF CONCEPT!
+ * DO NOT USE IN PRACTISE!
+**/
+qword keyRenewHash(qword genKey, qword rValue, int c)
+{
+  return (genKey + rValue + c) * 5325 % 9223372036854775807LL;
 }

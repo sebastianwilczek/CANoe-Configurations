@@ -10,6 +10,22 @@ variables
   int SystemCheck             = 0;
   const int PRESS             = 1;
   const Int NOPRESS           = 0;
+  
+  int groupId = 1;
+  int counter = 0;
+  int keyCounter = 0;
+  qword presharedKey = 243524100;
+  qword generatedKey;
+  qword randomValue;
+}
+
+/**
+ * Before starting, the ECU generates a key to be used in later exchanges.
+**/
+on preStart
+{
+  generatedKey = generateKey(presharedKey, 0);
+  write("BSC: First generated key: %x", generatedKey);
 }
 
 /**
@@ -18,6 +34,18 @@ variables
 on start
 {
   $BrakeLight = 0;
+  $Hash = hash(0);
+  counter++;
+}
+
+/**
+ * Generates a new key from an old key and a random value.
+ * THIS IS NOT CRYPTOGRAPHIC, PROOF OF CONCEPT!
+ * DO NOT USE IN PRACTISE!
+**/
+qword generateKey(qword previousKey, qword randomValue)
+{
+  return (previousKey + randomValue + keyCounter) % 9223372036854775807LL;
 }
 
 /**
@@ -32,4 +60,69 @@ on sysvar sysvar::Panel::BrakeActive
     gBrakePedalStatus = NOPRESS;
 
   $BrakeLight = @this;
+  $Hash = hash(@this);
+}
+
+/**
+ * When this ECU receives a FlexRay PDU for BackLightInfo, it sets the brake light to the BrakeLight signal inside the PDU.
+**/
+on frPDU BackLightInfo
+{
+  if(hash(this.BrakeLight) != this.Hash)
+  {
+    write("BSC: Hash not sent by BSC. Potential compromised ECU");
+  } else {
+    counter++;
+  }
+}
+
+/**
+ * Helper method to create a hash from the counter, the group ID and the generated key in combination with input data.
+ * THIS IS NOT CRYPTOGRAPHIC, PROOF OF CONCEPT!
+ * DO NOT USE IN PRACTISE!
+ *
+ * Reference for supposed SHA256 in CAPL: https://assets.vector.com/cms/content/events/2018/Webinars18/Vector_Webinar_CANoe_CANalyzer_11.0_20170410.pdf
+**/
+qword hash(qword data)
+{
+  return (groupId + generatedKey + counter + data) * 385305542 % 268435456;
+}
+
+/**
+ * Pressing the 'r' key starts the key renewal procedure.
+**/
+on key 'r'
+{
+  write("BSC: Signaling new key generation");
+  renewKey();
+  write("BSC: New key is %x", generatedKey);
+}
+
+/**
+ * Increases the key counter.
+ * Then it generates a random value.
+ * The counter, the random value and the hash of the old generated key with the counter and the random value are sent to the CAN bus.
+ * Then, a new key is generated from the old generated key and the new random value.
+**/
+renewKey()
+{
+  keyCounter++;
+  randomValue = random(9223372036854775807LL);
+  write("BSC: Sending new message for key generation: C=%x", keyCounter);
+  write("BSC: Sending new message for key generation: R=%x", randomValue);
+  write("BSC: Sending new message for key generation: K=%x", generatedKey);
+  $Counter = keyCounter;
+  $RandomValue = randomValue;
+  $KRHash = keyRenewHash(generatedKey, randomValue, keyCounter);
+  generatedKey = generateKey(generatedKey, randomValue);
+}
+
+/**
+ * Helper method to create a new key from an existing key, a counter and a random value.
+ * THIS IS NOT CRYPTOGRAPHIC, PROOF OF CONCEPT!
+ * DO NOT USE IN PRACTISE!
+**/
+qword keyRenewHash(qword genKey, qword rValue, int c)
+{
+  return (genKey + rValue + c) * 5325 % 9223372036854775807LL;
 }
